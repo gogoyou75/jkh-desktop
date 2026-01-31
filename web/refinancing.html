@@ -1,0 +1,349 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>Ставка рефинансирования</title>
+
+    <link rel="stylesheet" href="style.css">
+
+    <script src="data.js"></script>
+    <script src="layout.js"></script>
+</head>
+
+<body>
+<script>renderLayout();</script>
+
+<h2>Ставка рефинансирования</h2>
+
+
+<div style="border:2px solid #000; padding:12px; background:#fff; margin:12px 0 14px;">
+    <div style="font-size:12px; opacity:.85; line-height:1.35;">
+        ⚠️ <b>Информационно</b><br>
+        При расчёте пени применяется ограничение ставки рефинансирования:<br>
+        <b>до 01.01.2027 ставка для расчёта пени не может превышать 9,5% годовых</b>,
+        даже если фактическая ставка Центрального Банка выше.<br><br>
+        После <b>01.01.2027</b> расчёт производится по фактической ставке без ограничения.
+    </div>
+</div>
+
+<div class="layout-two">
+
+    <div>
+        <h3>Обычные ставки</h3>
+
+        <table style="width:100%; border-collapse:collapse;">
+            <thead>
+            <tr>
+                <th style="border:0.5px solid #000; padding:4px;">Дата начала</th>
+                <th style="border:0.5px solid #000; padding:4px;">Ставка, %</th>
+                <th style="border:0.5px solid #000; padding:4px; width:34px;"></th>
+            </tr>
+            </thead>
+            <tbody id="ratesBodyNormal"></tbody>
+        </table>
+
+        <div style="margin-top:10px;">
+            <button class="btn" id="addNormalBtn" type="button">добавить строку</button>
+            <button class="btn" id="saveNormalBtn" type="button">сохранить</button>
+        </div>
+    </div>
+
+    <div>
+        <h3>Ставки при моратории</h3>
+
+        <table style="width:100%; border-collapse:collapse;">
+            <thead>
+            <tr>
+                <th style="border:0.5px solid #000; padding:4px;">Дата начала</th>
+                <th style="border:0.5px solid #000; padding:4px;">Ставка, %</th>
+                <th style="border:0.5px solid #000; padding:4px; width:34px;"></th>
+            </tr>
+            </thead>
+            <tbody id="ratesBodyMora"></tbody>
+        </table>
+
+        <div style="margin-top:10px;">
+            <button class="btn" id="addMoraBtn" type="button">добавить строку</button>
+            <button class="btn" id="saveMoraBtn" type="button">сохранить</button>
+        </div>
+    </div>
+
+</div>
+
+<script>
+/* =========================================================
+   refinancing.html — CRUD ставок (обычные + мораторий)
+
+   Хранение:
+   - localStorage["refinancing_rates_normal_v1"]     = [{from:"DD.MM.YYYY", rate:"7.50"}...]
+   - localStorage["refinancing_rates_moratorium_v1"] = [{from:"DD.MM.YYYY", rate:"0.00"}...]
+   ========================================================= */
+
+const KEY_NORMAL = "refinancing_rates_normal_v1";
+const KEY_MORA   = "refinancing_rates_moratorium_v1";
+
+function esc(s){
+    return String(s ?? "")
+        .replaceAll("&","&amp;").replaceAll("<","&lt;")
+        .replaceAll(">","&gt;")
+        .replaceAll('"',"&quot;")
+        .replaceAll("'","&#039;");
+}
+
+function toISO(dmy){
+    const m = String(dmy||"").match(/^(\d{2})\.(\d{2})\.(\d{4})$/);
+    if (!m) return "";
+    return `${m[3]}-${m[2]}-${m[1]}`;
+}
+
+/** Маска даты: ввод цифр → ДД.ММ.ГГГГ (автовставка точек) */
+function formatDMYFromDigits(digits){
+    const d = (digits || "").replace(/\D/g, "").slice(0, 8); // максимум 8 цифр: ddmmyyyy
+    const p1 = d.slice(0, 2);
+    const p2 = d.slice(2, 4);
+    const p3 = d.slice(4, 8);
+    if (d.length <= 2) return p1;
+    if (d.length <= 4) return `${p1}.${p2}`;
+    return `${p1}.${p2}.${p3}`;
+}
+
+/** Применить маску к input даты и аккуратно сохранить позицию курсора */
+function applyDateMaskToInput(inputEl){
+    if (!inputEl) return;
+
+    const old = String(inputEl.value || "");
+    const oldPos = inputEl.selectionStart ?? old.length;
+
+    // сколько цифр было слева от курсора
+    const digitsLeft = old.slice(0, oldPos).replace(/\D/g, "").length;
+
+    const formatted = formatDMYFromDigits(old);
+    inputEl.value = formatted;
+
+    // восстановим курсор примерно туда же по количеству цифр слева
+    let pos = 0;
+    let seenDigits = 0;
+    while (pos < formatted.length){
+        if (/\d/.test(formatted[pos])) seenDigits++;
+        pos++;
+        if (seenDigits >= digitsLeft) break;
+    }
+    inputEl.setSelectionRange(pos, pos);
+}
+
+function loadList(key){
+    try{
+        const raw = localStorage.getItem(key);
+        const arr = raw ? JSON.parse(raw) : [];
+        if (!Array.isArray(arr)) return [];
+        return arr
+            .map(x => ({ from: String(x.from||""), rate: String(x.rate||"") }))
+            .filter(x => x.from.trim() || x.rate.trim());
+    }catch{
+        return [];
+    }
+}
+
+function saveList(key, list){
+    const cleaned = (list||[])
+        .map(x => ({ from: String(x.from||"").trim(), rate: String(x.rate||"").trim() }))
+        .filter(x => x.from || x.rate);
+
+    cleaned.sort((a,b) => {
+        const da = new Date(toISO(a.from));
+        const db = new Date(toISO(b.from));
+        if (da.toString()==="Invalid Date" && db.toString()==="Invalid Date") return 0;
+        if (da.toString()==="Invalid Date") return 1;
+        if (db.toString()==="Invalid Date") return -1;
+        return da - db;
+    });
+
+    localStorage.setItem(key, JSON.stringify(cleaned));
+}
+
+function validate(list){
+    const errors = [];
+
+    list.forEach((r, idx) => {
+        if (!r.from.trim() && !r.rate.trim()) return;
+
+        if (!/^(\d{2})\.(\d{2})\.(\d{4})$/.test(r.from.trim())){
+            errors.push(`Строка ${idx+1}: неверная дата (нужно ДД.ММ.ГГГГ).`);
+        }else{
+            const d = new Date(toISO(r.from.trim()));
+            if (d.toString()==="Invalid Date") errors.push(`Строка ${idx+1}: неверная дата.`);
+        }
+
+        if (r.rate.trim()){
+            const n = Number(String(r.rate).replace(",", "."));
+            if (!Number.isFinite(n)) errors.push(`Строка ${idx+1}: ставка не число.`);
+            if (n < 0 || n > 100) errors.push(`Строка ${idx+1}: ставка должна быть 0..100.`);
+        }
+    });
+
+    const map = new Map();
+    list.forEach((r, idx) => {
+        const k = r.from.trim();
+        if (!k) return;
+        if (map.has(k)) errors.push(`Дата начала повторяется: строка ${map.get(k)} и ${idx+1}.`);
+        else map.set(k, idx+1);
+    });
+
+    return errors;
+}
+
+function reindexRows(bodyId){
+    const rows = Array.from(document.querySelectorAll(`#${bodyId} tr`));
+    rows.forEach((tr, i) => tr.dataset.idx = String(i));
+}
+
+function renderTable(bodyId, key){
+    const body = document.getElementById(bodyId);
+    if (!body) return;
+
+    const list = loadList(key);
+
+    if (list.length === 0){
+        body.innerHTML = "";
+        return;
+    }
+
+    body.innerHTML = list.map((r, i) => `
+        <tr data-idx="${i}">
+            <td style="border:0.5px solid #000; padding:4px;">
+                <input class="r-from" type="text" inputmode="numeric" placeholder="ДД.ММ.ГГГГ" value="${esc(r.from)}" style="width:100%; box-sizing:border-box;">
+            </td>
+            <td style="border:0.5px solid #000; padding:4px;">
+                <input class="r-rate" type="text" placeholder="например 9.50" value="${esc(r.rate)}" style="width:100%; box-sizing:border-box;">
+            </td>
+            <td style="border:0.5px solid #000; padding:4px; text-align:center;">
+                <button class="row-del" type="button" title="Удалить" style="border:1px solid #000; background:#fff; cursor:pointer;">×</button>
+            </td>
+        </tr>
+    `).join("");
+
+    reindexRows(bodyId);
+}
+
+function collect(bodyId){
+    const rows = Array.from(document.querySelectorAll(`#${bodyId} tr`));
+    return rows.map(tr => ({
+        from: (tr.querySelector(".r-from")?.value || "").trim(),
+        rate: (tr.querySelector(".r-rate")?.value || "").trim()
+    }));
+}
+
+/**
+ * addRow добавляет строку прямо в DOM, а сохранение — только по кнопке "сохранить".
+ */
+function addRow(bodyId){
+    const body = document.getElementById(bodyId);
+    if (!body) return;
+
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+        <td style="border:0.5px solid #000; padding:4px;">
+            <input class="r-from" type="text" inputmode="numeric" placeholder="ДД.ММ.ГГГГ" style="width:100%; box-sizing:border-box;">
+        </td>
+        <td style="border:0.5px solid #000; padding:4px;">
+            <input class="r-rate" type="text" placeholder="например 9.50" style="width:100%; box-sizing:border-box;">
+        </td>
+        <td style="border:0.5px solid #000; padding:4px; text-align:center;">
+            <button class="row-del" type="button" title="Удалить" style="border:1px solid #000; background:#fff; cursor:pointer;">×</button>
+        </td>
+    `;
+    body.appendChild(tr);
+    reindexRows(bodyId);
+
+    const fromInput = tr.querySelector(".r-from");
+    fromInput?.focus();
+}
+
+function saveFromUI(key, bodyId){
+    // на всякий случай нормализуем даты перед валидацией
+    const rows = Array.from(document.querySelectorAll(`#${bodyId} .r-from`));
+    rows.forEach(inp => applyDateMaskToInput(inp));
+
+    const list = collect(bodyId).filter(x => x.from || x.rate);
+    const errors = validate(list);
+    if (errors.length){
+        alert("Ошибка сохранения:\n\n" + errors.join("\n"));
+        return;
+    }
+    saveList(key, list);
+    alert("Сохранено");
+    renderTable(bodyId, key);
+}
+
+function bindTbodyHandlers(bodyId, key){
+    const body = document.getElementById(bodyId);
+    if (!body) return;
+
+    // Удаление строки
+    body.addEventListener("click", (e) => {
+        const btn = e.target.closest(".row-del");
+        if (!btn) return;
+
+        const tr = btn.closest("tr");
+        if (!tr) return;
+
+        if (!confirm("Удалить строку?")) return;
+
+        tr.remove();
+        reindexRows(bodyId);
+
+        // фиксируем состояние сразу
+        saveList(key, collect(bodyId));
+    });
+
+    // Маска даты — делегированно на tbody (работает и для новых строк)
+    body.addEventListener("input", (e) => {
+        const inp = e.target.closest(".r-from");
+        if (!inp) return;
+        applyDateMaskToInput(inp);
+    });
+
+    // Паста даты — тоже форматируем
+    body.addEventListener("paste", (e) => {
+        const inp = e.target.closest(".r-from");
+        if (!inp) return;
+        // дать вставке произойти, потом форматнуть
+        setTimeout(() => applyDateMaskToInput(inp), 0);
+    });
+}
+
+document.addEventListener("DOMContentLoaded", () => {
+    // Демо-значения один раз
+    if (!localStorage.getItem(KEY_NORMAL)){
+        saveList(KEY_NORMAL, [
+            { from:"01.01.2023", rate:"7.50" },
+            { from:"01.01.2024", rate:"8.00" }
+        ]);
+    }
+    if (!localStorage.getItem(KEY_MORA)){
+        saveList(KEY_MORA, [
+            { from:"01.04.2023", rate:"0.00" },
+            { from:"01.06.2023", rate:"3.00" }
+        ]);
+    }
+
+    renderTable("ratesBodyNormal", KEY_NORMAL);
+    renderTable("ratesBodyMora", KEY_MORA);
+
+    // применим маску к уже отрендеренным датам (на всякий)
+    document.querySelectorAll(".r-from").forEach(inp => applyDateMaskToInput(inp));
+
+    document.getElementById("addNormalBtn")?.addEventListener("click", () => addRow("ratesBodyNormal"));
+    document.getElementById("addMoraBtn")?.addEventListener("click", () => addRow("ratesBodyMora"));
+
+    document.getElementById("saveNormalBtn")?.addEventListener("click", () => saveFromUI(KEY_NORMAL, "ratesBodyNormal"));
+    document.getElementById("saveMoraBtn")?.addEventListener("click", () => saveFromUI(KEY_MORA, "ratesBodyMora"));
+
+    bindTbodyHandlers("ratesBodyNormal", KEY_NORMAL);
+    bindTbodyHandlers("ratesBodyMora", KEY_MORA);
+});
+</script>
+
+<script>closeLayout();</script>
+</body>
+</html>

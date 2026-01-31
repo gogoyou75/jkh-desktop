@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <title>Кабинет пользователя</title>
+
+  <!-- ВАЖНО: подключаем твой layout.js (стандарт шапки) -->
+  <script src="layout.js"></script>
+  <script src="auth.js"></script>
+
+  <style>
+    .page {
+      font-family: Arial, sans-serif;
+      padding: 18px 22px;
+    }
+    h2 { margin: 0 0 14px 0; font-size: 22px; }
+    .box {
+      border: 1px solid #ccc;
+      background: #fafafa;
+      padding: 14px 16px;
+      margin-bottom: 18px;
+      max-width: 980px;
+    }
+    .row {
+      display: grid;
+      grid-template-columns: 120px 1fr;
+      gap: 10px;
+      margin: 6px 0;
+      align-items: center;
+      font-size: 13px;
+    }
+    .label { color:#555; }
+    .value { font-weight: 700; }
+
+    button{
+      border:1px solid #000;
+      background:#fff;
+      padding:6px 12px;
+      cursor:pointer;
+      font-size:13px;
+    }
+    button:hover{ background:#f3f3f3; }
+
+    .hint { font-size: 12px; color:#555; margin-left: 10px; }
+    .status {
+      margin-top:10px;
+      padding:8px 10px;
+      border:1px dashed #999;
+      background:#fff;
+      font-size:13px;
+    }
+  </style>
+</head>
+
+<body>
+
+<script>
+  // ✅ ВСТАВЛЯЕМ ШАПКУ ТВОЕГО СТАНДАРТА
+  renderLayout();
+</script>
+
+<div class="page">
+  <h2>Кабинет пользователя</h2>
+
+  <div class="box">
+    <div class="row"><div class="label">Email</div><div class="value" id="uEmail">—</div></div>
+    <div class="row"><div class="label">Роль</div><div class="value" id="uRole">—</div></div>
+    <div class="row"><div class="label">ID</div><div class="value" id="uId">—</div></div>
+
+    <div style="margin-top:12px;">
+      <button id="btnSaveProfile">Сохранить профиль сейчас</button>
+      <span class="hint">фиксирует текущую базу в профиле (если закрыть вкладку без «выхода»)</span>
+    </div>
+  </div>
+
+  <div class="box">
+    <h3 style="margin:0 0 10px 0;">Резервные копии</h3>
+
+    <div style="margin-bottom:10px;">
+      <button id="btnExport">Выгрузить бэкап (JSON)</button>
+      <span class="hint">внутри — только whitelist проектных ключей localStorage</span>
+    </div>
+
+    <div style="margin-bottom:10px;">
+      <input type="file" id="importFile">
+      <button id="btnImport">Загрузить бэкап (восстановить)</button>
+    </div>
+
+    <div class="status" id="statusBox">Статус: —</div>
+
+    <div style="margin-top:12px; font-size:13px;">
+      <b>CRITICAL:</b>
+      <ul style="margin-top:6px;">
+        <li>Пользователь НЕ может импортировать чужой бэкап (проверка ownerId)</li>
+        <li>Перед восстановлением автоматически сохраняем «точку отката» (последний снимок) в localStorage</li>
+        <li>После восстановления профиль сразу фиксируется (logout не нужен)</li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+<script>
+  // ✅ Закрываем обёртку layout.js и переносим контент в #layoutContent
+  closeLayout();
+</script>
+
+<script>
+  // init auth + guard
+  Auth.init();
+
+  const u = Auth.getCurrentUser();
+  if (!u) location.href = "login.html";
+
+  document.getElementById('uEmail').textContent = u.email;
+  document.getElementById('uRole').textContent  = u.role;
+  document.getElementById('uId').textContent    = u.id;
+
+  const statusBox = document.getElementById('statusBox');
+
+  function setStatus(t){ statusBox.textContent = 'Статус: ' + t; }
+
+  document.getElementById('btnSaveProfile').onclick = ()=>{
+    try{
+      Auth.saveCurrentProfileNow(); // :contentReference[oaicite:3]{index=3}
+      setStatus('профиль сохранён');
+    }catch(e){
+      setStatus('ошибка: ' + (e && e.message ? e.message : e));
+    }
+  };
+
+  document.getElementById('btnExport').onclick = ()=>{
+    try{
+      const data = Auth.exportUserBackup(); // :contentReference[oaicite:4]{index=4}
+      const blob = new Blob([JSON.stringify(data, null, 2)], {type:'application/json'});
+      const a = document.createElement('a');
+      const dt = new Date();
+      const fn = `papajkh_user_backup_${dt.getFullYear()}-${String(dt.getMonth()+1).padStart(2,'0')}-${String(dt.getDate()).padStart(2,'0')}.json`;
+      a.href = URL.createObjectURL(blob);
+      a.download = fn;
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(()=>{ URL.revokeObjectURL(a.href); a.remove(); }, 0);
+      setStatus('экспорт выполнен: ' + fn);
+    }catch(e){
+      setStatus('ошибка экспорта: ' + (e && e.message ? e.message : e));
+    }
+  };
+
+  document.getElementById('btnImport').onclick = async ()=>{
+    const f = document.getElementById('importFile').files && document.getElementById('importFile').files[0];
+    if(!f){ setStatus('файл не выбран'); return; }
+
+    try{
+      const raw = await f.text();
+      const obj = JSON.parse(raw);
+
+      // CRITICAL: точка отката (снимок) — перед импортом
+      try { Auth.saveCurrentProfileNow(); } catch {}
+
+      Auth.importUserBackup(obj); // :contentReference[oaicite:5]{index=5}
+      setStatus('восстановлено успешно');
+    }catch(e){
+      setStatus('ошибка импорта: ' + (e && e.message ? e.message : e));
+    }
+  };
+</script>
+
+</body>
+</html>

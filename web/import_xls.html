@@ -1,0 +1,964 @@
+[file name]: import_xls.html
+[file content begin]
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+    <script src="critical_guard.js" defer></script>
+  <title>Импорт первичных данных (Excel) — FIXED Excel-даты</title>
+
+  <link rel="stylesheet" href="style.css">
+
+  <!-- ОБЯЗАТЕЛЬНО подключаем базу данных ДО layout.js -->
+  <script src="data.js"></script>
+  <script src="layout.js"></script>
+
+  <!-- ✅ ЛОКАЛЬНО: положи xlsx.full.min.js рядом с этим файлом -->
+  <script src="xlsx.full.min.js"></script>
+
+  <!-- ✅ Variant A: движок авто-начислений (без UI изменений) -->
+  <script src="autoaccrual_engine.js"></script>
+
+  <style>
+    .import-page-title{ font-size:22px; margin:10px 0 15px; }
+    .import-box{ border:2px solid #000; padding:15px; background:#fafafa; box-sizing:border-box; }
+    .import-box h3{ margin:0 0 10px; font-size:16px; }
+    .import-btn{ border:2px solid #000; padding:6px 14px; background:#e5e5e5; cursor:pointer; font-size:14px; margin-top:8px; }
+    .import-btn:disabled{ opacity:0.5; cursor:default; }
+    .import-preview-container{ margin-top:10px; max-height:360px; overflow:auto; background:#fff; }
+    table.preview{ width:100%; border-collapse:collapse; font-size:12px; }
+    table.preview th, table.preview td{ border:1px solid #000; padding:4px 6px; vertical-align:top; }
+    table.preview th{ background:#f2f2f2; position:sticky; top:0; z-index:2; }
+    .row-ok{ background:#e6ffe6; }
+    .row-new{ background:#e6f0ff; }
+    .row-warn{ background:#fff7d6; }
+    .row-error{ background:#ffe6e6; }
+    .mono{ font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+    .small{ font-size:11px; opacity:0.9; }
+    .import-summary{ margin-top:8px; font-size:12px; }
+
+    /* подсветка строк, которые уже "трогали" вручную */
+    .row-touched{
+      outline: 2px dashed #000;
+      outline-offset: -2px;
+    }
+
+    .import-actions-row{
+      display:flex;
+      gap:8px;
+      flex-wrap:wrap;
+      align-items:center;
+      margin-top:8px;
+    }
+    .file-status{
+      margin-top:6px;
+      font-size:12px;
+      padding:6px 8px;
+      border:1px solid #000;
+      background:#fff;
+    }
+
+    .warn{
+      border:2px solid #000;
+      padding:8px 10px;
+      background:#fff6e5;
+      font-size:13px;
+    }
+  </style>
+</head>
+<body>
+<script>renderLayout();</script>
+
+<div class="content">
+  <h2 class="import-page-title">Импорт первичных данных из Excel</h2>
+
+  <div class="layout-two">
+
+    <!-- Левый блок -->
+    <div class="import-box">
+      <h3>Шаг 1. Выберите файл данных</h3>
+      <div class="small">
+        Загрузите <b>один</b> файл: <span class="mono">ШаблонНовыепервичныеданные.xlsx</span><br>
+        Колонки читаются по правилам: UID(0), ЛС(1), ФИО(2-4), площадь(5), оплаты(6-77).
+      </div>
+
+      <div style="margin:10px 0;">
+        <input type="file" id="fileInput" accept=".xlsx,.xls">
+      </div>
+
+      <button class="import-btn" id="btnPreview">Загрузить и показать предпросмотр</button>
+
+      <div class="small" style="margin-top:10px; line-height:1.35;">
+        <b>CRITICAL:</b><br>
+        • если UID(0) пустой/непохож на <span class="mono">uid_...</span> — строка блокируется, оплаты не импортируются по умолчанию;<br>
+        • если в базе у ЛС уже есть UID и он не совпадает с Excel — строка блокируется (конфликт);
+      </div>
+    </div>
+
+    <!-- Правый блок -->
+    <div class="import-box">
+      <h3>Шаг 2. Предпросмотр</h3>
+
+      <!-- статус загруженного файла (живёт вместе с черновиком) -->
+      <div class="file-status" id="fileStatusHint">Файл не загружен</div>
+
+      <div class="import-preview-container" id="previewContainer"></div>
+
+      <div class="import-actions-row">
+        <button class="import-btn" id="btnConfirm" disabled>Подтвердить импорт</button>
+        <button class="import-btn" id="btnResetPreview" disabled>Сбросить предпросмотр</button>
+      </div>
+
+      <div class="import-summary" id="summaryHint"></div>
+    </div>
+
+  </div>
+</div>
+
+<script>
+document.addEventListener('DOMContentLoaded', () => {
+  const btnPreview = document.getElementById('btnPreview');
+  const btnConfirm = document.getElementById('btnConfirm');
+  const btnResetPreview = document.getElementById('btnResetPreview');
+  const previewContainer = document.getElementById('previewContainer');
+  const summaryHint = document.getElementById('summaryHint');
+  const fileInput = document.getElementById('fileInput');
+  const fileStatusHint = document.getElementById('fileStatusHint');
+
+  // ====== Черновик предпросмотра (сохраняем модель до подтверждения импорта) ======
+  const IMPORT_DRAFT_KEY = 'jkh_import_draft_v1';
+
+
+  // =================== ЗАКОН СИСТЕМЫ: Excel-даты (FIXED) ===================
+  // CRITICAL: SheetJS теперь настроен на cellDates:false, поэтому даты приходят
+  // ТОЛЬКО как числа (Excel serial). Это самый надёжный вариант.
+  //
+  // Excel epoch: 1899-12-30 (с учётом ошибки Excel на 1900-02-29)
+  // Excel хранит даты как дни от этой даты
+  //
+  // ===================
+
+
+  function escapeHtml(s){
+    return String(s || '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+  }
+
+  function setFileStatus(text){
+    fileStatusHint.textContent = text || 'Файл не загружен';
+  }
+
+  function saveImportDraft(model){
+    try {
+      localStorage.setItem(IMPORT_DRAFT_KEY, JSON.stringify({
+        fileName: model?.fileName || '',
+        rows: model?.rows || [],
+        stats: model?.stats || null,
+        touchedExcelRows: Array.from(model?.touchedExcelRows || []),
+        savedAt: new Date().toISOString()
+      }));
+    } catch(e){
+      console.warn('Не удалось сохранить черновик импорта', e);
+    }
+  }
+
+  function loadImportDraft(){
+    try {
+      const raw = localStorage.getItem(IMPORT_DRAFT_KEY);
+      return raw ? JSON.parse(raw) : null;
+    } catch {
+      return null;
+    }
+  }
+
+  function clearImportDraft(){
+    localStorage.removeItem(IMPORT_DRAFT_KEY);
+  }
+
+  // ====== КАРТА КОЛОНОК (поле 0..77 -> индекс колонки Excel) ======
+  // Индексы колонок — 0-based (как в sheet_to_json(..., {header:1})).
+  const FIELD_COL = [
+    1, 2, 4, 5, 6, 7,
+    18, 19, 20, 21, 22, 23,
+    38, 39, 40, 41, 42, 43,
+    58, 59, 60, 61, 62, 63,
+    78, 79, 80, 81, 82, 83,
+    98, 99, 100, 101, 102, 103,
+    118, 119, 120, 121, 122, 123,
+    138, 139, 140, 141, 142, 143,
+    158, 159, 160, 161, 162, 163,
+    178, 179, 180, 181, 182, 183,
+    198, 199, 200, 201, 202, 203,
+    218, 219, 220, 221, 222, 223,
+    238, 239, 240, 241, 242, 243
+  ];
+
+  const PAY_START = 6;
+  const PAY_END = 77;
+
+  function cellByField(rowArr, fieldIndex){
+    const col = FIELD_COL[fieldIndex];
+    return (col == null) ? '' : (rowArr?.[col]);
+  }
+
+  const MONTHS_RU = [
+    'январь','февраль','март','апрель','май','июнь',
+    'июль','август','сентябрь','октябрь','ноябрь','декабрь'
+  ];
+
+  // previewModel хранит touchedExcelRows (ручные действия)
+  let previewModel = null; // { rows, fileName, stats, touchedExcelRows:Set }
+
+  function toStr(v){
+    return (v == null) ? '' : String(v).trim();
+  }
+
+  function isValidUid(uid){
+    const s = toStr(uid);
+    return /^uid_[a-z0-9_\-]{6,}$/i.test(s);
+  }
+
+  function parseLs(v){
+    const s = toStr(v).replace(/\s+/g,'');
+    const m = s.match(/^(\d{4})$/);
+    return m ? m[1] : '';
+  }
+
+  function fioFromRow(r){
+    const last = toStr(cellByField(r, 2));
+    const first = toStr(cellByField(r, 3));
+    const mid = toStr(cellByField(r, 4));
+    return [last, first, mid].filter(Boolean).join(' ').trim();
+  }
+
+  function parseAmount(v){
+    if (v == null) return 0;
+    if (typeof v === 'number') return v;
+    const s = String(v).replace(/\s+/g,'').replace(',','.');
+    const n = Number(s);
+    return Number.isFinite(n) ? n : 0;
+  }
+
+  // =================== CRITICAL: Excel-даты только как КАЛЕНДАРНАЯ СТРОКА ===================
+  // Причина: Date() тащит часовой пояс и может давать сдвиг на сутки.
+  // Поэтому любые входные даты приводим сразу к ISO-строке 'YYYY-MM-DD'.
+  // =========================================================================================
+
+  function assertISODateString(iso, ctx){
+    if (iso == null) return;
+    if (typeof iso !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(iso)){
+      console.error('CRITICAL: дата должна быть строкой ISO YYYY-MM-DD (Date запрещён для Excel)', { ctx, iso });
+    }
+  }
+
+  function parseDateAny(v, ctx){
+    if (!v) return null;
+
+    // 1) Excel serial (число)
+    if (typeof v === 'number' && v > 20000 && v < 90000) {
+      try {
+        if (window.XLSX && XLSX.SSF && typeof XLSX.SSF.parse_date_code === 'function') {
+          const d = XLSX.SSF.parse_date_code(v);
+          if (d && d.y && d.m && d.d) {
+            const yyyy = String(d.y).padStart(4,'0');
+            const mm = String(d.m).padStart(2,'0');
+            const dd = String(d.d).padStart(2,'0');
+            const iso = `${yyyy}-${mm}-${dd}`;
+            assertISODateString(iso, ctx || { kind:'excel_serial', raw:v });
+            return iso;
+          }
+        }
+      } catch (e) {
+        console.error('CRITICAL: ошибка разбора Excel serial даты', { ctx, raw: v, error: String(e && e.message || e) });
+      }
+      return null;
+    }
+
+    // 2) Строки
+    if (typeof v === 'string') {
+      const s = v.trim();
+
+      // dd.mm.yyyy
+      let m = s.match(/^(\d{1,2})\.(\d{1,2})\.(\d{4})$/);
+      if (m) {
+        const iso = `${m[3]}-${m[2].padStart(2,'0')}-${m[1].padStart(2,'0')}`;
+        assertISODateString(iso, ctx || { kind:'dmy_string', raw:s });
+        return iso;
+      }
+
+      // yyyy-mm-dd
+      m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+      if (m) {
+        const iso = `${m[1]}-${m[2].padStart(2,'0')}-${m[3].padStart(2,'0')}`;
+        assertISODateString(iso, ctx || { kind:'iso_string', raw:s });
+        return iso;
+      }
+
+      return null;
+    }
+
+    // 3) Date (если где-то случайно вернули Date — это регресс)
+    if (v instanceof Date && !isNaN(v.getTime())) {
+      console.error('CRITICAL: обнаружен Date-объект в импорте Excel. Date запрещён (timezone сдвигает сутки).', { ctx, raw: v });
+      const yy = v.getFullYear();
+      const mm = String(v.getMonth()+1).padStart(2,'0');
+      const dd = String(v.getDate()).padStart(2,'0');
+      const iso = `${yy}-${mm}-${dd}`;
+      assertISODateString(iso, ctx || { kind:'date_object' });
+      return iso;
+    }
+
+    return null;
+  }
+
+  function isoToDMY(iso){
+    const s = String(iso||'');
+    const m = s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    return m ? `${m[3]}.${m[2]}.${m[1]}` : '';
+  }
+
+
+
+  function r2(n){
+    return Math.round((Number(n)||0) * 100) / 100;
+  }
+
+  function getPaymentsKey(ls){
+    return 'payments_' + String(ls);
+  }
+
+  function loadPayments(ls){
+    try {
+      const raw = localStorage.getItem(getPaymentsKey(ls));
+      if (!raw) return [];
+      const arr = JSON.parse(raw);
+      return Array.isArray(arr) ? arr : [];
+    } catch {
+      return [];
+    }
+  }
+
+  function savePayments(ls, arr){
+    try {
+      localStorage.setItem(getPaymentsKey(ls), JSON.stringify(arr));
+    } catch (e){
+      console.warn('Не удалось сохранить payments_'+ls, e);
+    }
+  }
+
+  function nextPaymentId(arr){
+    let maxId = 0;
+    for (const r of (arr||[])){
+      const id = Number(r?.id) || 0;
+      if (id > maxId) maxId = id;
+    }
+    return maxId + 1;
+  }
+
+  function paymentsHasDuplicate(payArr, isoDate, amount, source){
+    const a = r2(amount);
+    const s = String(source||'').trim();
+    return (payArr||[]).some(r => r2(r?.paid) === a && String(r?.paid_date||'') === String(isoDate||'') && String(r?.source||'').trim() === s);
+  }
+
+  function debtsHasDuplicate(debtsArr, dmy, amount){
+    const a = r2(amount);
+    return (debtsArr||[]).some(r => r2(r?.paid) === a && String(r?.payDate||'') === String(dmy||''));
+  }
+
+  function detectDataRows(rows){
+    const out = [];
+    for (let i=0;i<rows.length;i++){
+      const r = rows[i] || [];
+      const uid = toStr(cellByField(r, 0));
+      const ls = parseLs(cellByField(r, 1));
+      if (ls || isValidUid(uid)) out.push({ idx: i, row: r });
+    }
+    return out;
+  }
+
+  function computeRowStatus(rowResult){
+    const existing = rowResult._existing || null;
+
+    if (rowResult.problems.length){
+      rowResult.status = 'error';
+      return;
+    }
+
+    if (existing) {
+      rowResult.status = rowResult.warnings.length ? 'warn' : 'ok';
+    } else {
+      rowResult.status = rowResult.warnings.length ? 'warn_new' : 'new';
+    }
+  }
+
+  function recomputeRowAgainstDB(row){
+    row.problems = [];
+    row.warnings = [];
+
+    const uidOk = isValidUid(row.uid);
+    const lsOk = !!row.ls;
+
+    if (!lsOk) row.problems.push('ЛС(1) должен быть 4 цифры');
+
+    const existing = (row.ls && AbonentsDB && AbonentsDB.abonents) ? (AbonentsDB.abonents[String(row.ls)] || null) : null;
+    row._existing = existing;
+
+    // если в базе появился UID, а в строке его нет — подтянем
+    if (existing && isValidUid(existing.uid) && !uidOk){
+      row.uid = String(existing.uid);
+    }
+
+    // после подтяжки — снова проверим
+    const uidOk2 = isValidUid(row.uid);
+    if (!uidOk2) row.problems.push('Нет UID(0) из программы (ожидается uid_...)');
+
+    if (!row.fio) row.warnings.push('ФИО пустое');
+
+    if (existing){
+      const baseUid = toStr(existing.uid);
+
+      if (baseUid && uidOk2 && baseUid !== String(row.uid)){
+        row.problems.push('Конфликт UID: в базе другой UID для этого ЛС');
+      }
+      if (!baseUid && uidOk2){
+        row.warnings.push('В базе нет UID у этого ЛС — при импорте UID будет присвоен');
+      }
+
+      const baseFio = toStr(existing.fio);
+      if (baseFio && row.fio && baseFio !== row.fio){
+        row.warnings.push(`ФИО не совпадает (база: ${baseFio})`);
+      }
+      const baseSq = Number(existing.square);
+      if (Number.isFinite(baseSq) && baseSq>0 && row.square !== '' && r2(baseSq) !== r2(row.square)){
+        row.warnings.push(`Площадь не совпадает (база: ${r2(baseSq)})`);
+      }
+    }
+
+    computeRowStatus(row);
+    delete row._existing;
+  }
+
+  function analyze(rows){
+    const candidates = detectDataRows(rows);
+
+    const model = [];
+    let ok=0, warn=0, err=0, neu=0;
+
+    for (const c of candidates){
+      const i = c.idx;
+      const r = c.row;
+
+      const uidRaw = toStr(cellByField(r, 0));
+      const uidOk = isValidUid(uidRaw);
+      const ls = parseLs(cellByField(r, 1));
+      const fio = fioFromRow(r);
+      const sq = parseAmount(cellByField(r, 5));
+
+      const rowResult = {
+        excelRow: i+1,
+        uid: uidRaw,
+        ls,
+        fio,
+        square: (Number.isFinite(sq) && sq>0) ? sq : '',
+        status: 'neutral',
+        problems: [],
+        warnings: [],
+        payments: []
+      };
+
+      if (!ls){
+        rowResult.problems.push('ЛС(1) должен быть 4 цифры');
+      }
+      if (!uidOk){
+        rowResult.problems.push('Нет UID(0) из программы (ожидается uid_...)');
+      }
+      if (!fio){
+        rowResult.warnings.push('ФИО пустое');
+      }
+
+      let existing = null;
+      if (ls && AbonentsDB && AbonentsDB.abonents) existing = AbonentsDB.abonents[String(ls)] || null;
+      rowResult._existing = existing;
+
+      if (existing){
+        const baseUid = toStr(existing.uid);
+        if (baseUid && uidOk && baseUid !== uidRaw){
+          rowResult.problems.push('Конфликт UID: в базе другой UID для этого ЛС');
+        }
+        if (!baseUid && uidOk){
+          rowResult.warnings.push('В базе нет UID у этого ЛС — при импорте UID будет присвоен');
+        }
+
+        const baseFio = toStr(existing.fio);
+        if (baseFio && fio && baseFio !== fio){
+          rowResult.warnings.push(`ФИО не совпадает (база: ${baseFio})`);
+        }
+        const baseSq = Number(existing.square);
+        if (Number.isFinite(baseSq) && baseSq>0 && rowResult.square !== '' && r2(baseSq) !== r2(rowResult.square)){
+          rowResult.warnings.push(`Площадь не совпадает (база: ${r2(baseSq)})`);
+        }
+      }
+
+      // платежи
+      for (let m=0;m<12;m++){
+        const monthName = MONTHS_RU[m];
+        const start = PAY_START + m*6;
+
+        for (let p=0;p<3;p++){
+          const sumCol = start + p*2;
+          const dateCol = sumCol + 1;
+
+          if (sumCol > PAY_END || dateCol > PAY_END) continue;
+
+          const amount = parseAmount(cellByField(r, sumCol));
+          const iso = parseDateAny(cellByField(r, dateCol), { excelRow: i+1, ls: ls, month: monthName, payNo: p+1 });
+
+          if (amount > 0 && !iso){
+            rowResult.problems.push(`${monthName}: сумма есть, даты нет (платёж #${p+1})`);
+            continue;
+          }
+          if (amount <= 0 && iso){
+            continue;
+          }
+          if (amount > 0 && iso){
+            const dmy = isoToDMY(iso);
+            rowResult.payments.push({ monthName, iso, dmy, amount, source: `Платёж ${p+1}` });
+          }
+        }
+      }
+
+      computeRowStatus(rowResult);
+
+      if (rowResult.status === 'error') err++;
+      else if (rowResult.status === 'warn' || rowResult.status === 'warn_new') warn++;
+      else if (rowResult.status === 'ok') ok++;
+      else neu++;
+
+      delete rowResult._existing;
+
+      model.push(rowResult);
+    }
+
+    return { model, stats: { ok, warn, err, neu, total: model.length } };
+  }
+
+  function statusClass(s){
+    if (s === 'ok') return 'row-ok';
+    if (s === 'new') return 'row-new';
+    if (s === 'warn' || s === 'warn_new') return 'row-warn';
+    return 'row-error';
+  }
+
+  function statusText(s){
+    if (s === 'ok') return 'OK (абонент найден)';
+    if (s === 'new') return 'НОВЫЙ абонент (создадим при импорте)';
+    if (s === 'warn') return 'ПРЕДУПРЕЖДЕНИЕ (абонент найден)';
+    if (s === 'warn_new') return 'ПРЕДУПРЕЖДЕНИЕ (новый абонент)';
+    return 'ОШИБКА (строка заблокирована)';
+  }
+
+  function renderPreview(model, stats){
+    if (!model || !model.length){
+      previewContainer.innerHTML = '<div class="small">Нет строк для предпросмотра.</div>';
+      btnConfirm.disabled = true;
+      btnResetPreview.disabled = !previewModel;
+      summaryHint.textContent = '';
+      return;
+    }
+
+    let html = '';
+    const missingUid = model.filter(x => !isValidUid(x.uid||''));
+    if (missingUid.length){
+      html += `<div class="warn" style="margin-bottom:8px;">Найдены строки без UID: <b>${missingUid.length}</b>. Нажмите "Создать абонента" в нужной строке.</div>`;
+    }
+
+    html += '<table class="preview">';
+    html += '<thead><tr>' +
+      '<th>#</th>' +
+      '<th>UID(0)</th>' +
+      '<th>ЛС(1)</th>' +
+      '<th>ФИО</th>' +
+      '<th>Площадь</th>' +
+      '<th>Платежи</th>' +
+      '<th>Статус / детали</th>' +
+    '</tr></thead><tbody>';
+
+    const touched = previewModel?.touchedExcelRows || new Set();
+
+    for (const r of model){
+      const cls = statusClass(r.status);
+      const touchedCls = touched.has(Number(r.excelRow)) ? ' row-touched' : '';
+      const payBrief = r.payments.length ? (r.payments.length + ' шт.') : '—';
+      const details = [];
+
+      if (r.problems.length) details.push('<b>Ошибки:</b> ' + r.problems.map(x=>escapeHtml(x)).join('; '));
+      if (r.warnings.length) details.push('<b>Предупр.:</b> ' + r.warnings.map(x=>escapeHtml(x)).join('; '));
+
+      if (r.payments.length){
+        const sample = r.payments.slice(0,3).map(p => `${p.monthName}: ${p.amount} (${p.dmy})`).join('\n');
+        details.push('<b>Пример платежей:</b><br>' + escapeHtml(sample).replace(/\n/g,'<br>'));
+      }
+
+      const uidValid = isValidUid(r.uid || '');
+      if (!uidValid){
+        details.push(` <div style="margin-top:6px;"><button type="button" class="import-btn" data-create-ab="1" data-excelrow="${r.excelRow}">Создать абонента</button></div> `);
+      }
+
+      html += `<tr class="${cls}${touchedCls}">` +
+        `<td>${r.excelRow}</td>` +
+        `<td class="mono">${escapeHtml(r.uid || '')}</td>` +
+        `<td class="mono">${escapeHtml(r.ls || '')}</td>` +
+        `<td>${escapeHtml(r.fio || '')}</td>` +
+        `<td>${escapeHtml(String(r.square || ''))}</td>` +
+        `<td>${escapeHtml(payBrief)}</td>` +
+        `<td><div><b>${escapeHtml(statusText(r.status))}</b></div><div class="small">${details.join('<br>')}</div></td>` +
+      '</tr>';
+    }
+
+    html += '</tbody></table>';
+    previewContainer.innerHTML = html;
+
+    bindCreateButtons(model);
+
+    summaryHint.textContent =
+      `Всего строк: ${stats.total}. OK: ${stats.ok}. Предупреждения: ${stats.warn}. Новые: ${stats.neu}. Ошибки: ${stats.err}.`;
+
+    btnConfirm.disabled = model.every(r => r.status === 'error');
+    btnResetPreview.disabled = false;
+  }
+
+  function splitFioParts(fio){
+    const s = String(fio||'').trim().replace(/\s+/g,' ');
+    if (!s) return { last:'', first:'', mid:'' };
+    const parts = s.split(' ');
+    return {
+      last: parts[0] || '',
+      first: parts[1] || '',
+      mid: parts.slice(2).join(' ') || ''
+    };
+  }
+
+  function touchRow(excelRow){
+    if (!previewModel) return;
+    if (!previewModel.touchedExcelRows) previewModel.touchedExcelRows = new Set();
+    previewModel.touchedExcelRows.add(Number(excelRow));
+    saveImportDraft(previewModel);
+  }
+
+  function openNewAbonentFromImport(row){
+    // ✅ отмечаем, что строку уже трогали вручную + сохраняем черновик (автосохранение по клику)
+    touchRow(row?.excelRow);
+
+    const fio = splitFioParts(row?.fio);
+    const q = new URLSearchParams();
+    if (row?.ls) q.set('ls', String(row.ls));
+    if (fio.last) q.set('last', fio.last);
+    if (fio.first) q.set('first', fio.first);
+    if (fio.mid) q.set('mid', fio.mid);
+    if (row?.square !== '' && row?.square !== null && row?.square !== undefined) q.set('square', String(row.square));
+    if (row?.uid) q.set('uid', String(row.uid));
+    q.set('src', 'import_xls');
+    // ✅ чтобы new_abonent.html знал, куда возвращаться
+    q.set('return', 'import_xls.html');
+    window.location.href = 'new_abonent.html?' + q.toString();
+  }
+
+  function bindCreateButtons(model){
+    document.querySelectorAll('button[data-create-ab="1"]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const excelRow = Number(btn.getAttribute('data-excelrow'));
+        const row = (model||[]).find(x => Number(x.excelRow) === excelRow);
+        if (!row){ alert('Строка не найдена.'); return; }
+        openNewAbonentFromImport(row);
+      });
+    });
+  }
+
+  function recheckPreviewAgainstDB(){
+    if (!previewModel || !Array.isArray(previewModel.rows)) return;
+
+    for (const r of previewModel.rows){
+      // ✅ перепроверяем (может UID уже появился в базе после создания абонента)
+      recomputeRowAgainstDB(r);
+    }
+
+    // пересчитать stats
+    const stats = { ok:0, warn:0, err:0, neu:0, total: previewModel.rows.length };
+    for (const r of previewModel.rows){
+      if (r.status === 'error') stats.err++;
+      else if (r.status === 'warn' || r.status === 'warn_new') stats.warn++;
+      else if (r.status === 'ok') stats.ok++;
+      else stats.neu++;
+    }
+    previewModel.stats = stats;
+
+    renderPreview(previewModel.rows, stats);
+    saveImportDraft(previewModel);
+  }
+
+  // ===== восстановление черновика при входе на страницу =====
+  (function restoreDraft(){
+    const d = loadImportDraft();
+    if (!d || !Array.isArray(d.rows) || !d.rows.length) return;
+
+    previewModel = {
+      fileName: d.fileName || '',
+      rows: d.rows,
+      stats: d.stats || null,
+      touchedExcelRows: new Set(d.touchedExcelRows || [])
+    };
+
+    setFileStatus(previewModel.fileName ? ('Загружен файл: ' + previewModel.fileName) : 'Файл загружен (имя неизвестно)');
+    renderPreview(previewModel.rows, previewModel.stats || {ok:0,warn:0,err:0,neu:0,total:previewModel.rows.length});
+
+    // ✅ если вернулись после new_abonent.html — перепроверим автоматически
+    const params = new URLSearchParams(location.search || '');
+    if (params.get('recheck') === '1') {
+      recheckPreviewAgainstDB();
+    }
+  })();
+
+  btnPreview.addEventListener('click', () => {
+    const file = fileInput.files && fileInput.files[0];
+    if (!file){
+      alert('Выберите файл Excel.');
+      return;
+    }
+
+    if (!window.XLSX) {
+      alert('Не найдена библиотека XLSX.\n\nПоложите файл xlsx.full.min.js рядом с import_xls.html (в ту же папку).');
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const data = new Uint8Array(e.target.result);
+      
+      // =================== КЛЮЧЕВОЕ ИЗМЕНЕНИЕ ===================
+      // cellDates: false - даты приходят как числа (Excel serial)
+      const wb = XLSX.read(data, { 
+        type: 'array', 
+        cellDates: false,  // ← НЕ преобразовывать в Date!
+        cellNF: false,
+        raw: true          // ← оставлять raw значения
+      });
+      // =========================================================
+      
+      const sheet = wb.Sheets[wb.SheetNames[0]];
+      const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, raw: true, defval: '' });
+
+      if (!rows || !rows.length){
+        alert('Файл пустой или не удалось прочитать данные.');
+        return;
+      }
+
+      const res = analyze(rows);
+
+      previewModel = {
+        rows: res.model,
+        fileName: file.name,
+        stats: res.stats,
+        touchedExcelRows: new Set()
+      };
+
+      setFileStatus('Загружен файл: ' + file.name);
+      renderPreview(res.model, res.stats);
+      saveImportDraft(previewModel);
+    };
+    reader.readAsArrayBuffer(file);
+  });
+
+  btnResetPreview.addEventListener('click', () => {
+    if (!confirm('Сбросить предпросмотр? Черновик будет удалён.')) return;
+
+    clearImportDraft();
+    previewModel = null;
+
+    previewContainer.innerHTML = '';
+    summaryHint.textContent = '';
+    btnConfirm.disabled = true;
+    btnResetPreview.disabled = true;
+
+    fileInput.value = '';
+    setFileStatus('Файл не загружен');
+  });
+
+  btnConfirm.addEventListener('click', () => {
+    if (!previewModel || !previewModel.rows){
+      alert('Сначала сделайте предпросмотр.');
+      return;
+    }
+
+    const rows = previewModel.rows;
+
+    let createdAb = 0;
+    let assignedUid = 0;
+    let addedDebts = 0;
+    let addedPays = 0;
+    let skipped = 0;
+
+    // ✅ Variant A: после импорта сделаем автоначисления для затронутых ЛС
+    const affectedLs = new Set();
+
+    for (const r of rows){
+      if (r.status === 'error') { skipped++; continue; }
+
+      const ls = String(r.ls || '');
+      const uid = String(r.uid || '');
+      if (!ls || !isValidUid(uid)) { skipped++; continue; }
+
+      const existing = AbonentsDB.abonents?.[ls] || null;
+
+      if (existing && existing.uid && String(existing.uid) !== uid){
+        skipped++;
+        continue;
+      }
+
+      if (!existing){
+        AbonentsDB.abonents[ls] = {
+          uid: uid,
+          fio: r.fio || '',
+          city: '',
+          street: '',
+          house: '',
+          flat: '',
+          square: (r.square === '' ? '' : Number(r.square)),
+          rooms: '',
+          share: '',
+          calcDate: '',
+          stateDate: '',
+          docDate: '',
+          debts: [],
+          mainDebtTotal: 0,
+          penaltyTotal: 0,
+          totalDebt: 0,
+          defaultNote: '',
+          defaultExcludes: []
+        };
+        createdAb++;
+      } else {
+        if (!existing.uid){
+          existing.uid = uid;
+          assignedUid++;
+        }
+      }
+
+      const a = AbonentsDB.abonents[ls];
+      if (!Array.isArray(a.debts)) a.debts = [];
+
+      for (const p of (r.payments || [])){
+        if (debtsHasDuplicate(a.debts, p.dmy, p.amount)) continue;        const year = Number(String(p.iso||'').slice(0,4)) || new Date().getFullYear();
+        const monthName = p.monthName;
+
+        a.debts.push({
+          year: year,
+          month: monthName,
+          accrued: 0,
+          paid: r2(p.amount),
+          payDate: p.dmy,
+          paymentPeriod: `${monthName} ${year}`,
+          penalty: 0,
+          mainDebt: 0,
+          debtPenalty: 0
+        });
+        addedDebts++;
+      }
+
+      const payArr = loadPayments(ls);
+      let idCounter = nextPaymentId(payArr);
+
+      for (const p of (r.payments || [])){
+        if (paymentsHasDuplicate(payArr, p.iso, p.amount, p.source)) continue;        const iso = String(p.iso||'');
+        const mm = iso.slice(5,7) || '01';
+        const yy = iso.slice(0,4) || String(new Date().getFullYear());
+
+        payArr.push({
+          id: idCounter++,
+          month: mm,
+          year: yy,
+          accrued: 0,
+          paid: r2(p.amount),
+          paid_date: p.iso,
+          source: String(p.source || '').trim() || 'Платёж 1',
+          // 🔒 CRITICAL: оплата импортирована из Excel и НЕ подлежит редактированию в таблице оплат
+          import_locked: true,
+          import_origin: 'excel_primary_v1',
+          import_file: previewModel?.fileName || '',
+          import_excel_row: Number(r.excelRow) || null,
+          import_saved_at: new Date().toISOString(),
+          use_period: false,
+          // 🔴 CRITICAL: Excel-импорт НЕ включает 'оплата за период'.
+          // Эта функция активируется только оператором вручную в карточке абонента.
+
+          period_from_m: mm,
+          period_from_y: yy,
+          period_to_m: mm,
+          period_to_y: yy,
+          period_from: `${mm}.${yy}`,
+          period_to: `${mm}.${yy}`,
+          note: '',
+          pay_main: 0,
+          pay_penalty: 0,
+          total_debt: 0
+        });
+        addedPays++;
+      }
+
+      savePayments(ls, payArr);
+
+      // отметим ЛС как затронутый импортом (даже если оплат не было — абонент мог быть создан/обновлён)
+      affectedLs.add(ls);
+    }
+
+    try {
+      if (typeof window.saveAbonentsDB === 'function') {
+        window.saveAbonentsDB();
+      } else {
+        localStorage.setItem('abonents_db_v1', JSON.stringify(AbonentsDB));
+      }
+    } catch (e){
+      console.warn('Не удалось сохранить AbonentsDB', e);
+    }
+
+    // ✅ Автоначисления (только логика, без UI)
+    try {
+      if (window.JKHAutoAccrual && typeof window.JKHAutoAccrual.recalcForMany === 'function') {
+        const ids = Array.from(affectedLs);
+        const res = window.JKHAutoAccrual.recalcForMany(ids);
+        // лог для диагностики
+        const changed = res.filter(x => x && x.changed).length;
+        if (changed) console.warn('[import] autoaccrual recalculated:', { affected: ids.length, changed });
+      } else {
+        console.warn('[import] JKHAutoAccrual не подключён (autoaccrual_engine.js) — начисления пересчитаются при открытии карточки');
+      }
+    } catch (e){
+      console.warn('[import] autoaccrual error', e);
+    }
+
+    alert(
+      `Импорт завершён.\n\n` +
+      `Создано новых абонентов: ${createdAb}\n` +
+      `Присвоено UID существующим: ${assignedUid}\n` +
+      `Добавлено оплат в debts[]: ${addedDebts}\n` +
+      `Добавлено оплат в payments_<ЛС>: ${addedPays}\n` +
+      `Пропущено/заблокировано строк: ${skipped}`
+    );
+
+    // ✅ после подтверждения импорта — черновик должен исчезнуть
+    clearImportDraft();
+
+    // сброс UI
+    btnConfirm.disabled = true;
+    btnResetPreview.disabled = true;
+    summaryHint.textContent = '';
+    previewContainer.innerHTML = '';
+    previewModel = null;
+    fileInput.value = '';
+    setFileStatus('Файл не загружен');
+  });
+});
+</script>
+
+</body>
+</html>
+[file content end]

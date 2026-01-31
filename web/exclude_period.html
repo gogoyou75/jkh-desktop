@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <script src="critical_guard.js" defer></script>
+    <title>Исключить период расчёта</title>
+
+    <link rel="stylesheet" href="style.css">
+
+    <script src="data.js"></script>
+    <script src="layout.js"></script>
+</head>
+
+<body>
+<script>renderLayout();</script>
+
+<h2>ИСКЛЮЧИТЬ ПЕРИОД</h2>
+
+<div class="box-border" style="max-width:700px;">
+    <h4>ИСКЛЮЧИТЬ ПЕРИОД РАСЧЁТА</h4>
+
+    <table style="width:100%; border-collapse:collapse;">
+        <thead>
+        <tr>
+            <th style="border:0.5px solid #000; padding:4px;">№</th>
+            <th style="border:0.5px solid #000; padding:4px;">начало</th>
+            <th style="border:0.5px solid #000; padding:4px;">конец</th>
+            <th style="border:0.5px solid #000; padding:4px;">причина</th>
+            <th style="border:0.5px solid #000; padding:4px; width:34px;"></th>
+        </tr>
+        </thead>
+        <tbody id="periodsBody"></tbody>
+    </table>
+
+    <div style="margin-top:10px;">
+        <button class="btn" id="addRowBtn" type="button">добавить строку</button>
+        <button class="btn" id="saveBtn" type="button">сохранить</button>
+    </div>
+
+    <div style="margin-top:10px; font-size:12px;">
+        * период влияет на расчёт пени (дни в указанных диапазонах не учитываются)
+    </div>
+</div>
+
+<script>
+/* =========================================================
+   exclude_period.html
+   - добавление строки работает (пустая строка НЕ удаляется)
+   - хранение: localStorage + AbonentsDB.abonents[id].defaultExcludes
+   ========================================================= */
+
+function getAbonentId(){
+    const p = new URLSearchParams(window.location.search);
+    const fromUrl = p.get("abonent") || p.get("id");
+    if (fromUrl) return fromUrl;
+
+    const db = window.AbonentsDB?.abonents || {};
+    const first = Object.keys(db)[0];
+    return first || "27";
+}
+function periodsKey(id){ return "exclude_periods_" + id; }
+
+function getAbonent(){
+    const id = getAbonentId();
+    return window.AbonentsDB?.abonents?.[id] || null;
+}
+
+function esc(s){
+    return String(s ?? "")
+        .replaceAll("&","&amp;").replaceAll("<","&lt;")
+        .replaceAll(">","&gt;").replaceAll('"',"&quot;")
+        .replaceAll("'","&#039;");
+}
+
+function parseDateAnyToDate(value){
+    const s = String(value || "").trim();
+    if (!s) return null;
+
+    // ISO: YYYY-MM-DD
+    const iso = s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (iso){
+        const d = new Date(`${iso[1]}-${iso[2]}-${iso[3]}`);
+        return d.toString()==="Invalid Date" ? null : d;
+    }
+
+    // RU: DD.MM.YYYY
+    const ru = s.match(/^(\d{2})\.(\d{2})\.(\d{4})$/);
+    if (ru){
+        const d = new Date(`${ru[3]}-${ru[2]}-${ru[1]}`);
+        return d.toString()==="Invalid Date" ? null : d;
+    }
+
+    const d = new Date(s);
+    return d.toString()==="Invalid Date" ? null : d;
+}
+function toISODateString(d){
+    const pad2 = (n)=>String(n).padStart(2,"0");
+    return `${d.getFullYear()}-${pad2(d.getMonth()+1)}-${pad2(d.getDate())}`;
+}
+function toDMYDateString(d){
+    const pad2 = (n)=>String(n).padStart(2,"0");
+    return `${pad2(d.getDate())}.${pad2(d.getMonth()+1)}.${d.getFullYear()}`;
+}
+function toISO(dmyOrIso){
+    const d = parseDateAnyToDate(dmyOrIso);
+    return d ? toISODateString(d) : "";
+}
+function parseDMY(dmyOrIso){
+    // совместимость: принимает и "ДД.ММ.ГГГГ", и ISO "YYYY-MM-DD"
+    return parseDateAnyToDate(dmyOrIso);
+}
+
+
+function normalizeList(list){
+    return (Array.isArray(list) ? list : []).map(p => ({
+        from: String(p?.from || "").trim(),
+        to: String(p?.to || "").trim(),
+        reason: String(p?.reason || "").trim()
+    }));
+}
+
+function readFromLocalStorage(){
+    const id = getAbonentId();
+    try{
+        const raw = localStorage.getItem(periodsKey(id));
+        if (!raw) return null;
+        const arr = JSON.parse(raw);
+        return normalizeList(arr);
+    }catch{
+        return null;
+    }
+}
+
+function readFromAbonent(){
+    const a = getAbonent();
+    return normalizeList(a?.defaultExcludes || []);
+}
+
+function writeToLocalStorage(list, opts){
+    const id = getAbonentId();
+    const keepEmpty = !!(opts && opts.keepEmpty);
+
+    const normalized = normalizeList(list);
+    const cleaned = keepEmpty
+        ? normalized
+        : normalized.filter(p => p.from || p.to || p.reason);
+
+    localStorage.setItem(periodsKey(id), JSON.stringify(cleaned));
+}
+
+function writeToAbonent(list, opts){
+    const a = getAbonent();
+    if (!a) return;
+
+    const keepEmpty = !!(opts && opts.keepEmpty);
+    const normalized = normalizeList(list);
+    const cleaned = keepEmpty
+        ? normalized
+        : normalized.filter(p => p.from || p.to || p.reason);
+
+    a.defaultExcludes = cleaned;
+}
+
+function readPeriods(){
+    // приоритет localStorage, если есть (оно переживает перезагрузку)
+    const fromLS = readFromLocalStorage();
+    if (fromLS !== null) return fromLS;
+
+    // иначе берём из базы (defaultExcludes)
+    return readFromAbonent();
+}
+
+function writePeriods(list, opts){
+    // сохраняем в оба места
+    writeToLocalStorage(list, opts);
+    writeToAbonent(list, opts);
+}
+
+function validatePeriods(list){
+    const errors = [];
+
+    if (list.length > 10){
+        errors.push("Нельзя больше 10 периодов на одного абонента.");
+    }
+
+    const parsed = list.map((p, idx) => {
+        const a = parseDMY(p.from);
+        const b = parseDMY(p.to);
+        return { idx, p, a, b };
+    });
+
+    parsed.forEach(x => {
+        if (!x.p.from || !x.p.to) return;
+        if (!x.a || !x.b){
+            errors.push(`Строка ${x.idx+1}: неверная дата (выбери дату в календаре или введи корректно).`);
+            return;
+        }
+        if (x.b < x.a){
+            errors.push(`Строка ${x.idx+1}: дата окончания раньше даты начала.`);
+        }
+        const days = Math.floor((x.b - x.a)/(24*3600*1000)) + 1;
+        if (days > 365){
+            errors.push(`Строка ${x.idx+1}: период больше 365 дней.`);
+        }
+    });
+
+    const filled = parsed.filter(x => x.p.from && x.p.to && x.a && x.b && x.b >= x.a);
+    filled.sort((x,y)=>x.a-y.a);
+    for (let i=0;i<filled.length;i++){
+        for (let j=i+1;j<filled.length;j++){
+            if (filled[j].a > filled[i].b) break;
+            errors.push(`Периоды пересекаются: строки ${filled[i].idx+1} и ${filled[j].idx+1}.`);
+        }
+    }
+
+    return errors;
+}
+
+function render(){
+    const body = document.getElementById("periodsBody");
+    if (!body) return;
+
+    const list = readPeriods();
+
+    // если пусто — показываем одну пустую строку
+    const view = (list.length === 0) ? [{from:"",to:"",reason:""}] : list;
+
+    body.innerHTML = view.map((p, i) => `
+        <tr data-idx="${i}">
+            <td style="border:0.5px solid #000; padding:4px; text-align:center;">${i+1}</td>
+            <td style="border:0.5px solid #000; padding:4px;">
+                <input class="p-from" type="date" value="${esc(toISO(p.from))}" style="width:100%; box-sizing:border-box;">
+            </td>
+            <td style="border:0.5px solid #000; padding:4px;">
+                <input class="p-to" type="date" value="${esc(toISO(p.to))}" style="width:100%; box-sizing:border-box;">
+            </td>
+            <td style="border:0.5px solid #000; padding:4px;">
+                <input class="p-reason" type="text" value="${esc(p.reason)}" style="width:100%; box-sizing:border-box;">
+            </td>
+            <td style="border:0.5px solid #000; padding:4px; text-align:center;">
+                <button class="row-del" type="button" title="Удалить" style="border:1px solid #000; background:#fff; cursor:pointer;">×</button>
+            </td>
+        </tr>
+    `).join("");
+}
+
+function collectFromUI(){
+    const rows = Array.from(document.querySelectorAll("#periodsBody tr"));
+    return rows.map(tr => ({
+        from: (tr.querySelector(".p-from")?.value || "").trim(),
+        to: (tr.querySelector(".p-to")?.value || "").trim(),
+        reason: (tr.querySelector(".p-reason")?.value || "").trim()
+    }));
+}
+
+function addRow(){
+    const list = collectFromUI(); // берём из UI, чтобы не терять введённое
+    list.push({ from:"", to:"", reason:"" });
+
+    // ВАЖНО: keepEmpty=true, иначе пустая строка сразу исчезнет
+    writePeriods(list, { keepEmpty: true });
+    render();
+}
+
+document.addEventListener("DOMContentLoaded", () => {
+    // при входе: если вообще нигде нет данных, создадим одну строку и положим в AbonentsDB (пустую)
+    const initial = readPeriods();
+    if (!initial || initial.length === 0){
+        writePeriods([{from:"",to:"",reason:""}], { keepEmpty: true });
+    }
+
+    render();
+
+    document.getElementById("addRowBtn")?.addEventListener("click", addRow);
+
+    document.getElementById("saveBtn")?.addEventListener("click", () => {
+        const list = collectFromUI();
+
+        // перед сохранением чистим пустые
+        const cleaned = normalizeList(list).filter(p => p.from || p.to || p.reason);
+
+        const errors = validatePeriods(cleaned);
+        if (errors.length){
+            alert("Ошибка сохранения:\n\n" + errors.join("\n"));
+            return;
+        }
+
+        writePeriods(cleaned, { keepEmpty: false });
+        alert("Сохранено");
+        render();
+    });
+
+    // удаление строки
+    document.getElementById("periodsBody")?.addEventListener("click", (e) => {
+        const btn = e.target.closest(".row-del");
+        if (!btn) return;
+
+        const tr = btn.closest("tr");
+        const idx = Number(tr?.dataset?.idx);
+        if (!Number.isFinite(idx)) return;
+
+        if (!confirm("Удалить строку?")) return;
+
+        const list = collectFromUI();
+        list.splice(idx, 1);
+
+        // keepEmpty=true — чтобы пустая строка могла существовать
+        writePeriods(list, { keepEmpty: true });
+        render();
+    });
+
+    // автосохранение при вводе (в оба места), без чистки
+    document.getElementById("periodsBody")?.addEventListener("input", () => {
+        const list = collectFromUI();
+        writePeriods(list, { keepEmpty: true });
+    });
+});
+</script>
+
+<script>closeLayout();</script>
+</body>
+</html>

@@ -1,0 +1,711 @@
+<!DOCTYPE html>
+
+<!-- ============================================================
+🔒 CRITICAL — НЕ ТРОГАТЬ (ПАПАЖКХ) | Date: 2026-01-27
+Doc: docs/LOGIC_SPEC_v1.5.3.md
+Эталон: jkh_site_full_v01.27.3.zip | SHA256: 6b4254a9b3b74327fe2d2c48c34e3e446ba9ae4e3369c6c554a683bde7b6ceec
+
+- ES-modules (type="module") запрещены в v1.5.x (должно работать file://)
+- Порядок подключений CRITICAL: calc_engine.js должен быть ДО payment_table.js / spravka_sud.js
+- Карточка абонента = источник истины; справки/отчёты не ломают карточку
+============================================================ -->
+
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <script src="critical_guard.js" defer></script>
+    <title>Главная ЖКХ</title>
+
+    <link rel="stylesheet" href="style.css">
+
+    <!-- данные и лэйаут -->
+    <script src="data.js"></script>
+    <script src="calc_engine.js"></script>
+<script src="layout.js"></script>
+
+    <style>
+        /* ===== ФИКСИРОВАННАЯ ШАПКА ===== */
+        .sticky-header thead tr:first-child th {
+            position: sticky;
+            top: 50px;
+            background: #efefef;
+            z-index: 100;
+        }
+
+        /* ===== СТИЛИ СТРЕЛОК ===== */
+        .sort-arrow {
+            font-size: 11px;
+            padding-left: 4px;
+            opacity: 0.7;
+        }
+        .sort-arrow.asc::after { content: "▲"; }
+        .sort-arrow.desc::after { content: "▼"; }
+
+        /* ===== ФИЛЬТРЫ ===== */
+        .filters-row th { padding: 1px; }
+        .filters-row input {
+            width: 95%;
+            font-size: 11px;
+            padding: 2px 4px;
+            box-sizing: border-box;
+        }
+
+        /* ===== КЛИКАБЕЛЬНЫЕ СТРОКИ ===== */
+        .row-clickable { cursor: pointer; }
+        .row-clickable:hover td { background: #f5f5f5; }
+
+        /* ===== ВЫДЕЛЕНИЕ ПО ДОЛГУ ===== */
+        .debt-low td  { background-color: #fff6e5; }
+        .debt-mid td  { background-color: #ffe0e0; }
+        .debt-high td { background-color: #ffcccc; font-weight: bold; }
+
+        /* ===== PAGINATION ===== */
+        #paginationInfo {
+            margin: 10px 0 5px;
+            font-size: 13px;
+        }
+
+        #paginationControls button {
+            margin: 0 3px;
+            padding: 3px 7px;
+            font-size: 12px;
+            border: 1px solid #000;
+            background: #fff;
+            cursor: pointer;
+        }
+
+        #paginationControls .current-page {
+            font-weight: bold;
+            text-decoration: underline;
+        }
+
+        #paginationControls button[disabled] {
+            opacity: 0.4;
+            cursor: default;
+        }
+    </style>
+</head>
+<body>
+
+<script>renderLayout();</script>
+
+<h2>ОБЩАЯ ИНФОРМАЦИЯ ПО КАЖДОМУ АБОНЕНТУ</h2>
+
+<table id="abonentsTable" class="sticky-header">
+    <thead>
+        <!-- === ШАПКА === -->
+        <tr>
+            <th data-field="id">
+                <span class="label-text">лицевой счёт</span>
+                <span class="sort-arrow"></span>
+            </th>
+            <th data-field="fam">
+                <span class="label-text">Фамилия</span>
+                <span class="sort-arrow"></span>
+            </th>
+            <th data-field="name">
+                <span class="label-text">Имя</span>
+                <span class="sort-arrow"></span>
+            </th>
+            <th data-field="otch">
+                <span class="label-text">Отчество</span>
+                <span class="sort-arrow"></span>
+            </th>
+            <th data-field="totalDebt">
+                <span class="label-text">Всего задолженность</span>
+                <span class="sort-arrow"></span>
+            </th>
+            <th data-field="penalty">
+                <span class="label-text">ПЕНЯ за период</span>
+                <span class="sort-arrow"></span>
+            </th>
+            <th data-field="nachisleno">
+                <span class="label-text">Начислено за период</span>
+                <span class="sort-arrow"></span>
+            </th>
+            <th data-field="oplacheno">
+                <span class="label-text">ОПЛАЧЕНО за период</span>
+                <span class="sort-arrow"></span>
+            </th>
+            <th data-field="startDate">
+                <span class="label-text">дата начала расчёта</span>
+                <span class="sort-arrow"></span>
+            </th>
+            <th data-field="endDate">
+                <span class="label-text">дата окончания расчёта</span>
+                <span class="sort-arrow"></span>
+            </th>
+            <th data-field="note">
+                <span class="label-text">примечание абонента</span>
+                <span class="sort-arrow"></span>
+            </th>
+            <th data-field="flatReg">
+                <span class="label-text">ID квартиры (regnum)</span>
+                <span class="sort-arrow"></span>
+            </th>
+        </tr>
+
+        <!-- === ФИЛЬТРЫ === -->
+        <tr class="filters-row">
+            <th><input data-field="id"></th>
+            <th><input data-field="fam"></th>
+            <th><input data-field="name"></th>
+            <th><input data-field="otch"></th>
+            <th><input data-field="totalDebt"></th>
+            <th><input data-field="penalty"></th>
+            <th><input data-field="nachisleno"></th>
+            <th><input data-field="oplacheno"></th>
+            <th><input data-field="startDate"></th>
+            <th><input data-field="endDate"></th>
+            <th><input data-field="note"></th>
+            <th><input data-field="flatReg"></th>
+        </tr>
+    </thead>
+
+    <tbody></tbody>
+</table>
+
+<div id="paginationInfo"></div>
+<div id="paginationControls"></div>
+
+<script>
+/* ============================================================
+     ГЛОБАЛЬНЫЕ ДАННЫЕ
+============================================================ */
+let allRows = [];
+let filteredRows = [];
+let currentPage = 1;
+const pageSize = 20;
+let sortField = null;
+let sortAsc = true;
+const filters = {};
+
+// ============================================================
+// 🔐 CRITICAL_ASSERT (DEV)
+// В проде тихо логируем, в DEV можно бросать исключение.
+// ============================================================
+function CRITICAL_ASSERT(cond, msg, ctx){
+    if (cond) return;
+    try {
+        console.error("CRITICAL_ASSERT:", msg || "assert failed", ctx || {});
+    } catch(e){}
+    // можно включить жёсткий режим: localStorage.setItem('CRITICAL_ASSERT_THROW','1')
+    try {
+        if (localStorage.getItem('CRITICAL_ASSERT_THROW') === '1') {
+            throw new Error(String(msg || "CRITICAL_ASSERT failed"));
+        }
+    } catch(e){ throw e; }
+}
+
+/* ============================================================
+     ДАТЫ (формат/парсинг)
+============================================================ */
+function pad2(n){ return String(n).padStart(2, "0"); }
+
+function formatDMY(d){
+    if (!d || d.toString() === "Invalid Date") return "";
+    return `${pad2(d.getDate())}.${pad2(d.getMonth()+1)}.${d.getFullYear()}`;
+}
+
+function parseDateDMY(str) {
+    if (!str) return null;
+    const p = String(str).split(".");
+    if (p.length !== 3) return null;
+    const d = new Date(+p[2], +p[1] - 1, +p[0]);
+    return d.toString() === "Invalid Date" ? null : d;
+}
+
+function escapeHtml(str){
+    return String(str ?? "")
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#039;");
+}
+
+// поддержка ISO YYYY-MM-DD и RU DD.MM.YYYY (как в payment_table.js)
+function parseDateAnyToDate(value) {
+    if (value === null || value === undefined) return null;
+    const s = String(value || "").trim();
+    if (!s) return null;
+
+    // CRITICAL: ISO YYYY-MM-DD нельзя парсить через new Date(iso) (UTC-сдвиг).
+    // Разбираем вручную и создаём локальную дату в 12:00.
+    let m1 = s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (m1) {
+        const y = Number(m1[1]);
+        const mo = Number(m1[2]);
+        const d = Number(m1[3]);
+        const dt = new Date(y, mo - 1, d, 12, 0, 0);
+        return dt.toString() === "Invalid Date" ? null : dt;
+    }
+
+    // RU: DD.MM.YYYY (допускаем 1-2 цифры)
+    m1 = s.match(/^(\d{1,2})\.(\d{1,2})\.(\d{4})$/);
+    if (m1) {
+        const dd = Number(m1[1]);
+        const mm = Number(m1[2]);
+        const yy = Number(m1[3]);
+        const dt = new Date(yy, mm - 1, dd, 12, 0, 0);
+        return dt.toString() === "Invalid Date" ? null : dt;
+    }
+
+    const d2 = new Date(s);
+    if (d2.toString() === "Invalid Date") return null;
+    return new Date(d2.getFullYear(), d2.getMonth(), d2.getDate(), 12, 0, 0);
+}
+function parseDateForSort(str){
+    // в колонках startDate/endDate у нас ДД.ММ.ГГГГ
+    return parseDateDMY(str);
+}
+
+/* ============================================================
+     ✅ ЧТЕНИЕ ИТОГОВ И ДАТ ИЗ payments_<id>
+============================================================ */
+function toNum(v){
+    const n = parseFloat(String(v ?? "").replace(",", ".").replace(/\s+/g,""));
+    return isNaN(n) ? 0 : n;
+}
+
+
+function getAbonentNote(id, a){
+    // 1) из AbonentsDB полей
+    const fromA = (a && (a.defaultNote || a.note || a.comment || a.prim || a.primNote || a.noteText)) ? (a.defaultNote || a.note || a.comment || a.prim || a.primNote || a.noteText) : "";
+    if (String(fromA || "").trim()) return String(fromA);
+
+    // 2) запасной вариант: отдельный ключ (если карточка так сохраняла)
+    try{
+        const raw = localStorage.getItem("note_" + String(id));
+        if (raw !== null && raw !== undefined) return String(raw);
+    }catch(e){}
+
+    return "";
+}
+
+function getPaymentsForAbonent(id){
+    try{
+        const raw = localStorage.getItem("payments_" + id);
+        if (!raw) return [];
+        const arr = JSON.parse(raw);
+        return Array.isArray(arr) ? arr : [];
+    }catch{
+        return [];
+    }
+}
+
+// Итоги + даты:
+// - Начислено/Оплачено: суммы accrued/paid
+// - Пеня/Всего: из строки с максимальным total_debt (нарастающий итог)
+// - startDate: min(paid_date)
+// - endDate (умно):
+//    - если totalDebt > 0 -> сегодня
+//    - если totalDebt == 0 -> max(paid_date)
+function calcTotalsFromPayments(id, abonentObj){
+    const arr = getPaymentsForAbonent(id);
+    if (!arr.length) return null;
+
+    let sumAcc = 0;
+    let sumPaid = 0;
+
+    for (const r of arr){
+        sumAcc += toNum(r.accrued);
+        sumPaid += toNum(r.paid);
+    }
+
+    // ✅ Итоговые "Всего задолженность" и "ПЕНЯ за период" должны совпадать с логикой карточки.
+    // Важно: в LS строки payments_<id> могут НЕ содержать актуальные total_debt/pay_penalty,
+    // потому что карточка пересчитывает это "на лету".
+    // Поэтому:
+    //   1) если доступен calc_engine (JKHCalcEngine) — считаем итог прямо сейчас (это самый надёжный вариант)
+    //   2) иначе — fallback к данным из последней строки последнего месяца.
+
+    let totalDebt = 0;
+    let penalty = 0;
+
+    // (1) основной путь — через calc_engine
+    try {
+        if (window.JKHCalcEngine) {
+            // ✅ ЕДИНЫЙ ДВИЖОК: для сводной главной используем тот же метод,
+            // что и карточка/справка: calcTotalsAsOfAdjusted() на дату окончания расчёта.
+            //
+            // ВАЖНО:
+            // - calcTotalsAsOfCore() отдаёт "начисленную пеню" (penaltyAccruedTotal) — это ДРУГОЕ.
+            // - нам нужна "пеня к взысканию / задолженность по пени" (penaltyDebt),
+            //   которая согласована с карточкой и справкой.
+            const asOf = new Date(); // дата окончания расчёта на главной = сегодня
+            if (typeof window.JKHCalcEngine.calcTotalsAsOfAdjusted === 'function') {
+                const adj = window.JKHCalcEngine.calcTotalsAsOfAdjusted(
+                    arr,
+                    asOf,
+                    { abonentId: id, applyAdvanceOffset: true, allowNegativePrincipal: true }
+                );
+
+                const principal = Number(adj?.principal) || 0;       // может быть отрицательный (аванс)
+                const penDebt   = Number(adj?.penaltyDebt) || 0;
+                const total     = Number(adj?.total) || (principal + penDebt);
+
+                totalDebt = total;
+                // 🔴 CRITICAL: если итог <= 0 (нет долга/аванс) — пеня в сводной = 0
+                penalty = (totalDebt > 0.0000001) ? penDebt : 0;
+
+                CRITICAL_ASSERT(Number.isFinite(totalDebt), "Index: totalDebt is not finite", { id, totalDebt, adj });
+                CRITICAL_ASSERT(Number.isFinite(penalty),   "Index: penalty is not finite",   { id, penalty, adj });
+            } else {
+                throw new Error('JKHCalcEngine.calcTotalsAsOfAdjusted is missing');
+            }
+        } else {
+            throw new Error('no JKHCalcEngine');
+        }
+    } catch (e) {
+        // (2) fallback — последняя строка последнего месяца (как раньше)
+        let endRow = null;
+        let bestKey = -Infinity;
+        let bestIsAccr = false;
+        let bestId = -Infinity;
+
+        for (const r of arr){
+            const y = Number(r.year) || 0;
+            const m = Number(r.month) || 0;
+            const key = (y * 12) + m;
+            const isAccr = Math.abs(toNum(r.accrued)) > 0.0000001;
+
+            const rid = Number(r.id) || 0;
+
+            const better =
+                (key > bestKey) ||
+                (key === bestKey && isAccr && !bestIsAccr) ||
+                (key === bestKey && isAccr === bestIsAccr && rid >= bestId);
+
+            if (better){
+                bestKey = key;
+                bestIsAccr = isAccr;
+                bestId = rid;
+                endRow = r;
+            }
+        }
+
+        totalDebt = endRow ? toNum(endRow.total_debt) : 0;
+        penalty   = endRow ? toNum(endRow.pay_penalty) : 0;
+
+        if (totalDebt <= 0.0000001) penalty = 0;
+    }
+
+    // ✅ страховка: если total_debt в строках не заполнен (0), всё равно можем показать аванс/долг по суммам
+    // principalNet = начислено - оплачено (может быть < 0)
+    const principalNet = sumAcc - sumPaid;
+    if (Math.abs(totalDebt) <= 0.0000001 && Math.abs(principalNet) > 0.0000001) {
+        totalDebt = principalNet + penalty;
+    }
+
+    // правило: если итоговый долг <= 0 (аванс/ноль) — пеня в сводной = 0, а "Всего задолженность" = только principalNet
+    if (totalDebt <= 0.0000001) {
+        penalty = 0;
+        if (Math.abs(principalNet) > 0.0000001) totalDebt = principalNet;
+    }
+
+    // ✅ дата начала расчёта = дата регистрации абонента (если задана)
+    let startDate = "";
+    const regRaw = abonentObj?.regDate || abonentObj?.registrationDate || abonentObj?.reg_date || abonentObj?.date_reg || abonentObj?.registeredAt;
+    const regD = parseDateAnyToDate(regRaw);
+    if (regD) startDate = formatDMY(regD);
+
+    // запасной вариант, если регистрации нет: берём первый месяц из данных
+    if (!startDate){
+        let minKey = Infinity;
+        let minY = 0, minM = 0;
+        for (const r of arr){
+            const y = Number(r.year) || 0;
+            const m = Number(r.month) || 0;
+            const key = (y * 12) + m;
+            if (key && key < minKey){
+                minKey = key;
+                minY = y; minM = m;
+            }
+        }
+        if (minKey !== Infinity && minY && minM){
+            startDate = formatDMY(new Date(minY, minM-1, 1));
+        }
+    }
+
+    // ✅ дата окончания расчёта всегда текущая дата
+    const endDate = formatDMY(new Date());
+
+    return {
+        nachisleno: Math.abs(sumAcc)  > 0.0000001 ? sumAcc.toFixed(2)  : "",
+        oplacheno:  Math.abs(sumPaid) > 0.0000001 ? sumPaid.toFixed(2) : "",
+        totalDebt:  Math.abs(totalDebt) > 0.0000001 ? totalDebt.toFixed(2) : "",
+        penalty:    Math.abs(penalty)   > 0.0000001 ? penalty.toFixed(2)   : "",
+        startDate:  startDate,
+        endDate:    endDate
+    };
+}
+
+/* ============================================================
+     ЗАГРУЗКА ДАННЫХ ИЗ data.js + (при наличии) из payments_<id>
+============================================================ */
+document.addEventListener("DOMContentLoaded", () => {
+
+    const db = window.AbonentsDB?.abonents || {};
+
+    for (const id in db) {
+        const a = db[id];
+
+        const fio = (a.fio || "").split(" ");
+        const fam = fio[0] || "";
+        const name = fio[1] || "";
+        const otch = fio[2] || "";
+
+        const totals = calcTotalsFromPayments(id, a);
+
+        allRows.push({
+            id,
+            fam,
+            name,
+            otch,
+
+            // ✅ если есть payments_<id> — берём итоги из них
+            totalDebt: (totals?.totalDebt ?? a.totalDebt ?? a.total_debt ?? a.mainDebtTotal ?? ""),
+            penalty:   (totals?.penalty   ?? a.penalty ?? a.penaltyTotal ?? ""),
+
+            nachisleno: (totals?.nachisleno ?? ""),
+            oplacheno:  (totals?.oplacheno  ?? ""),
+
+            startDate:  (totals?.startDate ?? ""),
+            endDate:    (totals?.endDate   ?? ""),
+
+            note: getAbonentNote(id, a),
+            flatReg: (a.regnum || a.premiseRegnum || a.premise_regnum || a.regNumber || a.reg_no || a.flat || '')
+        });
+    }
+
+    initFilters();
+    initSorting();
+    render();
+});
+
+/* ============================================================
+     ИНИЦИАЛИЗАЦИЯ ФИЛЬТРОВ
+============================================================ */
+function initFilters() {
+    document.querySelectorAll(".filters-row input").forEach(input => {
+        const field = input.dataset.field;
+        filters[field] = "";
+
+        input.addEventListener("input", () => {
+            filters[field] = input.value;
+            currentPage = 1;
+            render();
+        });
+    });
+}
+
+/* ============================================================
+     ИНИЦИАЛИЗАЦИЯ СОРТИРОВКИ (со стрелками)
+============================================================ */
+function initSorting() {
+    const headers = document.querySelectorAll("thead tr:first-child th");
+
+    headers.forEach(th => {
+        const field = th.dataset.field;
+        if (!field) return;
+
+        th.style.cursor = "pointer";
+
+        th.addEventListener("click", () => {
+            if (sortField === field) sortAsc = !sortAsc;
+            else {
+                sortField = field;
+                sortAsc = true;
+            }
+            render();
+        });
+    });
+}
+
+/* ============================================================
+     ОСНОВНОЙ РЕНДЕР (фильтры + сортировка + пагинация)
+============================================================ */
+function render() {
+    /* --- фильтрация --- */
+    filteredRows = allRows.filter(r => {
+        for (const f in filters) {
+            const val = String(filters[f] ?? "").toLowerCase().trim();
+            if (!val) continue;
+            if (!String(r[f] ?? "").toLowerCase().includes(val)) return false;
+        }
+        return true;
+    });
+
+    /* --- сортировка --- */
+    if (sortField) {
+        filteredRows.sort((a, b) => {
+            let A = String(a[sortField] ?? "").trim();
+            let B = String(b[sortField] ?? "").trim();
+
+            const dA = parseDateForSort(A);
+            const dB = parseDateForSort(B);
+            if (dA && dB) return sortAsc ? dA - dB : dB - dA;
+
+            const nA = parseFloat(A.replace(/\s+/g, ""));
+            const nB = parseFloat(B.replace(/\s+/g, ""));
+            if (!isNaN(nA) && !isNaN(nB)) return sortAsc ? nA - nB : nB - nA;
+
+            return sortAsc ? A.localeCompare(B, "ru") : B.localeCompare(A, "ru");
+        });
+    }
+
+    /* --- пагинация --- */
+    const total = filteredRows.length;
+    const totalPages = Math.max(1, Math.ceil(total / pageSize));
+    if (currentPage > totalPages) currentPage = totalPages;
+
+    const startIndex = (currentPage - 1) * pageSize;
+    const pageRows = filteredRows.slice(startIndex, startIndex + pageSize);
+
+    /* --- вывод строк --- */
+    const tbody = document.querySelector("#abonentsTable tbody");
+    tbody.innerHTML = "";
+
+    pageRows.forEach(r => {
+        const tr = document.createElement("tr");
+        tr.classList.add("row-clickable");
+        tr.dataset.id = r.id;
+
+        const debt = parseFloat((r.totalDebt || "").toString().replace(/\s+/g, ""));
+        const pen = parseFloat((r.penalty || "").toString().replace(/\s+/g, ""));
+        if ((debt > 0.0000001) || (!isNaN(pen) && pen > 0.0000001)) tr.classList.add("has-debt");
+        if (!isNaN(debt)) {
+            if (debt > 50000) tr.classList.add("debt-high");
+            else if (debt > 10000) tr.classList.add("debt-mid");
+            else if (debt > 0) tr.classList.add("debt-low");
+        }
+
+        tr.innerHTML = `
+            <td>${r.id}</td>
+            <td>${r.fam}</td>
+            <td>${r.name}</td>
+            <td>${r.otch}</td>
+            <td>${r.totalDebt}</td>
+            <td>${r.penalty}</td>
+            <td>${r.nachisleno}</td>
+            <td>${r.oplacheno}</td>
+            <td>${r.startDate}</td>
+            <td>${r.endDate}</td>
+            <td><textarea class="note-inline note-abonent" data-id="${r.id}" placeholder="">${escapeHtml(String(r.note||""))}</textarea></td>
+            <td>${r.flatReg}</td>
+        `;
+        tbody.appendChild(tr);
+    });
+
+    /* --- переход по клику --- */
+    tbody.onclick = (e) => {
+        // если клик по textarea/инпуту — НЕ переходим в карточку
+        const tag = (e.target && e.target.tagName) ? e.target.tagName.toLowerCase() : "";
+        if (tag === "textarea" || tag === "input" || tag === "select" || tag === "button") return;
+
+        const tr = e.target.closest("tr");
+        if (tr) {
+            window.location.href = "abonent_card.html?abonent=" + encodeURIComponent(tr.dataset.id);
+        }
+    };
+
+    
+    // --- сохранение "Примечание абонента" прямо из общей таблицы ---
+    // Храним в AbonentsDB.abonents[id].defaultNote и пытаемся сохранить через saveAbonentsDB (если есть).
+    tbody.querySelectorAll("textarea.note-abonent").forEach(ta => {
+        ta.addEventListener("click", (ev) => ev.stopPropagation());
+        ta.addEventListener("keydown", (ev) => ev.stopPropagation());
+        ta.addEventListener("blur", () => {
+            const id = String(ta.dataset.id || "").trim();
+            if (!id) return;
+            const val = String(ta.value || "");
+
+            try{
+                if (window.AbonentsDB && window.AbonentsDB.abonents && window.AbonentsDB.abonents[id]){
+                    window.AbonentsDB.abonents[id].defaultNote = val;
+                }
+            }catch(e){}
+
+            // запасной вариант: локально сохраняем под отдельным ключом
+            try{ localStorage.setItem("note_" + id, val); }catch(e){}
+
+            // если в data.js есть сохранение базы — используем его
+            try{
+                if (typeof window.saveAbonentsDB === "function") window.saveAbonentsDB();
+                else if (typeof window.saveDB === "function") window.saveDB();
+                else {
+                    // запасной вариант: типичный ключ базы (если data.js хранит её в LS)
+                    localStorage.setItem("abonents_db_v1", JSON.stringify(window.AbonentsDB));
+                }
+            }catch(e){}
+        });
+    });
+/* --- стрелки сортировки --- */
+    document.querySelectorAll("thead tr:first-child th").forEach(th => {
+        const field = th.dataset.field;
+        const arrow = th.querySelector(".sort-arrow");
+        if (!arrow) return;
+
+        if (field === sortField) {
+            arrow.classList.remove("asc", "desc");
+            arrow.classList.add(sortAsc ? "asc" : "desc");
+        } else {
+            arrow.classList.remove("asc", "desc");
+        }
+    });
+
+    /* --- пагинация --- */
+    renderPagination(total, startIndex + 1, startIndex + pageRows.length);
+}
+
+/* ============================================================
+     PAGINATION
+============================================================ */
+function renderPagination(total, from, to) {
+    const info = document.getElementById("paginationInfo");
+    const controls = document.getElementById("paginationControls");
+
+    if (total === 0) {
+        info.textContent = "Нет данных";
+        controls.innerHTML = "";
+        return;
+    }
+
+    info.textContent = `Показано ${from}–${to} из ${total}`;
+
+    const totalPages = Math.max(1, Math.ceil(total / pageSize));
+
+    controls.innerHTML = "";
+
+    function btn(label, page, disabled, current) {
+        const b = document.createElement("button");
+        b.textContent = label;
+        if (disabled) b.disabled = true;
+        if (current) b.classList.add("current-page");
+        if (!disabled) b.onclick = () => {
+            currentPage = page;
+            render();
+        };
+        controls.appendChild(b);
+    }
+
+    btn("⏮", 1, currentPage === 1);
+    btn("◀", currentPage - 1, currentPage === 1);
+
+    const min = Math.max(1, currentPage - 2);
+    const max = Math.min(totalPages, currentPage + 2);
+
+    for (let p = min; p <= max; p++) {
+        btn(String(p), p, false, p === currentPage);
+    }
+
+    btn("▶", currentPage + 1, currentPage === totalPages);
+    btn("⏭", totalPages, currentPage === totalPages);
+}
+</script>
+
+<script>closeLayout();</script>
+
+</body>
+</html>

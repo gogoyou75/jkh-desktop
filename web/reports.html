@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <script src="critical_guard.js" defer></script>
+    <title>Справки</title>
+    <link rel="stylesheet" href="style.css">
+
+    <script src="data.js"></script>
+    <script src="layout.js"></script>
+
+    <style>
+        /* Локальные стили под макет "справки.png" */
+        .page-title { margin: 0 0 8px 0; font-size: 26px; font-weight: 700; }
+        .page-subtitle { margin: 0 0 10px 0; font-size: 18px; font-weight: 700; }
+
+        .reports-wrap {
+            display: flex;
+            gap: 24px;
+            align-items: flex-start;
+            margin-top: 10px;
+        }
+
+        .period-card {
+            width: 360px;
+            border: 2px solid #000;
+            padding: 14px;
+            box-sizing: border-box;
+            background: #fff;
+        }
+        .period-card h4 {
+            margin: 0 0 12px 0;
+            font-size: 14px;
+            font-weight: 700;
+        }
+        .period-card label {
+            display: block;
+            font-size: 13px;
+            margin: 10px 0 6px 0;
+        }
+        .period-card input[type="date"]{
+            width: 100%;
+            height: 28px;
+            border: 2px solid #000;
+            padding: 2px 6px;
+            box-sizing: border-box;
+        }
+        .period-card .btn-wide{
+            width: 100%;
+            margin-top: 14px;
+            height: 34px;
+            border: 2px solid #000;
+            background: #e5e5e5;
+            cursor: pointer;
+            font-size: 13px;
+        }
+
+        .reports-table-wrap { flex: 1; }
+        .reports-table { table-layout: fixed; }
+        .reports-table th, .reports-table td { font-size: 13px; }
+        .reports-table .open-btn {
+            border: 2px solid #000;
+            background: #e5e5e5;
+            padding: 6px 14px;
+            cursor: pointer;
+        }
+
+        /* ===== ВЫРАВНИВАНИЕ ШИРИН КОЛОНОК "ОБЩИЕ ДАННЫЕ" ===== */
+        #abonentInfoTable { width: 100%; table-layout: fixed; }
+        #abonentInfoTable th, #abonentInfoTable td{
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+    </style>
+</head>
+<body>
+
+<script>renderLayout();</script>
+
+<h2 class="page-title">Справки</h2>
+<h3 class="page-subtitle" id="abonentTitle">Общие данные</h3>
+
+<table id="abonentInfoTable">
+    <!-- ===== фиксируем ширины под 14 колонок (с улицей) ===== -->
+    <colgroup>
+        <col style="width:7%">  <!-- лицевой счёт -->
+        <col style="width:9%">  <!-- рег. № кв -->
+        <col style="width:9%">  <!-- Фамилия -->
+        <col style="width:8%">  <!-- Имя -->
+        <col style="width:8%">  <!-- Отчество -->
+        <col style="width:6%">  <!-- Общая площадь -->
+        <col style="width:6%">  <!-- право собственности -->
+        <col style="width:6%">  <!-- кол комнат -->
+        <col style="width:7%">  <!-- город -->
+        <col style="width:10%"> <!-- улица -->
+        <col style="width:5%">  <!-- дом -->
+        <col style="width:4%">  <!-- кв -->
+        <col style="width:6%">  <!-- Уникальный ID -->
+        <col style="width:9%">  <!-- телефон -->
+    </colgroup>
+
+    <thead>
+    <tr>
+        <th>лицевой счёт</th>
+        <th>рег. № кв</th>
+        <th>Фамилия</th>
+        <th>Имя</th>
+        <th>Отчество</th>
+        <th>Общая площадь</th>
+        <th>право собственности</th>
+        <th>кол комнат</th>
+        <th>город</th>
+        <th>улица</th>
+        <th>дом</th>
+        <th>кв</th>
+        <th>Уникальный ID</th>
+        <th>телефон</th>
+    </tr>
+    </thead>
+    <tbody id="abonentInfoBody"></tbody>
+</table>
+
+<div class="reports-wrap">
+
+    <div class="reports-table-wrap">
+        <table class="reports-table">
+            <colgroup>
+                <col style="width:8%">
+                <col style="width:52%">
+                <col style="width:20%">
+                <col style="width:20%">
+            </colgroup>
+            <thead>
+            <tr>
+                <th>Код</th>
+                <th>Название справки</th>
+                <th>Назначение</th>
+                <th>Действие</th>
+            </tr>
+            </thead>
+            <tbody>
+            <tr>
+                <td>01</td>
+                <td>РАСЧЁТ ВЗЫСКИВАЕМОЙ СУММЫ</td>
+                <td>для суда</td>
+                <td><button class="open-btn" id="openReport01" type="button">ОТКРЫТЬ</button></td>
+            </tr>
+            </tbody>
+        </table>
+    </div>
+
+    <div class="period-card">
+        <h4>Выберите период для справки:</h4>
+
+        <label for="repFrom">Дата начала:</label>
+        <input id="repFrom" type="date" value="">
+
+        <label for="repTo">Дата окончания:</label>
+        <input id="repTo" type="date" value="">
+
+        <button class="btn-wide" id="repChooseBtn" type="button">ВЫБРАТЬ</button>
+    </div>
+
+</div>
+
+<div class="bottom-nav">
+    <a href="abonent_card.html" class="back-btn" id="backToCard">⬅ назад</a>
+</div>
+
+<script>
+function getAbonentIdFromURL() {
+    const params = new URLSearchParams(window.location.search);
+    const fromUrl = params.get("abonent");
+    if (fromUrl) return fromUrl;
+
+    const db = window.AbonentsDB?.abonents || {};
+    const first = Object.keys(db)[0];
+    return first || "27";
+}
+
+function calcPeriodKey(id){ return "calc_period_" + id; }
+function reportPeriodKey(id){ return "report_period_" + id; }
+
+function fillAbonentCardHeader() {
+    const id = getAbonentIdFromURL();
+    const db = window.AbonentsDB?.abonents || {};
+    const a = db[id];
+    if (!a) return;
+
+    // заголовок
+    document.getElementById("abonentTitle").textContent = "Общие данные " + (a.fio || "");
+
+    // таблица
+    const fioParts = (a.fio || "").split(" ");
+    const last = fioParts[0] || "";
+    const name = fioParts[1] || "";
+    const mid  = fioParts[2] || "";
+
+    document.getElementById("abonentInfoBody").innerHTML = `
+      <tr>
+        <td>${id}</td>
+        <td>${a.regnum || ""}</td>
+        <td>${last}</td>
+        <td>${name}</td>
+        <td>${mid}</td>
+        <td>${a.square ?? ""}</td>
+        <td>${a.share ?? ""}</td>
+        <td>${a.rooms ?? ""}</td>
+        <td>${a.city ?? ""}</td>
+        <td>${a.street ?? ""}</td>
+        <td>${a.house ?? ""}</td>
+        <td>${a.flat ?? ""}</td>
+        <td>${a.uid ?? ""}</td>
+        <td>${a.phone ?? ""}</td>
+      </tr>
+    `;
+
+    // кнопка "назад" — сохранить абонента в URL
+    const back = document.getElementById("backToCard");
+    back.href = "abonent_card.html?abonent=" + encodeURIComponent(id);
+}
+
+function loadAutoPeriod() {
+    const id = getAbonentIdFromURL();
+    const fromEl = document.getElementById("repFrom");
+    const toEl = document.getElementById("repTo");
+
+    // 1) если уже выбирали период на странице справок — берём его
+    try {
+        const rawR = localStorage.getItem(reportPeriodKey(id));
+        if (rawR) {
+            const p = JSON.parse(rawR);
+            fromEl.value = p.from || "";
+            toEl.value   = p.to || "";
+            return;
+        }
+    } catch {}
+
+    // 2) иначе — берем период из карточки абонента (если он выбран)
+    try {
+        const raw = localStorage.getItem(calcPeriodKey(id));
+        if (!raw) { fromEl.value = ""; toEl.value = ""; return; }
+        const p = JSON.parse(raw);
+        fromEl.value = p.from || "";
+        toEl.value   = p.to || "";
+    } catch {
+        fromEl.value = "";
+        toEl.value = "";
+    }
+}
+
+function isValidPeriod(from, to){
+    if (!from || !to) return false;
+    const a = new Date(from), b = new Date(to);
+    return a.toString() !== "Invalid Date" && b.toString() !== "Invalid Date" && a <= b;
+}
+
+function saveReportPeriod(from, to){
+    const id = getAbonentIdFromURL();
+    localStorage.setItem(reportPeriodKey(id), JSON.stringify({from: from || "", to: to || ""}));
+}
+
+document.addEventListener("DOMContentLoaded", () => {
+    fillAbonentCardHeader();
+    loadAutoPeriod();
+
+    document.getElementById("repChooseBtn").addEventListener("click", () => {
+        const from = document.getElementById("repFrom").value;
+        const to   = document.getElementById("repTo").value;
+
+        if (!isValidPeriod(from, to)) {
+            saveReportPeriod("", "");
+            alert("Период не выбран.");
+            return;
+        }
+        saveReportPeriod(from, to);
+        alert("Период для справки выбран: " + from + " — " + to);
+    });
+
+    document.getElementById("openReport01").addEventListener("click", () => {
+        const id = getAbonentIdFromURL();
+        const from = document.getElementById("repFrom").value;
+        const to   = document.getElementById("repTo").value;
+
+        // сохраняем выбранный период (если нет — сохраняем пусто)
+        if (isValidPeriod(from, to)) saveReportPeriod(from, to);
+        else saveReportPeriod("", "");
+
+        // открываем страницу справки (если она есть в проекте)
+        location.href = "spravka_sud.html?abonent=" + encodeURIComponent(id);
+    });
+});
+</script>
+
+<script>closeLayout();</script>
+</body>
+</html>

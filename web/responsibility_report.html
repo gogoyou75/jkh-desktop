@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <title>Отчёт: кто ответственный</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="data.js"></script>
+  <script src="layout.js"></script>
+  <style>
+    .card{border:2px solid #000; background:#fff; padding:14px; margin-top:10px;}
+    table{width:100%; border-collapse:collapse; font-size:13px;}
+    th,td{border:2px solid #000; padding:6px; vertical-align:top;}
+    .muted{opacity:.8; font-size:12px;}
+    .row{display:flex; gap:10px; align-items:end; flex-wrap:wrap;}
+    .row label{font-size:13px; display:flex; flex-direction:column; gap:6px;}
+    input{border:2px solid #000; height:28px; padding:2px 6px; font-size:13px;}
+    button{border:2px solid #000; padding:6px 10px; background:#e5e5e5; cursor:pointer;}
+    @media print {
+      .no-print{display:none !important;}
+      body{background:#fff;}
+    }
+  </style>
+</head>
+<body>
+<script>renderLayout();</script>
+
+<h2>Отчёт для суда: кто был ответственным</h2>
+
+<div class="card">
+  <div id="hdr" style="font-weight:700;"></div>
+  <div class="muted" style="margin-top:6px;">
+    🔴 CRITICAL: отчёт строится по истории ответственности (links). Финансовая история абонента не переносится.
+  </div>
+
+  <div class="row no-print" style="margin-top:12px;">
+    <label>Период с
+      <input type="date" id="from">
+    </label>
+    <label>по
+      <input type="date" id="to">
+    </label>
+    <button type="button" onclick="run()">Сформировать</button>
+    <button type="button" onclick="window.print()">Печать</button>
+    <button type="button" onclick="history.back()">Назад</button>
+  </div>
+</div>
+
+<div class="card">
+  <div style="font-weight:700; margin-bottom:8px;">Результат</div>
+  <table>
+    <thead>
+      <tr>
+        <th style="width:170px;">Период ответственности (внутри выбранного периода)</th>
+        <th style="width:90px;">ЛС</th>
+        <th>ФИО</th>
+        <th style="width:140px;">Основание</th>
+      </tr>
+    </thead>
+    <tbody id="rows"></tbody>
+  </table>
+</div>
+
+<script>
+function q(name){ return document.getElementById(name); }
+function getLinks(){ return Array.isArray(window.AbonentsDB?.links) ? window.AbonentsDB.links : []; }
+function getDb(){ return window.AbonentsDB?.abonents || {}; }
+function getPremises(){ return window.AbonentsDB?.premises || {}; }
+
+function parseISO(s){
+  const v = String(s||'').trim();
+  if(!v) return null;
+  const d = new Date(v);
+  return isNaN(d.getTime()) ? null : d;
+}
+function fmtISO(d){
+  if(!d) return '';
+  const yyyy=d.getFullYear();
+  const mm=String(d.getMonth()+1).padStart(2,'0');
+  const dd=String(d.getDate()).padStart(2,'0');
+  return `${yyyy}-${mm}-${dd}`;
+}
+function maxDate(a,b){ return a && b ? (a>b?a:b) : (a||b); }
+function minDate(a,b){ return a && b ? (a<b?a:b) : (a||b); }
+
+function splitByPeriod(regnum, from, to){
+  const r = String(regnum||'').trim();
+  const links = getLinks()
+    .filter(l => String(l?.regnum||'').trim() === r)
+    .slice()
+    .sort((a,b) => String(a?.dateFrom||'').localeCompare(String(b?.dateFrom||'')));
+
+  // нормализуем интервалы links: [dateFrom, dateTo||∞)
+  const result = [];
+  links.forEach(l => {
+    const df = parseISO(l.dateFrom);
+    const dt = parseISO(l.dateTo) || null; // null = бесконечность
+    if(!df) return;
+
+    // пересечение с [from,to]
+    const segFrom = from ? maxDate(df, from) : df;
+    const segTo   = to ? minDate(dt || to, to) : dt;
+
+    // условие пересечения: segFrom <= segTo (если segTo null — ок)
+    if(segTo && segFrom > segTo) return;
+    if(!segTo && to && segFrom > to) return;
+
+    result.push({
+      abonentId: String(l.abonentId||'').trim(),
+      from: segFrom,
+      to: segTo, // может быть null
+      reason: 'История ответственности (links)'
+    });
+  });
+
+  return result;
+}
+
+function run(){
+  const params = new URLSearchParams(location.search);
+  const regnum = params.get('regnum') || '';
+  const r = String(regnum).trim();
+  if(!r){ alert('Нет regnum'); return; }
+
+  const from = parseISO(q('from').value);
+  const to = parseISO(q('to').value);
+  if(from && to && from > to){ alert('Неверный период: дата "с" больше "по"'); return; }
+
+  const p = getPremises()[r] || null;
+  const addr = p ? [p.city,p.street,p.house,p.flat].filter(Boolean).join(', ') : '';
+  q('hdr').textContent = `Квартира: ${r}${addr ? ' — ' + addr : ''}`;
+
+  const rows = q('rows');
+  rows.innerHTML = '';
+  const db = getDb();
+
+  const segs = splitByPeriod(r, from, to);
+  if(!segs.length){
+    rows.innerHTML = `<tr><td colspan="4">Нет данных об ответственности на указанный период</td></tr>`;
+    return;
+  }
+
+  segs.forEach(s => {
+    const fio = String(db[s.abonentId]?.fio || '').trim();
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td>${fmtISO(s.from)} — ${s.to ? fmtISO(s.to) : 'по настоящее время'}</td>
+      <td>${s.abonentId}</td>
+      <td>${fio || '—'}</td>
+      <td>${s.reason}</td>
+    `;
+    rows.appendChild(tr);
+  });
+}
+
+// дефолтные даты (текущий месяц)
+(function init(){
+  const params = new URLSearchParams(location.search);
+  const regnum = params.get('regnum') || '';
+  const r = String(regnum).trim();
+  const p = getPremises()[r] || null;
+  const addr = p ? [p.city,p.street,p.house,p.flat].filter(Boolean).join(', ') : '';
+  q('hdr').textContent = r ? `Квартира: ${r}${addr ? ' — ' + addr : ''}` : 'Квартира: —';
+
+  const now = new Date();
+  const from = new Date(now.getFullYear(), now.getMonth(), 1);
+  const to = new Date(now.getFullYear(), now.getMonth()+1, 0);
+  q('from').value = fmtISO(from);
+  q('to').value = fmtISO(to);
+
+  if(r) run();
+})();
+</script>
+
+<script>closeLayout();</script>
+</body>
+</html>

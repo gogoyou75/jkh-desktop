@@ -1,0 +1,959 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+    <script src="critical_guard.js" defer></script>
+  <title>Новый абонент</title>
+  <link rel="stylesheet" href="style.css">
+
+  <!-- ОБЯЗАТЕЛЬНО подключаем базу ДО layout.js -->
+  <script src="data.js"></script>
+  <script src="layout.js"></script>
+
+  <!-- ✅ Variant A: движок авто-начислений (без UI изменений) -->
+  <script src="autoaccrual_engine.js"></script>
+
+  <style>
+    .form-block {
+      max-width: 520px;
+      border: 2px solid #000;
+      padding: 14px;
+      background: #fff;
+    }
+    .form-block label { display:block; margin-top: 10px; font-size: 13px; }
+    .form-block input, .form-block textarea, .form-block select {
+      width: 100%;
+      border: 2px solid #000;
+      padding: 6px 8px;
+      box-sizing: border-box;
+      font-size: 13px;
+      font-family: inherit;
+    }
+    .form-block input { height: 30px; }
+    textarea{ min-height: 90px; resize: vertical; }
+
+    .row2 {
+      display:grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px 12px;
+    }
+    .muted {
+      font-size: 12px;
+      opacity: 0.85;
+      margin-top: 6px;
+      line-height: 1.35;
+    }
+    .btn-wide { width: 100%; margin-top: 14px; }
+
+    .readonly-box{
+      border: 2px solid #000;
+      padding: 10px;
+      margin-top: 10px;
+      font-size: 13px;
+      background:#fff;
+    }
+    .readonly-box .title{
+      font-weight: bold;
+      margin-bottom: 6px;
+    }
+    .readonly-row{ margin-top: 4px; }
+
+    .top-actions{
+      display:flex;
+      gap:10px;
+      flex-wrap:wrap;
+      margin: 10px 0 14px;
+    }
+    .btn{
+      border:2px solid #000;
+      background:#e5e5e5;
+      padding:6px 12px;
+      cursor:pointer;
+      font-size:13px;
+    }
+    .btn:disabled{ opacity:.6; cursor:default; }
+
+    /* ===== список абонентов снизу ===== */
+    .list-panel{
+      margin-top: 18px;
+      border: 2px solid #000;
+      padding: 12px;
+      background: #fff;
+    }
+    .list-panel .head{
+      display:flex;
+      align-items:flex-end;
+      justify-content:space-between;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-bottom: 10px;
+    }
+    .list-panel .title{
+      font-weight: 700;
+      font-size: 16px;
+    }
+    .list-panel .sub{
+      font-size: 12px;
+      opacity: .85;
+    }
+    .count{
+      font-size: 12px;
+      opacity: .85;
+    }
+
+    #abonentsTable{
+      width: 100%;
+      border-collapse: collapse;
+      table-layout: fixed;
+      font-size: 13px;
+    }
+    #abonentsTable th, #abonentsTable td{
+      border: 2px solid #000;
+      padding: 6px;
+      vertical-align: top;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    #abonentsTable thead th{
+      background: #f2f2f2;
+      font-weight: 700;
+    }
+    #abonentsTable .filters th{
+      background: #fff;
+      padding: 4px;
+    }
+    .col-ls{ width: 90px; }
+    .col-fio{ width: 260px; }
+    .col-addr{ width: 360px; }
+    .col-start{ width: 180px; }
+    .col-period{ width: 230px; }
+    .col-open{ width: 90px; }
+
+    .filter-input{
+      width: 100%;
+      border: 2px solid #000;
+      height: 26px;
+      padding: 2px 6px;
+      box-sizing: border-box;
+      font-size: 12px;
+      font-family: inherit;
+    }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+    .open-link{
+      text-decoration: underline;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .period-active{ font-weight: 700; }
+    .period-ended{ color:#b00; font-weight:700; }
+  </style>
+</head>
+<body>
+<script>renderLayout();</script>
+
+<h2>Создать нового абонента</h2>
+
+<div class="top-actions" id="topActions" style="display:none;">
+  <button class="btn" type="button" id="btnBackToImport">← Вернуться к импорту</button>
+</div>
+
+<div class="form-block">
+
+  <div class="row2">
+    <div>
+      <label>Фамилия</label>
+      <input id="na_last" type="text" autocomplete="family-name">
+    </div>
+    <div>
+      <label>Имя</label>
+      <input id="na_first" type="text" autocomplete="given-name">
+    </div>
+  </div>
+
+  <label>Отчество</label>
+  <input id="na_mid" type="text">
+
+  <label>Лицевой счёт</label>
+  <input id="na_ls" type="text" inputmode="numeric" placeholder="например: 0105">
+
+  <div class="row2">
+    <div>
+      <label>Дата начала расчёта (с какого дня месяца начать начислять)</label>
+      <input id="na_date_from" type="date">
+      <div class="muted">Если оставить пустым — поставим 1-е число текущего месяца.</div>
+    </div>
+    <div></div>
+  </div>
+
+  <div class="row2">
+    <div>
+      <label>Телефон</label>
+      <input id="na_phone" type="text" autocomplete="tel">
+    </div>
+    <div>
+      <label>E-mail</label>
+      <input id="na_email" type="email" autocomplete="email" placeholder="например: example@mail.ru">
+    </div>
+  </div>
+
+  <label>Примечание об абоненте</label>
+  <textarea id="na_note" placeholder="Примечание..."></textarea>
+
+  <div id="importPrefillBox" class="readonly-box" style="display:none;">
+    <div class="title">Данные из Excel (предзаполнение)</div>
+    <div class="readonly-row" id="importPrefillText"></div>
+    <div class="muted">
+      Выберите квартиру (адрес) ниже и нажмите «СОЗДАТЬ АБОНЕНТА».
+      После создания вы вернётесь на импорт, и строка перепроверится (UID подтянется из базы).
+    </div>
+  </div>
+
+  <div class="row">
+    <div class="col">
+      <label for="premiseSelect">Выбрать квартиру</label>
+      <select id="premiseSelect">
+        <option value="">— выберите квартиру —</option>
+      </select>
+      <div class="muted">
+        Если нужной квартиры нет в списке — добавьте её в разделе «Квартиры» (premises.html), затем вернитесь сюда.
+      </div>
+    </div>
+  </div>
+
+  <!-- ⚠️ Рег. № кв / адрес / площадь НЕ показываем (по ТЗ), но сохраняем, чтобы не ломать связи -->
+  <input id="na_regnum" type="hidden">
+  <input id="na_city" type="hidden">
+  <input id="na_street" type="hidden">
+  <input id="na_house" type="hidden">
+  <input id="na_flat" type="hidden">
+  <input id="na_square" type="hidden">
+
+  <!-- из Excel (для подсказки/логики) -->
+  <input id="na_square_excel" type="hidden">
+  <input id="na_uid_import" type="hidden">
+
+  <!-- откуда пришли -->
+  <input id="na_src" type="hidden">
+  <input id="na_return" type="hidden">
+
+  <div id="premiseInfo" class="readonly-box" style="display:none;">
+    <div class="title">Квартира (привязка автоматически)</div>
+    <div class="readonly-row" id="premiseAddr"></div>
+    <div class="muted">
+      Связь с квартирой сохраняется через regnum + адресные поля из premises.
+    </div>
+  </div>
+
+  <div id="premiseWarn" class="readonly-box" style="display:none; border-color:#b00;">
+    <div class="title">Не выбрана квартира</div>
+    <div class="muted">
+      Выберите квартиру из списка выше.
+      Если нужной квартиры нет — добавьте её в «Квартиры» (premises.html).
+    </div>
+  </div>
+
+  <button class="btn btn-wide" id="btnCreate">СОЗДАТЬ АБОНЕНТА</button>
+
+</div>
+
+<!-- ====== НИЖЕ: список всех абонентов + поиск по столбцам ====== -->
+<div class="list-panel">
+  <div class="head">
+    <div>
+      <div class="title">Список всех абонентов</div>
+      <div class="sub">Фильтры работают по каждому столбцу. Клик “открыть” — переход в карточку.</div>
+    </div>
+    <div class="count" id="abonentsCount">—</div>
+  </div>
+
+  <table id="abonentsTable">
+    <colgroup>
+      <col class="col-ls">
+      <col class="col-fio">
+      <col class="col-addr">
+      <col class="col-start">
+      <col class="col-period">
+      <col class="col-open">
+    </colgroup>
+    <thead>
+      <tr>
+        <th>ЛС</th>
+        <th>ФИО</th>
+        <th>Адрес</th>
+        <th>Дата начала расчёта</th>
+        <th>Период ответственности (этот абонент)</th>
+        <th></th>
+      </tr>
+      <tr class="filters">
+        <th><input class="filter-input" data-col="ls" placeholder="поиск..."></th>
+        <th><input class="filter-input" data-col="fio" placeholder="поиск..."></th>
+        <th><input class="filter-input" data-col="addr" placeholder="поиск..."></th>
+        <th><input class="filter-input" data-col="start" placeholder="YYYY-MM-DD / поиск..."></th>
+        <th><input class="filter-input" data-col="period" placeholder="поиск..."></th>
+        <th><button class="btn" type="button" id="btnFiltersReset" style="padding:4px 8px; font-size:12px;">сброс</button></th>
+      </tr>
+    </thead>
+    <tbody id="abonentsTbody"></tbody>
+  </table>
+</div>
+
+<script>
+/* =========================
+   УТИЛИТЫ
+   ========================= */
+function joinFio(last, first, mid) {
+  return [last, first, mid].map(x => String(x || "").trim()).filter(Boolean).join(" ");
+}
+
+function generateUid() {
+  return "uid_" + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2, 8);
+}
+
+function getDefaultCalcStartDate(){
+  const d = new Date();
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth()+1).padStart(2,'0');
+  return `${yyyy}-${mm}-01`;
+}
+
+function normalizeLs4(v){
+  const s = String(v || "").trim().replace(/\s+/g,'');
+  if (!s) return "";
+  const digits = s.replace(/\D+/g,'');
+  if (!digits) return "";
+  // если уже 4 цифры — ок; если меньше — дополним слева нулями до 4
+  if (digits.length >= 4) return digits.slice(-4);
+  return digits.padStart(4, "0");
+}
+
+function getNextLsId(preferred) {
+  const db = window.AbonentsDB?.abonents || {};
+  const p = normalizeLs4(preferred);
+  if (p && !db[p]) return p;
+
+  let n = 1;
+  const ids = Object.keys(db).map(x => parseInt(x, 10)).filter(x => Number.isFinite(x));
+  if (ids.length) n = Math.max(...ids) + 1;
+
+  // выдаём новый как 4-значный
+  while (db[String(String(n).padStart(4,'0'))]) n++;
+  return String(n).padStart(4,'0');
+}
+
+function esc(s){
+  return String(s ?? '')
+    .replaceAll("&","&amp;").replaceAll("<","&lt;")
+    .replaceAll(">","&gt;").replaceAll('"',"&quot;")
+    .replaceAll("'","&#039;");
+}
+
+/* =========================
+   КВАРТИРЫ (premises)
+   ========================= */
+function formatPremiseOption(regnum, p) {
+  const city = String(p?.city || "").trim();
+  const street = String(p?.street || "").trim();
+  const house = String(p?.house || "").trim();
+  const flat = String(p?.flat || "").trim();
+  const sq = (p?.square === undefined || p?.square === null || p?.square === "") ? "" : String(p.square).trim();
+
+  const addr = [city, street, house, flat].filter(Boolean).join(", ");
+  const sqTxt = sq ? (" (" + sq + " м²)") : "";
+  return (String(regnum || "").trim() || "—") + " — " + (addr || "адрес не заполнен") + sqTxt;
+}
+
+function populatePremiseSelect(selectedRegnum) {
+  const sel = document.getElementById("premiseSelect");
+  if (!sel) return;
+
+  while (sel.options.length > 1) sel.remove(1);
+
+  const premises = window.AbonentsDB?.premises || {};
+  const regs = Object.keys(premises);
+
+  regs.sort((a, b) => {
+    const pa = premises[a] || {};
+    const pb = premises[b] || {};
+    const aa = [pa.city, pa.street, pa.house, pa.flat].map(x => String(x || "").toLowerCase()).join("|");
+    const bb = [pb.city, pb.street, pb.house, pb.flat].map(x => String(x || "").toLowerCase()).join("|");
+    if (aa < bb) return -1;
+    if (aa > bb) return 1;
+    return String(a).localeCompare(String(b), "ru");
+  });
+
+  regs.forEach(reg => {
+    const p = premises[reg] || {};
+    const opt = document.createElement("option");
+    opt.value = String(reg);
+    opt.textContent = formatPremiseOption(reg, p);
+    sel.appendChild(opt);
+  });
+
+  if (selectedRegnum) sel.value = String(selectedRegnum);
+}
+
+function applyPremiseByRegnum(regnum) {
+  const warn = document.getElementById("premiseWarn");
+  const info = document.getElementById("premiseInfo");
+
+  if (!regnum) {
+    document.getElementById("na_regnum").value = "";
+    if (warn) warn.style.display = "block";
+    if (info) info.style.display = "none";
+    return;
+  }
+
+  document.getElementById("na_regnum").value = regnum;
+
+  const p = window.AbonentsDB?.premises?.[regnum] || null;
+  if (!p) {
+    if (warn) warn.style.display = "block";
+    if (info) info.style.display = "none";
+    return;
+  }
+
+  document.getElementById("na_city").value = String(p.city || "");
+  document.getElementById("na_street").value = String(p.street || "");
+  document.getElementById("na_house").value = String(p.house || "");
+  document.getElementById("na_flat").value = String(p.flat || "");
+  document.getElementById("na_square").value = (p.square === undefined || p.square === null) ? "" : String(p.square);
+
+  const addr = [p.city, p.street, p.house, p.flat].filter(Boolean).join(", ");
+  const el = document.getElementById("premiseAddr");
+  if (el) el.textContent = addr || "(адрес не заполнен)";
+  if (info) info.style.display = "block";
+  if (warn) warn.style.display = "none";
+
+  const df = document.getElementById("na_date_from");
+  if (df && !df.value) df.value = getDefaultCalcStartDate();
+}
+
+/* =========================
+   ВОЗВРАТ НА ИМПОРТ (recheck=1)
+   ========================= */
+function safeReturnUrl(u){
+  const s = String(u || "").trim();
+  // разрешим только локальные .html без протоколов
+  if (!s) return "";
+  if (s.includes("://")) return "";
+  if (s.startsWith("//")) return "";
+  if (!/^[a-z0-9_\-\/\.]+\.html(\?.*)?$/i.test(s)) return "";
+  return s;
+}
+
+function goBackToImport(){
+  const ret = safeReturnUrl(document.getElementById("na_return").value);
+  if (!ret) { location.href = "import_xls.html?recheck=1"; return; }
+
+  const hasQ = ret.includes("?");
+  location.href = ret + (hasQ ? "&" : "?") + "recheck=1";
+}
+
+/* =========================
+   ИМПОРТ ОПЛАТ ДЛЯ НОВОГО АБОНЕНТА (из import_preview_v1)
+   CRITICAL (v1.4): use_period НЕ включаем автоматически.
+   Срабатывает ТОЛЬКО когда оператор создаёт абонента из импорта.
+   ========================= */
+
+function r2(n){
+  const x = Number(n);
+  if (!Number.isFinite(x)) return 0;
+  return Math.round(x * 100) / 100;
+}
+
+function paymentsKeyForLs(ls){
+  return 'payments_' + String(ls || '').trim();
+}
+
+function loadPaymentsForLs(ls){
+  try {
+    const raw = localStorage.getItem(paymentsKeyForLs(ls));
+    if (!raw) return [];
+    const arr = JSON.parse(raw);
+    return Array.isArray(arr) ? arr : [];
+  } catch {
+    return [];
+  }
+}
+
+function savePaymentsForLs(ls, arr){
+  try {
+    localStorage.setItem(paymentsKeyForLs(ls), JSON.stringify(Array.isArray(arr) ? arr : []));
+  } catch (e){
+    console.warn('[new_abonent] savePaymentsForLs error', e);
+  }
+}
+
+function nextPaymentIdForArray(arr){
+  let maxId = 0;
+  for (const r of (arr || [])){
+    const id = Number(r?.id) || 0;
+    if (id > maxId) maxId = id;
+  }
+  return maxId + 1;
+}
+
+function paymentsHasDuplicate(arr, iso, amount){
+  const a = r2(amount);
+  const d = String(iso || '').trim();
+  return (arr || []).some(r => r2(r?.paid) === a && String(r?.paid_date || '').trim() === d);
+}
+
+function debtsHasDuplicate(debtsArr, dmy, amount){
+  const a = r2(amount);
+  const dd = String(dmy || '').trim();
+  return (debtsArr || []).some(r => r2(r?.paid) === a && String(r?.payDate || '').trim() === dd);
+}
+
+function loadImportDraft(){
+  try {
+    const raw = localStorage.getItem('import_preview_v1');
+    if (!raw) return null;
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+function findDraftRowByLs(draft, ls){
+  if (!draft || !Array.isArray(draft.rows)) return null;
+  const key = String(ls || '').trim();
+  return draft.rows.find(r => String(r?.ls || '').trim() === key) || null;
+}
+
+function importPaymentsFromDraftForNewAbonent(ls, abonentObj){
+  const draft = loadImportDraft();
+  const row = findDraftRowByLs(draft, ls);
+  if (!row) return { ok: true, imported: 0, reason: 'no_draft_row' };
+
+  const pays = Array.isArray(row.payments) ? row.payments : [];
+  if (!pays.length) return { ok: true, imported: 0, reason: 'no_payments' };
+
+  // payments_<LS>
+  const payArr = loadPaymentsForLs(ls);
+  let idCounter = nextPaymentIdForArray(payArr);
+  let addedPays = 0;
+
+  for (const p of pays){
+    const iso = String(p?.iso || '').trim();
+    const amount = r2(p?.amount);
+    if (!(amount > 0) || !iso) continue;
+    if (paymentsHasDuplicate(payArr, iso, amount)) continue;
+
+    const mm = iso.slice(5,7) || '01';
+    const yy = iso.slice(0,4) || String(new Date().getFullYear());
+
+    payArr.push({
+      id: idCounter++,
+      month: mm,
+      year: yy,
+      accrued: 0,
+      paid: amount,
+      paid_date: iso,
+      use_period: false,
+      // CRITICAL (v1.4): период НЕ включаем автоматически
+      period_from_m: mm,
+      period_from_y: yy,
+      period_to_m: mm,
+      period_to_y: yy,
+      period_from: `${mm}.${yy}`,
+      period_to: `${mm}.${yy}`,
+      note: '',
+      pay_main: 0,
+      pay_penalty: 0,
+      total_debt: 0
+    });
+    addedPays++;
+  }
+
+  if (addedPays) savePaymentsForLs(ls, payArr);
+
+  // debts[] (для совместимости с отчётами/старой структурой)
+  try {
+    if (abonentObj){
+      if (!Array.isArray(abonentObj.debts)) abonentObj.debts = [];
+      let addedDebts = 0;
+      for (const p of pays){
+        const dmy = String(p?.dmy || '').trim();
+        const iso = String(p?.iso || '').trim();
+        const amount = r2(p?.amount);
+        if (!(amount > 0) || !dmy || !iso) continue;
+        if (debtsHasDuplicate(abonentObj.debts, dmy, amount)) continue;
+        const year = Number(iso.slice(0,4)) || new Date().getFullYear();
+        const monthName = String(p?.monthName || '').trim() || '';
+        abonentObj.debts.push({
+          year: year,
+          month: monthName,
+          accrued: 0,
+          paid: amount,
+          payDate: dmy,
+          paymentPeriod: monthName ? `${monthName} ${year}` : String(year),
+          penalty: 0,
+          mainDebt: 0,
+          debtPenalty: 0
+        });
+        addedDebts++;
+      }
+      if (addedDebts) {
+        // ничего — сохранение AbonentsDB произойдёт общим save ниже
+      }
+    }
+  } catch (e){
+    console.warn('[new_abonent] debts append error', e);
+  }
+
+  return { ok: true, imported: addedPays, reason: 'ok' };
+}
+
+/* =========================
+   ПРЕДЗАПОЛНЕНИЕ ИЗ QUERY
+   ========================= */
+function prefillFromQueryParams() {
+  let regnum = "";
+  let last = "", first = "", mid = "";
+  let ls = "", square = "", uid = "";
+  let src = "";
+  let ret = "";
+
+  try {
+    const params = new URLSearchParams(window.location.search || "");
+    regnum = (params.get("regnum") || "").trim();
+    last = (params.get("last") || "").trim();
+    first = (params.get("first") || "").trim();
+    mid = (params.get("mid") || "").trim();
+    ls = (params.get("ls") || "").trim();
+    square = (params.get("square") || "").trim();
+    uid = (params.get("uid") || "").trim();
+    src = (params.get("src") || "").trim();
+    ret = (params.get("return") || "").trim();
+  } catch {}
+
+  document.getElementById("na_src").value = src;
+  document.getElementById("na_return").value = ret;
+
+  if (last) document.getElementById("na_last").value = last;
+  if (first) document.getElementById("na_first").value = first;
+  if (mid) document.getElementById("na_mid").value = mid;
+  if (ls) document.getElementById("na_ls").value = normalizeLs4(ls);
+
+  if (square) document.getElementById("na_square_excel").value = square;
+  if (uid) document.getElementById("na_uid_import").value = uid;
+
+  // UI: если пришли из импорта — покажем кнопку "вернуться"
+  if (src === "import_xls" || safeReturnUrl(ret)) {
+    const ta = document.getElementById("topActions");
+    if (ta) ta.style.display = "flex";
+  }
+
+  // подсказка "данные из Excel"
+  if (src === 'import_xls') {
+    const box = document.getElementById('importPrefillBox');
+    const txt = document.getElementById('importPrefillText');
+    if (box && txt) {
+      const fioLine = [last, first, mid].filter(Boolean).join(' ').trim();
+      const parts = [];
+      if (fioLine) parts.push('ФИО: ' + fioLine);
+      if (ls) parts.push('ЛС: ' + normalizeLs4(ls));
+      if (square) parts.push('Площадь (из Excel): ' + square);
+      if (!uid) parts.push('UID: нет (создадим новый)');
+      box.style.display = 'block';
+      txt.textContent = parts.join(' | ');
+    }
+  }
+
+  populatePremiseSelect(regnum);
+  applyPremiseByRegnum(regnum);
+
+  // дефолт даты
+  const df = document.getElementById("na_date_from");
+  if (df && !df.value) df.value = getDefaultCalcStartDate();
+}
+
+/* =========================
+   СОЗДАНИЕ АБОНЕНТА
+   ========================= */
+function createAbonent() {
+  const last = document.getElementById("na_last").value.trim();
+  const first = document.getElementById("na_first").value.trim();
+  const mid = document.getElementById("na_mid").value.trim();
+  const fio = joinFio(last, first, mid);
+  if (!last || !first) { alert("Заполните Фамилию и Имя"); return; }
+
+  const dbRoot = window.AbonentsDB;
+  if (!dbRoot || !dbRoot.abonents) { alert("База AbonentsDB не найдена"); return; }
+
+  const regnum = String(document.getElementById("na_regnum").value || "").trim();
+  if (!regnum) {
+    alert("Квартира не выбрана. Выберите квартиру из списка.");
+    return;
+  }
+
+  const premise = dbRoot.premises?.[regnum] || null;
+  if (!premise) {
+    alert("Квартира (premises) по regnum не найдена. Сначала заведите квартиру, затем создавайте абонента.");
+    return;
+  }
+
+  const city = String(document.getElementById("na_city").value || "").trim();
+  const street = String(document.getElementById("na_street").value || "").trim();
+  const house = String(document.getElementById("na_house").value || "").trim();
+  const flat = String(document.getElementById("na_flat").value || "").trim();
+
+  const squareRaw = String(document.getElementById("na_square").value || "").trim();
+  const square = squareRaw === "" ? "" : Number(squareRaw);
+
+  const phone = document.getElementById("na_phone").value.trim();
+  const email = document.getElementById("na_email").value.trim();
+  const note = document.getElementById("na_note").value.trim();
+
+  const lsInput = document.getElementById("na_ls").value.trim();
+  const ls = getNextLsId(lsInput);
+
+  const dfRaw = document.getElementById('na_date_from')?.value || '';
+  const df = String(dfRaw).trim();
+  const dateFrom = df || getDefaultCalcStartDate();
+
+  if (!Array.isArray(dbRoot.links)) dbRoot.links = [];
+
+  // UID: если пришёл из импорта и он валидный — используем его; иначе создаём новый
+  const uidImport = String(document.getElementById("na_uid_import").value || "").trim();
+  const uid = (uidImport && uidImport.startsWith("uid_")) ? uidImport : generateUid();
+
+  dbRoot.abonents[ls] = {
+    fio,
+    regnum,
+    city, street, house, flat,
+    square,
+
+    rooms: "",
+    share: "",
+
+    phone,
+    email,
+
+    debts: [],
+    mainDebtTotal: 0,
+    penaltyTotal: 0,
+    totalDebt: 0,
+
+    defaultNote: note,
+    defaultExcludes: [],
+
+    uid: uid,
+
+    // даты расчёта (если где-то уже используется)
+    calcStartDate: dateFrom,
+    calcEndDate: "",
+
+    // старые поля (чтобы не ломать связи)
+    calcDate: "",
+    stateDate: "",
+    docDate: ""
+  };
+
+  // связь абонент ↔ квартира (ответственность)
+  dbRoot.links.push({
+    abonentId: String(ls),
+    regnum,
+    dateFrom: dateFrom,
+    dateTo: ""
+  });
+
+  // ✅ v1.4: если абонент создаётся из импорта — переносим оплаты из предпросмотра СРАЗУ.
+  // Это решает кейс: в Excel UID пустой → оператор создаёт абонента → оплаты должны «сесть» без повторного импорта.
+  const src = String(document.getElementById("na_src").value || "").trim();
+  if (src === 'import_xls') {
+    try {
+      const res = importPaymentsFromDraftForNewAbonent(String(ls), dbRoot.abonents[ls]);
+      if (res && res.imported) {
+        console.warn('[new_abonent] imported payments from draft:', { ls: String(ls), imported: res.imported });
+      }
+    } catch (e) {
+      console.warn('[new_abonent] importPaymentsFromDraftForNewAbonent error', e);
+    }
+  }
+
+  if (window.saveAbonentsDB) window.saveAbonentsDB();
+
+  // ✅ Variant A: сразу создаём/пересчитываем начисления с даты начала (включительно)
+  try {
+    if (window.JKHAutoAccrual && typeof window.JKHAutoAccrual.recalcForAbonent === 'function') {
+      window.JKHAutoAccrual.recalcForAbonent(String(ls));
+    }
+  } catch (e) {
+    console.warn('[new_abonent] autoaccrual error', e);
+  }
+
+  // если пришли со страницы импорта — возвращаемся туда и запускаем recheck
+  const ret = safeReturnUrl(String(document.getElementById("na_return").value || "").trim());
+  if (src === "import_xls" || ret) {
+    alert("Абонент создан. Возвращаюсь к импорту для перепроверки строки (UID подтянется из базы).");
+    goBackToImport();
+    return;
+  }
+
+  alert("Абонент создан.");
+  location.href = "abonent_card.html?abonent=" + encodeURIComponent(ls);
+}
+
+/* =========================================================
+   Список всех абонентов + фильтры
+   ========================================================= */
+function getDb(){ return window.AbonentsDB?.abonents || {}; }
+function getPremises(){ return window.AbonentsDB?.premises || {}; }
+function getLinks(){ return Array.isArray(window.AbonentsDB?.links) ? window.AbonentsDB.links : []; }
+
+function getActiveLinkForAbonent(abonentId, regnum){
+  const id = String(abonentId);
+  const r = String(regnum || "").trim();
+  const links = getLinks().filter(l => String(l?.abonentId) === id && String(l?.regnum || "").trim() === r);
+  if (!links.length) return null;
+  const active = links.find(l => !String(l?.dateTo || "").trim());
+  if (active) return active;
+  return links.slice().sort((a,b) => String(b?.dateTo||"").localeCompare(String(a?.dateTo||"")))[0];
+}
+
+function buildAbonentRow(id, a){
+  const premises = getPremises();
+  const regnum = String(a?.premiseRegnum || a?.regnum || "").trim();
+  const p = regnum ? (premises[regnum] || null) : null;
+
+  const fio = String(a?.fio || "").trim();
+
+  const addrParts = [
+    p?.city ?? a?.city,
+    p?.street ?? a?.street,
+    p?.house ?? a?.house,
+    p?.flat ?? a?.flat
+  ].map(x => String(x || "").trim()).filter(Boolean);
+
+  const addr = addrParts.join(", ");
+
+  const link = regnum ? getActiveLinkForAbonent(id, regnum) : null;
+  const start = String(a?.calcStartDate || link?.dateFrom || "").trim();
+
+  const df = String(link?.dateFrom || "").trim();
+  const dt = String(link?.dateTo || "").trim();
+
+  let periodText = "—";
+  let periodHtml = "—";
+  if (df || dt){
+    const isActive = !dt;
+    const right = dt ? `<span class="period-ended">${esc(dt)}</span>` : "по настоящее время";
+    periodHtml = `${esc(df || "—")} — ${right}`;
+    periodText = `${df || "—"} — ${dt || "по настоящее время"}`;
+    if (isActive) periodHtml = `<span class="period-active">${periodHtml}</span>`;
+  }
+
+  return {
+    id: String(id),
+    fio,
+    addr,
+    start,
+    periodText,
+    periodHtml
+  };
+}
+
+let __abonentsCache = [];
+
+function renderAbonentsTable(list){
+  const tbody = document.getElementById("abonentsTbody");
+  if (!tbody) return;
+
+  tbody.innerHTML = "";
+
+  list.forEach(x => {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td class="mono">${esc(x.id)}</td>
+      <td title="${esc(x.fio)}">${esc(x.fio || "—")}</td>
+      <td title="${esc(x.addr)}">${esc(x.addr || "—")}</td>
+      <td class="mono">${esc(x.start || "—")}</td>
+      <td title="${esc(x.periodText)}">${x.periodHtml}</td>
+      <td style="text-align:center;">
+        <a class="open-link" href="abonent_card.html?abonent=${encodeURIComponent(x.id)}">открыть</a>
+      </td>
+    `;
+    tbody.appendChild(tr);
+  });
+
+  const cnt = document.getElementById("abonentsCount");
+  if (cnt) cnt.textContent = `Показано: ${list.length} / ${__abonentsCache.length}`;
+}
+
+function readFilters(){
+  const els = Array.from(document.querySelectorAll(".filter-input"));
+  const out = {};
+  els.forEach(el => {
+    const k = el.getAttribute("data-col");
+    out[k] = String(el.value || "").trim().toLowerCase();
+  });
+  return out;
+}
+
+function applyFilters(){
+  const f = readFilters();
+  const filtered = __abonentsCache.filter(x => {
+    const okLs = !f.ls || String(x.id).toLowerCase().includes(f.ls);
+    const okFio = !f.fio || String(x.fio).toLowerCase().includes(f.fio);
+    const okAddr = !f.addr || String(x.addr).toLowerCase().includes(f.addr);
+    const okStart = !f.start || String(x.start).toLowerCase().includes(f.start);
+    const okPeriod = !f.period || String(x.periodText).toLowerCase().includes(f.period);
+    return okLs && okFio && okAddr && okStart && okPeriod;
+  });
+  renderAbonentsTable(filtered);
+}
+
+function initAbonentsList(){
+  const db = getDb();
+  const ids = Object.keys(db).sort((a,b) => {
+    const na = Number(a), nb = Number(b);
+    if (!Number.isNaN(na) && !Number.isNaN(nb)) return na - nb;
+    return String(a).localeCompare(String(b), "ru");
+  });
+
+  __abonentsCache = ids.map(id => buildAbonentRow(id, db[id]));
+  renderAbonentsTable(__abonentsCache);
+
+  document.querySelectorAll(".filter-input").forEach(el => {
+    el.addEventListener("input", applyFilters);
+  });
+
+  document.getElementById("btnFiltersReset")?.addEventListener("click", () => {
+    document.querySelectorAll(".filter-input").forEach(i => i.value = "");
+    applyFilters();
+  });
+}
+
+/* =========================
+   INIT
+   ========================= */
+document.addEventListener("DOMContentLoaded", () => {
+  prefillFromQueryParams();
+
+  document.getElementById("btnBackToImport")?.addEventListener("click", goBackToImport);
+
+  const ps = document.getElementById("premiseSelect");
+  if (ps) {
+    ps.addEventListener("change", () => {
+      const reg = String(ps.value || "").trim();
+      applyPremiseByRegnum(reg);
+    });
+  }
+
+  // удобство: ввод ЛС сразу нормализуем до 4 цифр
+  document.getElementById("na_ls")?.addEventListener("blur", (e) => {
+    e.target.value = normalizeLs4(e.target.value);
+  });
+
+  document.getElementById("btnCreate").addEventListener("click", createAbonent);
+
+  initAbonentsList();
+});
+</script>
+
+<script>closeLayout();</script>
+</body>
+</html>

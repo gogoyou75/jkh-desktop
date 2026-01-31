@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <script src="critical_guard.js" defer></script>
+    <title>Реквизиты организации</title>
+    <link rel="stylesheet" href="style.css">
+    <script src="data.js"></script>
+    <script src="layout.js"></script>
+    <script src="requisites.js"></script>
+    <style>
+        .req-wrap { max-width: 980px; }
+        .req-wrap h2 { margin: 0 0 8px 0; font-size: 28px; font-weight: 700; }
+        .req-note { margin: 6px 0 14px 0; font-size: 13px; color:#111; line-height: 1.45; }
+        .req-note code { background:#f3f3f3; padding: 2px 6px; border:1px solid #000; }
+        .req-note .muted { color:#444; }
+
+        .req-table, .signers-table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+        .req-table th, .req-table td,
+        .signers-table th, .signers-table td { border: 1px solid #000; padding: 8px; vertical-align: top; }
+        .req-table th { background: #f3f3f3; text-align: left; width: 320px; }
+        .req-table input, .req-table select { width: 100%; height: 30px; border: 1px solid #000; padding: 4px 6px; box-sizing: border-box; }
+
+        .req-actions { display:flex; gap:10px; margin-top: 12px; align-items:center; flex-wrap: wrap; }
+        .req-actions button { height: 32px; padding: 0 12px; border: 1px solid #000; background: #fff; cursor: pointer; }
+        .req-actions .hint { font-size: 13px; color: #444; }
+
+        .req-required { color:#c00; font-weight: 700; }
+
+        .toast { margin-top: 10px; padding: 8px 10px; border: 1px solid #000; display:none; }
+        .toast.ok { background: #eaffea; }
+        .toast.err { background: #ffeaea; }
+
+        .block-title { margin: 18px 0 8px 0; font-size: 18px; font-weight: 700; }
+        .signers-table th { background:#f3f3f3; text-align:left; }
+        .signers-table input, .signers-table textarea {
+            width: 100%;
+            border: 1px solid #000;
+            padding: 4px 6px;
+            box-sizing: border-box;
+            font-size: 13px;
+        }
+        .signers-table textarea { height: 30px; resize: vertical; min-height: 30px; }
+        .signers-table .col-small { width: 90px; text-align:center; }
+        .signers-table .col-del { width: 60px; text-align:center; }
+        .signers-table .btn-del { height: 28px; padding: 0 10px; border: 1px solid #000; background:#fff; cursor:pointer; }
+        .signers-actions { display:flex; gap:10px; align-items:center; margin-top: 10px; flex-wrap:wrap; }
+        .signers-actions button { height: 32px; padding: 0 12px; border: 1px solid #000; background:#fff; cursor:pointer; }
+        .signers-actions .hint { font-size: 13px; color: #444; }
+    </style>
+</head>
+<body>
+<script>renderLayout();</script>
+
+<div class="req-wrap">
+    <h2>Реквизиты</h2>
+
+    <div class="req-note">
+        Эти данные одинаковы для всех справок и меняются редко. Сохраняются в <b>localStorage</b> (вариант А) и автоматически подставляются в справки.
+        <br><span class="muted">Ключ:</span> <code>organization_requisites_v1</code>
+    </div>
+
+    <div id="toast" class="toast"></div>
+
+    <table class="req-table">
+        <tr>
+            <th>Полное наименование (как в суде) <span class="req-required">*</span></th>
+            <td><input id="full_name" type="text" placeholder="Например: Товарищество собственников жилья «___»"></td>
+        </tr>
+        <tr>
+            <th>Краткое наименование</th>
+            <td><input id="short_name" type="text" placeholder="Например: ТСЖ «___»"></td>
+        </tr>
+        <tr>
+            <th>Форма (ТСЖ / УК / ЖСК)</th>
+            <td>
+                <select id="form">
+                    <option value="ТСЖ">ТСЖ</option>
+                    <option value="УК">УК</option>
+                    <option value="ЖСК">ЖСК</option>
+                </select>
+            </td>
+        </tr>
+        <tr>
+            <th>ИНН</th>
+            <td><input id="inn" type="text" placeholder="10 или 12 цифр"></td>
+        </tr>
+        <tr>
+            <th>ОГРН</th>
+            <td><input id="ogrn" type="text" placeholder="13 цифр"></td>
+        </tr>
+        <tr>
+            <th>Юридический адрес</th>
+            <td><input id="legal_address" type="text" placeholder="Адрес по ЕГРЮЛ"></td>
+        </tr>
+        <tr>
+            <th>Почтовый адрес</th>
+            <td><input id="postal_address" type="text" placeholder="Адрес для корреспонденции"></td>
+        </tr>
+        <tr>
+            <th>Телефон</th>
+            <td><input id="phone" type="text" placeholder="+7 (___) ___-__-__"></td>
+        </tr>
+        <tr>
+            <th>Email</th>
+            <td><input id="email" type="text" placeholder="mail@example.com"></td>
+        </tr>
+    </table>
+
+    <div class="req-actions">
+        <button id="btnSave" type="button">Сохранить</button>
+        <button id="btnReset" type="button">Очистить</button>
+        <div class="hint">После сохранения реквизиты и подписанты будут использоваться в справках (например, в «Справка для суда»).</div>
+    </div>
+
+    <div class="block-title">Подписанты / право подписи</div>
+    <div class="req-note" style="margin-top:0">
+        Здесь указываются лица, которые могут подписывать справку (председатель, представитель по доверенности и т.д.).
+        <br><span class="muted">Ключ:</span> <code>organization_signers_v1</code>
+    </div>
+
+    <table class="signers-table" id="signersTable">
+        <thead>
+        <tr>
+            <th>ФИО</th>
+            <th>Должность</th>
+            <th>Основание подписи (устав / протокол / доверенность)</th>
+            <th class="col-small">По умолчанию</th>
+            <th class="col-small">Активен</th>
+            <th class="col-del">Удалить</th>
+        </tr>
+        </thead>
+        <tbody id="signersTbody"></tbody>
+    </table>
+
+    <div class="signers-actions">
+        <button id="btnAddSigner" type="button">Добавить подписанта</button>
+        <div class="hint">В справке можно выбрать подписанта. Если не выбирать — берётся «по умолчанию».</div>
+    </div>
+
+    <div class="req-note">
+        Подстановка в справках: реквизиты — автоматически; подписант — выбирается в справке в строке подписи.
+    </div>
+</div>
+
+<script>closeLayout();</script>
+</body>
+</html>

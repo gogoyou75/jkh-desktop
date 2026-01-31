@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <title>Вход в программу</title>
+  <script src="auth.js" defer></script>
+
+  <style>
+    body{
+      margin:0;
+      font-family: Arial, sans-serif;
+      background:#fff;
+      min-height:100vh;
+      display:flex;
+      align-items:center;
+      justify-content:center;
+    }
+
+    .wrap{
+      width: 880px;
+      max-width: calc(100vw - 40px);
+    }
+
+    h2{
+      margin:0 0 10px 0;
+      font-size: 26px;
+      font-weight: 700;
+    }
+
+    .box{
+      border:2px solid #000;
+      padding:14px 16px;
+      background:#fff;
+    }
+
+    .tabs{
+      display:flex;
+      gap:10px;
+      margin: 0 0 14px 0;
+    }
+
+    .tab{
+      border:1px solid #000;
+      background:#fff;
+      padding:6px 12px;
+      cursor:pointer;
+      font-size:13px;
+      user-select:none;
+    }
+    .tab.active{
+      background:#efefef;
+      font-weight:700;
+    }
+
+    .row{
+      display:grid;
+      grid-template-columns: 140px 1fr;
+      gap:10px;
+      align-items:center;
+      margin:10px 0;
+      max-width: 620px;
+    }
+    .row label{
+      font-size:13px;
+    }
+    input, select{
+      border:1px solid #000;
+      padding:6px 8px;
+      font-size:13px;
+      width: 100%;
+      box-sizing:border-box;
+    }
+
+    .opts{
+      display:grid;
+      grid-template-columns: 140px 1fr;
+      gap:10px;
+      margin-top: 6px;
+      max-width: 620px;
+      align-items:start;
+    }
+    .opts .optcol{
+      display:flex;
+      flex-direction:column;
+      gap:8px;
+      padding-top:3px;
+      font-size:13px;
+    }
+
+    .hint{
+      margin-top: 8px;
+      font-size:12px;
+      line-height:1.35;
+      max-width: 760px;
+    }
+
+    .btn{
+      margin-top: 14px;
+      border:1px solid #000;
+      background:#fff;
+      padding:6px 16px;
+      cursor:pointer;
+      font-size:13px;
+      font-weight:700;
+    }
+
+    .status{
+      border:2px solid #000;
+      background:#fff6e5;
+      padding:8px 10px;
+      font-size:12px;
+      margin-bottom:12px;
+      display:none;
+    }
+
+    .panel{ display:none; }
+    .panel.active{ display:block; }
+  </style>
+</head>
+
+<body>
+  <div class="wrap">
+    <h2>Вход в программу</h2>
+
+    <div class="box">
+
+      <div id="statusBox" class="status"></div>
+
+      <!-- ВАЖНО: кнопки "Вход" сверху НЕТ (как ты просил) -->
+      <div class="tabs">
+        <div class="tab active" data-tab="login">Вход</div>
+        <div class="tab" data-tab="register">Регистрация</div>
+        <div class="tab" data-tab="recover">Восстановление</div>
+      </div>
+
+      <!-- LOGIN -->
+      <div class="panel active" id="panel-login">
+        <form id="loginForm" autocomplete="on">
+          <div class="row">
+            <label for="loginEmail">Email</label>
+            <input id="loginEmail" type="email" name="username" autocomplete="username">
+          </div>
+
+          <div class="row">
+            <label for="loginPass">Пароль</label>
+            <input id="loginPass" type="password" name="password" autocomplete="current-password">
+          </div>
+
+          <div class="row">
+            <label for="loginRemember">Запомнить</label>
+            <select id="loginRemember">
+              <option value="0">нет</option>
+              <option value="7">на 7 дней</option>
+              <option value="30" selected>на 30 дней</option>
+            </select>
+          </div>
+
+          <div class="opts">
+            <label>Опции</label>
+            <div class="optcol">
+              <label><input type="checkbox" id="rememberEmail" checked> Запомнить e-mail</label>
+              <label><input type="checkbox" id="savePassBrowser" disabled checked> Сохранить пароль (в браузере)</label>
+            </div>
+          </div>
+
+          <div class="hint">
+            Пароль сохраняет сам браузер (если поддерживает). В программе пароль не хранится в открытом виде.
+          </div>
+
+          <button class="btn" type="submit">Войти</button>
+
+          <div class="hint" style="margin-top:12px;">
+            Офлайн-режим: письма не отправляются. Восстановление делается через recovery-коды или мастер-ключ администратора.
+          </div>
+        </form>
+      </div>
+
+      <!-- REGISTER (информ-панель; реальная регистрация админа может быть в админке/первом запуске) -->
+      <div class="panel" id="panel-register">
+        <div class="hint" style="font-size:13px;">
+          Регистрация выполняется администратором (через админ-панель) либо при первом запуске (первый админ).
+        </div>
+      </div>
+
+      <!-- RECOVER -->
+      <div class="panel" id="panel-recover">
+        <div class="hint" style="font-size:13px;">
+          Восстановление выполняется офлайн: recovery-код или мастер-ключ администратора.
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+<script>
+  // tabs
+  document.querySelectorAll('.tab').forEach(t=>{
+    t.addEventListener('click', ()=>{
+      document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));
+      t.classList.add('active');
+
+      document.querySelectorAll('.panel').forEach(p=>p.classList.remove('active'));
+      document.getElementById('panel-' + t.dataset.tab).classList.add('active');
+    });
+  });
+
+  function showStatus(msg){
+    const b = document.getElementById('statusBox');
+    b.textContent = msg;
+    b.style.display = 'block';
+  }
+
+  function hideStatus(){
+    const b = document.getElementById('statusBox');
+    b.style.display = 'none';
+    b.textContent = '';
+  }
+
+  // prefill email from Auth storage (если есть)
+  document.addEventListener('DOMContentLoaded', ()=>{
+    try{
+      if (window.Auth && typeof Auth.getLastEmail === 'function'){
+        const e = Auth.getLastEmail();
+        if (e) document.getElementById('loginEmail').value = e;
+      }
+    }catch{}
+  });
+
+  document.getElementById('loginForm').addEventListener('submit', async (e)=>{
+    e.preventDefault();
+    hideStatus();
+
+    const email = (loginEmail.value || '').trim();
+    const pass  = (loginPass.value || '');
+    const days  = parseInt(loginRemember.value, 10) || 0;
+
+    try{
+      // запомнить email (наша опция)
+      if (rememberEmail.checked && window.Auth && typeof Auth.setLastEmail === 'function'){
+        Auth.setLastEmail(email);
+      }
+
+      // вход
+      await Auth.signIn(email, pass, days);  // API из auth.js :contentReference[oaicite:1]{index=1}
+      location.href = 'index.html';
+    }catch(err){
+      showStatus('Не удалось войти: ' + (err && err.message ? err.message : err));
+    }
+  });
+</script>
+</body>
+</html>

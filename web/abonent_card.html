@@ -1,0 +1,1227 @@
+<!DOCTYPE html>
+
+<!-- ============================================================
+🔒 CRITICAL — НЕ ТРОГАТЬ (ПАПАЖКХ) | Date: 2026-01-27
+Doc: docs/LOGIC_SPEC_v1.5.3.md
+Эталон: jkh_site_full_v01.27.3.zip | SHA256: 6b4254a9b3b74327fe2d2c48c34e3e446ba9ae4e3369c6c554a683bde7b6ceec
+
+- ES-modules (type="module") запрещены в v1.5.x (должно работать file://)
+- Порядок подключений CRITICAL: calc_engine.js должен быть ДО payment_table.js / spravka_sud.js
+- Карточка абонента = источник истины; справки/отчёты не ломают карточку
+============================================================ -->
+
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <script src="critical_guard.js" defer></script>
+    <title>Карточка абонента</title>
+    <link rel="stylesheet" href="style.css">
+
+    <script src="constants.js"></script>
+    <script src="data.js"></script>
+    <script src="layout.js"></script>
+
+    <!-- 🔴 CRITICAL: движок автоначислений -->
+    <script src="autoaccrual_engine.js"></script>
+
+     <!-- таблица оплат / начислений -->
+    <script src="calc_engine.js"></script>
+     <script src="payment_table.js"></script>
+
+
+    <style>
+        .uid-click{ cursor:pointer; text-decoration: underline; }
+
+        .edit-link {
+            font-size: 13px;
+            margin-left: 14px;
+            cursor: pointer;
+            text-decoration: underline;
+            font-weight: normal;
+        }
+
+        #abonentEditModal {
+            position: fixed;
+            top: 0; left: 0;
+            width: 100%; height: 100%;
+            background: rgba(0,0,0,.4);
+            display: none;
+            align-items: center;
+            justify-content: center;
+            z-index: 6000;
+        }
+
+        #changeResponsibleModal {
+            position: fixed;
+            top: 0; left: 0;
+            width: 100%; height: 100%;
+            background: rgba(0,0,0,.4);
+            display: none;
+            align-items: center;
+            justify-content: center;
+            z-index: 6500;
+        }
+        .change-resp-card {
+            width: 560px;
+            background: #fff;
+            border: 2px solid #000;
+            padding: 18px;
+            box-sizing: border-box;
+        }
+        .change-resp-card label {
+            font-size: 13px;
+            display: block;
+            margin-top: 10px;
+        }
+        .change-resp-card input,
+        .change-resp-card select {
+            width: 100%;
+            border: 2px solid #000;
+            height: 28px;
+            padding: 2px 6px;
+            box-sizing: border-box;
+            font-size: 13px;
+        }
+        .change-resp-actions {
+            display: flex;
+            justify-content: space-between;
+            gap: 10px;
+            margin-top: 16px;
+        }
+        .change-resp-actions button {
+            border: 2px solid #000;
+            padding: 6px 10px;
+            cursor: pointer;
+            background: #fff;
+        }
+        .abonent-edit-card {
+            width: 560px;
+            background: #fff;
+            border: 2px solid #000;
+            padding: 18px 18px 16px 18px;
+            box-sizing: border-box;
+        }
+        .abonent-edit-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px 12px;
+            margin-top: 10px;
+        }
+        .abonent-edit-grid label {
+            font-size: 13px;
+        }
+        .abonent-edit-grid input,
+        .abonent-edit-grid select {
+            width: 100%;
+            border: 2px solid #000;
+            height: 28px;
+            padding: 2px 6px;
+            box-sizing: border-box;
+            font-size: 13px;
+        }
+        .abonent-edit-grid .full {
+            grid-column: 1 / -1;
+        }
+        .abonent-edit-actions {
+            display: flex;
+            justify-content: space-between;
+            gap: 10px;
+            margin-top: 14px;
+        }
+        .abonent-edit-actions button {
+            border: 2px solid #000;
+            padding: 8px 12px;
+            background: #e5e5e5;
+            cursor: pointer;
+            font-size: 13px;
+            white-space: nowrap;
+        }
+        .readonly-hint {
+            font-size: 12px;
+            opacity: 0.85;
+        }
+
+        /* ===== ВЫРАВНИВАНИЕ ШИРИН КОЛОНОК "ОБЩИЕ ДАННЫЕ" ===== */
+        #abonentInfoTable { width: 100%; table-layout: fixed; }
+        #abonentInfoTable th, #abonentInfoTable td{
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        /* ===== Квартира / Правообладатель ===== */
+        .premise-card {
+            margin-top: 10px;
+            border: 2px solid #000;
+            padding: 12px;
+            background: #fff;
+        }
+        .premise-card .premise-head {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-end;
+            gap: 10px;
+            margin-bottom: 8px;
+        }
+        .premise-card .premise-title {
+            font-size: 16px;
+            font-weight: 700;
+        }
+        .premise-card .premise-sub {
+            font-size: 12px;
+        }
+        .premise-card .premise-grid {
+            display: grid;
+            grid-template-columns: 210px 1fr;
+            gap: 6px 12px;
+            font-size: 13px;
+        }
+        .premise-card .premise-grid .k {
+            font-weight: 700;
+        }
+        .premise-card .premise-actions {
+            margin-top: 10px;
+            display: flex;
+            justify-content: flex-start;
+            gap: 10px;
+        }
+
+    </style>
+</head>
+<body>
+
+<script>renderLayout();</script>
+
+<h2>Карточка абонента</h2>
+
+<h3 id="abonentTitle">
+    Общие данные
+    <span class="edit-link" onclick="openAbonentEdit()">изменить</span>
+</h3>
+
+<table id="abonentInfoTable">
+    <!-- ===== фиксируем ширины под 14 колонок (с улицей) ===== -->
+    <colgroup>
+        <col style="width:7%">  <!-- лицевой счёт -->
+        <col style="width:9%">  <!-- рег. № кв -->
+        <col style="width:9%">  <!-- Фамилия -->
+        <col style="width:8%">  <!-- Имя -->
+        <col style="width:8%">  <!-- Отчество -->
+        <col style="width:6%">  <!-- Общая площадь -->
+        <col style="width:6%">  <!-- право собственности -->
+        <col style="width:6%">  <!-- кол комнат -->
+        <col style="width:7%">  <!-- город -->
+        <col style="width:10%"> <!-- улица -->
+        <col style="width:5%">  <!-- дом -->
+        <col style="width:4%">  <!-- кв -->
+        <col style="width:6%">  <!-- Уникальный ID -->
+        <col style="width:9%">  <!-- телефон -->
+    </colgroup>
+
+    <thead>
+    <tr>
+        <th>лицевой счёт</th>
+        <th>рег. № кв</th>
+        <th>Фамилия</th>
+        <th>Имя</th>
+        <th>Отчество</th>
+        <th>Общая площадь</th>
+        <th>право собственности</th>
+        <th>кол комнат</th>
+        <th>город</th>
+        <th>улица</th>
+        <th>дом</th>
+        <th>кв</th>
+        <th>Уникальный ID</th>
+        <th>телефон</th>
+    </tr>
+    </thead>
+    <tbody id="abonentInfoBody"></tbody>
+</table>
+
+
+<div class="premise-card" id="premiseCard">
+    <div class="premise-head">
+        <div>
+            <div class="premise-title">Квартира / Правообладатель</div>
+            <div class="premise-sub muted">Данные по объекту (квартира) и текущему ответственному</div>
+        </div>
+    </div>
+
+    <div class="premise-grid">
+        <div class="k">Рег. № кв</div><div><span id="premiseRegnum">—</span></div>
+        <div class="k">Адрес</div><div><span id="premiseAddress">—</span></div>
+        <div class="k">Площадь</div><div><span id="premiseSquare">—</span></div>
+        <div class="k">Квартира заведена</div><div><span id="premiseCreatedAt">—</span></div>
+        <div class="k">Текущий ответственный</div><div><span id="premiseResponsible">—</span></div>
+        <div class="k">Период ответственности</div><div><span id="premisePeriod">—</span></div>
+        <div class="k">Период ответственности (этот абонент)</div><div><span id="premiseMyPeriod">—</span></div>
+    </div>
+
+    <div class="premise-actions">
+        <button class="btn" type="button" onclick="openChangeResponsibleModal()">Сменить ответственного</button>
+            <button class="btn" type="button" onclick="openResponsibilityReport()">Отчёт: кто ответственный</button>
+    </div>
+
+<div style="margin-top:12px;">
+  <div style="font-weight:700; margin-bottom:6px;">История ответственных по квартире</div>
+  <table id="respHistoryTable" style="width:100%; border-collapse:collapse; font-size:13px;">
+    <thead>
+      <tr>
+        <th style="border:2px solid #000; padding:6px; width:160px;">Период</th>
+        <th style="border:2px solid #000; padding:6px; width:90px;">ЛС</th>
+        <th style="border:2px solid #000; padding:6px;">ФИО</th>
+        <th style="border:2px solid #000; padding:6px; width:90px;">Статус</th>
+        <th style="border:2px solid #000; padding:6px; width:130px;">Действие</th>
+      </tr>
+    </thead>
+    <tbody id="respHistoryBody"></tbody>
+  </table>
+  <div class="readonly-hint" style="margin-top:6px;">
+    🔴 История начислений/оплат не переносится — это только история ответственности (links).
+  </div>
+</div>
+
+</div>
+
+
+<div class="options">
+    <label onclick="location.href='exclude_period.html?abonent=' + encodeURIComponent(getAbonentIdFromURL())"
+           style="cursor:pointer; text-decoration:underline;">
+        Исключить период расчёта
+    </label>
+
+    <label>
+        Мораторий
+        <input type="checkbox" id="moratoriumToggle">
+    </label>
+
+    <label onclick="openNotesModal()"
+           style="cursor:pointer; text-decoration:underline;">
+        Примечание абонента
+    </label>
+</div>
+
+<div class="calc-inline">
+    <div class="calc-inline-title">
+        <b>РАСЧЁТ ВЗЫСКИВАЕМОЙ СУММЫ</b> <span class="calc-inline-sub">за период:</span>
+    </div>
+
+    <div class="calc-inline-fields">
+        <input id="calcFrom" type="date" value="">
+        <input id="calcTo" type="date" value="">
+    </div>
+
+    <div class="calc-inline-actions">
+        <button class="calc-btn" id="calcRunBtn" type="button">расчёт</button>
+        <button class="calc-btn" id="calcReportsBtn" type="button">справки</button>
+        <button class="calc-btn" id="calcResetBtn" type="button">сбросить</button>
+    </div>
+</div>
+
+<h3>Оплата абонента</h3>
+
+<div class="note" style="margin:6px 0 10px 0; font-size:12px; opacity:0.85;">Подсказка: начисление месяца показывается первой строкой; оплаты — ниже. Если включаете «за период», изменения сохраняются автоматически.</div>
+
+<div class="payments-header">
+    <button class="btn" onclick="addPaymentRow()">Добавить оплату</button>
+    <button class="btn" onclick="openPaymentSourcesModal()" title="Справочник источников поступления">Источники</button>
+</div>
+
+<div>
+    <table id="paymentTable" class="payments-table">
+        <colgroup>
+            <col style="width:12%">
+            <col style="width:8%">
+            <col style="width:9%">
+            <col style="width:11%">
+            <col style="width:10%">
+            <col style="width:20%">
+            <col style="width:8%">
+            <col style="width:7%">
+            <col style="width:7%">
+            <col style="width:14%">
+            <col style="width:4%">
+        </colgroup>
+
+        <thead>
+        <tr>
+            <th>Год/Месяц</th>
+            <th>Начислено</th>
+            <th>Оплачено</th>
+            <th>Дата оплаты</th>
+            <th>Источник</th>
+            <th>Оплата за период</th>
+            <th>по обяз.</th>
+            <th>по пени</th>
+            <th>Всего</th>
+            <th>Примечание</th>
+            <th>ID</th>
+        </tr>
+        </thead>
+        <tbody id="paymentTableBody"></tbody>
+    </table>
+</div>
+
+<div class="bottom-nav">
+    <a href="index.html" class="back-btn">⬅ назад</a>
+</div>
+
+<div id="notesModal"
+     style="position:fixed;top:0;left:0;width:100%;height:100%;
+            background:rgba(0,0,0,.4);display:none;align-items:center;
+            justify-content:center;z-index:5000;">
+    <div style="width:450px;background:#fff;border:2px solid #000;padding:20px;">
+        <h3>Примечание абонента</h3>
+        <textarea id="notesText"
+                  style="width:100%;height:200px;border:2px solid #000;"></textarea>
+        <div style="margin-top:15px;display:flex;justify-content:space-between;">
+            <button onclick="saveNotes()">Сохранить</button>
+            <button onclick="closeNotesModal()">Закрыть</button>
+        </div>
+    </div>
+</div>
+
+<!-- ===== Модальное окно смены ответственного ===== -->
+<div id="changeResponsibleModal">
+    <div class="change-resp-card">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;">
+            <h3 style="margin:0;">Смена ответственного</h3>
+            <div class="readonly-hint" style="text-align:right;">
+                Закрываем период у текущего<br>и открываем у нового
+            </div>
+        </div>
+
+        <div id="cr_info" class="muted" style="margin-top:8px;"></div>
+
+        <label>Новый ответственный (лицевой счёт)</label>
+        <select id="cr_newAbonent"></select>
+
+        <label>Дата передачи / начала ответственности</label>
+        <input id="cr_date" type="date">
+
+        <div class="change-resp-actions">
+            <button onclick="applyChangeResponsible()">Применить</button>
+            <button onclick="closeChangeResponsibleModal()">Отмена</button>
+        </div>
+    </div>
+</div>
+
+<!-- ===== Модальное окно редактирования абонента ===== -->
+<div id="abonentEditModal">
+    <div class="abonent-edit-card">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;">
+            <h3 style="margin:0;">Изменить абонента</h3>
+            <div class="readonly-hint">Уникальный ID, адрес и рег. № кв менять нельзя</div>
+        </div>
+
+        <div class="abonent-edit-grid">
+            <div>
+                <label>Лицевой счёт</label>
+                <input id="ae_ls" type="text" inputmode="numeric">
+            </div>
+            <div>
+                <label>Рег. № кв</label>
+                <!-- ✅ НАВСЕГДА -->
+                <input id="ae_regnum" type="text" disabled>
+            </div>
+
+            <div>
+                <label>Фамилия</label>
+                <input id="ae_last" type="text">
+            </div>
+            <div>
+                <label>Имя</label>
+                <input id="ae_first" type="text">
+            </div>
+
+            <div class="full">
+                <label>Отчество</label>
+                <input id="ae_mid" type="text">
+            </div>
+
+            <div>
+                <label>Город</label>
+                <!-- ✅ НАВСЕГДА -->
+                <input id="ae_city" type="text" disabled>
+            </div>
+            <div>
+                <label>Улица</label>
+                <!-- ✅ НАВСЕГДА -->
+                <input id="ae_street" type="text" disabled>
+            </div>
+
+            <div>
+                <label>Дом</label>
+                <!-- ✅ НАВСЕГДА -->
+                <input id="ae_house" type="text" disabled>
+            </div>
+            <div>
+                <label>Квартира</label>
+                <!-- ✅ НАВСЕГДА -->
+                <input id="ae_flat" type="text" disabled>
+            </div>
+
+            <div>
+                <label>Общая площадь (м²)</label>
+                <input id="ae_square" type="number" step="0.1">
+            </div>
+            <div>
+                <label>Кол-во комнат</label>
+                <input id="ae_rooms" type="text" placeholder='например: "двух комнат"'>
+            </div>
+
+            <div>
+                <label>Право собственности</label>
+                <input id="ae_share" type="text" placeholder='например: "1/1"'>
+            </div>
+            <div>
+                <label>Телефон</label>
+                <input id="ae_phone" type="text">
+            </div>
+
+            <div class="full">
+                <label>Уникальный ID</label>
+                <input id="ae_uid" type="text" disabled>
+            </div>
+        </div>
+
+        <div class="abonent-edit-actions">
+            <button type="button" onclick="saveAbonentEdit()">Сохранить изменения</button>
+            <button type="button" onclick="closeAbonentEdit()">Отмена</button>
+        </div>
+    </div>
+</div>
+
+<script>
+function getAbonentIdFromURL() {
+    const params = new URLSearchParams(window.location.search || "");
+    const uid = String(params.get("uid") || "").trim();
+    const fromUrl = String(params.get("abonent") || "").trim();
+
+    // 1) если открыли по uid — найдём ЛС (текущий ключ) по uid
+    if (uid) {
+        const db = window.AbonentsDB?.abonents || {};
+        for (const id of Object.keys(db)) {
+            if (String(db[id]?.uid || "").trim() === uid) return id;
+        }
+    }
+
+    // 2) иначе — как раньше (по ЛС)
+    if (fromUrl) return fromUrl;
+
+    const db = window.AbonentsDB?.abonents || {};
+    const first = Object.keys(db)[0];
+    return first || "27";
+}
+
+function getDb() {
+    return window.AbonentsDB?.abonents || {};
+}
+
+function getPremisesDb(){
+    return window.AbonentsDB?.premises || {};
+}
+
+function getLinks(){
+    return Array.isArray(window.AbonentsDB?.links) ? window.AbonentsDB.links : [];
+}
+
+function getPremiseForAbonent(abonentId, abonentObj){
+    const a = abonentObj || null;
+    const regnum = String(a?.premiseRegnum || a?.regnum || "").trim();
+    if (!regnum) return { regnum: "", p: null };
+    const p = getPremisesDb()[regnum] || null;
+    return { regnum, p };
+}
+
+function getActiveLinkForAbonent(abonentId, regnum){
+    const id = String(abonentId);
+    const r = String(regnum || "").trim();
+    const links = getLinks().filter(l => String(l?.abonentId) === id && String(l?.regnum || "").trim() === r);
+    if (!links.length) return null;
+    // активная = без dateTo, иначе берём самую позднюю
+    const active = links.find(l => !String(l?.dateTo || "").trim());
+    if (active) return active;
+    return links.slice().sort((a,b) => String(b?.dateTo||"").localeCompare(String(a?.dateTo||"")))[0];
+}
+
+
+function getActiveLinkForPremise(regnum){
+    const r = String(regnum || '').trim();
+    if (!r) return null;
+    const links = getLinks().filter(l => String(l?.regnum || '').trim() === r);
+    if (!links.length) return null;
+    const active = links.find(l => !String(l?.dateTo || '').trim());
+    if (active) return active;
+    return links.slice().sort((a,b) => String(b?.dateTo||"").localeCompare(String(a?.dateTo||"")))[0];
+}
+
+
+function getCurrentAbonent() {
+    const id = String(getAbonentIdFromURL());
+    const db = getDb();
+    return { id, a: db[id] || null };
+}
+
+function splitFio(fio) {
+    const parts = String(fio || "").trim().split(/\s+/).filter(Boolean);
+    return {
+        last: parts[0] || "",
+        first: parts[1] || "",
+        mid: parts.slice(2).join(" ") || ""
+    };
+}
+
+function joinFio(last, first, mid) {
+    return [last, first, mid].map(x => String(x || "").trim()).filter(Boolean).join(" ");
+}
+
+
+async function copyUidFromCard(){
+    const { a } = getCurrentAbonent();
+    const uid = String(a?.uid || "").trim();
+    if (!uid) return;
+
+    try{
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            await navigator.clipboard.writeText(uid);
+            alert("UID скопирован");
+            return;
+        }
+    }catch(e){}
+
+    const ta = document.createElement("textarea");
+    ta.value = uid;
+    ta.style.position = "fixed";
+    ta.style.left = "-9999px";
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand("copy"); alert("UID скопирован"); } catch(e){}
+    document.body.removeChild(ta);
+}
+
+function fillAbonentCard() {
+    const { id, a } = getCurrentAbonent();
+    if (!a) return;
+
+    const { regnum, p } = getPremiseForAbonent(id, a);
+    const premise = p || {};
+    const link = regnum ? getActiveLinkForAbonent(id, regnum) : null;
+
+    const fioParts = splitFio(a.fio);
+
+    document.getElementById("abonentTitle").innerHTML =
+        'Общие данные&nbsp;&nbsp;' + (a.fio || "") +
+        ' <span class="edit-link" onclick="openAbonentEdit()">изменить</span>';
+
+    const tbody = document.getElementById("abonentInfoBody");
+    tbody.innerHTML = `
+      <tr>
+        <td>${id}</td>
+        <td>${regnum || a.regnum || ""}</td>
+        <td>${fioParts.last}</td>
+        <td>${fioParts.first}</td>
+        <td>${fioParts.mid}</td>
+        <td>${(premise.square ?? a.square) ?? ""}</td>
+        <td>${a.share ?? ""}</td>
+        <td>${a.rooms ?? ""}</td>
+        <td>${premise.city ?? a.city ?? ""}</td>
+        <td>${premise.street ?? a.street ?? ""}</td>
+        <td>${premise.house ?? a.house ?? ""}</td>
+        <td>${premise.flat ?? a.flat ?? ""}</td>
+        <td class="uid-click" onclick="copyUidFromCard()" title="Нажми — скопировать UID">${a.uid ?? ""}</td>
+        <td>${a.phone ?? ""}</td>
+      </tr>
+    `;
+
+    // ===== Заполняем блок "Квартира / Правообладатель" =====
+    const addr = [premise.city ?? a.city, premise.street ?? a.street, premise.house ?? a.house, premise.flat ?? a.flat]
+        .map(x => String(x || '').trim()).filter(Boolean).join(', ');
+
+    const setText = (id, val) => {
+        const el = document.getElementById(id);
+        if (!el) return;
+        const v = String(val || '').trim();
+        el.textContent = v ? v : '—';
+    };
+
+    setText('premiseRegnum', regnum || a.regnum || '');
+    setText('premiseAddress', addr);
+    setText('premiseSquare', (premise.square ?? a.square) ?? '');
+    setText('premiseCreatedAt', premise.createdAt || '');
+
+    const activePremiseLink = regnum ? getActiveLinkForPremise(regnum) : null;
+    const activeAbId = String(activePremiseLink?.abonentId || '').trim();
+    const activeAb = activeAbId ? (getDb()[activeAbId] || null) : null;
+    const activeName = String(activeAb?.fio || '').trim();
+
+    if (activeAbId) {
+        setText('premiseResponsible', activeName ? `${activeAbId} — ${activeName}` : activeAbId);
+        const df = String(activePremiseLink?.dateFrom || '').trim();
+        const dt = String(activePremiseLink?.dateTo || '').trim();
+
+        const periodHtml = (df || dt)
+            ? `${df || '—'} — ${dt ? `<span style="color:#c00;font-weight:700;">${dt}</span>` : 'по настоящее время'}`
+            : '—';
+        const pp = document.getElementById('premisePeriod');
+        if (pp) pp.innerHTML = periodHtml;
+
+        // Период ответственности именно этого абонента по этой квартире
+        const myLink = regnum ? getActiveLinkForAbonent(id, regnum) : null;
+        const mdf = String(myLink?.dateFrom || '').trim();
+        const mdt = String(myLink?.dateTo || '').trim();
+        const myHtml = (mdf || mdt)
+            ? `${mdf || '—'} — ${mdt ? `<span style="color:#c00;font-weight:700;">${mdt}</span>` : 'по настоящее время'}`
+            : '—';
+        const mp = document.getElementById('premiseMyPeriod');
+        if (mp) mp.innerHTML = myHtml;
+    } else {
+        // Если нет связей, показываем текущего абонента как контекст
+        setText('premiseResponsible', (a.fio ? `${id} — ${a.fio}` : id));
+        const df = String(link?.dateFrom || '').trim();
+        const dt = String(link?.dateTo || '').trim();
+
+        const periodHtml = (df || dt)
+            ? `${df || '—'} — ${dt ? `<span style="color:#c00;font-weight:700;">${dt}</span>` : 'по настоящее время'}`
+            : '—';
+        const pp = document.getElementById('premisePeriod');
+        if (pp) pp.innerHTML = periodHtml;
+
+        // Период ответственности именно этого абонента по этой квартире
+        const myLink = regnum ? getActiveLinkForAbonent(id, regnum) : null;
+        const mdf = String(myLink?.dateFrom || '').trim();
+        const mdt = String(myLink?.dateTo || '').trim();
+        const myHtml = (mdf || mdt)
+            ? `${mdf || '—'} — ${mdt ? `<span style="color:#c00;font-weight:700;">${mdt}</span>` : 'по настоящее время'}`
+            : '—';
+        const mp = document.getElementById('premiseMyPeriod');
+        if (mp) mp.innerHTML = myHtml;
+    
+
+    // ✅ показываем историю ответственности по квартире
+    try { renderResponsibilityHistory(regnum || a.regnum || ''); } catch(e) {}
+}
+}
+	// 🔴 CRITICAL: автоначисление + контроль пропусков
+	// Не меняет внешний вид карточки. Делает только одно:
+	// при открытии карточки вызывает движок автоначислений, чтобы восстановить
+	// пропущенные месяцы начислений (например, январь 2026), если их удалили случайно.
+	function __runAutoAccrualRepairOnce(){
+	    try {
+	        const id = getAbonentIdFromURL();
+	        if (!id) return;
+	        const gk = 'jkh_autoaccrual_repair_once_v1:' + String(id);
+	        if (sessionStorage.getItem(gk) === '1') return;
+	        sessionStorage.setItem(gk, '1');
+
+	        if (!window.JKHAutoAccrual || typeof window.JKHAutoAccrual.recalcForAbonent !== 'function') return;
+	        const res = window.JKHAutoAccrual.recalcForAbonent(id);
+	        // если что-то изменилось (добавились пропущенные начисления) — перерисуем таблицу
+	        if (res && res.ok && res.changed) {
+	            try { if (window.__loadPaymentTable) window.__loadPaymentTable(); } catch(e) {}
+	        }
+	    } catch(e) {
+	        try { console.warn('[autoaccrual] repairOnce error', e); } catch(_){ }
+	    }
+	}
+
+	document.addEventListener("DOMContentLoaded", () => {
+	    // 1) заполнить шапку/данные абонента
+	    fillAbonentCard();
+	    // 2) восстановить пропущенные месяцы начислений (например, январь)
+	    __runAutoAccrualRepairOnce();
+	    // 3) отрисовать таблицу (если движок не перерисовал сам)
+	    try { if (window.__loadPaymentTable) window.__loadPaymentTable(); } catch(e) {}
+	});
+function renderResponsibilityHistory(regnum){
+  const body = document.getElementById('respHistoryBody');
+  if (!body) return;
+  body.innerHTML = '';
+
+  const r = String(regnum || '').trim();
+  if (!r){
+    body.innerHTML = `<tr><td colspan="5" style="border:2px solid #000; padding:6px;">Нет regnum — история недоступна</td></tr>`;
+    return;
+  }
+
+  const links = getLinks()
+    .filter(l => String(l?.regnum || '').trim() === r)
+    .slice()
+    .sort((a,b) => String(b?.dateFrom||'').localeCompare(String(a?.dateFrom||'')));
+
+  if (!links.length){
+    body.innerHTML = `<tr><td colspan="5" style="border:2px solid #000; padding:6px;">Связей (истории) пока нет</td></tr>`;
+    return;
+  }
+
+  const db = getDb();
+  links.forEach(l => {
+    const aid = String(l?.abonentId || '').trim();
+    const fio = String(db[aid]?.fio || '').trim();
+    const df = String(l?.dateFrom || '').trim();
+    const dt = String(l?.dateTo || '').trim();
+    const active = !dt;
+    const period = `${df || '—'} — ${dt ? dt : 'по наст. время'}`;
+
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td style="border:2px solid #000; padding:6px; ${active ? 'font-weight:700;' : ''}">${period}</td>
+      <td style="border:2px solid #000; padding:6px; ${active ? 'font-weight:700;' : ''}">${aid}</td>
+      <td style="border:2px solid #000; padding:6px; ${active ? 'font-weight:700;' : ''}">${fio || '—'}</td>
+      <td style="border:2px solid #000; padding:6px; ${active ? 'font-weight:700; color:#0a0;' : ''}">
+        ${active ? 'текущий' : 'закрыт'}
+      </td>
+      <td style="border:2px solid #000; padding:6px;">
+        <a href="abonent_card.html?abonent=${encodeURIComponent(aid)}" style="text-decoration:underline;">открыть</a>
+      </td>
+    `;
+    body.appendChild(tr);
+  });
+}
+
+function openResponsibilityReport(){
+  const { id, a } = getCurrentAbonent();
+  if (!a) { alert('Абонент не найден'); return; }
+  const { regnum } = getPremiseForAbonent(id, a);
+  const r = String(regnum || '').trim();
+  if (!r) { alert('Нет regnum — отчёт недоступен'); return; }
+  window.location.href = 'responsibility_report.html?regnum=' + encodeURIComponent(r);
+}
+
+
+// ===== Смена ответственного (смена собственника) =====
+function openChangeResponsibleModal() {
+    const { id, a } = getCurrentAbonent();
+    if (!a) { alert('Абонент не найден'); return; }
+
+    const { regnum, p } = getPremiseForAbonent(id, a);
+    if (!regnum) {
+        alert('У абонента не указан рег. № кв — смена ответственного невозможна.');
+        return;
+    }
+
+    const premise = p || {};
+    const db = getDb();
+    const links = Array.isArray(window.AbonentsDB?.links) ? window.AbonentsDB.links : [];
+
+    const active = links.find(l => String(l.regnum) === String(regnum) && !String(l.dateTo || '').trim());
+    const activeId = active ? String(active.abonentId) : '';
+
+    // Инфо
+    const addr = [premise.city, premise.street, premise.house, premise.flat].filter(Boolean).join(', ');
+    const infoEl = document.getElementById('cr_info');
+    if (infoEl) {
+        const curName = activeId && db[activeId] ? (db[activeId].fio || '') : (a.fio || '');
+        const curDf = String(active?.dateFrom || '').trim();
+        infoEl.innerHTML = `Объект: <b>${regnum}</b>${addr ? ' — ' + addr : ''}<br>` +
+            `Текущий ответственный: <b>${activeId || id}</b> ${curName ? '— ' + curName : ''}` +
+            (curDf ? ` (с <b>${curDf}</b>)` : '');
+    }
+
+    // Заполняем список абонентов
+    const sel = document.getElementById('cr_newAbonent');
+    sel.innerHTML = '';
+
+    // Сортировка по числу (если возможно)
+    const ids = Object.keys(db).sort((x, y) => {
+        const nx = Number(x), ny = Number(y);
+        if (!Number.isNaN(nx) && !Number.isNaN(ny)) return nx - ny;
+        return String(x).localeCompare(String(y), 'ru');
+    });
+
+    ids.forEach(k => {
+        if (String(k) === String(id)) return; // исключаем текущего
+        const fio = String(db[k]?.fio || '').trim();
+        const opt = document.createElement('option');
+        opt.value = String(k);
+        opt.textContent = fio ? `${k} — ${fio}` : String(k);
+        sel.appendChild(opt);
+    });
+
+    // Дата (по умолчанию сегодня)
+    const d = new Date();
+    const yyyy = d.getFullYear();
+    const mm = String(d.getMonth() + 1).padStart(2, '0');
+    const dd = String(d.getDate()).padStart(2, '0');
+    const dateInput = document.getElementById('cr_date');
+    if (dateInput && !dateInput.value) dateInput.value = `${yyyy}-${mm}-${dd}`;
+
+    document.getElementById('changeResponsibleModal').style.display = 'flex';
+}
+
+function closeChangeResponsibleModal() {
+    const m = document.getElementById('changeResponsibleModal');
+    if (m) m.style.display = 'none';
+}
+
+function applyChangeResponsible() {
+    const { id, a } = getCurrentAbonent();
+    if (!a) { alert('Абонент не найден'); return; }
+
+    const { regnum, p } = getPremiseForAbonent(id, a);
+    if (!regnum) { alert('Нет рег. № кв'); return; }
+
+    const newId = String(document.getElementById('cr_newAbonent')?.value || '').trim();
+    const dateFrom = String(document.getElementById('cr_date')?.value || '').trim();
+
+    if (!newId) { alert('Выберите нового ответственного'); return; }
+    if (!dateFrom) { alert('Укажите дату передачи'); return; }
+    if (String(newId) === String(id)) { alert('Новый ответственный совпадает с текущим'); return; }
+
+    const db = getDb();
+    if (!db[String(newId)]) { alert('Абонент не найден: ' + newId); return; }
+
+    if (!window.AbonentsDB) window.AbonentsDB = {};
+    if (!window.AbonentsDB.links) window.AbonentsDB.links = [];
+
+    const links = window.AbonentsDB.links;
+
+    // Ограничение: один активный объект на абонента (чтобы не было путаницы)
+    const otherActive = links.find(l => String(l.abonentId) === String(newId)
+        && !String(l.dateTo || '').trim()
+        && String(l.regnum) !== String(regnum));
+    if (otherActive) {
+        alert(`У выбранного абонента уже есть активная квартира: ${otherActive.regnum}.\n` +
+              `Сначала закройте её период или выберите другого абонента.`);
+        return;
+    }
+
+    // 0) текущие активные связи по этой квартире
+    // (иногда после тестов/ошибок может оказаться >1 активной — мы это нормализуем)
+    const activeList = links.filter(l =>
+        String(l.regnum) === String(regnum) && !String(l.dateTo || '').trim()
+    );
+
+    const currentActive = activeList.length === 1 ? activeList[0] : null;
+    const currentActiveId = currentActive ? String(currentActive.abonentId) : "";
+
+    // Если выбран тот же, кто уже текущий (и нет дублей) — просто выходим
+    if (currentActiveId && String(currentActiveId) === String(newId)) {
+        alert('Этот абонент уже является текущим ответственным по данной квартире.');
+        return;
+    }
+
+    // 1) закрываем ВСЕ активные связи по этой квартире (гарантия: один активный период)
+    activeList.forEach(l => {
+        l.dateTo = dateFrom;
+
+        // закрываем расчёт у старого ЛС
+        const oldAb = db[String(l.abonentId)];
+        if (oldAb) oldAb.calcEndDate = dateFrom;
+    });
+
+    // 2) создаём новую связь
+    links.push({
+        abonentId: String(newId),
+        regnum: String(regnum),
+        dateFrom: String(dateFrom),
+        dateTo: ""
+    });
+
+    // 2а) фиксируем даты расчёта у нового ЛС (чтобы автоначисления/долг не "лезли" в чужой период)
+    const newAb = db[String(newId)];
+    if (newAb) {
+        newAb.calcStartDate = dateFrom;
+        newAb.calcEndDate = "";
+    }
+
+    // 3) для обратной совместимости (пока старые поля ещё используются в UI)
+    const premise = p || (window.AbonentsDB.premises ? window.AbonentsDB.premises[String(regnum)] : null) || {};
+    const na = db[String(newId)];
+    if (na) {
+        na.regnum = String(regnum);
+        if (premise.city)   na.city = premise.city;
+        if (premise.street) na.street = premise.street;
+        if (premise.house)  na.house = premise.house;
+        if (premise.flat)   na.flat = premise.flat;
+        if (premise.square !== undefined && premise.square !== null && premise.square !== "") na.square = premise.square;
+    }
+
+    saveAbonentsDB();
+
+    // Переходим на карточку нового ответственного
+    window.location.href = 'abonent_card.html?abonent=' + encodeURIComponent(String(newId));
+}
+
+function openAbonentEdit() {
+    const { id, a } = getCurrentAbonent();
+    if (!a) { alert("Абонент не найден"); return; }
+
+    const { regnum, p } = getPremiseForAbonent(id, a);
+    const premise = p || {};
+
+    const fioParts = splitFio(a.fio);
+
+    document.getElementById("ae_ls").value = id;
+
+    // ✅ НАВСЕГДА (только показ)
+    document.getElementById("ae_regnum").value = regnum || a.regnum || "";
+    document.getElementById("ae_city").value   = premise.city || a.city || "";
+    document.getElementById("ae_street").value = premise.street || a.street || "";
+    document.getElementById("ae_house").value  = premise.house || a.house || "";
+    document.getElementById("ae_flat").value   = premise.flat || a.flat || "";
+
+    document.getElementById("ae_last").value  = fioParts.last;
+    document.getElementById("ae_first").value = fioParts.first;
+    document.getElementById("ae_mid").value   = fioParts.mid;
+
+    document.getElementById("ae_square").value = ((premise.square ?? a.square) ?? "");
+    document.getElementById("ae_rooms").value  = a.rooms || "";
+    document.getElementById("ae_share").value  = a.share || "";
+    document.getElementById("ae_phone").value  = a.phone || "";
+
+    document.getElementById("ae_uid").value = a.uid || "";
+
+    document.getElementById("abonentEditModal").style.display = "flex";
+}
+
+function closeAbonentEdit() {
+    document.getElementById("abonentEditModal").style.display = "none";
+}
+
+function migrateLocalKeys(oldId, newId) {
+    const pairs = [
+        ["note_", "note_"],
+        ["moratorium_", "moratorium_"],
+        ["calc_period_", "calc_period_"],
+        ["calc_period_active_", "calc_period_active_"],
+        ["exclude_periods_", "exclude_periods_"]
+    ];
+
+    pairs.forEach(([pOld, pNew]) => {
+        const oldKey = pOld + oldId;
+        const newKey = pNew + newId;
+        const val = localStorage.getItem(oldKey);
+        if (val !== null && localStorage.getItem(newKey) === null) {
+            localStorage.setItem(newKey, val);
+        }
+        if (val !== null) localStorage.removeItem(oldKey);
+    });
+}
+
+function saveAbonentEdit() {
+    const { id: oldId, a } = getCurrentAbonent();
+    if (!a) { alert("Абонент не найден"); return; }
+
+    const db = getDb();
+
+    const newIdRaw = document.getElementById("ae_ls").value.trim();
+    const newId = newIdRaw === "" ? oldId : newIdRaw;
+
+    const last  = document.getElementById("ae_last").value.trim();
+    const first = document.getElementById("ae_first").value.trim();
+    const mid   = document.getElementById("ae_mid").value.trim();
+
+    const fio = joinFio(last, first, mid);
+
+    if (!newId) { alert("Лицевой счёт не может быть пустым"); return; }
+    if (!fio) { alert("Заполните Фамилию и Имя (минимум)"); return; }
+
+    const isIdChanged = String(newId) !== String(oldId);
+    if (isIdChanged && db[String(newId)]) {
+        alert("Такой лицевой счёт уже существует: " + newId);
+        return;
+    }
+
+    // ✅ НАВСЕГДА: regnum + адрес НЕ ТРОГАЕМ
+    // a.regnum = ...
+    // a.city/a.street/a.house/a.flat = ...
+
+    // можно менять ФИО / площадь / комнаты / долю / телефон
+    a.fio    = fio;
+
+    const sq = document.getElementById("ae_square").value;
+    a.square = (sq === "" ? "" : Number(sq));
+
+    a.rooms  = document.getElementById("ae_rooms").value.trim();
+    a.share  = document.getElementById("ae_share").value.trim();
+    a.phone  = document.getElementById("ae_phone").value.trim();
+
+    if (isIdChanged) {
+        db[String(newId)] = a;
+        delete db[String(oldId)];
+        migrateLocalKeys(String(oldId), String(newId));
+
+        const url = new URL(window.location.href);
+        url.searchParams.set("abonent", String(newId));
+        window.history.replaceState({}, "", url.toString());
+    }
+
+    if (window.saveAbonentsDB) window.saveAbonentsDB();
+
+    closeAbonentEdit();
+    fillAbonentCard();
+	
+    loadMoratoriumUI();
+
+    if (window.__loadPaymentTable) window.__loadPaymentTable();
+
+    alert("Изменения сохранены");
+	renderResponsibilityHistory(regnum);
+
+}
+
+function moratoriumKey(id){ return "moratorium_" + id; }
+
+function loadMoratoriumUI(){
+    const id = getAbonentIdFromURL();
+    const el = document.getElementById("moratoriumToggle");
+    if (!el) return;
+    el.checked = localStorage.getItem(moratoriumKey(id)) === "1";
+}
+function bindMoratoriumUI(){
+    const id = getAbonentIdFromURL();
+    const el = document.getElementById("moratoriumToggle");
+    if (!el) return;
+    el.addEventListener("change", () => {
+        localStorage.setItem(moratoriumKey(id), el.checked ? "1" : "0");
+        if (window.__loadPaymentTable) window.__loadPaymentTable();
+    });
+}
+document.addEventListener("DOMContentLoaded", () => {
+    loadMoratoriumUI();
+    bindMoratoriumUI();
+});
+
+function openNotesModal() {
+    const id = getAbonentIdFromURL();
+    const note = localStorage.getItem("note_" + id) || "";
+    document.getElementById("notesText").value = note;
+    document.getElementById("notesModal").style.display = "flex";
+}
+function closeNotesModal() {
+    document.getElementById("notesModal").style.display = "none";
+}
+function saveNotes() {
+    const id = getAbonentIdFromURL();
+    const txt = document.getElementById("notesText").value.trim();
+    localStorage.setItem("note_" + id, txt);
+    closeNotesModal();
+    alert("Примечание сохранено");
+}
+
+function calcPeriodKey(id){ return "calc_period_" + id; }
+function calcPeriodActiveKey(id){ return "calc_period_active_" + id; }
+
+function loadCalcPeriodUI(){
+    const id = getAbonentIdFromURL();
+    const fromEl = document.getElementById("calcFrom");
+    const toEl   = document.getElementById("calcTo");
+    if (!fromEl || !toEl) return;
+
+    try {
+        const raw = localStorage.getItem(calcPeriodKey(id));
+        if (raw) {
+            const obj = JSON.parse(raw);
+            fromEl.value = obj.from || "";
+            toEl.value   = obj.to || "";
+        } else {
+            fromEl.value = "";
+            toEl.value   = "";
+        }
+    } catch {
+        fromEl.value = "";
+        toEl.value   = "";
+    }
+}
+
+function saveCalcPeriod(from, to){
+    const id = getAbonentIdFromURL();
+    localStorage.setItem(calcPeriodKey(id), JSON.stringify({from: from || "", to: to || ""}));
+}
+
+function setCalcPeriodActive(active){
+    const id = getAbonentIdFromURL();
+    localStorage.setItem(calcPeriodActiveKey(id), active ? "1" : "0");
+}
+
+function isValidPeriod(from, to){
+    if (!from || !to) return false;
+    try {
+        const a = new Date(from);
+        const b = new Date(to);
+        return a.toString() !== "Invalid Date" && b.toString() !== "Invalid Date" && a <= b;
+    } catch { return false; }
+}
+
+function bindCalcButtons(){
+    const runBtn = document.getElementById("calcRunBtn");
+    const repBtn = document.getElementById("calcReportsBtn");
+    const resetBtn = document.getElementById("calcResetBtn");
+    const fromEl = document.getElementById("calcFrom");
+    const toEl   = document.getElementById("calcTo");
+    if (!runBtn || !repBtn || !resetBtn || !fromEl || !toEl) return;
+
+    runBtn.addEventListener("click", () => {
+        const from = fromEl.value;
+        const to   = toEl.value;
+
+        if (!isValidPeriod(from, to)) {
+            saveCalcPeriod("", "");
+            setCalcPeriodActive(false);
+            if (window.__loadPaymentTable) window.__loadPaymentTable();
+            return;
+        }
+
+        saveCalcPeriod(from, to);
+        setCalcPeriodActive(true);
+
+        if (window.__loadPaymentTable) window.__loadPaymentTable();
+    });
+
+    resetBtn.addEventListener("click", () => {
+        saveCalcPeriod("", "");
+        setCalcPeriodActive(false);
+        fromEl.value = "";
+        toEl.value = "";
+        if (window.__loadPaymentTable) window.__loadPaymentTable();
+    });
+
+    repBtn.addEventListener("click", () => {
+        const id = getAbonentIdFromURL();
+        location.href = "reports.html?abonent=" + encodeURIComponent(id);
+    });
+}
+
+document.addEventListener("DOMContentLoaded", () => {
+    loadCalcPeriodUI();
+    bindCalcButtons();
+});
+
+document.addEventListener("click", (e) => {
+    const m = document.getElementById("abonentEditModal");
+    if (!m) return;
+    if (m.style.display === "flex" && e.target === m) closeAbonentEdit();
+});
+</script>
+
+<script>closeLayout();</script>
+
+<!-- Модалка: Справочник источников поступления -->
+<div id="sourcesModal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,.35); z-index:9999; align-items:center; justify-content:center;">
+  <div style="background:#fff; width:720px; max-width:95vw; border:2px solid #000; padding:14px; box-shadow:0 10px 30px rgba(0,0,0,.2);">
+    <div style="display:flex; align-items:center; justify-content:space-between; gap:10px;">
+      <div style="font-weight:700;">Справочник источников поступления</div>
+      <button class="btn" type="button" onclick="closePaymentSourcesModal()">✖</button>
+    </div>
+
+    <div style="margin-top:10px; display:flex; gap:8px;">
+      <input id="sourceNewInput" type="text" placeholder="Новый источник (например: Банк, Почта, Онлайн)" style="flex:1; padding:8px; border:2px solid #000;">
+      <button class="btn" type="button" onclick="addPaymentSourceFromModal()">Добавить</button>
+    </div>
+
+    <div style="margin-top:10px; font-size:12px; opacity:.85;">
+      Переименование синхронизирует все платежи текущего абонента. Удаление: если источник используется — будет предложена замена.
+    </div>
+
+    <div id="sourcesList" style="margin-top:10px; max-height:45vh; overflow:auto; border-top:2px solid #000; padding-top:8px;"></div>
+
+    <div style="margin-top:12px; display:flex; justify-content:flex-end; gap:8px;">
+      <button class="btn" type="button" onclick="closePaymentSourcesModal()">Закрыть</button>
+    </div>
+  </div>
+</div>
+
+</body>
+</html>

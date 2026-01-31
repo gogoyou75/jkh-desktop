@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+
+<!-- ============================================================
+🔒 CRITICAL — НЕ ТРОГАТЬ (ПАПАЖКХ) | Date: 2026-01-27
+Doc: docs/LOGIC_SPEC_v1.5.3.md
+Эталон: jkh_site_full_v01.27.3.zip | SHA256: 6b4254a9b3b74327fe2d2c48c34e3e446ba9ae4e3369c6c554a683bde7b6ceec
+
+- ES-modules (type="module") запрещены в v1.5.x (должно работать file://)
+- Порядок подключений CRITICAL: calc_engine.js должен быть ДО payment_table.js / spravka_sud.js
+- Карточка абонента = источник истины; справки/отчёты не ломают карточку
+============================================================ -->
+
+<html lang="ru">
+<head>
+<meta charset="UTF-8" />
+    <script src="critical_guard.js" defer></script>
+<title>Расчёт взыскиваемой суммы</title>
+
+<link rel="stylesheet" href="style.css" />
+
+<!-- ВСЕГДА корректный порядок: данные → storage → layout → spravka_sud -->
+<script src="data.js"></script>
+<script src="layout.js"></script>
+<script src="calc_engine.js"></script>
+
+<style>
+    body {
+        margin: 0;
+        font-family: Arial, sans-serif;
+        background: #ffffff;
+    }
+
+    .sheet-wrapper {
+        width: 960px;
+        margin: 0 auto;
+        padding: 20px 10px 40px 10px;
+        background: #fff;
+    }
+
+    .org-header {
+        font-size: 14px;
+        margin-bottom: 20px;
+        line-height: 1.4;
+    }
+    .org-header .label { font-weight: bold; }
+
+    .sheet-title {
+        text-align: center;
+        font-size: 22px;
+        font-weight: bold;
+        margin: 15px 0 25px 0;
+    }
+
+    table.info-block {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 15px;
+        margin-bottom: 25px;
+    }
+    table.info-block td {
+        border-bottom: 0.5px solid #999;
+        padding: 4px 3px;
+    }
+    table.info-block td:first-child {
+        width: 220px;
+        font-weight: bold;
+    }
+
+    table.sheet-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 14px;
+        margin-bottom: 25px;
+    }
+    table.sheet-table th {
+        border: 0.5px solid #000;
+        background: #f2f2f2;
+        padding: 6px 4px;
+        text-align: center;
+    }
+    table.sheet-table td {
+        border: 0.5px solid #000;
+        padding: 6px 4px;
+    }
+
+    .summary-block {
+        margin-top: 25px;
+        font-size: 15px;
+        line-height: 1.5;
+    }
+    .summary-block table {
+        width: 60%;
+        border-collapse: collapse;
+        margin-top: 10px;
+    }
+    .summary-block td {
+        border: 0.5px solid #000;
+        padding: 6px;
+    }
+    .align-right {
+        text-align: right;
+    }
+
+    .notes-block {
+        margin-top: 30px;
+        margin-bottom: 15px;
+        font-weight: bold;
+        font-size: 15px;
+    }
+    .notes-block textarea {
+        width: 100%;
+        min-height: 90px;
+        border: 1px solid #aaa;
+        padding: 6px;
+        resize: vertical;
+        font-size: 14px;
+    }
+
+    .sign-line {
+        margin-top: 40px;
+        font-size: 15px;
+    }
+    .sign-line .fio {
+        padding: 0 10px;
+        border-bottom: 0.5px solid #000;
+        display: inline-block;
+    }
+    .sign-line .line {
+        display: inline-block;
+        border-bottom: 0.5px solid #000;
+        width: 200px;
+        margin-left: 10px;
+    }
+
+    .sign-mp {
+        margin-top: 18px;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+    }
+
+    .sign-mp .stamp{
+        width: 70px;
+        height: 70px;
+        border: 1px solid #000;
+        border-radius: 999px;
+        display:flex;
+        align-items:center;
+        justify-content:center;
+        font-size: 15px;
+        letter-spacing: 0.5px;
+    }
+
+    .doc-date {
+        margin-top: 15px;
+        font-size: 15px;
+    }
+
+    @media print {
+        #mini-menu,
+        .topbar {
+            display: none !important;
+        }
+        .sheet-wrapper {
+            width: 100%;
+            margin: 0;
+            padding: 0;
+        }
+    }
+
+    /* --- FIX: основание подписи текст над линией --- */
+    .basis-field{display:inline-block; position:relative; min-width:260px; vertical-align:middle;}
+    .basis-field .basis-line{display:block; width:260px;}
+    .basis-field .basis-text{
+        position:absolute; left:0; right:0; top:-16px;
+        text-align:center; font-weight:400;
+    }
+    .basis-label{margin-right:10px;}
+    
+
+
+/* === PATCH vX: requisites/sign/mp layout === */
+
+.org-header { text-align: center; }
+.org-header > div { margin: 2px 0; }
+.sign-mp { width: 100%; justify-content: center; }
+.sign-footer { width: 100%; }
+
+</style>
+</head>
+
+<body>
+
+<script>renderLayout();</script>
+
+<div class="sheet-wrapper">
+
+    <div class="org-header" id="orgHeader">
+        <div id="orgRowName"><span class="label">Наименование организации:</span> <span id="orgName"></span></div>
+        <div id="orgRowInn"><span class="label">ИНН:</span> <span id="orgInn"></span></div>
+        <div id="orgRowLegal"><span class="label">Юридический адрес:</span> <span id="orgLegal"></span></div>
+        <div id="orgRowPostal"><span class="label">Почтовый адрес:</span> <span id="orgPostal"></span></div>
+        <div id="orgRowPhone"><span class="label">Телефон:</span> <span id="orgPhone"></span></div>
+        <div id="orgRowEmail"><span class="label">Email:</span> <span id="orgEmail"></span></div>
+    </div>
+
+    <div class="sheet-title">
+        РАСЧЁТ ВЗЫСКИВАЕМОЙ СУММЫ<br>
+        <span style="font-size:16px;font-weight:normal;">
+            за период <span id="period_from"></span> – <span id="period_to"></span>
+        </span>
+    </div>
+
+    <table class="info-block">
+        <tr><td>Ф.И.О.:</td><td id="fio"></td></tr>
+        <tr><td>Адрес:</td><td id="address"></td></tr>
+        <tr><td>Площадь квартиры:</td><td><span id="square"></span> кв.м.</td></tr>
+        <tr><td>Количество комнат:</td><td id="rooms"></td></tr>
+        <tr><td>Право собственности:</td><td id="share"></td></tr>
+</table>
+
+    <table class="sheet-table" id="debtTable">
+        <thead>
+        <tr>
+            <th rowspan="2">Год/месяц</th>
+            <th rowspan="2">Начислено</th>
+            <th colspan="2">Оплачено</th>
+<th colspan="3">Задолженность</th>
+        </tr>
+        <tr>
+            <th>Сумма</th>
+            <th>Дата</th>
+            <th>по платежу</th>
+            <th>по пени</th>
+            <th>Всего</th>
+        </tr>
+        </thead>
+
+        <tbody id="debtRows"></tbody>
+
+        <tfoot>
+        <tr style="background:#eef9ee;">
+            <td style="text-align:right;font-weight:bold;">ИТОГО:</td>
+            <td id="sumAccrued"></td>
+            <td id="sumPaid"></td>
+            <td></td>
+<td id="sumMainDebt"></td>
+            <td id="sumDebtPenalty"></td>
+            <td id="sumTotalDebt"></td>
+        </tr>
+        </tfoot>
+    </table>
+
+    <div class="summary-block">
+        По состоянию на <span id="stateDate"></span> задолженность составляет:
+        <table>
+            <tr><td>Долг по основному платежу:</td><td class="align-right" id="mainDebt"></td></tr>
+            <tr><td>Долг по пени:</td><td class="align-right" id="peniDebt"></td></tr>
+            <tr><td><b>ДОЛГ ВСЕГО:</b></td><td class="align-right" id="totalDebt"></td></tr>
+        </table>
+    </div>
+
+    <div class="notes-block">Примечание:</div>
+    <textarea id="notes"></textarea>
+
+    <div id="excludeWrapper"></div>
+
+    <div class="sign-footer" id="signFooter">
+    <div class="sign-line" id="signLine">
+        <span id="signerPosition">Председатель правления</span>
+        <span class="fio" id="chairmanName"></span>
+        подпись
+        <span class="line"></span>
+    </div>
+
+    <div class="sign-line" id="basisLine" style="display:none;">
+        <span class="basis-label">Основание подписи</span>
+        <span class="basis-field">
+            <span id="signerBasisText" class="basis-text"></span>
+            <span class="line basis-line"></span>
+        </span>
+    </div>
+
+    <div class="sign-mp"><div class="stamp">МП</div></div>
+</div>
+
+    <div class="doc-date"><span id="docDate"></span></div>
+
+</div>
+
+<!-- Скрипты логики -->
+<script src="spravka_sud.js"></script>
+
+<script>
+/* твой JS из второй версии – полностью рабочий */
+</script>
+
+<script>closeLayout();</script>
+
+</body>
+</html>

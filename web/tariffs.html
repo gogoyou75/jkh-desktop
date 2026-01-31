@@ -1,0 +1,550 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <script src="critical_guard.js" defer></script>
+  <title>Тарифы (динамические)</title>
+
+  <link rel="stylesheet" href="style.css" />
+
+  <!-- ОБЯЗАТЕЛЬНО: подключаем данные и layout -->
+  <script src="data.js"></script>
+  <script src="layout.js"></script>
+
+  <!-- ЛОГИКА автоначислений (Variant A).
+       ВАЖНО: этот файл может читать старый ключ tariffs_content_repair_v1.
+       Поэтому мы сохраняем тарифы в новом ключе tariffs_dynamic_v1 И
+       автоматически пишем совместимость в tariffs_content_repair_v1. -->
+  <script src="autoaccrual_engine.js"></script>
+
+  <style>
+    .panel{ border:2px solid #000; padding:12px; background:#fff; margin-bottom:14px; }
+    .hint{ font-size:12px; opacity:.85; margin-top:6px; }
+    .small{ font-size:12px; opacity:.85; line-height:1.35; margin-top:6px; }
+    .btnrow{ display:flex; gap:8px; flex-wrap:wrap; margin-top:8px; }
+    .btn{ border:2px solid #000; background:#e5e5e5; padding:6px 12px; cursor:pointer; font-size:13px; }
+    .btn:disabled{ opacity:.6; cursor:default; }
+
+    .tariff-card{ border:2px solid #000; background:#fff; padding:10px; margin-bottom:12px; }
+    .tariff-head{ display:flex; gap:10px; align-items:flex-end; flex-wrap:wrap; }
+    .tariff-head .grow{ flex:1; min-width:240px; }
+    label{ display:block; font-size:12px; opacity:.85; margin-bottom:4px; }
+    input, select{
+      width:100%; box-sizing:border-box; border:2px solid #000;
+      height:28px; padding:4px 6px; font-family:inherit; font-size:13px;
+      background:#fff;
+    }
+    input[type="month"]{ height:28px; }
+    .chk{ display:flex; gap:6px; align-items:center; height:28px; padding:0 6px; border:2px solid #000; background:#fff; }
+    .chk input{ width:auto; height:auto; border:0; }
+
+    table{ width:100%; border-collapse:collapse; table-layout:fixed; margin-top:10px; }
+    th, td{ border:2px solid #000; padding:6px; vertical-align:top; }
+    th{ background:#f2f2f2; }
+    .col-date{ width:190px; }
+    .col-rate{ width:200px; }
+    .col-actions{ width:120px; }
+    .right{ text-align:right; }
+
+    .mono{ font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+    .danger{ background:#ffecec; }
+  </style>
+</head>
+
+<body>
+<script>renderLayout();</script>
+
+<h2>Тарифы (динамические)</h2>
+
+<div class="panel">
+  <div class="small">
+    ✅ Можно создавать любое количество тарифов.<br>
+    ✅ Для каждого тарифа: <b>название</b>, <b>тип</b> (руб/м² или фикс/мес), <b>история ставок</b> и <b>галочка “участвует в расчётах”</b>.<br><br>
+    <b>Хранение:</b><br>
+    • основной ключ: <span class="mono">tariffs_dynamic_v1</span><br>
+    • совместимость (для старых расчётов): <span class="mono">tariffs_content_repair_v1</span> (генерируется автоматически)
+  </div>
+  <div class="hint">
+    ⚠️ Дата начала тарифа — <b>только 1-е число месяца</b>. Выбор даты сделан календарём “месяц/год”.
+  </div>
+</div>
+
+<div class="btnrow">
+  <button class="btn" type="button" id="btnAddTariff">+ добавить тариф</button>
+  <button class="btn" type="button" id="btnSaveAll">сохранить всё</button>
+  <button class="btn" type="button" id="btnRecalcAll">пересчитать всем</button>
+</div>
+
+<div id="tariffsHost" style="margin-top:14px;"></div>
+
+<script>
+(function(){
+  "use strict";
+
+  const KEY_NEW = "tariffs_dynamic_v1";
+  const KEY_LEGACY = "tariffs_content_repair_v1";
+  const KEY_LEGACY_BACKUP = "tariffs_content_repair_v1_backup";
+
+  const DEFAULT_LEGACY = {
+    content: [
+      { date: "2023-01-01", rate: 35.00 },
+      { date: "2024-01-01", rate: 38.50 }
+    ],
+    repair: [
+      { date: "2023-01-01", rate: 10.00 },
+      { date: "2024-01-01", rate: 12.00 }
+    ]
+  };
+
+  const deepClone = (obj) => JSON.parse(JSON.stringify(obj));
+
+  function safeJsonParse(raw, fallback){
+    try{
+      if (!raw) return fallback;
+      const v = JSON.parse(raw);
+      return (v === undefined) ? fallback : v;
+    }catch{ return fallback; }
+  }
+
+  function uid(){
+    return "t_" + Math.random().toString(16).slice(2) + "_" + Date.now().toString(16);
+  }
+
+  function r2(x){ return Math.round((Number(x)||0) * 100) / 100; }
+  function toNum(v){
+    if (typeof v === "number") return v;
+    const s = String(v ?? "").replace(/\s+/g,"").replace(",",".");
+    const n = Number(s);
+    return Number.isFinite(n) ? n : NaN;
+  }
+
+  function isoToYYYYMM(iso){
+    const m = String(iso||"").match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (!m) return "";
+    return `${m[1]}-${m[2]}`;
+  }
+
+  function yyyymmToISOFirst(yyyymm){
+    const m = String(yyyymm||"").trim().match(/^(\d{4})-(\d{2})$/);
+    if (!m) return "";
+    return `${m[1]}-${m[2]}-01`;
+  }
+
+  function normalizeISOToFirst(iso){
+    const m = String(iso||"").match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (!m) return "";
+    return `${m[1]}-${m[2]}-01`;
+  }
+
+  function loadLegacy(){
+    const raw = localStorage.getItem(KEY_LEGACY);
+    if (!raw){
+      localStorage.setItem(KEY_LEGACY, JSON.stringify(DEFAULT_LEGACY));
+      return deepClone(DEFAULT_LEGACY);
+    }
+    const parsed = safeJsonParse(raw, null);
+    if (!parsed || typeof parsed !== "object") return deepClone(DEFAULT_LEGACY);
+    const out = { content: [], repair: [] };
+    out.content = Array.isArray(parsed.content) ? parsed.content : [];
+    out.repair  = Array.isArray(parsed.repair) ? parsed.repair : [];
+    out.content = out.content.map(x => ({ date: normalizeISOToFirst(x.date), rate: r2(toNum(x.rate)) }));
+    out.repair  = out.repair.map(x => ({ date: normalizeISOToFirst(x.date), rate: r2(toNum(x.rate)) }));
+    return out;
+  }
+
+  function migrateIfNeeded(){
+    const existing = safeJsonParse(localStorage.getItem(KEY_NEW), null);
+    if (Array.isArray(existing) && existing.length) return existing;
+
+    const legacy = loadLegacy();
+    const tariffs = [
+      {
+        id: uid(),
+        code: "content",
+        title: "Содержание",
+        type: "per_m2",
+        active: true,
+        rates: (legacy.content || []).map(x => ({ from: normalizeISOToFirst(x.date), value: r2(toNum(x.rate)) }))
+      },
+      {
+        id: uid(),
+        code: "repair",
+        title: "Ремонт общего имущества",
+        type: "per_m2",
+        active: true,
+        rates: (legacy.repair || []).map(x => ({ from: normalizeISOToFirst(x.date), value: r2(toNum(x.rate)) }))
+      }
+    ];
+
+    localStorage.setItem(KEY_NEW, JSON.stringify(tariffs));
+    return tariffs;
+  }
+
+  function loadNew(){
+    const tariffs = migrateIfNeeded();
+    return (tariffs || []).map(t => ({
+      id: String(t?.id || uid()),
+      code: String(t?.code || ""),
+      title: String(t?.title || ""),
+      type: (t?.type === "fixed_month") ? "fixed_month" : "per_m2",
+      active: !!t?.active,
+      rates: Array.isArray(t?.rates) ? t.rates.map(r => ({
+        from: normalizeISOToFirst(r?.from),
+        value: r2(toNum(r?.value))
+      })).filter(r => r.from) : []
+    }));
+  }
+
+  function backupLegacy(){
+    try{
+      const raw = localStorage.getItem(KEY_LEGACY);
+      if (raw) localStorage.setItem(KEY_LEGACY_BACKUP, raw);
+    }catch{}
+  }
+
+  function valueAsOf(rates, monthStartISO){
+    const target = String(monthStartISO||"");
+    let chosen = null;
+    (rates || []).slice().sort((a,b)=>String(a.from).localeCompare(String(b.from))).forEach(r => {
+      if (String(r.from) <= target) chosen = r;
+    });
+    return chosen ? r2(toNum(chosen.value)) : 0;
+  }
+
+  function buildLegacyTimeline(tariffs){
+    const per = (tariffs || []).filter(t => t.active && t.type === "per_m2" && String(t.title||"").trim());
+    const dates = new Set();
+
+    per.forEach(t => (t.rates||[]).forEach(r => { if (r.from) dates.add(normalizeISOToFirst(r.from)); }));
+    if (!dates.size) dates.add("2000-01-01");
+
+    const allDates = Array.from(new Set(Array.from(dates))).sort((a,b)=>String(a).localeCompare(String(b)));
+
+    const isRepair = (t) => String(t.code||"") === "repair" || String(t.title||"").toLowerCase().includes("ремонт");
+
+    const rows = [];
+    for (const d of allDates){
+      let sumContent = 0;
+      let sumRepair = 0;
+
+      for (const t of per){
+        const v = valueAsOf(t.rates, d);
+        if (isRepair(t)) sumRepair += v;
+        else sumContent += v;
+      }
+
+      rows.push({ from: d, content: r2(sumContent), repair: r2(sumRepair) });
+    }
+
+    const out = [];
+    let prev = null;
+    for (const r of rows){
+      if (!prev || r2(prev.content) !== r2(r.content) || r2(prev.repair) !== r2(r.repair)){
+        out.push(r);
+        prev = r;
+      }
+    }
+
+    return out.length ? out : [{ from: "2000-01-01", content: 0, repair: 0 }];
+  }
+
+  function validateTariffs(tariffs){
+    const errors = [];
+
+    (tariffs || []).forEach((t, ti) => {
+      const n = ti + 1;
+      if (!String(t.title||"").trim()) errors.push(`Тариф #${n}: название пустое`);
+
+      const rates = Array.isArray(t.rates) ? t.rates : [];
+      const seen = new Set();
+      rates.forEach((r, ri) => {
+        const month = isoToYYYYMM(r.from);
+        if (!r.from){
+          errors.push(`Тариф «${t.title || ("#"+n)}»: строка ${ri+1} — не выбран месяц`);
+          return;
+        }
+        if (seen.has(r.from)){
+          errors.push(`Тариф «${t.title || ("#"+n)}»: дубль месяца ${month}`);
+          return;
+        }
+        seen.add(r.from);
+        const v = toNum(r.value);
+        if (!Number.isFinite(v)) errors.push(`Тариф «${t.title || ("#"+n)}»: строка ${ri+1} — неверная ставка`);
+      });
+    });
+
+    return errors;
+  }
+
+  function saveAll(tariffs){
+    localStorage.setItem(KEY_NEW, JSON.stringify(tariffs));
+    backupLegacy();
+    const legacy = buildLegacyTimeline(tariffs);
+    localStorage.setItem(KEY_LEGACY, JSON.stringify(legacy));
+  }
+
+  function escapeHtml(s){
+    return String(s ?? "")
+      .replaceAll("&", "&amp;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;")
+      .replaceAll('"', "&quot;")
+      .replaceAll("'", "&#039;");
+  }
+
+  function cardHtml(t){
+    const activeChecked = t.active ? "checked" : "";
+    const typeVal = (t.type === "fixed_month") ? "fixed_month" : "per_m2";
+    const typeLabel = (typeVal === "per_m2") ? "руб/м²" : "фикс/мес";
+
+    const rows = (t.rates || []).slice().sort((a,b)=>String(a.from).localeCompare(String(b.from))).map((r) => {
+      const mm = r.from ? isoToYYYYMM(r.from) : "";
+      const vv = (r.value === 0 || r.value) ? String(r.value) : "";
+      return `
+        <tr data-rate-row="1">
+          <td><input data-field="rate_month" type="month" value="${escapeHtml(mm)}"></td>
+          <td><input data-field="rate_value" placeholder="0.00" value="${escapeHtml(vv)}"></td>
+          <td class="right"><button class="btn" type="button" data-rate-del="1">удалить</button></td>
+        </tr>
+      `;
+    }).join("");
+
+    return `
+      <div class="tariff-card" data-tariff-id="${escapeHtml(t.id)}">
+        <div class="tariff-head">
+          <div class="grow">
+            <label>Название тарифа</label>
+            <input data-field="title" value="${escapeHtml(t.title)}" placeholder="Например: Домофон / Лифт / Охрана / ..." />
+          </div>
+
+          <div style="width:220px;">
+            <label>Тип тарифа</label>
+            <select data-field="type">
+              <option value="per_m2" ${typeVal==="per_m2" ? "selected":""}>руб/м²</option>
+              <option value="fixed_month" ${typeVal==="fixed_month" ? "selected":""}>фикс/мес</option>
+            </select>
+          </div>
+
+          <div style="width:220px;">
+            <label>Участвует в расчётах</label>
+            <div class="chk">
+              <input type="checkbox" data-field="active" ${activeChecked} />
+              <span>действует</span>
+            </div>
+          </div>
+
+          <div style="width:140px;">
+            <button class="btn danger" type="button" data-tariff-del="1">удалить тариф</button>
+          </div>
+        </div>
+
+        <div class="hint" style="margin-top:10px;">
+          История ставок (<b>${typeLabel}</b>): одна строка = один месяц начала действия. Дальше ставка действует “сквозь время”.
+        </div>
+
+        <table>
+          <colgroup>
+            <col class="col-date"><col class="col-rate"><col class="col-actions">
+          </colgroup>
+          <thead>
+            <tr>
+              <th>Месяц начала</th>
+              <th>Ставка</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            ${rows || ""}
+          </tbody>
+        </table>
+
+        <div class="btnrow">
+          <button class="btn" type="button" data-rate-add="1">+ добавить строку ставки</button>
+        </div>
+      </div>
+    `;
+  }
+
+  function render(){
+    const host = document.getElementById("tariffsHost");
+    const tariffs = loadNew();
+    host.innerHTML = tariffs.map(cardHtml).join("");
+    if (!tariffs.length) host.innerHTML = `<div class="panel">Тарифов пока нет. Нажми <b>+ добавить тариф</b>.</div>`;
+  }
+
+  function readFromUI(){
+    const cards = Array.from(document.querySelectorAll(".tariff-card"));
+    const out = [];
+
+    for (const card of cards){
+      const id = String(card.getAttribute("data-tariff-id") || uid());
+      const title = String(card.querySelector('[data-field="title"]')?.value || "");
+      const type = String(card.querySelector('[data-field="type"]')?.value || "per_m2");
+      const active = !!card.querySelector('[data-field="active"]')?.checked;
+
+      const rates = [];
+      const rows = Array.from(card.querySelectorAll('tr[data-rate-row="1"]'));
+      rows.forEach(tr => {
+        const monthRaw = tr.querySelector('input[data-field="rate_month"]')?.value || "";
+        const valRaw   = tr.querySelector('input[data-field="rate_value"]')?.value || "";
+        const from = yyyymmToISOFirst(monthRaw);
+        const v = toNum(valRaw);
+        const anyTyped = String(monthRaw||"").trim() || String(valRaw||"").trim();
+        if (!from && !anyTyped) return;
+        rates.push({ from: from, value: r2(v) });
+      });
+
+      let code = "";
+      try{
+        const cur = safeJsonParse(localStorage.getItem(KEY_NEW), []);
+        const old = Array.isArray(cur) ? cur.find(x => String(x?.id) === id) : null;
+        code = String(old?.code || "");
+      }catch{}
+
+      out.push({
+        id, code,
+        title,
+        type: (type === "fixed_month") ? "fixed_month" : "per_m2",
+        active,
+        rates
+      });
+    }
+
+    out.forEach(t => {
+      t.title = String(t.title||"");
+      t.rates = (t.rates || [])
+        .map(r => ({ from: normalizeISOToFirst(r.from), value: r2(toNum(r.value)) }))
+        .filter(r => r.from);
+      t.rates.sort((a,b)=>String(a.from).localeCompare(String(b.from)));
+    });
+
+    return out;
+  }
+
+  function addTariff(){
+    const tariffs = loadNew();
+    tariffs.push({
+      id: uid(),
+      code: "",
+      title: "Новый тариф",
+      type: "per_m2",
+      active: true,
+      rates: []
+    });
+    localStorage.setItem(KEY_NEW, JSON.stringify(tariffs));
+    render();
+  }
+
+  function addRateRow(card){
+    const tbody = card.querySelector("table tbody");
+    tbody.insertAdjacentHTML("beforeend", `
+      <tr data-rate-row="1">
+        <td><input data-field="rate_month" type="month" value=""></td>
+        <td><input data-field="rate_value" placeholder="0.00" value=""></td>
+        <td class="right"><button class="btn" type="button" data-rate-del="1">удалить</button></td>
+      </tr>
+    `);
+  }
+
+  function deleteTariff(card){
+    const id = String(card.getAttribute("data-tariff-id") || "");
+    if (!id) return;
+    if (!confirm("Удалить тариф?")) return;
+
+    const tariffs = loadNew().filter(t => String(t.id) !== id);
+    localStorage.setItem(KEY_NEW, JSON.stringify(tariffs));
+    render();
+  }
+
+  function saveAllFromUI(){
+    const tariffs = readFromUI();
+    const errs = validateTariffs(tariffs);
+    if (errs.length){
+      alert("Ошибки:\n" + errs.join("\n"));
+      return false;
+    }
+
+    if (!tariffs.length){
+      const ok = confirm("Ты удалил ВСЕ тарифы.\n\nЭто приведёт к начислениям = 0.\nПродолжить?");
+      if (!ok) return false;
+    }
+
+    saveAll(tariffs);
+    alert("Тарифы сохранены.");
+    return true;
+  }
+
+  function recalcAll(){
+    try{
+      if (window.JKHAutoAccrual && typeof window.JKHAutoAccrual.recalcAll === "function") {
+        const res = window.JKHAutoAccrual.recalcAll();
+
+        const total = Array.isArray(res) ? res.length : 0;
+        const changed = Array.isArray(res) ? res.filter(x => x && x.changed).length : 0;
+
+        alert(`Перерасчёт выполнен.
+Абонентов обработано: ${total}
+Изменения в начислениях: ${changed}`);
+        return true;
+      }
+
+      alert(
+        "Тарифы сохранены, но перерасчёт НЕ запущен.\n\n" +
+        "Причина: не найден JKHAutoAccrual.recalcAll().\n" +
+        "Проверь подключение autoaccrual_engine.js и ошибки в Console."
+      );
+      return false;
+
+    }catch(e){
+      console.warn("recalcAll failed", e);
+      alert("Перерасчёт упал с ошибкой. Открой F12 → Console и пришли ошибку.");
+      return false;
+    }
+  }
+
+  document.getElementById("btnAddTariff").addEventListener("click", addTariff);
+  document.getElementById("btnSaveAll").addEventListener("click", () => {
+    if (!saveAllFromUI()) return;
+    recalcAll();
+  });
+  document.getElementById("btnRecalcAll").addEventListener("click", () => {
+    const ok = confirm("Пересчитать начисления всем абонентам по ТЕКУЩИМ СОХРАНЁННЫМ тарифам?\n\n(Если ты менял поля, но не нажал «сохранить всё», изменения не попадут в расчёт.)");
+    if (!ok) return;
+    recalcAll();
+  });
+
+  document.addEventListener("click", (e) => {
+    const delTariffBtn = e.target && e.target.closest && e.target.closest('button[data-tariff-del="1"]');
+    if (delTariffBtn){
+      const card = delTariffBtn.closest(".tariff-card");
+      if (card) deleteTariff(card);
+      return;
+    }
+
+    const addRateBtn = e.target && e.target.closest && e.target.closest('button[data-rate-add="1"]');
+    if (addRateBtn){
+      const card = addRateBtn.closest(".tariff-card");
+      if (card) addRateRow(card);
+      return;
+    }
+
+    const delRateBtn = e.target && e.target.closest && e.target.closest('button[data-rate-del="1"]');
+    if (delRateBtn){
+      const tr = delRateBtn.closest("tr");
+      if (tr) tr.remove();
+      return;
+    }
+  });
+
+  document.addEventListener("DOMContentLoaded", () => {
+    migrateIfNeeded();
+    render();
+    if (!localStorage.getItem(KEY_LEGACY)) localStorage.setItem(KEY_LEGACY, JSON.stringify(DEFAULT_LEGACY));
+  });
+
+})();
+</script>
+
+<script>closeLayout();</script>
+</body>
+</html>

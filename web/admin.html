@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<!-- ============================================================
+🔒 CRITICAL — ADMIN PANEL | Date: 2026-01-27
+- Требует вход (Auth)
+- Доступ только для роли admin
+- Экспорт/импорт базы проекта (один JSON)
+============================================================ -->
+<html lang="ru">
+<head>
+    <meta charset="UTF-8" />
+    <script src="critical_guard.js" defer></script>
+    <title>Админка</title>
+    <link rel="stylesheet" href="style.css">
+
+    <script src="auth.js" defer></script>
+    <script src="layout.js"></script>
+
+    <style>
+        .panel {
+            border: 2px solid #000;
+            padding: 12px;
+            margin: 12px 0;
+            background: #fff;
+            max-width: 980px;
+        }
+        .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+        .row > * { margin: 2px 0; }
+        label { font-size: 13px; }
+        input[type="text"], input[type="password"], select {
+            height: 28px;
+            padding: 3px 6px;
+            border: 1px solid #000;
+            font-size: 13px;
+        }
+        button {
+            border: 1px solid #000;
+            background: #fff;
+            height: 28px;
+            padding: 0 10px;
+            cursor: pointer;
+            font-size: 13px;
+        }
+        button:hover { background: #f2f2f2; }
+        .hint { font-size: 12px; color: #333; }
+        .danger { color: #b00000; font-weight: bold; }
+        table { border-collapse: collapse; width: 100%; }
+        th, td { border: 1px solid #000; padding: 6px 6px; font-size: 13px; vertical-align: top; }
+        th { background: #efefef; }
+        .mono { font-family: Consolas, monospace; font-size: 12px; }
+        .badge { border: 1px solid #000; padding: 1px 6px; font-size: 12px; display:inline-block; }
+    </style>
+</head>
+<body>
+
+<script>renderLayout();</script>
+
+<h2>АДМИН-ПАНЕЛЬ</h2>
+
+<div id="adminGate" class="panel" style="display:none;"></div>
+
+<div id="adminBody" style="display:none;">
+
+    <div class="panel">
+        <h3 style="margin:0 0 8px;">Экспорт / импорт базы (одним JSON)</h3>
+        <div class="row">
+            <button id="btnExport">Скачать резервную копию</button>
+            <label>
+                <input id="importFile" type="file" accept="application/json" style="display:none;">
+                <button id="btnImport">Загрузить резервную копию</button>
+            </label>
+        </div>
+        <div class="hint" style="margin-top:6px;">
+            Экспорт/импорт работает офлайн. Формат — JSON слепок ключей проекта (localStorage).
+        </div>
+        <div id="backupStatus" class="hint" style="margin-top:6px;"></div>
+    </div>
+
+    <div class="panel">
+        <h3 style="margin:0 0 8px;">Пользователи</h3>
+        <div class="row">
+            <label>Email: <input id="newEmail" type="text" placeholder="user@example.com"></label>
+            <label>Имя: <input id="newName" type="text" placeholder="Иванов И.И."></label>
+            <label>Роль:
+                <select id="newRole">
+                    <option value="user">user</option>
+                    <option value="admin">admin</option>
+                </select>
+            </label>
+            <label>Пароль: <input id="newPass" type="password" placeholder="••••••••"></label>
+            <button id="btnCreateUser">Создать</button>
+        </div>
+        <div class="hint" style="margin-top:6px;">
+            Восстановление офлайн: recovery-коды + мастер-ключ администратора.
+        </div>
+
+        <div style="margin-top:10px; overflow:auto;">
+            <table>
+                <thead>
+                    <tr>
+                        <th>ID</th>
+                        <th>Email</th>
+                        <th>Имя</th>
+                        <th>Роль</th>
+                        <th>Статус</th>
+                        <th>Действия</th>
+                    </tr>
+                </thead>
+                <tbody id="usersTbody"></tbody>
+            </table>
+        </div>
+    </div>
+
+    <div class="panel">
+        <h3 style="margin:0 0 8px;">Мастер-ключ администратора (офлайн)</h3>
+        <div class="row">
+            <button id="btnRotateMaster">Сгенерировать новый мастер-ключ</button>
+        </div>
+        <div class="hint" style="margin-top:6px;">
+            Мастер-ключ показывается <b>один раз</b> после генерации. Сохрани его отдельно.
+        </div>
+        <div id="masterKeyBox" class="mono" style="margin-top:8px;"></div>
+    </div>
+
+</div>
+
+<script>
+(function(){
+    function $(id){ return document.getElementById(id); }
+    function esc(s){ return String(s||'').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+    function gate(msgHtml){
+        const box = $('adminGate');
+        box.style.display = '';
+        box.innerHTML = msgHtml;
+        $('adminBody').style.display = 'none';
+    }
+
+    function okToShow(){
+        $('adminGate').style.display = 'none';
+        $('adminBody').style.display = '';
+    }
+
+    async function refreshUsers(){
+        const tbody = $('usersTbody');
+        tbody.innerHTML = '';
+
+        const list = await Auth.adminListUsers();
+        list.forEach(u => {
+            const tr = document.createElement('tr');
+            tr.innerHTML = `
+                <td class="mono">${esc(u.id)}</td>
+                <td>${esc(u.email)}</td>
+                <td>${esc(u.displayName||'')}</td>
+                <td><span class="badge">${esc(u.role)}</span></td>
+                <td>${u.disabled ? '<span class="danger">заблокирован</span>' : 'активен'}</td>
+                <td>
+                    <button data-act="toggle" data-id="${esc(u.id)}">${u.disabled ? 'Разблок.' : 'Блок.'}</button>
+                    <button data-act="reset" data-id="${esc(u.id)}">Сброс пароля</button>
+                </td>
+            `;
+            tbody.appendChild(tr);
+        });
+
+        tbody.querySelectorAll('button[data-act]').forEach(b => {
+            b.addEventListener('click', async ()=>{
+                const act = b.getAttribute('data-act');
+                const id = b.getAttribute('data-id');
+
+                if(act === 'toggle'){
+                    const u = (await Auth.adminListUsers()).find(x => x.id === id);
+                    if(!u) return;
+                    await Auth.adminSetDisabled(id, !u.disabled);
+                    refreshUsers();
+                }
+
+                if(act === 'reset'){
+                    const p = prompt('Новый пароль (будет установлен сразу):');
+                    if(!p) return;
+                    await Auth.adminResetPassword(id, p);
+                    alert('Пароль обновлён.');
+                }
+            });
+        });
+    }
+
+    async function init(){
+        // auth guard
+        if (!Auth.authEnabled()){
+            gate('<b>Система пользователей ещё не настроена.</b><br>Открой <a href="login.html">login.html</a> и создай первого администратора.');
+            return;
+        }
+        if (!Auth.isLoggedIn()){
+            gate('<b>Требуется вход.</b><br>Открой <a href="login.html">login.html</a> и войди.');
+            return;
+        }
+        const u = await Auth.getSessionUser();
+        if (!u || u.role !== 'admin'){
+            gate('<b>Недостаточно прав.</b><br>Текущий пользователь не администратор.');
+            return;
+        }
+
+        okToShow();
+        await refreshUsers();
+
+        // export
+        $('btnExport').addEventListener('click', async ()=>{
+            const snap = Auth.exportProjectStorageSnapshot();
+            const json = JSON.stringify(snap, null, 2);
+            const blob = new Blob([json], {type:'application/json'});
+            const a = document.createElement('a');
+            const dt = new Date();
+            const fn = `papajkh_backup_${dt.getFullYear()}-${String(dt.getMonth()+1).padStart(2,'0')}-${String(dt.getDate()).padStart(2,'0')}.json`;
+            a.href = URL.createObjectURL(blob);
+            a.download = fn;
+            document.body.appendChild(a);
+            a.click();
+            setTimeout(()=>{ URL.revokeObjectURL(a.href); a.remove(); }, 0);
+            $('backupStatus').textContent = 'Экспорт выполнен: ' + fn;
+        });
+
+        // import
+        $('btnImport').addEventListener('click', ()=> $('importFile').click());
+        $('importFile').addEventListener('change', async ()=>{
+            const f = $('importFile').files && $('importFile').files[0];
+            if(!f) return;
+            const raw = await f.text();
+            try{
+                const obj = JSON.parse(raw);
+                const ok = confirm('Загрузить резервную копию? Текущая база проекта будет заменена.');
+                if(!ok) return;
+                Auth.importProjectStorageSnapshot(obj);
+                alert('Импорт завершён. Страница будет перезагружена.');
+                location.href = 'index.html';
+            }catch(e){
+                alert('Ошибка JSON: ' + (e && e.message ? e.message : e));
+            }
+        });
+
+        // create user
+        $('btnCreateUser').addEventListener('click', async ()=>{
+            const email = ($('newEmail').value||'').trim();
+            const name = ($('newName').value||'').trim();
+            const role = $('newRole').value;
+            const pass = ($('newPass').value||'').trim();
+            if(!email || !pass){
+                alert('Нужны email и пароль.');
+                return;
+            }
+            await Auth.adminCreateUser({ email, displayName: name, role, password: pass });
+            $('newEmail').value = '';
+            $('newName').value = '';
+            $('newPass').value = '';
+            await refreshUsers();
+            alert('Пользователь создан.');
+        });
+
+        // master key rotate
+        $('btnRotateMaster').addEventListener('click', async ()=>{
+            const ok = confirm('Сгенерировать новый мастер-ключ? Старый перестанет работать.');
+            if(!ok) return;
+            await Auth.adminRotateMasterKey();
+            const key = Auth.popMasterKeyOnce();
+            $('masterKeyBox').innerHTML = key ? ('Новый мастер-ключ: <b>' + esc(key) + '</b>') : '<span class="danger">Не удалось получить ключ.</span>';
+        });
+
+        // if key was generated ранее и ещё не показан
+        const maybe = Auth.popMasterKeyOnce();
+        if(maybe){
+            $('masterKeyBox').innerHTML = 'Мастер-ключ (показ 1 раз): <b>' + esc(maybe) + '</b>';
+        }
+    }
+
+    // ждём auth.js (defer)
+    (function wait(){
+        if(window.Auth && typeof Auth.getSessionUser === 'function') return init();
+        setTimeout(wait, 30);
+    })();
+})();
+</script>
+
+<script>closeLayout();</script>
+
+</body>
+</html>

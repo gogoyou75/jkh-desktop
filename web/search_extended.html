@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <script src="critical_guard.js" defer></script>
+    <title>Расширенный поиск</title>
+
+    <link rel="stylesheet" href="style.css">
+    <script src="data.js"></script>
+    <script src="layout.js"></script>
+
+    <style>
+        .search-container {
+            border: 2px solid black;
+            background: #f4f4f4;
+            padding: 20px;
+            width: 95%;
+            margin-top: 20px;
+        }
+
+        .search-row {
+            display: flex;
+            gap: 40px;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+
+        .search-block {
+            display: flex;
+            flex-direction: column;
+        }
+
+        .search-block label {
+            font-weight: bold;
+            margin-bottom: 5px;
+            font-size: 14px;
+        }
+
+        .search-block input[type="text"],
+        .search-block input[type="date"] {
+            border: 2px solid black;
+            padding: 5px;
+            width: 250px;
+            font-size: 14px;
+        }
+
+        .search-btn {
+            margin-top: 18px;
+            border: 2px solid black;
+            background: white;
+            font-size: 16px;
+            padding: 7px 25px;
+            cursor: pointer;
+        }
+
+        .search-btn:hover {
+            background: #f0f0f0;
+        }
+
+        #extendedResults {
+            border-collapse: collapse;
+            margin-top: 25px;
+            width: 95%;
+        }
+
+        #extendedResults th, #extendedResults td {
+            border: 2px solid black;
+            padding: 6px 8px;
+            font-size: 14px;
+        }
+
+        #extendedResults th {
+            background: #efefef;
+        }
+
+        #extendedResults tr:hover {
+            background: #f1f1f1;
+            cursor: pointer;
+        }
+
+        .no-results {
+            padding: 20px;
+            text-align: center;
+            font-style: italic;
+            color: #666;
+        }
+    </style>
+</head>
+
+<body>
+
+<script>renderLayout();</script>
+
+<h2>Расширенный поиск абонентов</h2>
+
+<div class="search-container">
+    <div class="search-row">
+        <div class="search-block">
+            <label>ПОИСК</label>
+            <input type="text" id="searchText" placeholder="ФИО, адрес или лицевой счёт">
+        </div>
+        <div class="search-block">
+            <label>за период:</label>
+            <div style="display:flex; gap:10px;">
+                <input type="date" id="dateFrom">
+                <input type="date" id="dateTo">
+            </div>
+            <div style="font-size: 12px; color: #666; margin-top: 5px;">
+                Оставьте пустым для поиска без фильтра по датам
+            </div>
+        </div>
+    </div>
+    <button class="search-btn" onclick="runSearch()">ПОИСК</button>
+</div>
+
+<h3 style="margin-top:30px;">Результаты поиска:</h3>
+
+<table id="extendedResults">
+    <thead>
+    <tr>
+        <th>Лицевой счёт</th>
+        <th>ФИО</th>
+        <th>Адрес</th>
+        <th>Дата оплаты</th>
+    </tr>
+    </thead>
+    <tbody></tbody>
+</table>
+
+<script>
+window.runSearch = function () {
+    const text = (document.getElementById("searchText").value || "").trim();
+    const from = document.getElementById("dateFrom").value;
+    const to = document.getElementById("dateTo").value;
+
+    const tbody = document.querySelector("#extendedResults tbody");
+    tbody.innerHTML = "";
+
+    // Получаем данные из localStorage
+    let allAbonents = {};
+
+    for (let i = 0; i < localStorage.length; i++) {
+        const key = localStorage.key(i);
+        if (key && key.startsWith('abonent_')) {
+            try {
+                const abonentData = JSON.parse(localStorage.getItem(key));
+                const abonentId = key.replace('abonent_', '');
+                allAbonents[abonentId] = abonentData;
+            } catch (e) {
+                console.error("Ошибка парсинга", key, e);
+            }
+        }
+    }
+
+    let foundCount = 0;
+
+    for (const id in allAbonents) {
+        const a = allAbonents[id];
+        
+        if (!a || typeof a !== 'object') continue;
+
+        const fio = a.fio || "";
+        const city = a.city || "";
+        const street = a.street || "";
+        const house = a.house || "";
+        const flat = a.flat || "";
+        
+        const adr = `${city} ${street} ${house} ${flat}`;
+
+        // Фильтр по тексту (регистронезависимый)
+        if (text) {
+            const textLower = text.toLowerCase();
+            const fioLower = fio.toLowerCase();
+            const adrLower = adr.toLowerCase();
+            const idLower = id.toLowerCase();
+            
+            const textMatch = fioLower.includes(textLower) || 
+                             adrLower.includes(textLower) || 
+                             idLower.includes(textLower);
+            
+            if (!textMatch) continue;
+        }
+
+        // Определяем последнюю оплату
+        let lastPayRaw = null;
+
+        if (Array.isArray(a.debts)) {
+            for (const d of a.debts) {
+                if (d.payDate && d.payDate.trim() !== "") {
+                    const parts = d.payDate.split(".");
+                    if (parts.length === 3) {
+                        const day = parts[0].padStart(2, '0');
+                        const month = parts[1].padStart(2, '0');
+                        const year = parts[2];
+                        const iso = `${year}-${month}-${day}`;
+                        if (!lastPayRaw || iso > lastPayRaw) {
+                            lastPayRaw = iso;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Фильтр по диапазону дат - ТОЛЬКО если обе даты заполнены
+        if (from && to) {
+            if (lastPayRaw) {
+                if (lastPayRaw < from || lastPayRaw > to) {
+                    continue;
+                }
+            }
+            // Если нет даты оплаты, но заданы обе даты фильтра - пропускаем
+        }
+
+        const lastPayOut = lastPayRaw ? 
+            lastPayRaw.split("-").reverse().join(".") : 
+            "-";
+
+        tbody.innerHTML += `
+            <tr onclick="location.href='abonent_card.html?abonent=${id}'">
+                <td>${id}</td>
+                <td>${a.fio || 'Не указано'}</td>
+                <td>${[a.city, a.street, a.house, a.flat].filter(Boolean).join(', ')}</td>
+                <td>${lastPayOut}</td>
+            </tr>
+        `;
+        
+        foundCount++;
+    }
+
+    if (foundCount === 0) {
+        tbody.innerHTML = `<tr><td colspan="4" class="no-results">Ничего не найдено</td></tr>`;
+    }
+};
+
+// Автопоиск при нажатии Enter
+document.addEventListener('DOMContentLoaded', function() {
+    document.getElementById('searchText').addEventListener('keypress', function(e) {
+        if (e.key === 'Enter') {
+            runSearch();
+        }
+    });
+    
+    // НЕ устанавливаем даты по умолчанию - оставляем пустыми
+    // document.getElementById('dateFrom').value = '';
+    // document.getElementById('dateTo').value = '';
+});
+</script>
+
+<script>closeLayout();</script>
+
+</body>
+</html>
