@@ -1,868 +1,607 @@
 /* ============================================================
-   auth.js — OFFLINE-FIRST вход/пользователи/админка (v1)
-   - Без ES-modules (должно работать file://)
-   - Без сервера / без email
-   - Первый запуск: регистрация первого пользователя (ADMIN)
-   - После создания пользователей: защита страниц (кроме login.html)
-   - Админка: admin.html (после входа)
+   auth.js — OFFLINE-FIRST (LEGACY / NO-ASYNC)
+   localStorage auth + admin api
 
-   ВАЖНО:
-   - Не ломаем существующую логику расчётов.
-   - Не трогаем calc_engine / payment_table / spravka_*.
-   - Работаем только через localStorage.
-
-   Профили пользователей:
-   - Мы храним «снимок базы проекта» для каждого пользователя.
-   - При входе переключаем активную базу на профиль пользователя.
-
-   (c) ПРОЕКТ ПАПАЖКХ
+   FIX (2026-02-01):
+   - Регистрация:
+       * если пользователей 0 -> первый становится ADMIN
+       * если пользователи уже есть -> регистрация создаёт USER
+       * НЕ БЛОКИРУЕМ регистрацию обычных пользователей
+       * Оставлена совместимость: Auth.registerFirstAdmin(...) теперь работает как "register"
+   - В шапке вместо имени всегда показываем EMAIL
+   - Ссылка "Резервные копии" ведёт:
+       admin -> admin.html#backupStatus
+       user  -> user_panel.html#statusBox
+   - admin.html не пустая: добавлены методы getSessionUser/adminListUsers/...
    ============================================================ */
 
 (function () {
   "use strict";
 
-  // ============================================================
-  // KEYS
-  // ============================================================
-  const AUTH_USERS_KEY = "auth_users_v1";
-  const AUTH_SESSION_KEY = "auth_session_v1";
-  const AUTH_MASTER_KEY_HASH = "auth_master_key_hash_v1";
-  const AUTH_PROFILE_PREFIX = "auth_profile_"; // + userId
-  const AUTH_SETTINGS_KEY = "auth_settings_v1";
-  const AUTH_LAST_EMAIL_KEY = "auth_last_email_v1";
+  // ------------------ utils ------------------
+  function nowMs() { return Date.now(); }
+  function safeJsonParse(s, fallback) { try { return JSON.parse(s); } catch (e) { return fallback; } }
+  function safeJsonStringify(v) { try { return JSON.stringify(v); } catch (e) { return ""; } }
 
-  // Проектные ключи (whitelist для backup/restore)
-  // (дублируем список из data.js — НЕ ТРОГАЯ data.js)
-  const PROJECT_KEY_PREFIXES = [
-    "payments_",
-    "note_",
-    "exclude_periods_",
-    "calc_period_",
-    "calc_period_active_",
-    "report_period_",
-    "payments_ui_collapsed_"
-  ];
-  const PROJECT_KEY_EXACT = [
-    "abonents_db_v1",
-    "abonent_notes_v1",
-    "exclude_periods_v1",
-    "tariffs_v1",
-    "refinancing_v1",
-    "import_preview_v1",
-    "draft_new_abonent_v1",
-    "payment_sources_v1",
-    "tariffs_content_repair_v1",
-    "tariffs_content_repair_v1_backup",
-    "refinancing_rates_normal_v1",
-    "refinancing_rates_moratorium_v1",
-    "jkh_excel_date_debug",
-    "last_abonent_id"
-  ];
-
-  // Пустая база (дублируем BASE_DB из data.js)
-  const EMPTY_DB = {
-    orgName: 'ТСЖ "Карла Маркса 50"',
-    orgInn: "4909093352",
-    chairman: "В.Б.Тремов",
-    premises: {},
-    links: [],
-    abonents: {}
-  };
-
-  // ============================================================
-  // UTILS
-  // ============================================================
-  function nowIso() {
-    try { return new Date().toISOString(); } catch { return ""; }
-  }
-
-  function safeJsonParse(raw, fallback) {
-    try {
-      if (!raw) return fallback;
-      const v = JSON.parse(raw);
-      return v === undefined ? fallback : v;
-    } catch {
-      return fallback;
-    }
-  }
-
-  function safeJsonStringify(obj) {
-    try { return JSON.stringify(obj); } catch { return ""; }
-  }
-
-  function uid() {
-    return "u_" + Math.random().toString(36).slice(2) + Date.now().toString(36);
-  }
-
-  function normalizeEmail(e) {
-    return String(e || "").trim().toLowerCase();
-  }
-
-  function getPath() {
-    try {
-      const p = (location.pathname || "").split("/");
-      return (p[p.length - 1] || "").toLowerCase();
-    } catch {
-      return "";
-    }
-  }
-
-  function isLoginPage() {
-    const p = getPath();
-    return p === "login.html";
-  }
-
-  function isAdminPage() {
-    const p = getPath();
-    return p === "admin.html";
-  }
-
-  function sleep(ms) {
-    return new Promise((r) => setTimeout(r, ms));
-  }
-
-  // ============================================================
-  // HASHING (лучше crypto.subtle, fallback — простой hash)
-  // ============================================================
-  function toHex(buffer) {
-    const bytes = new Uint8Array(buffer);
-    let out = "";
-    for (let i = 0; i < bytes.length; i++) {
-      out += bytes[i].toString(16).padStart(2, "0");
-    }
+  function randHex(len) {
+    var out = "";
+    var chars = "abcdef0123456789";
+    for (var i = 0; i < len; i++) out += chars.charAt(Math.floor(Math.random() * chars.length));
     return out;
   }
 
-  // FNV-1a 32-bit (fallback, не крипто)
-  function fnv1a32(str) {
-    let h = 0x811c9dc5;
-    for (let i = 0; i < str.length; i++) {
-      h ^= str.charCodeAt(i);
-      h = (h + ((h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24))) >>> 0;
+  function normalizeEmail(email) { return String(email || "").trim().toLowerCase(); }
+
+  // ------------------ storage keys ------------------
+  var K_USERS = "auth_users_v1";
+  var K_SESS  = "auth_session_v1";
+  var K_BOOT  = "auth_bootstrap_secrets_v1";
+
+  // мастер-ключ (хэш + одноразовый показ)
+  var K_MASTER_HASH    = "auth_master_key_hash_v1";
+  var K_MASTER_PENDING = "auth_master_key_pending_v1";
+
+  // ------------------ crypto-lite (офлайн-прототип) ------------------
+  function hashPass(pw) {
+    pw = String(pw || "");
+    var h = 2166136261;
+    for (var i = 0; i < pw.length; i++) {
+      h ^= pw.charCodeAt(i);
+      h = (h * 16777619) >>> 0;
     }
     return ("00000000" + h.toString(16)).slice(-8);
   }
 
-  async function sha256(str) {
-    str = String(str);
-    try {
-      if (window.crypto && window.crypto.subtle && window.TextEncoder) {
-        const data = new TextEncoder().encode(str);
-        const digest = await crypto.subtle.digest("SHA-256", data);
-        return toHex(digest);
-      }
-    } catch {
-      // ignore
-    }
-    // fallback
-    return "fnv1a:" + fnv1a32(str);
+  // ------------------ users db ------------------
+  function saveUsers(users) {
+    localStorage.setItem(K_USERS, safeJsonStringify(users || []));
   }
 
-  // ============================================================
-  // STORAGE: USERS / SESSION
-  // ============================================================
+  // Всегда возвращаем массив, если битое значение — лечим.
+  // + нормализуем поля role/disabled/displayName/id/email
   function loadUsers() {
-    return safeJsonParse(localStorage.getItem(AUTH_USERS_KEY), { users: [] });
+    var raw = localStorage.getItem(K_USERS);
+    var parsed = safeJsonParse(raw || "[]", []);
+
+    if (!Array.isArray(parsed)) {
+      parsed = [];
+      try { saveUsers(parsed); } catch (e) {}
+    }
+
+    var changed = false;
+    for (var i = 0; i < parsed.length; i++) {
+      var u = parsed[i] || {};
+      if (!u.id) { u.id = "u_" + randHex(12); changed = true; }
+      if (typeof u.email !== "string") { u.email = String(u.email || ""); changed = true; }
+      if (!u.role) { u.role = "user"; changed = true; }
+      if (typeof u.disabled !== "boolean") { u.disabled = false; changed = true; }
+      if (typeof u.displayName !== "string") { u.displayName = String(u.displayName || ""); changed = true; }
+      if (typeof u.createdAt !== "number") { u.createdAt = u.createdAt ? Number(u.createdAt) : 0; changed = true; }
+      // passHash обязателен, но не восстанавливаем (оставим как есть)
+      parsed[i] = u;
+    }
+
+    if (changed) {
+      try { saveUsers(parsed); } catch (e2) {}
+    }
+
+    return parsed;
   }
 
-  function saveUsers(db) {
-    localStorage.setItem(AUTH_USERS_KEY, safeJsonStringify(db));
+  function usersCount() {
+    var users = loadUsers();
+    return Array.isArray(users) ? users.length : 0;
   }
 
-  function getUsersList() {
-    const db = loadUsers();
-    return Array.isArray(db.users) ? db.users : [];
+  function getUserByEmail(email) {
+    email = normalizeEmail(email);
+    var users = loadUsers();
+    for (var i = 0; i < users.length; i++) {
+      if (normalizeEmail(users[i].email) === email) return users[i];
+    }
+    return null;
   }
 
-  function findUserByEmail(email) {
-    const e = normalizeEmail(email);
-    return getUsersList().find((u) => normalizeEmail(u.email) === e) || null;
-  }
-
-  function findUserById(id) {
-    return getUsersList().find((u) => u.id === id) || null;
+  function getUserById(id) {
+    var users = loadUsers();
+    for (var i = 0; i < users.length; i++) {
+      if (users[i].id === id) return users[i];
+    }
+    return null;
   }
 
   function isAuthEnabled() {
-    return getUsersList().length > 0;
+    return usersCount() > 0;
   }
 
-  // Backward-compat alias: часть страниц/версий используют Auth.authEnabled()
-  function authEnabled() {
-    return isAuthEnabled();
-  }
-
-  function setLastEmail(email) {
-    try {
-      const e = normalizeEmail(email);
-      if (e) localStorage.setItem(AUTH_LAST_EMAIL_KEY, e);
-    } catch {
-      // ignore
-    }
-  }
-
-  function getLastEmail() {
-    try {
-      return String(localStorage.getItem(AUTH_LAST_EMAIL_KEY) || "").trim();
-    } catch {
-      return "";
-    }
-  }
-
+  // ------------------ session ------------------
   function loadSession() {
-    const s = safeJsonParse(localStorage.getItem(AUTH_SESSION_KEY), null);
-    if (!s || !s.userId) return null;
-    // rememberUntil
-    if (s.rememberUntil) {
-      try {
-        if (Date.now() > Number(s.rememberUntil)) {
-          localStorage.removeItem(AUTH_SESSION_KEY);
-          return null;
-        }
-      } catch {
-        // ignore
-      }
-    }
-    return s;
+    return safeJsonParse(localStorage.getItem(K_SESS) || "null", null);
   }
-
-  function saveSession(session) {
-    localStorage.setItem(AUTH_SESSION_KEY, safeJsonStringify(session));
+  function saveSession(sess) {
+    localStorage.setItem(K_SESS, safeJsonStringify(sess));
   }
-
   function clearSession() {
-    localStorage.removeItem(AUTH_SESSION_KEY);
+    localStorage.removeItem(K_SESS);
+  }
+
+  function ensureSessionValid() {
+    var sess = loadSession();
+    if (!sess) return null;
+
+    if (sess.expiresAt && nowMs() > sess.expiresAt) {
+      clearSession();
+      return null;
+    }
+    return sess;
   }
 
   function getCurrentUser() {
-    const s = loadSession();
-    if (!s) return null;
-    const u = findUserById(s.userId);
-    if (!u || u.disabled) return null;
-    return u;
+    var sess = ensureSessionValid();
+    if (!sess || !sess.userId) return null;
+    return getUserById(sess.userId);
   }
 
-  // Совместимость: некоторые страницы ожидают isLoggedIn()
+  function startSession(user, rememberDays) {
+    rememberDays = Number(rememberDays || 0);
+    var ttlMs = rememberDays > 0 ? rememberDays * 24 * 3600 * 1000 : 0;
+    var sess = {
+      userId: user.id,
+      role: user.role,
+      createdAt: nowMs(),
+      expiresAt: ttlMs ? (nowMs() + ttlMs) : 0
+    };
+    saveSession(sess);
+    return sess;
+  }
+
   function isLoggedIn() {
     return !!getCurrentUser();
   }
 
-  // Совместимость с UI старых страниц
-  function getSessionUser() {
-    return getCurrentUser();
+  // ------------------ bootstrap admin ------------------
+  function generateBootstrapSecrets() {
+    return {
+      masterKey: "MK-" + randHex(24),
+      recoveryCodes: [
+        "RC-" + randHex(10),
+        "RC-" + randHex(10),
+        "RC-" + randHex(10),
+        "RC-" + randHex(10),
+        "RC-" + randHex(10)
+      ]
+    };
   }
 
-  // ============================================================
-  // MASTER KEY (для аварийного сброса)
-  // ============================================================
-  async function ensureMasterKeyHashExists() {
-    if (localStorage.getItem(AUTH_MASTER_KEY_HASH)) return;
-    const mk = generateMasterKey();
-    const h = await sha256(mk);
-    localStorage.setItem(AUTH_MASTER_KEY_HASH, h);
-    // показываем 1 раз при первом создании пользователей
-    localStorage.setItem("auth_master_key_once_v1", mk);
+  // Внутренний создатель пользователя
+  function createUserRecord(role, email, password, name) {
+    email = normalizeEmail(email);
+    if (!email) throw new Error("Email обязателен");
+
+    password = String(password || "");
+    if (password.length < 4) throw new Error("Пароль слишком короткий (мин. 4)");
+
+    if (getUserByEmail(email)) throw new Error("Пользователь с таким email уже существует");
+
+    return {
+      id: "u_" + randHex(12),
+      email: email,
+      passHash: hashPass(password),
+      role: role,
+      displayName: String(name || ""),
+      createdAt: nowMs(),
+      pinHash: "",
+      disabled: false
+    };
   }
 
-  function generateMasterKey() {
-    // человеческий формат: 4 блока по 4 символа
-    const abc = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-    function block() {
-      let b = "";
-      for (let i = 0; i < 4; i++) b += abc[Math.floor(Math.random() * abc.length)];
-      return b;
+  // ✅ Совместимость со старым UI:
+  // РАНЬШЕ: registerFirstAdmin блокировал регистрацию, если usersCount()>0.
+  // ТЕПЕРЬ: это "register" — первый становится admin, остальные user.
+  function registerFirstAdmin(email, password, name) {
+    var count = usersCount();
+
+    // 1) если это самый первый пользователь -> admin + bootstrap secrets
+    if (count === 0) {
+      var secrets = generateBootstrapSecrets();
+
+      var adminUser = createUserRecord("admin", email, password, name);
+
+      saveUsers([adminUser]);
+
+      // секреты первого запуска (если где-то выводятся)
+      try { localStorage.setItem(K_BOOT, safeJsonStringify(secrets)); } catch (e) {}
+
+      // мастер-ключ: хэш + одноразовый показ (pending)
+      try {
+        localStorage.setItem(K_MASTER_HASH, hashPass(secrets.masterKey));
+        localStorage.setItem(K_MASTER_PENDING, secrets.masterKey);
+      } catch (e2) {}
+
+      return { user: adminUser, secrets: secrets };
     }
-    return [block(), block(), block(), block()].join("-");
+
+    // 2) иначе — обычная регистрация USER (НЕ блокируем)
+    var users = loadUsers();
+    var user = createUserRecord("user", email, password, name);
+    users.push(user);
+    saveUsers(users);
+    return { user: user, secrets: null };
   }
 
-  async function verifyMasterKey(masterKey) {
-    const stored = localStorage.getItem(AUTH_MASTER_KEY_HASH);
-    if (!stored) return false;
-    const h = await sha256(String(masterKey || "").trim());
-    return h === stored;
-  }
-
-  function popMasterKeyOnce() {
-    const mk = localStorage.getItem("auth_master_key_once_v1");
-    if (mk) localStorage.removeItem("auth_master_key_once_v1");
-    return mk || "";
+  // Новое имя (если захочешь в будущем перевести login.html на него)
+  function registerUser(email, password, name) {
+    if (usersCount() === 0) {
+      // если случайно вызывают регистрацию юзера на пустой базе — всё равно создаём admin по правилам
+      return registerFirstAdmin(email, password, name);
+    }
+    var users = loadUsers();
+    var user = createUserRecord("user", email, password, name);
+    users.push(user);
+    saveUsers(users);
+    return { user: user, secrets: null };
   }
 
   function readBootstrapSecretsOnce() {
-    // возвращает {masterKey, recoveryCodes} и очищает
-    const raw = localStorage.getItem("auth_bootstrap_secrets_v1");
+    var raw = localStorage.getItem(K_BOOT);
     if (!raw) return null;
-    try { localStorage.removeItem("auth_bootstrap_secrets_v1"); } catch {}
+    try { localStorage.removeItem(K_BOOT); } catch (e) {}
     return safeJsonParse(raw, null);
   }
 
+  // ------------------ UI topbar authBox ------------------
+  function renderAuthStatus() {
+    var authBox = document.getElementById("authBox");
+    if (!authBox) return;
 
-  // ============================================================
-  // PROJECT BACKUP / RESTORE
-  // ============================================================
-  function shouldIncludeProjectKey(k) {
-    if (PROJECT_KEY_EXACT.includes(k)) return true;
-    return PROJECT_KEY_PREFIXES.some((p) => k.startsWith(p));
-  }
+    var u = getCurrentUser();
 
-  function exportProjectStorageSnapshot() {
-    const storage = {};
-    Object.keys(localStorage).forEach((k) => {
-      if (!shouldIncludeProjectKey(k)) return;
-      storage[k] = localStorage.getItem(k);
-    });
-    return {
-      app: "PAPAJKH",
-      schema_version: "1.5.3",
-      exported_at: nowIso(),
-      storage
-    };
-  }
+    if (u) {
+      // ✅ всегда показываем EMAIL
+      var emailLabel = (u.email || "");
 
-  function removeProjectKeys() {
-    PROJECT_KEY_EXACT.forEach((k) => localStorage.removeItem(k));
-    Object.keys(localStorage).forEach((k) => {
-      if (PROJECT_KEY_PREFIXES.some((p) => k.startsWith(p))) localStorage.removeItem(k);
-    });
-    try { sessionStorage.clear(); } catch { /* ignore */ }
-  }
-
-  function importProjectStorageSnapshot(backupObj) {
-    if (!backupObj || backupObj.app !== "PAPAJKH" || typeof backupObj.storage !== "object") {
-      throw new Error("Неверный формат бэкапа");
-    }
-
-    // очистим текущие проектные ключи
-    removeProjectKeys();
-
-    // запишем строго whitelist-ключи
-    Object.keys(backupObj.storage).forEach((k) => {
-      if (!shouldIncludeProjectKey(k)) return;
-      const v = backupObj.storage[k];
-      if (v === null || v === undefined) return;
-      localStorage.setItem(k, String(v));
-    });
-
-    // гарантируем, что база существует
-    if (!localStorage.getItem("abonents_db_v1")) {
-      localStorage.setItem("abonents_db_v1", safeJsonStringify(EMPTY_DB));
-    }
-  }
-
-  // ============================================================
-  // USER BACKUP (для user_panel.html)
-  // ============================================================
-  function exportUserBackup() {
-    const u = getCurrentUser();
-    if (!u) throw new Error("Нужен вход");
-    const snap = exportProjectStorageSnapshot();
-    return {
-      type: "PAPAJKH_USER_BACKUP",
-      exported_at: snap.exported_at,
-      schema_version: snap.schema_version,
-      owner: { id: u.id, email: u.email, role: u.role },
-      snapshot: snap
-    };
-  }
-
-  function importUserBackup(obj) {
-    const u = getCurrentUser();
-    if (!u) throw new Error("Нужен вход");
-    if (!obj || obj.type !== "PAPAJKH_USER_BACKUP" || !obj.snapshot) {
-      throw new Error("Неверный формат бэкапа");
-    }
-    // CRITICAL: обычный пользователь не может импортировать чужой бэкап
-    if (u.role !== "admin" && obj.owner && obj.owner.id && obj.owner.id !== u.id) {
-      throw new Error("Этот бэкап принадлежит другому пользователю");
-    }
-    importProjectStorageSnapshot(obj.snapshot);
-    // сразу фиксируем профиль в хранилище (не ждём logout)
-    try { saveProfileSnapshotForUser(u.id); } catch { /* ignore */ }
-  }
-
-  function saveCurrentProfileNow() {
-    const u = getCurrentUser();
-    if (!u) throw new Error("Нужен вход");
-    try { saveProfileSnapshotForUser(u.id); } catch { /* ignore */ }
-    return true;
-  }
-
-  // ============================================================
-  // USER PROFILES (снимок проектной базы на пользователя)
-  // ============================================================
-  function getProfileKey(userId) {
-    return AUTH_PROFILE_PREFIX + userId;
-  }
-
-  function saveProfileSnapshotForUser(userId) {
-    const snap = exportProjectStorageSnapshot();
-    localStorage.setItem(getProfileKey(userId), safeJsonStringify(snap));
-  }
-
-  function hasProfileSnapshot(userId) {
-    return !!localStorage.getItem(getProfileKey(userId));
-  }
-
-  function loadProfileSnapshot(userId) {
-    return safeJsonParse(localStorage.getItem(getProfileKey(userId)), null);
-  }
-
-  function initEmptyProjectStorage() {
-    removeProjectKeys();
-    localStorage.setItem("abonents_db_v1", safeJsonStringify(EMPTY_DB));
-    // минимальные справочники можно добавить позже, сейчас не трогаем
-  }
-
-  // ============================================================
-  // AUTH FLOWS
-  // ============================================================
-  async function createUser({ email, password, role, displayName }) {
-    const e = normalizeEmail(email);
-    if (!e) throw new Error("Введите email");
-    if (!password || String(password).length < 6) throw new Error("Пароль минимум 6 символов");
-
-    const usersDb = loadUsers();
-    usersDb.users = Array.isArray(usersDb.users) ? usersDb.users : [];
-
-    if (usersDb.users.some((u) => normalizeEmail(u.email) === e)) {
-      throw new Error("Пользователь с таким email уже существует");
-    }
-
-    await ensureMasterKeyHashExists();
-
-    const passHash = await sha256(password);
-
-    const user = {
-      id: uid(),
-      email: e,
-      role: role || "user",
-      displayName: String(displayName || "").trim(),
-      passHash,
-      pinHash: "",
-      recovery: [],
-      disabled: false,
-      createdAt: nowIso()
-    };
-
-    usersDb.users.push(user);
-    saveUsers(usersDb);
-
-    return user;
-  }
-
-  // ============================================================
-  // FIRST ADMIN (bootstrap)
-  // ============================================================
-  async function registerFirstAdmin(email, password, name) {
-    if (isAuthEnabled()) {
-      throw new Error("Регистрация первого администратора уже выполнена");
-    }
-    const user = await createUser({ email, password, role: "admin", displayName: name || "" });
-
-    // Первому админу сразу выдаём мастер-ключ и recovery-коды (показываем один раз)
-    const recoveryCodes = await generateRecoveryCodes(user.id);
-    const masterKey = popMasterKeyOnce();
-
-    return {
-      user,
-      secrets: {
-        masterKey: masterKey || "",
-        recoveryCodes: Array.isArray(recoveryCodes) ? recoveryCodes : []
-      }
-    };
-  }
-
-  async function setUserPin(userId, pin) {
-    pin = String(pin || "").trim();
-    if (!/^\d{4,8}$/.test(pin)) throw new Error("PIN должен быть 4–8 цифр");
-
-    const usersDb = loadUsers();
-    const u = (usersDb.users || []).find((x) => x.id === userId);
-    if (!u) throw new Error("Пользователь не найден");
-
-    u.pinHash = await sha256("PIN:" + pin);
-    saveUsers(usersDb);
-  }
-
-  async function generateRecoveryCodes(userId) {
-    const usersDb = loadUsers();
-    const u = (usersDb.users || []).find((x) => x.id === userId);
-    if (!u) throw new Error("Пользователь не найден");
-
-    const codes = [];
-    const abc = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-    for (let i = 0; i < 10; i++) {
-      let c = "";
-      for (let j = 0; j < 10; j++) c += abc[Math.floor(Math.random() * abc.length)];
-      codes.push(c);
-    }
-
-    u.recovery = [];
-    for (const c of codes) u.recovery.push(await sha256("RC:" + c));
-    saveUsers(usersDb);
-
-    return codes;
-  }
-
-  async function loginByPassword(email, password, rememberDays) {
-    // ✅ BOOTSTRAP: если пользователей ещё нет — первый вход создаёт ADMIN и сразу логинит.
-    if (!isAuthEnabled()) {
-      const created = await registerFirstAdmin(email, password, "");
-      // сохраняем секреты (мастер-ключ и recovery-коды) в localStorage для разового просмотра
-      try { localStorage.setItem("auth_bootstrap_secrets_v1", safeJsonStringify(created.secrets || {})); } catch {}
-      // UX: запоминаем последний email
-      setLastEmail(email);
-      await startSession(created.user, rememberDays);
-      return created.user;
-    }
-
-
-    const u = findUserByEmail(email);
-    if (!u) throw new Error("Пользователь не найден");
-    if (u.disabled) throw new Error("Пользователь заблокирован");
-
-    const h = await sha256(password);
-    if (h !== u.passHash) throw new Error("Неверный пароль");
-
-    // UX: запоминаем последний email (для автоподстановки на login.html)
-    setLastEmail(email);
-
-    await startSession(u, rememberDays);
-    return u;
-  }
-
-  async function loginByPin(email, pin, rememberDays) {
-    const u = findUserByEmail(email);
-    if (!u) throw new Error("Пользователь не найден");
-    if (u.disabled) throw new Error("Пользователь заблокирован");
-    if (!u.pinHash) throw new Error("PIN не настроен");
-
-    const h = await sha256("PIN:" + String(pin || "").trim());
-    if (h !== u.pinHash) throw new Error("Неверный PIN");
-
-    // UX: запоминаем последний email
-    setLastEmail(email);
-
-    await startSession(u, rememberDays);
-    return u;
-  }
-
-  // Alias for UI: Auth.signIn(email, password, rememberDays)
-  async function signIn(email, password, rememberDays) {
-    return loginByPassword(email, password, rememberDays);
-  }
-
-  async function consumeRecoveryCode(email, code) {
-    const u = findUserByEmail(email);
-    if (!u) throw new Error("Пользователь не найден");
-    if (u.disabled) throw new Error("Пользователь заблокирован");
-
-    const codeHash = await sha256("RC:" + String(code || "").trim().toUpperCase());
-
-    const usersDb = loadUsers();
-    const uu = (usersDb.users || []).find((x) => x.id === u.id);
-    if (!uu) throw new Error("Пользователь не найден");
-
-    const idx = (uu.recovery || []).indexOf(codeHash);
-    if (idx < 0) throw new Error("Неверный recovery-код");
-
-    // одноразовый код — удаляем
-    uu.recovery.splice(idx, 1);
-    saveUsers(usersDb);
-
-    return uu;
-  }
-
-  async function resetPasswordDirect(email, newPassword) {
-    if (!newPassword || String(newPassword).length < 6) throw new Error("Пароль минимум 6 символов");
-
-    const usersDb = loadUsers();
-    const u = (usersDb.users || []).find((x) => normalizeEmail(x.email) === normalizeEmail(email));
-    if (!u) throw new Error("Пользователь не найден");
-
-    u.passHash = await sha256(newPassword);
-    // при сбросе пароля сбрасываем pin (чтобы не осталось старого быстрого доступа)
-    u.pinHash = "";
-
-    saveUsers(usersDb);
-
-    // после смены пароля лучше разлогинить активную сессию
-    const s = loadSession();
-    if (s && s.userId === u.id) clearSession();
-
-    return true;
-  }
-
-  // Совместимость с UI: resetPassword(email, newPassword, {type:'recovery', code} | {type:'master', key})
-  async function resetPassword(email, newPassword, proof) {
-    if (proof && typeof proof === 'object' && proof.type) {
-      if (proof.type === 'recovery') {
-        await consumeRecoveryCode(email, proof.code);
-        return resetPasswordDirect(email, newPassword);
-      }
-      if (proof.type === 'master') {
-        const ok = await verifyMasterKey(proof.key);
-        if (!ok) throw new Error('Неверный мастер-ключ');
-        return resetPasswordDirect(email, newPassword);
-      }
-      throw new Error('Неизвестный способ восстановления');
-    }
-    // старый вызов: resetPassword(email, newPassword)
-    return resetPasswordDirect(email, newPassword);
-  }
-
-  async function startSession(user, rememberDays) {
-    // Перед переключением базы — сохраняем профиль предыдущей сессии
-    const prev = loadSession();
-    if (prev && prev.userId && prev.userId !== user.id) {
-      try { saveProfileSnapshotForUser(prev.userId); } catch { /* ignore */ }
-    }
-
-    // Переключение базы на профиль пользователя
-    if (hasProfileSnapshot(user.id)) {
-      const snap = loadProfileSnapshot(user.id);
-      if (snap) {
-        try { importProjectStorageSnapshot(snap); } catch { /* ignore */ }
-      }
-    } else {
-      // Если профиля нет:
-      // - Если это самый первый пользователь (bootstrap) — НЕ трогаем текущую базу, а сохраняем её как его профиль
-      // - Иначе — стартуем с пустой базы
-      const usersCount = getUsersList().length;
-      if (usersCount === 1 && user.role === "admin") {
-        try { saveProfileSnapshotForUser(user.id); } catch { /* ignore */ }
+      // ✅ ссылки по роли
+      var links = "";
+      if (u.role === "admin") {
+        links =
+          '<a href="admin.html" style="color:blue;text-decoration:underline;font-size:12px;">админка</a>' +
+          '<span style="margin:0 6px;">|</span>' +
+          '<a href="user_panel.html#statusBox" style="color:blue;text-decoration:underline;font-size:12px;">резервные копии</a>' +
+          '<span style="margin:0 6px;">|</span>';
       } else {
-        initEmptyProjectStorage();
-        try { saveProfileSnapshotForUser(user.id); } catch { /* ignore */ }
+        links =
+          '<a href="user_panel.html#statusBox" style="color:blue;text-decoration:underline;font-size:12px;">резервные копии</a>' +
+          '<span style="margin:0 6px;">|</span>';
       }
-    }
 
-    const sess = {
-      userId: user.id,
-      createdAt: nowIso(),
-      token: uid()
-    };
-    const days = Number(rememberDays || 0);
-    if (days > 0) {
-      sess.rememberUntil = String(Date.now() + days * 24 * 60 * 60 * 1000);
+      authBox.innerHTML = [
+        '<div style="display:flex; align-items:center; gap:8px;">',
+          links,
+          '<span style="font-size:12px;">' + emailLabel + '</span>',
+          '<button onclick="Auth.logoutAndRedirect()" style="font-size:12px; padding:2px 8px; border:1px solid black; background:white; cursor:pointer;">выйти</button>',
+        '</div>'
+      ].join("");
+    } else {
+      authBox.innerHTML = [
+        '<a href="login.html" style="color:blue; text-decoration:underline; margin-right:10px;">регистрация</a>',
+        '<a href="login.html" style="color:blue; text-decoration:underline;">вход</a>'
+      ].join("");
     }
-    saveSession(sess);
-
-    // чтобы текущая вкладка увидела новую базу
-    try { location.reload(); } catch { /* ignore */ }
   }
 
   function logout() {
-    const u = getCurrentUser();
-    if (u) {
-      try { saveProfileSnapshotForUser(u.id); } catch { /* ignore */ }
-    }
     clearSession();
-    try { location.href = "login.html"; } catch { /* ignore */ }
+    renderAuthStatus();
   }
 
-  // ============================================================
-  // GUARD / UI
-  // ============================================================
-  function renderAuthBox() {
-    const box = document.getElementById("authBox") || document.querySelector(".login-box");
-    if (!box) return;
-
-    const enabled = isAuthEnabled();
-    const user = getCurrentUser();
-
-    if (!enabled) {
-      box.innerHTML = `<a href="login.html" style="text-decoration:none;">настроить вход</a>`;
-      return;
+  function logoutAndRedirect() {
+    logout();
+    renderAuthStatus();
+    var p = window.location.pathname || "";
+    if (p.indexOf("admin.html") !== -1) {
+      window.location.href = "index.html";
     }
+  }
 
+  // Защита страниц
+  function protectPages() {
+    var path = window.location.pathname || "";
+    var protectedNames = ["admin.html", "import_xls.html", "tariffs.html", "requisites.html"];
+
+    var isProtected = false;
+    for (var i = 0; i < protectedNames.length; i++) {
+      if (path.indexOf(protectedNames[i]) !== -1) { isProtected = true; break; }
+    }
+    if (!isProtected) return;
+
+    var user = getCurrentUser();
     if (!user) {
-      box.innerHTML = `<a href="login.html" style="text-decoration:none;">войти</a>`;
+      window.location.href = "login.html?redirect=" + encodeURIComponent(window.location.pathname);
       return;
     }
 
-    const safeEmail = String(user.email || "");
-    const isAdmin = user.role === "admin";
-
-    box.innerHTML = `
-      <span style="white-space:nowrap;">${safeEmail}</span>
-      <span style="margin:0 6px;">|</span>
-      <a href="user_panel.html" style="text-decoration:none;">резервные копии</a>
-      <span style="margin:0 6px;">|</span>
-      ${isAdmin ? `<a href="admin.html" style="text-decoration:none;">админка</a><span style="margin:0 6px;">|</span>` : ``}
-      <a href="#" id="authLogoutLink" style="text-decoration:none;">выход</a>
-    `;
-    
-    const link = document.getElementById("authLogoutLink");
-    if (link) {
-      link.addEventListener("click", (e) => {
-        e.preventDefault();
-        logout();
-      });
+    if (path.indexOf("admin.html") !== -1 && user.role !== "admin") {
+      alert("Недостаточно прав для доступа к этой странице");
+      window.location.href = "index.html";
     }
   }
 
-  function guardPages() {
-    if (!isAuthEnabled()) return; // до настройки — не блокируем
-    if (isLoginPage()) return;
-
-    const u = getCurrentUser();
-    if (!u) {
-      try { location.href = "login.html"; } catch { /* ignore */ }
-      return;
+  // ------------------ login ------------------
+  function loginByPassword(email, password, rememberDays) {
+    // BOOTSTRAP: пустая база -> создаём admin автоматически
+    if (usersCount() === 0) {
+      var created = registerFirstAdmin(email, password, "");
+      startSession(created.user, rememberDays);
+      renderAuthStatus();
+      protectPages();
+      return created.user;
     }
 
-    if (isAdminPage() && u.role !== "admin") {
-      alert("Доступ запрещён: нужна роль ADMIN");
-      try { location.href = "index.html"; } catch { /* ignore */ }
-    }
+    email = normalizeEmail(email);
+    password = String(password || "");
+
+    var user = getUserByEmail(email);
+    if (!user) throw new Error("Пользователь не найден");
+    if (user.disabled) throw new Error("Пользователь заблокирован");
+    if (user.passHash !== hashPass(password)) throw new Error("Неверный пароль");
+
+    startSession(user, rememberDays);
+    renderAuthStatus();
+    protectPages();
+    return user;
   }
 
-  // ============================================================
-  // ADMIN API (для admin.html)
-  // ============================================================
-  // Совместимость: admin.html может передавать объект {email, password, role, displayName}
-  async function adminCreateUser(email, password, role) {
-    const me = getCurrentUser();
-    if (!me || me.role !== "admin") throw new Error("Требуется ADMIN");
+  function requireRole(role) {
+    ensureSessionValid();
+    var u = getCurrentUser();
+    if (!u) throw new Error("Не выполнен вход");
+    if (role && u.role !== role) throw new Error("Недостаточно прав");
+    return u;
+  }
 
-    let payload;
-    if (email && typeof email === 'object') {
-      payload = {
-        email: email.email,
-        password: email.password,
-        role: email.role,
-        displayName: email.displayName
-      };
-    } else {
-      payload = { email, password, role: role || 'user', displayName: '' };
-    }
+  function init() {
+    loadUsers(); // нормализация
+    ensureSessionValid();
+    renderAuthStatus();
+    protectPages();
 
-    const u = await createUser(payload);
-    // для нового пользователя создадим пустой профиль
-    if (!hasProfileSnapshot(u.id)) {
-      initEmptyProjectStorage();
-      saveProfileSnapshotForUser(u.id);
-      // вернём базу обратно админу
-      if (hasProfileSnapshot(me.id)) {
-        const snap = loadProfileSnapshot(me.id);
-        if (snap) importProjectStorageSnapshot(snap);
-      }
-    }
+    setInterval(function () {
+      ensureSessionValid();
+      renderAuthStatus();
+    }, 10000);
+  }
+
+  // ------------------ ADMIN API (для admin.html) ------------------
+  function adminRequire() {
+    var u = getCurrentUser();
+    if (!u) throw new Error("Требуется вход");
+    if (u.role !== "admin") throw new Error("Недостаточно прав");
     return u;
   }
 
   function adminListUsers() {
-    const me = getCurrentUser();
-    if (!me || me.role !== "admin") throw new Error("Требуется ADMIN");
-    return getUsersList().map((u) => ({
-      id: u.id,
-      email: u.email,
-      displayName: u.displayName || "",
-      role: u.role,
-      disabled: !!u.disabled,
-      createdAt: u.createdAt || ""
-    }));
+    adminRequire();
+    var users = loadUsers();
+    var out = [];
+    for (var i = 0; i < users.length; i++) {
+      out.push({
+        id: users[i].id,
+        email: users[i].email,
+        displayName: users[i].displayName || "",
+        role: users[i].role || "user",
+        disabled: !!users[i].disabled,
+        createdAt: users[i].createdAt || 0
+      });
+    }
+    return out;
   }
 
-  function adminSetDisabled(userId, disabled) {
-    const me = getCurrentUser();
-    if (!me || me.role !== "admin") throw new Error("Требуется ADMIN");
+  function adminCreateUser(payload) {
+    adminRequire();
 
-    const usersDb = loadUsers();
-    const u = (usersDb.users || []).find((x) => x.id === userId);
-    if (!u) throw new Error("Пользователь не найден");
-    if (u.id === me.id) throw new Error("Нельзя блокировать самого себя");
+    payload = payload || {};
+    var email = normalizeEmail(payload.email);
+    var password = String(payload.password || "");
+    var displayName = String(payload.displayName || "");
+    var role = (payload.role === "admin") ? "admin" : "user";
 
-    u.disabled = !!disabled;
-    saveUsers(usersDb);
-  }
+    if (!email) throw new Error("Email обязателен");
+    if (password.length < 4) throw new Error("Пароль слишком короткий (мин. 4)");
+    if (getUserByEmail(email)) throw new Error("Пользователь с таким email уже существует");
 
-  async function adminResetPassword(userId, newPassword) {
-    const me = getCurrentUser();
-    if (!me || me.role !== "admin") throw new Error("Требуется ADMIN");
-
-    const usersDb = loadUsers();
-    const u = (usersDb.users || []).find((x) => x.id === userId);
-    if (!u) throw new Error("Пользователь не найден");
-
-    if (!newPassword || String(newPassword).length < 6) throw new Error("Пароль минимум 6 символов");
-    u.passHash = await sha256(newPassword);
-    u.pinHash = "";
-    saveUsers(usersDb);
-
+    var users = loadUsers();
+    users.push({
+      id: "u_" + randHex(12),
+      email: email,
+      passHash: hashPass(password),
+      role: role,
+      displayName: displayName,
+      createdAt: nowMs(),
+      pinHash: "",
+      disabled: false
+    });
+    saveUsers(users);
     return true;
   }
 
-  async function adminRotateMasterKey() {
-    const me = getCurrentUser();
-    if (!me || me.role !== "admin") throw new Error("Требуется ADMIN");
+  function adminSetDisabled(userId, disabled) {
+    adminRequire();
+    var users = loadUsers();
+    var found = false;
 
-    const mk = generateMasterKey();
-    const h = await sha256(mk);
-    localStorage.setItem(AUTH_MASTER_KEY_HASH, h);
-    localStorage.setItem("auth_master_key_once_v1", mk);
-    return mk;
-  }
-
-  // ============================================================
-  // INIT
-  // ============================================================
-  async function init() {
-    try {
-      // 1) Guard pages
-      guardPages();
-      // 2) Render auth box
-      renderAuthBox();
-    } catch {
-      // ignore
+    for (var i = 0; i < users.length; i++) {
+      if (users[i].id === userId) {
+        users[i].disabled = !!disabled;
+        found = true;
+        break;
+      }
     }
+    if (!found) throw new Error("Пользователь не найден");
+
+    saveUsers(users);
+
+    var cur = getCurrentUser();
+    if (cur && cur.id === userId && !!disabled) {
+      clearSession();
+    }
+    return true;
   }
 
-  // ============================================================
-  // PUBLIC API
-  // ============================================================
+  function adminResetPassword(userId, newPass) {
+    adminRequire();
+    newPass = String(newPass || "");
+    if (newPass.length < 4) throw new Error("Пароль слишком короткий (мин. 4)");
+
+    var users = loadUsers();
+    var found = false;
+
+    for (var i = 0; i < users.length; i++) {
+      if (users[i].id === userId) {
+        users[i].passHash = hashPass(newPass);
+        found = true;
+        break;
+      }
+    }
+    if (!found) throw new Error("Пользователь не найден");
+
+    saveUsers(users);
+    return true;
+  }
+
+  function adminRotateMasterKey() {
+    adminRequire();
+    var key = "MK-" + randHex(24);
+    try {
+      localStorage.setItem(K_MASTER_HASH, hashPass(key));
+      localStorage.setItem(K_MASTER_PENDING, key);
+    } catch (e) {}
+    return true;
+  }
+
+  function popMasterKeyOnce() {
+    var key = localStorage.getItem(K_MASTER_PENDING) || "";
+    if (key) {
+      try { localStorage.removeItem(K_MASTER_PENDING); } catch (e) {}
+      return key;
+    }
+    return "";
+  }
+
+  function adminDeleteUser(userId){
+    adminRequire();
+
+    var me = getCurrentUser();
+    if (me && me.id === userId){
+      throw new Error("Нельзя удалить самого себя");
+    }
+
+    var users = loadUsers();
+    var admins = users.filter(function(u){ return u.role === "admin" && !u.disabled; });
+    if (admins.length <= 1){
+      throw new Error("Нельзя удалить последнего администратора");
+    }
+
+    var idx = -1;
+    for (var i = 0; i < users.length; i++){
+      if (users[i].id === userId){ idx = i; break; }
+    }
+    if (idx === -1) throw new Error("Пользователь не найден");
+
+    users.splice(idx, 1);
+    saveUsers(users);
+    return true;
+  }
+
+  // ------------------ backup snapshot (localStorage) ------------------
+  function exportProjectStorageSnapshot() {
+    adminRequire();
+
+    var snap = {
+      _meta: {
+        format: "papajkh_localstorage_snapshot_v1",
+        createdAt: nowMs()
+      },
+      keys: {}
+    };
+
+    for (var i = 0; i < localStorage.length; i++) {
+      var k = localStorage.key(i);
+      if (k === K_BOOT) continue;
+      if (k === K_MASTER_PENDING) continue;
+      snap.keys[k] = localStorage.getItem(k);
+    }
+    return snap;
+  }
+
+  function importProjectStorageSnapshot(obj) {
+    adminRequire();
+    if (!obj || !obj.keys || typeof obj.keys !== "object") {
+      throw new Error("Неверный формат резервной копии");
+    }
+
+    localStorage.clear();
+    var keys = obj.keys;
+    for (var k in keys) {
+      if (Object.prototype.hasOwnProperty.call(keys, k)) {
+        localStorage.setItem(k, keys[k]);
+      }
+    }
+    return true;
+  }
+
+  // ------------------ Promise wrappers ------------------
+  function pwrap(fn) {
+    return function () {
+      var args = arguments;
+      return Promise.resolve().then(function(){ return fn.apply(null, args); });
+    };
+  }
+
+  // ------------------ exports ------------------
   window.Auth = {
     // base
-    init,
-    isAuthEnabled,
-    authEnabled,
-    isLoggedIn,
-    getSessionUser,
-    getCurrentUser,
-    logout,
+    isAuthEnabled: isAuthEnabled,
+    authEnabled: isAuthEnabled,
+    isLoggedIn: isLoggedIn,
 
-    // UX helpers
-    getLastEmail,
-    setLastEmail,
+    getCurrentUser: getCurrentUser,
+    getSessionUser: pwrap(function(){ return getCurrentUser(); }), // admin.html ждёт это
 
-    // login/register
-    loginByPassword,
-    loginByPin,
-    signIn,
-    createUser,
-    registerFirstAdmin,
-    setUserPin,
-    generateRecoveryCodes,
-    consumeRecoveryCode,
-    resetPassword,
-    verifyMasterKey,
-    popMasterKeyOnce,
-    readBootstrapSecretsOnce,
+    ensureSessionValid: ensureSessionValid,
+    logout: logout,
+    logoutAndRedirect: logoutAndRedirect,
+    requireRole: requireRole,
+    readBootstrapSecretsOnce: readBootstrapSecretsOnce,
+
+    init: init,
+    renderAuthStatus: renderAuthStatus,
+    protectPages: protectPages,
+
+    // login
+    loginByPassword: pwrap(loginByPassword),
+
+    // ✅ совместимость со старым UI (кнопка "регистрация" могла вызывать registerFirstAdmin)
+    registerFirstAdmin: pwrap(registerFirstAdmin),
+
+    // ✅ новый явный метод (можно позже перевести login.html на него)
+    registerUser: pwrap(registerUser),
+
+    // alias
+    signIn: function(email, password, rememberDays) {
+      return this.loginByPassword(email, password, rememberDays);
+    },
+
+    // admin api
+    adminListUsers: pwrap(adminListUsers),
+    adminCreateUser: pwrap(adminCreateUser),
+    adminSetDisabled: pwrap(adminSetDisabled),
+    adminResetPassword: pwrap(adminResetPassword),
+    adminDeleteUser: pwrap(adminDeleteUser),
+    adminRotateMasterKey: pwrap(adminRotateMasterKey),
+    popMasterKeyOnce: popMasterKeyOnce,
 
     // backup
-    exportProjectStorageSnapshot,
-    importProjectStorageSnapshot,
-    exportUserBackup,
-    importUserBackup,
-    saveCurrentProfileNow,
-
-    // admin
-    adminCreateUser,
-    adminListUsers,
-    adminSetDisabled,
-    adminResetPassword,
-    adminRotateMasterKey
+    exportProjectStorageSnapshot: exportProjectStorageSnapshot,
+    importProjectStorageSnapshot: importProjectStorageSnapshot
   };
-
 })();

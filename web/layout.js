@@ -17,14 +17,28 @@
 // ============================================================
 function ensureAuthScriptLoaded() {
   try {
-    if (window.Auth && typeof window.Auth.init === "function") return;
-    if (document.querySelector('script[data-auth="1"]')) return;
+    // Если Auth.init есть — инициализируем, иначе оставляем безопасные ссылки в authBox
+    if (window.Auth && typeof window.Auth.init === "function") {
+      try { window.Auth.init(); } catch (e) { console.warn("Auth.init failed", e); }
+      return;
+    }
+    // уже добавляли?
+    const existing = document.querySelector('script[data-auth="1"]');
+    if (existing) return;
+
     const s = document.createElement("script");
     s.src = "auth.js";
     s.defer = true;
     s.setAttribute("data-auth", "1");
+    s.onload = () => {
+      if (window.Auth && typeof window.Auth.init === "function") {
+        try { window.Auth.init(); } catch (e) { console.warn("Auth.init failed", e); }
+      }
+    };
     document.head.appendChild(s);
-  } catch { /* ignore */ }
+  } catch (e) {
+    console.warn("ensureAuthScriptLoaded failed", e);
+  }
 }
 ensureAuthScriptLoaded();
 

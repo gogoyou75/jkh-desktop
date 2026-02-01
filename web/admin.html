@@ -156,6 +156,7 @@
                 <td>
                     <button data-act="toggle" data-id="${esc(u.id)}">${u.disabled ? 'Разблок.' : 'Блок.'}</button>
                     <button data-act="reset" data-id="${esc(u.id)}">Сброс пароля</button>
+                    <button data-act="delete" data-id="${esc(u.id)}" class="danger">Удалить</button>
                 </td>
             `;
             tbody.appendChild(tr);
@@ -173,7 +174,19 @@
                     refreshUsers();
                 }
 
+                
+                if(act === 'delete'){
+                    const ok = confirm(
+                      'УДАЛИТЬ пользователя НАВСЕГДА?\n\nОперация необратима.'
+                    );
+                    if(!ok) return;
+                    await Auth.adminDeleteUser(id);
+                    await refreshUsers();
+                    alert('Пользователь удалён.');
+                }
+
                 if(act === 'reset'){
+
                     const p = prompt('Новый пароль (будет установлен сразу):');
                     if(!p) return;
                     await Auth.adminResetPassword(id, p);

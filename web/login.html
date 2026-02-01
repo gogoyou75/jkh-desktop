@@ -126,7 +126,6 @@
 
       <div id="statusBox" class="status"></div>
 
-      <!-- ВАЖНО: кнопки "Вход" сверху НЕТ (как ты просил) -->
       <div class="tabs">
         <div class="tab active" data-tab="login">Вход</div>
         <div class="tab" data-tab="register">Регистрация</div>
@@ -175,11 +174,36 @@
         </form>
       </div>
 
-      <!-- REGISTER (информ-панель; реальная регистрация админа может быть в админке/первом запуске) -->
+      <!-- REGISTER -->
       <div class="panel" id="panel-register">
-        <div class="hint" style="font-size:13px;">
-          Регистрация выполняется администратором (через админ-панель) либо при первом запуске (первый админ).
-        </div>
+        <form id="registerForm" autocomplete="on">
+          <div class="row">
+            <label for="registerEmail">Email</label>
+            <input id="registerEmail" type="email" autocomplete="username">
+          </div>
+
+          <div class="row">
+            <label for="registerPass">Пароль</label>
+            <input id="registerPass" type="password" autocomplete="new-password">
+          </div>
+
+          <div class="row">
+            <label for="registerPass2">Повтор пароля</label>
+            <input id="registerPass2" type="password" autocomplete="new-password">
+          </div>
+
+          <div class="row">
+            <label for="registerName">Имя (необязательно)</label>
+            <input id="registerName" type="text" autocomplete="name">
+          </div>
+
+          <div class="hint" style="margin-top:12px;">
+            <strong>Внимание:</strong> При первой регистрации в системе будет создан первый администратор.
+            Если система уже содержит пользователей, будет создан обычный пользователь.
+          </div>
+
+          <button class="btn" type="submit">Зарегистрироваться</button>
+        </form>
       </div>
 
       <!-- RECOVER -->
@@ -193,58 +217,219 @@
   </div>
 
 <script>
-  // tabs
-  document.querySelectorAll('.tab').forEach(t=>{
-    t.addEventListener('click', ()=>{
-      document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));
-      t.classList.add('active');
+  // tabs (без стрелок для совместимости)
+  (function(){
+    var tabs = document.querySelectorAll('.tab');
+    for (var i=0;i<tabs.length;i++){
+      tabs[i].addEventListener('click', (function(t){
+        return function(){
+          for (var j=0;j<tabs.length;j++) tabs[j].classList.remove('active');
+          t.classList.add('active');
 
-      document.querySelectorAll('.panel').forEach(p=>p.classList.remove('active'));
-      document.getElementById('panel-' + t.dataset.tab).classList.add('active');
-    });
-  });
+          var panels = document.querySelectorAll('.panel');
+          for (var k=0;k<panels.length;k++) panels[k].classList.remove('active');
 
-  function showStatus(msg){
-    const b = document.getElementById('statusBox');
+          var pid = 'panel-' + t.getAttribute('data-tab');
+          var p = document.getElementById(pid);
+          if (p) p.classList.add('active');
+        };
+      })(tabs[i]));
+    }
+  })();
+
+  function showStatus(msg, isError){
+    var b = document.getElementById('statusBox');
     b.textContent = msg;
     b.style.display = 'block';
+    b.style.background = isError ? '#ffe6e6' : '#f0fff0';
+    b.style.borderColor = isError ? '#d00' : '#0a0';
   }
-
   function hideStatus(){
-    const b = document.getElementById('statusBox');
+    var b = document.getElementById('statusBox');
     b.style.display = 'none';
     b.textContent = '';
   }
 
-  // prefill email from Auth storage (если есть)
-  document.addEventListener('DOMContentLoaded', ()=>{
+  // email prefill
+  document.addEventListener('DOMContentLoaded', function(){
     try{
       if (window.Auth && typeof Auth.getLastEmail === 'function'){
-        const e = Auth.getLastEmail();
-        if (e) document.getElementById('loginEmail').value = e;
+        var e = Auth.getLastEmail();
+        if (e) {
+          document.getElementById('loginEmail').value = e;
+          document.getElementById('registerEmail').value = e;
+        }
       }
-    }catch{}
+    }catch(e){}
   });
 
-  document.getElementById('loginForm').addEventListener('submit', async (e)=>{
+  // ========== ВХОД ==========
+  document.getElementById('loginForm').addEventListener('submit', function (e){
     e.preventDefault();
     hideStatus();
 
-    const email = (loginEmail.value || '').trim();
-    const pass  = (loginPass.value || '');
-    const days  = parseInt(loginRemember.value, 10) || 0;
+    var emailEl = document.getElementById('loginEmail');
+    var passEl  = document.getElementById('loginPass');
+    var daysEl  = document.getElementById('loginRemember');
+
+    var email = (emailEl.value || '').trim();
+    var pass  = (passEl.value || '');
+    var days  = parseInt(daysEl.value, 10) || 0;
+
+    if (!email) {
+      showStatus('Введите email', true);
+      emailEl.focus();
+      return;
+    }
+    if (!pass) {
+      showStatus('Введите пароль', true);
+      passEl.focus();
+      return;
+    }
 
     try{
-      // запомнить email (наша опция)
-      if (rememberEmail.checked && window.Auth && typeof Auth.setLastEmail === 'function'){
+      // запомнить email (опция)
+      if (document.getElementById('rememberEmail').checked && window.Auth && typeof Auth.setLastEmail === 'function'){
         Auth.setLastEmail(email);
       }
 
-      // вход
-      await Auth.signIn(email, pass, days);  // API из auth.js :contentReference[oaicite:1]{index=1}
-      location.href = 'index.html';
+      // Используем loginByPassword, который автоматически создаст первого админа при пустой базе
+      if (window.Auth && typeof Auth.loginByPassword === 'function') {
+        Auth.loginByPassword(email, pass, days).then(function(user){
+          // Успешный вход
+          showStatus('Вход выполнен успешно! Перенаправление...', false);
+          
+          // Проверяем редирект из URL
+          var urlParams = new URLSearchParams(window.location.search);
+          var redirect = urlParams.get('redirect');
+          
+          // Задержка для отображения сообщения об успехе
+          setTimeout(function(){
+            if (redirect && (redirect === 'index.html' || redirect.endsWith('.html'))) {
+              location.href = redirect;
+            } else {
+              location.href = 'index.html';
+            }
+          }, 500);
+        }).catch(function(err){
+          showStatus('Не удалось войти: ' + (err && err.message ? err.message : err), true);
+        });
+      } else {
+        showStatus('Ошибка: Auth.loginByPassword не найден', true);
+      }
+
     }catch(err){
-      showStatus('Не удалось войти: ' + (err && err.message ? err.message : err));
+      showStatus('Не удалось войти: ' + (err && err.message ? err.message : err), true);
+    }
+  });
+
+  // ========== РЕГИСТРАЦИЯ ==========
+  document.getElementById('registerForm').addEventListener('submit', function (e){
+    e.preventDefault();
+    hideStatus();
+
+    var emailEl = document.getElementById('registerEmail');
+    var passEl = document.getElementById('registerPass');
+    var pass2El = document.getElementById('registerPass2');
+    var nameEl = document.getElementById('registerName');
+
+    var email = (emailEl.value || '').trim();
+    var pass = (passEl.value || '');
+    var pass2 = (pass2El.value || '');
+    var name = (nameEl.value || '').trim();
+
+    // Валидация
+    if (!email) {
+      showStatus('Введите email', true);
+      emailEl.focus();
+      return;
+    }
+    if (!pass) {
+      showStatus('Введите пароль', true);
+      passEl.focus();
+      return;
+    }
+    if (pass.length < 4) {
+      showStatus('Пароль слишком короткий (мин. 4 символа)', true);
+      passEl.focus();
+      return;
+    }
+    if (pass !== pass2) {
+      showStatus('Пароли не совпадают', true);
+      pass2El.focus();
+      return;
+    }
+
+    try {
+      // Проверяем, есть ли функция registerUser, если нет - используем registerFirstAdmin
+      var registerFunc = null;
+      if (window.Auth && typeof Auth.registerUser === 'function') {
+        registerFunc = Auth.registerUser;
+      } else if (window.Auth && typeof Auth.registerFirstAdmin === 'function') {
+        registerFunc = Auth.registerFirstAdmin;
+      }
+
+      if (!registerFunc) {
+        showStatus('Ошибка: функция регистрации не найдена', true);
+        return;
+      }
+
+      // Определяем роль: если база пустая - админ, иначе обычный пользователь
+      var role = 'user';
+      if (window.Auth && typeof Auth.usersCount === 'function') {
+        try {
+          var count = Auth.usersCount();
+          if (count === 0) role = 'admin';
+        } catch(e) {}
+      }
+
+      // Для совместимости: если используется registerFirstAdmin, передаем только нужные параметры
+      if (registerFunc === Auth.registerFirstAdmin) {
+        registerFunc(email, pass, name).then(function(result){
+          // После регистрации автоматически входим
+          if (window.Auth && typeof Auth.loginByPassword === 'function') {
+            return Auth.loginByPassword(email, pass, 30);
+          }
+          return Promise.reject(new Error('Не удалось войти после регистрации'));
+        }).then(function(user){
+          showStatus('Регистрация выполнена успешно! Вы вошли как ' + (user.role === 'admin' ? 'администратор' : 'пользователь'), false);
+          
+          // Запоминаем email
+          if (window.Auth && typeof Auth.setLastEmail === 'function'){
+            Auth.setLastEmail(email);
+          }
+          
+          setTimeout(function(){
+            location.href = 'index.html';
+          }, 1000);
+        }).catch(function(err){
+          showStatus('Ошибка регистрации: ' + (err && err.message ? err.message : err), true);
+        });
+      } else {
+        // Используем registerUser
+        registerFunc(email, pass, name, role).then(function(result){
+          // После регистрации автоматически входим
+          if (window.Auth && typeof Auth.loginByPassword === 'function') {
+            return Auth.loginByPassword(email, pass, 30);
+          }
+          return Promise.reject(new Error('Не удалось войти после регистрации'));
+        }).then(function(user){
+          showStatus('Регистрация выполнена успешно! Вы вошли как ' + (user.role === 'admin' ? 'администратор' : 'пользователь'), false);
+          
+          // Запоминаем email
+          if (window.Auth && typeof Auth.setLastEmail === 'function'){
+            Auth.setLastEmail(email);
+          }
+          
+          setTimeout(function(){
+            location.href = 'index.html';
+          }, 1000);
+        }).catch(function(err){
+          showStatus('Ошибка регистрации: ' + (err && err.message ? err.message : err), true);
+        });
+      }
+    } catch(err) {
+      showStatus('Ошибка регистрации: ' + (err && err.message ? err.message : err), true);
     }
   });
 </script>

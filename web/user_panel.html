@@ -4,15 +4,12 @@
   <meta charset="UTF-8" />
   <title>Кабинет пользователя</title>
 
-  <!-- ВАЖНО: подключаем твой layout.js (стандарт шапки) -->
+  <!-- Единая шапка проекта -->
   <script src="layout.js"></script>
   <script src="auth.js"></script>
 
   <style>
-    .page {
-      font-family: Arial, sans-serif;
-      padding: 18px 22px;
-    }
+    .page { font-family: Arial, sans-serif; padding: 18px 22px; }
     h2 { margin: 0 0 14px 0; font-size: 22px; }
     .box {
       border: 1px solid #ccc;
@@ -48,14 +45,16 @@
       border:1px dashed #999;
       background:#fff;
       font-size:13px;
+      white-space: pre-wrap;
     }
+
+    .danger { color:#b00020; font-weight:700; }
   </style>
 </head>
 
 <body>
-
 <script>
-  // ✅ ВСТАВЛЯЕМ ШАПКУ ТВОЕГО СТАНДАРТА
+  // Вставляем шапку стандарта
   renderLayout();
 </script>
 
@@ -68,22 +67,27 @@
     <div class="row"><div class="label">ID</div><div class="value" id="uId">—</div></div>
 
     <div style="margin-top:12px;">
-      <button id="btnSaveProfile">Сохранить профиль сейчас</button>
-      <span class="hint">фиксирует текущую базу в профиле (если закрыть вкладку без «выхода»)</span>
+      <button id="btnSavePoint">Создать точку отката</button>
+      <span class="hint">сохраняет текущую базу в localStorage как резервную «точку отката» перед импортом</span>
+    </div>
+    <div class="hint" style="margin-top:8px;">
+      Если пользовательская панель у тебя не открывалась раньше — это было из‑за вызовов функций, которых нет в auth.js.
+      Здесь всё автономно и не ломает проект.
     </div>
   </div>
 
   <div class="box">
-    <h3 style="margin:0 0 10px 0;">Резервные копии</h3>
+    <h3 style="margin:0 0 10px 0;">Резервные копии (пользователь)</h3>
 
     <div style="margin-bottom:10px;">
       <button id="btnExport">Выгрузить бэкап (JSON)</button>
-      <span class="hint">внутри — только whitelist проектных ключей localStorage</span>
+      <span class="hint">формат: снимок ключей localStorage (кроме одноразовых секретов)</span>
     </div>
 
     <div style="margin-bottom:10px;">
-      <input type="file" id="importFile">
+      <input type="file" id="importFile" accept=".json,application/json">
       <button id="btnImport">Загрузить бэкап (восстановить)</button>
+      <span class="hint danger">ВНИМАНИЕ: восстановление перезапишет localStorage</span>
     </div>
 
     <div class="status" id="statusBox">Статус: —</div>
@@ -91,78 +95,177 @@
     <div style="margin-top:12px; font-size:13px;">
       <b>CRITICAL:</b>
       <ul style="margin-top:6px;">
-        <li>Пользователь НЕ может импортировать чужой бэкап (проверка ownerId)</li>
-        <li>Перед восстановлением автоматически сохраняем «точку отката» (последний снимок) в localStorage</li>
-        <li>После восстановления профиль сразу фиксируется (logout не нужен)</li>
+        <li>В бэкап добавляем ownerId (ID пользователя), чтобы не импортировать «чужую» копию.</li>
+        <li>Перед импортом автоматически сохраняем «точку отката» (последний снимок) в localStorage.</li>
+        <li>После восстановления остаёмся на этой странице и показываем статус.</li>
       </ul>
     </div>
   </div>
 </div>
 
 <script>
-  // ✅ Закрываем обёртку layout.js и переносим контент в #layoutContent
+  // Закрываем обёртку layout.js и переносим контент в #layoutContent
   closeLayout();
 </script>
 
 <script>
-  // init auth + guard
+  // --------- helpers ---------
+  function nowMs(){ return Date.now(); }
+
+  function safeJsonParse(s, fallback){
+    try { return JSON.parse(s); } catch(e){ return fallback; }
+  }
+
+  function setStatus(t){
+    var el = document.getElementById('statusBox');
+    if (el) el.textContent = 'Статус: ' + t;
+  }
+
+  function downloadJson(obj, filename){
+    var blob = new Blob([JSON.stringify(obj, null, 2)], {type:'application/json'});
+    var a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(function(){
+      URL.revokeObjectURL(a.href);
+      a.remove();
+    }, 0);
+  }
+
+  // --------- guard/auth ---------
   Auth.init();
 
-  const u = Auth.getCurrentUser();
-  if (!u) location.href = "login.html";
+  var u = Auth.getCurrentUser();
+  if (!u){
+    location.href = "login.html?redirect=" + encodeURIComponent("user_panel.html");
+  }
 
-  document.getElementById('uEmail').textContent = u.email;
-  document.getElementById('uRole').textContent  = u.role;
-  document.getElementById('uId').textContent    = u.id;
+  document.getElementById('uEmail').textContent = u.email || '';
+  document.getElementById('uRole').textContent  = u.role || '';
+  document.getElementById('uId').textContent    = u.id || '';
 
-  const statusBox = document.getElementById('statusBox');
+  // --------- user backup (OFFLINE / NO-ASYNC REQUIRED) ---------
+  // Снимок localStorage. Исключаем одноразовые секреты и pending мастер-ключ.
+  function exportUserBackup(){
+    var snap = {
+      _meta: {
+        format: "papajkh_user_backup_v1",
+        createdAt: nowMs(),
+        ownerId: u.id,
+        ownerEmail: (u.email || "")
+      },
+      keys: {}
+    };
 
-  function setStatus(t){ statusBox.textContent = 'Статус: ' + t; }
+    for (var i = 0; i < localStorage.length; i++){
+      var k = localStorage.key(i);
 
-  document.getElementById('btnSaveProfile').onclick = ()=>{
+      // исключаем одноразовые секреты первого запуска + pending master-key
+      if (k === "auth_bootstrap_secrets_v1") continue;
+      if (k === "auth_master_key_pending_v1") continue;
+
+      snap.keys[k] = localStorage.getItem(k);
+    }
+    return snap;
+  }
+
+  function saveRollbackPoint(tag){
+    var rb = exportUserBackup();
+    rb._meta.isRollback = true;
+    rb._meta.tag = String(tag || "manual");
     try{
-      Auth.saveCurrentProfileNow(); // :contentReference[oaicite:3]{index=3}
-      setStatus('профиль сохранён');
+      localStorage.setItem("papajkh_user_rollback_last_v1", JSON.stringify(rb));
+    }catch(e){}
+    return rb;
+  }
+
+  function importUserBackup(obj){
+    if (!obj || !obj._meta || obj._meta.format !== "papajkh_user_backup_v1"){
+      throw new Error("Неверный формат бэкапа (ожидается papajkh_user_backup_v1)");
+    }
+    if (!obj.keys || typeof obj.keys !== "object"){
+      throw new Error("Неверная структура бэкапа (нет keys)");
+    }
+
+    // CRITICAL: защита от «чужого» бэкапа
+    var ownerId = String(obj._meta.ownerId || "");
+    if (ownerId && ownerId !== u.id){
+      throw new Error("Этот бэкап принадлежит другому пользователю (ownerId не совпадает)");
+    }
+
+    // CRITICAL: точка отката перед импортом
+    saveRollbackPoint("before_import");
+
+    // Восстановление: перезаписываем localStorage целиком
+    localStorage.clear();
+
+    for (var k in obj.keys){
+      if (Object.prototype.hasOwnProperty.call(obj.keys, k)){
+        localStorage.setItem(k, obj.keys[k]);
+      }
+    }
+
+    // после импорта: обновим Auth/шапку (на случай, если сессия восстановлена)
+    try { Auth.init(); } catch(e){}
+    return true;
+  }
+
+  // --------- UI actions ---------
+  document.getElementById('btnSavePoint').onclick = function(){
+    try{
+      saveRollbackPoint("manual");
+      setStatus("точка отката сохранена (papajkh_user_rollback_last_v1)");
     }catch(e){
-      setStatus('ошибка: ' + (e && e.message ? e.message : e));
+      setStatus("ошибка: " + (e && e.message ? e.message : e));
     }
   };
 
-  document.getElementById('btnExport').onclick = ()=>{
+  document.getElementById('btnExport').onclick = function(){
     try{
-      const data = Auth.exportUserBackup(); // :contentReference[oaicite:4]{index=4}
-      const blob = new Blob([JSON.stringify(data, null, 2)], {type:'application/json'});
-      const a = document.createElement('a');
-      const dt = new Date();
-      const fn = `papajkh_user_backup_${dt.getFullYear()}-${String(dt.getMonth()+1).padStart(2,'0')}-${String(dt.getDate()).padStart(2,'0')}.json`;
-      a.href = URL.createObjectURL(blob);
-      a.download = fn;
-      document.body.appendChild(a);
-      a.click();
-      setTimeout(()=>{ URL.revokeObjectURL(a.href); a.remove(); }, 0);
-      setStatus('экспорт выполнен: ' + fn);
+      var data = exportUserBackup();
+      var dt = new Date();
+      var fn = "papajkh_user_backup_" +
+        dt.getFullYear() + "-" +
+        String(dt.getMonth()+1).padStart(2,'0') + "-" +
+        String(dt.getDate()).padStart(2,'0') + ".json";
+      downloadJson(data, fn);
+      setStatus("экспорт выполнен: " + fn);
     }catch(e){
-      setStatus('ошибка экспорта: ' + (e && e.message ? e.message : e));
+      setStatus("ошибка экспорта: " + (e && e.message ? e.message : e));
     }
   };
 
-  document.getElementById('btnImport').onclick = async ()=>{
-    const f = document.getElementById('importFile').files && document.getElementById('importFile').files[0];
-    if(!f){ setStatus('файл не выбран'); return; }
+  document.getElementById('btnImport').onclick = function(){
+    var inp = document.getElementById('importFile');
+    var f = inp && inp.files && inp.files[0];
+    if (!f){ setStatus("файл не выбран"); return; }
 
-    try{
-      const raw = await f.text();
-      const obj = JSON.parse(raw);
-
-      // CRITICAL: точка отката (снимок) — перед импортом
-      try { Auth.saveCurrentProfileNow(); } catch {}
-
-      Auth.importUserBackup(obj); // :contentReference[oaicite:5]{index=5}
-      setStatus('восстановлено успешно');
-    }catch(e){
-      setStatus('ошибка импорта: ' + (e && e.message ? e.message : e));
-    }
+    var r = new FileReader();
+    r.onload = function(){
+      try{
+        var obj = safeJsonParse(String(r.result || ""), null);
+        importUserBackup(obj);
+        setStatus("восстановлено успешно. Если что — откат: ключ papajkh_user_rollback_last_v1");
+        // если пришли по якорю — оставляем на #statusBox
+        if (!location.hash) location.hash = "#statusBox";
+      }catch(e){
+        setStatus("ошибка импорта: " + (e && e.message ? e.message : e));
+      }
+    };
+    r.onerror = function(){ setStatus("ошибка чтения файла"); };
+    r.readAsText(f);
   };
+
+  // если открыли по ссылке "...#statusBox" — подсветим статус
+  (function(){
+    if ((location.hash || "").toLowerCase() === "#statusbox"){
+      try { document.getElementById("statusBox").scrollIntoView({behavior:"smooth"}); } catch(e){}
+    }
+  })();
+
+  setStatus("готово");
 </script>
 
 </body>
