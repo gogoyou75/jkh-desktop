@@ -9,6 +9,34 @@
   // ============================================================
   const KEY_DB = "abonents_db_v1";
 
+  // ============================================================
+  // Scoped storage helpers (per-user базы + admin "ALL")
+  // ============================================================
+  function _ownerId() {
+    try {
+      if (window.Auth && typeof Auth.getActiveDbOwnerId === "function") return Auth.getActiveDbOwnerId();
+      if (window.JKHStorage && typeof JKHStorage.getActiveOwnerId === "function") return JKHStorage.getActiveOwnerId();
+    } catch (e) {}
+    return "guest";
+  }
+
+  function _isAllMode() { return _ownerId() === "ALL"; }
+
+  function _isGuest() {
+    try {
+      if (window.Auth && typeof Auth.isGuest === "function") return Auth.isGuest();
+    } catch (e) {}
+    return _ownerId() === "guest";
+  }
+
+  function _k(key, ownerId) {
+    try {
+      if (window.JKHStorage && typeof JKHStorage.k === "function") return JKHStorage.k(key, ownerId);
+    } catch (e) {}
+    return "jkhdb::" + String(ownerId || _ownerId()) + "::" + key;
+  }
+
+
   // Список ключей/префиксов проекта для "сброс базы" и "загрузить демо"
   const PROJECT_KEY_PREFIXES = [
     "payments_",
@@ -52,27 +80,55 @@
       if (!raw) return fallback;
       const v = JSON.parse(raw);
       return v === undefined ? fallback : v;
-    } catch {
+    } catch (e) {
       return fallback;
     }
   }
 
   function removeProjectKeys() {
-    // exact
-    PROJECT_KEY_EXACT.forEach((k) => localStorage.removeItem(k));
+    // ВАЖНО: сброс делаем в рамках выбранной базы (scoped).
+    // admin в режиме "ALL" — сбрасывает ВСЕ пользовательские базы.
+    var owners = [];
+    if (_isAllMode()) {
+      try {
+        var users = (window.Auth && typeof Auth.adminListUsers === "function") ? Auth.adminListUsers() : [];
+        if (Array.isArray(users)) {
+          for (var i = 0; i < users.length; i++) if (users[i] && users[i].id) owners.push(users[i].id);
+        }
+      } catch (e) {}
+    } else {
+      owners = [_ownerId()];
+    }
 
-    // prefixes
-    Object.keys(localStorage).forEach((k) => {
-      if (PROJECT_KEY_PREFIXES.some((p) => k.startsWith(p))) {
-        localStorage.removeItem(k);
+    for (var oi = 0; oi < owners.length; oi++) {
+      var owner = owners[oi];
+
+      // exact keys
+      for (var ei = 0; ei < PROJECT_KEY_EXACT.length; ei++) {
+        var ek = PROJECT_KEY_EXACT[ei];
+        try { localStorage.removeItem(_k(ek, owner)); } catch (e) {}
       }
-    });
 
-    // иногда удобно чистить sessionStorage тоже
-    try { sessionStorage.clear(); } catch {}
-  }
+      // prefixes (scoped)
+      var pref = (window.JKHStorage && typeof JKHStorage.scopePrefixFor === "function")
+        ? JKHStorage.scopePrefixFor(owner)
+        : ("jkhdb::" + String(owner) + "::");
 
-  // ============================================================
+      for (var li = localStorage.length - 1; li >= 0; li--) {
+        var kk = localStorage.key(li);
+        if (!kk) continue;
+        if (kk.indexOf(pref) !== 0) continue;
+        var tail = kk.slice(pref.length);
+        for (var pi = 0; pi < PROJECT_KEY_PREFIXES.length; pi++) {
+          if (tail.indexOf(PROJECT_KEY_PREFIXES[pi]) === 0) { try { localStorage.removeItem(kk); } catch (e) {} break; }
+        }
+      }
+    }
+
+    // sessionStorage можно чистить, но НЕ трогаем Auth-сессию намеренно.
+    // (логин/выбор базы остаются)
+    try { sessionStorage.clear(); } catch (e) {}
+  }// ============================================================
   // AbonentsDB base (пустая структура)
   // ============================================================
   const BASE_DB = {
@@ -117,13 +173,67 @@
   }
 
   function loadFromStorage() {
-    const raw = localStorage.getItem(KEY_DB);
+    // admin ALL-mode: объединённый просмотр всех баз (READONLY)
+    if (_isAllMode()) {
+      var merged = { version: 1, premises: {}, links: [], abonents: {} };
+      try {
+        var users = (window.Auth && typeof Auth.adminListUsers === "function") ? Auth.adminListUsers() : [];
+        if (Array.isArray(users)) {
+          for (var i = 0; i < users.length; i++) {
+            var uid = users[i] && users[i].id;
+            if (!uid) continue;
+            var rawU = localStorage.getItem(_k(KEY_DB, uid));
+            var parsedU = safeJsonParse(rawU, null);
+            if (parsedU && typeof parsedU === "object") {
+              // premises
+              if (parsedU.premises && typeof parsedU.premises === "object") {
+                for (var pr in parsedU.premises) merged.premises[pr] = parsedU.premises[pr];
+              }
+              // links
+              if (Array.isArray(parsedU.links)) {
+                for (var j = 0; j < parsedU.links.length; j++) {
+                  var L = parsedU.links[j];
+                  if (L && typeof L === "object") {
+                    var L2 = Object.assign({}, L);
+                    L2._ownerId = uid;
+                    merged.links.push(L2);
+                  }
+                }
+              }
+              // abonents
+              if (parsedU.abonents && typeof parsedU.abonents === "object") {
+                for (var a in parsedU.abonents) {
+                  var A = parsedU.abonents[a];
+                  if (!A) continue;
+                  var A2 = Object.assign({}, A);
+                  A2._ownerId = uid;
+                  merged.abonents[a] = A2;
+                }
+              }
+            }
+          }
+        }
+      } catch (e) {}
+      window.JKH_DB_READONLY = true;
+      return merged;
+    }
+
+    window.JKH_DB_READONLY = false;
+    const raw = localStorage.getItem(_k(KEY_DB));
     const parsed = safeJsonParse(raw, null);
     return parsed && typeof parsed === "object" ? parsed : null;
   }
 
   function saveToStorage(db) {
-    localStorage.setItem(KEY_DB, JSON.stringify(db));
+    if (_isGuest()) {
+      alert("Гость: только просмотр. Войдите, чтобы сохранять.");
+      return;
+    }
+    if (_isAllMode()) {
+      alert("Режим 'все базы' — только просмотр. Выберите конкретную базу в выпадающем списке (админ).");
+      return;
+    }
+    localStorage.setItem(_k(KEY_DB), JSON.stringify(db));
   }
 
   function normalizeDb(db) {
@@ -269,35 +379,35 @@
     saveToStorage(demoDb);
 
     // 2) last abonent
-    localStorage.setItem("last_abonent_id", "1008");
+    localStorage.setItem(_k("last_abonent_id"), "1008");
 
     // 3) источники платежей
-    localStorage.setItem("payment_sources_v1", JSON.stringify(["Платёж 1", "Платёж 2", "Платёж 3"]));
+    localStorage.setItem(_k("payment_sources_v1"), JSON.stringify(["Платёж 1", "Платёж 2", "Платёж 3"]));
 
     // 4) тарифы (как у тебя на скрине: content/repair)
-    localStorage.setItem("tariffs_content_repair_v1", JSON.stringify({
+    localStorage.setItem(_k("tariffs_content_repair_v1"), JSON.stringify({
       content: [{ date: "2025-01-01", rate: 10 }],
       repair: [{ date: "2025-01-01", rate: 10 }]
     }));
 
     // 5) ставки рефинансирования (normal + moratorium)
-    localStorage.setItem("refinancing_rates_normal_v1", JSON.stringify([
+    localStorage.setItem(_k("refinancing_rates_normal_v1"), JSON.stringify([
       { from: "01.01.2025", rate: "11" }
     ]));
-    localStorage.setItem("refinancing_rates_moratorium_v1", JSON.stringify([
+    localStorage.setItem(_k("refinancing_rates_moratorium_v1"), JSON.stringify([
       { from: "01.04.2025", rate: "5" }
     ]));
 
     // 6) периоды расчёта (пустые, как на скрине)
     ["1006", "1008"].forEach((id) => {
-      localStorage.setItem("calc_period_" + id, JSON.stringify({ from: "", to: "" }));
-      localStorage.setItem("calc_period_active_" + id, "0");
-      localStorage.setItem("report_period_" + id, JSON.stringify({ from: "", to: "" }));
+      localStorage.setItem(_k("calc_period_" + id), JSON.stringify({ from: "", to: "" }));
+      localStorage.setItem(_k("calc_period_active_" + id), "0");
+      localStorage.setItem(_k("report_period_" + id), JSON.stringify({ from: "", to: "" }));
     });
 
     // 7) платежи — намеренно как “проверочный кейс”
     //    (формат совместим с index.html, который суммирует accrued/paid и читает paid_date)
-    localStorage.setItem("payments_1006", JSON.stringify([
+    localStorage.setItem(_k("payments_1006"), JSON.stringify([
       // Начисления (мы специально делаем помесячные строки начислений)
       { id: 1, year: "2025", month: "01", accrued: 200, paid: 0, paid_date: "", source: "Платёж 1", payment_period: "" },
       { id: 2, year: "2025", month: "02", accrued: 200, paid: 0, paid_date: "", source: "Платёж 1", payment_period: "" },
@@ -306,7 +416,7 @@
       { id: 3, year: "2025", month: "02", accrued: 0, paid: 3870, paid_date: "10.02.2025", source: "Платёж 1", payment_period: "" }
     ]));
 
-    localStorage.setItem("payments_1008", JSON.stringify([
+    localStorage.setItem(_k("payments_1008"), JSON.stringify([
       { id: 1, year: "2025", month: "01", accrued: 200, paid: 0, paid_date: "", source: "Платёж 1", payment_period: "" }
     ]));
   }

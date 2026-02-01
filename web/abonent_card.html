@@ -13,6 +13,8 @@ Doc: docs/LOGIC_SPEC_v1.5.3.md
 <html lang="ru">
 <head>
     <meta charset="UTF-8">
+    <script src="auth.js"></script>
+    <script src="storage.js"></script>
     <script src="critical_guard.js" defer></script>
     <title>Карточка абонента</title>
     <link rel="stylesheet" href="style.css">
@@ -1222,6 +1224,61 @@ document.addEventListener("click", (e) => {
     </div>
   </div>
 </div>
+
+
+<script>
+(function(){
+  function mode(){
+    try {
+      if (window.Auth && typeof Auth.getActiveDbOwnerId === 'function') return Auth.getActiveDbOwnerId();
+      if (window.JKHStorage && typeof JKHStorage.getActiveOwnerId === 'function') return JKHStorage.getActiveOwnerId();
+    } catch(e){}
+    return 'guest';
+  }
+  function isGuest(){ return mode()==='guest'; }
+  function isAll(){ return mode()==='ALL'; }
+
+  function apply(){
+    if (!(isGuest() || isAll())) return;
+
+    var reason = isGuest()
+      ? 'Гость: только просмотр (войдите, чтобы редактировать)'
+      : "Админ: режим 'все базы' — только просмотр (выберите конкретную базу)";
+
+    // скрыть "изменить"
+    var edits = document.querySelectorAll('.edit-link');
+    for (var i=0;i<edits.length;i++){ edits[i].style.display='none'; }
+
+    // блокировать кнопки/ссылки, которые меняют данные
+    var els = document.querySelectorAll('button, a, [onclick]');
+    for (var j=0;j<els.length;j++){
+      var el=els[j];
+      var oc = (el.getAttribute('onclick')||'').toLowerCase();
+      var txt = (el.innerText||'').toLowerCase();
+      var dangerous = oc.indexOf('save')>=0 || oc.indexOf('delete')>=0 || oc.indexOf('remove')>=0 || oc.indexOf('add')>=0 ||
+                      oc.indexOf('openabonentedit')>=0 ||
+                      txt.indexOf('сохран')>=0 || txt.indexOf('удал')>=0 || txt.indexOf('добав')>=0 || txt.indexOf('сменить')>=0;
+      if (dangerous) {
+        el.style.opacity='0.55';
+        el.style.pointerEvents='none';
+        el.title = reason;
+      }
+    }
+
+    // любые input/textarea делаем readonly (на случай встроенного редактирования)
+    var inputs = document.querySelectorAll('input, textarea, select');
+    for (var k=0;k<inputs.length;k++){
+      try{
+        inputs[k].setAttribute('readonly','readonly');
+        inputs[k].setAttribute('disabled','disabled');
+      }catch(e){}
+    }
+  }
+
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', apply);
+  else apply();
+})();
+</script>
 
 </body>
 </html>

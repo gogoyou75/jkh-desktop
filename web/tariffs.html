@@ -8,6 +8,8 @@
   <link rel="stylesheet" href="style.css" />
 
   <!-- ОБЯЗАТЕЛЬНО: подключаем данные и layout -->
+  <script src="auth.js"></script>
+  <script src="storage.js"></script>
   <script src="data.js"></script>
   <script src="layout.js"></script>
 
@@ -49,6 +51,16 @@
     .mono{ font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
     .danger{ background:#ffecec; }
   </style>
+
+<script>
+  // scoped key helper for this page
+  function _k(key){
+    try{ if(window.JKHStorage&&typeof JKHStorage.k==='function') return JKHStorage.k(key); }catch(e){}
+    try{ if(window.Auth&&typeof Auth.getActiveDbOwnerId==='function') return 'jkhdb::'+Auth.getActiveDbOwnerId()+'::'+key; }catch(e){}
+    return key;
+  }
+</script>
+
 </head>
 
 <body>

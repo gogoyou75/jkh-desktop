@@ -14,6 +14,77 @@ window.PremisesAdmin = (function () {
     function normRegnum(s) { return normStr(s).replace(/\s+/g, ''); }
 
     // -----------------------------
+    // ✅ MULTI-DB SCOPE (admin can view user базы / ALL)
+    // -----------------------------
+    const KEY_DB = "abonents_db_v1";
+
+    function getActiveOwnerId() {
+        try {
+            if (window.Auth && typeof Auth.getActiveDbOwnerId === "function") return Auth.getActiveDbOwnerId();
+            if (window.JKHStorage && typeof JKHStorage.getActiveOwnerId === "function") return JKHStorage.getActiveOwnerId();
+        } catch (e) {}
+        return "guest";
+    }
+
+    function isAllMode() { return getActiveOwnerId() === "ALL"; }
+    function isGuest() {
+        try { if (window.Auth && typeof Auth.isGuest === "function") return Auth.isGuest(); } catch (e) {}
+        return getActiveOwnerId() === "guest";
+    }
+
+    function kScoped(key, ownerId) {
+        try { if (window.JKHStorage && typeof JKHStorage.k === "function") return JKHStorage.k(key, ownerId); } catch (e) {}
+        return "jkhdb::" + String(ownerId || getActiveOwnerId()) + "::" + key;
+    }
+
+    function safeParse(raw, fallback) {
+        try { return raw ? JSON.parse(raw) : fallback; } catch (e) { return fallback; }
+    }
+
+    function listAllOwnersSorted() {
+        // returns [{id,email,role}]
+        // ВАЖНО: Auth.adminListUsers() в auth.js экспортируется как Promise-wrapper,
+        // поэтому здесь читаем список пользователей напрямую из localStorage,
+        // чтобы "ВСЕ БАЗЫ" работали синхронно и без гонок.
+        var raw = null;
+        try { raw = localStorage.getItem("auth_users_v1"); } catch (e) { raw = null; }
+        var users = safeParse(raw, []);
+        if (!Array.isArray(users)) users = [];
+
+        // sort: admin(s) first, then users by email
+        users.sort(function(a, b){
+            var ra = (a && a.role === "admin") ? 0 : 1;
+            var rb = (b && b.role === "admin") ? 0 : 1;
+            if (ra !== rb) return ra - rb;
+            var ea = String((a && a.email) || "").toLowerCase();
+            var eb = String((b && b.email) || "").toLowerCase();
+            return ea.localeCompare(eb, "ru");
+        });
+
+        return users
+            .map(function(u){ return ({ id: u.id, email: (u.email || ""), role: (u.role || "user") }); })
+            .filter(function(u){ return !!u.id; });
+    }
+
+    function loadDbForOwner(ownerId) {
+        const raw = localStorage.getItem(kScoped(KEY_DB, ownerId));
+        const parsed = safeParse(raw, null);
+        if (parsed && typeof parsed === "object") return parsed;
+        return { premises: {}, links: [], abonents: {} };
+    }
+
+    const GROUP_COLORS = [
+        "#EAF3FF", // light blue
+        "#EAFBEA", // light green
+        "#FFF6E5", // light orange
+        "#F3E8FF", // light purple
+        "#FFEAF1", // light pink
+        "#E9FBFF", // light cyan
+        "#F4F4F4"  // light gray
+    ];
+
+
+    // -----------------------------
     // regnum может быть неизвестен при создании (двухэтапная фиксация)
     // TEMP-* допускается как временный ключ. Настоящий regnum фиксируется 1 раз.
     // -----------------------------
@@ -489,17 +560,94 @@ window.PremisesAdmin = (function () {
     }
 
     function renderTable() {
-        const db = window.AbonentsDB;
         const tbody = q('premisesTable')?.querySelector('tbody');
         if (!tbody) return;
 
         const filter = normStr(q('premSearch')?.value).toLowerCase();
+        tbody.innerHTML = '';
+
+        // ============================================================
+        // ALL MODE (admin): показываем ВСЕ базы, группировка по владельцу
+        // ============================================================
+        if (isAllMode()) {
+            const owners = listAllOwnersSorted();
+            let totalAll = 0;
+            let totalShown = 0;
+
+            owners.forEach((owner, gi) => {
+                const db = loadDbForOwner(owner.id);
+                const premises = db?.premises || {};
+                const regs = Object.keys(premises).sort();
+
+                totalAll += regs.length;
+
+                // собираем строки по фильтру
+                const list = [];
+                regs.forEach(regnum => {
+                    const p = premises[regnum];
+                    const hay = [p?.regnum, p?.city, p?.street, p?.house, p?.flat].join(' ').toLowerCase();
+                    if (filter && !hay.includes(filter)) return;
+                    list.push(p);
+                });
+
+                // если фильтр активен и в группе нет совпадений — не показываем группу
+                if (filter && list.length === 0) return;
+
+                const color = GROUP_COLORS[gi % GROUP_COLORS.length];
+
+                // header group row
+                const trH = document.createElement('tr');
+                trH.style.background = color;
+                trH.style.fontWeight = 'bold';
+                trH.innerHTML = `
+                    <td colspan="9">
+                        База: ${esc(owner.role === 'admin' ? 'АДМИН' : 'ЮЗЕР')} — ${esc(owner.email || owner.id)}
+                        <span class="small" style="margin-left:10px; font-weight:normal;">(показано: ${list.length} / ${regs.length})</span>
+                    </td>
+                `;
+                tbody.appendChild(trH);
+
+                // rows
+                list.forEach(p => {
+                    const link = activeLinkForRegnum(db, p.regnum);
+                    const fio = link ? fioById(db, link.abonentId) : '';
+                    const fioText = fio ? fio : '—';
+
+                    const tr = document.createElement('tr');
+                    tr.style.background = color;
+
+                    const regLabel = isTempRegnum(p.regnum)
+                        ? `${esc(p.regnum)} <span class="small" style="background:#fff3bf; padding:0 4px; border:1px solid #000; margin-left:6px;">временный</span>`
+                        : esc(p.regnum);
+
+                    tr.innerHTML = `
+                        <td class="mono">${regLabel}</td>
+                        <td>${esc(p.city)}</td>
+                        <td>${esc(p.street)}</td>
+                        <td>${esc(p.house)}</td>
+                        <td>${esc(p.flat)}</td>
+                        <td>${p.square === '' || p.square === null || p.square === undefined ? '' : esc(p.square)}</td>
+                        <td>${esc(p.createdAt || '')}</td>
+                        <td>${esc(fioText)}</td>
+                        <td class="small">—</td>
+                    `;
+                    tbody.appendChild(tr);
+                    totalShown++;
+                });
+            });
+
+            q('premCount').textContent = `Показано: ${totalShown} / ${totalAll} (все базы)`;
+            return;
+        }
+
+        // ============================================================
+        // NORMAL MODE: текущая выбранная база (админ или конкретный юзер)
+        // ============================================================
+        const db = window.AbonentsDB;
         const premises = db?.premises || {};
         const rows = Object.keys(premises).sort().map(regnum => premises[regnum]);
 
         let shown = 0;
-        tbody.innerHTML = '';
-
         rows.forEach(p => {
             const hay = [p.regnum, p.city, p.street, p.house, p.flat].join(' ').toLowerCase();
             if (filter && !hay.includes(filter)) return;
@@ -546,7 +694,11 @@ window.PremisesAdmin = (function () {
         refreshAddressDatalists(); // ✅ после перерендера тоже обновим
     }
 
-    function onSave() {
+function onSave() {
+        // 🔒 запрет записи для гостя и для режима "ВСЕ БАЗЫ"
+        if (isGuest()) { alert('Гость: только просмотр. Войдите, чтобы сохранять.'); return; }
+        if (isAllMode()) { alert('Режим "все базы" — только просмотр. Выберите конкретную базу (админ/юзер), чтобы сохранять.'); return; }
+
         const db = window.AbonentsDB;
         const f = readForm();
 
@@ -638,6 +790,8 @@ window.PremisesAdmin = (function () {
     }
 
     function onDelete(regnum) {
+        if (isGuest()) { alert('Гость: только просмотр.'); return; }
+        if (isAllMode()) { alert('Режим "все базы" — только просмотр.'); return; }
         const db = window.AbonentsDB;
         const reg = String(regnum);
         if (!db?.premises?.[reg]) return;
@@ -710,6 +864,25 @@ window.PremisesAdmin = (function () {
         window.AbonentsDB = window.AbonentsDB || { abonents: {}, premises: {}, links: [] };
         window.AbonentsDB.premises = window.AbonentsDB.premises || {};
         window.AbonentsDB.links = window.AbonentsDB.links || [];
+
+        // ALL-mode: только просмотр — блокируем форму добавления/редактирования
+        if (isAllMode()) {
+            try {
+                const saveBtn = q('btnPremSave');
+                if (saveBtn) { saveBtn.disabled = true; saveBtn.style.opacity = '0.6'; saveBtn.title = 'Режим "все базы" — только просмотр'; }
+                const resetBtn = q('btnPremReset');
+                if (resetBtn) { resetBtn.disabled = true; resetBtn.style.opacity = '0.6'; }
+                const formTitle = q('premFormTitle');
+                if (formTitle) formTitle.textContent = 'Добавить квартиру (объект) — недоступно в режиме "все базы"';
+                const warn = q('premFormWarn');
+                if (warn) { warn.textContent = 'Режим "все базы" — только просмотр. Выберите конкретную базу (админ/юзер), чтобы добавлять/редактировать.'; warn.style.display = 'block'; }
+                // поля формы
+                ['p_regnum','p_created','p_city','p_street','p_house','p_flat','p_square','p_regnum_unknown'].forEach(id=>{
+                    const el = q(id);
+                    if (el) { el.disabled = true; el.style.opacity = '0.7'; }
+                });
+            } catch (e) {}
+        }
 
         bind();
         setFormModeAdd();

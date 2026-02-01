@@ -2,7 +2,54 @@
 <html lang="ru">
 <head>
   <meta charset="UTF-8">
-    <script src="critical_guard.js" defer></script>
+    
+    <!-- JKH CANON FIX: suppress false "Guest: read-only" dialogs for logged-in users (must run BEFORE data.js) -->
+    <script>
+    (function(){
+      function jkhSafeParse(s){ try { return JSON.parse(s); } catch(e){ return null; } }
+      function jkhHasValidSession(){
+        try{
+          var sess = jkhSafeParse(localStorage.getItem("auth_session_v1") || "null");
+          if(!sess || !sess.userId) return false;
+          if(sess.expiresAt && Date.now() > sess.expiresAt) return false;
+          var users = jkhSafeParse(localStorage.getItem("auth_users_v1") || "[]");
+          if(!Array.isArray(users)) return false;
+          for(var i=0;i<users.length;i++){
+            var u = users[i] || {};
+            if(u.id === sess.userId) return true;
+          }
+          return false;
+        }catch(e){ return false; }
+      }
+      if(!jkhHasValidSession()) return;
+
+      var BLOCK = [
+        "Гость: только просмотр. Войдите, чтобы сохранять.",
+        "Гость: только просмотр",
+        "только просмотр"
+      ];
+      function shouldBlock(msg){
+        msg = String(msg || "");
+        for(var i=0;i<BLOCK.length;i++){
+          if(msg.indexOf(BLOCK[i]) !== -1) return true;
+        }
+        return false;
+      }
+
+      var _alert = window.alert;
+      var _confirm = window.confirm;
+
+      window.alert = function(msg){
+        if(shouldBlock(msg)) return;
+        return _alert.call(window, msg);
+      };
+      window.confirm = function(msg){
+        if(shouldBlock(msg)) return true; // allow action to proceed for logged-in users
+        return _confirm.call(window, msg);
+      };
+    })();
+    </script>
+<script src="critical_guard.js" defer></script>
   <title>Новый абонент</title>
   <link rel="stylesheet" href="style.css">
 

@@ -250,7 +250,102 @@
   }
 
   // ------------------ UI topbar authBox ------------------
-  function renderAuthStatus() {
+  
+  // ============================================================
+  // DB SCOPE (multi-tenant localStorage)
+  // ============================================================
+  var ADMIN_VIEW_SCOPE_KEY = "jkh_admin_view_scope_v1"; // device-level, unscoped
+
+  function isGuest() {
+    return !getCurrentUser();
+  }
+
+  
+  // ============================================================
+  // CANON FIX (2026-02-01):
+  // На страницах reports.html / requisites.html / import_xls.html / new_abonent.html
+  // иногда всплывало confirm-сообщение "Гость: только просмотр..." даже у авторизованного USER.
+  // Причина: некоторые legacy-скрипты показывают confirm, если на момент вызова они "думают", что роль Guest.
+  // Каноническое правило: если пользователь авторизован — НЕ показывать гостевые confirm/alert.
+  // ============================================================
+  function patchGuestDialogsForLoggedIn() {
+    try {
+      if (window.__JKH_GUEST_DIALOGS_PATCHED) return;
+      window.__JKH_GUEST_DIALOGS_PATCHED = true;
+
+      var origConfirm = window.confirm;
+      if (typeof origConfirm === "function") {
+        window.confirm = function (msg) {
+          try {
+            var u = getCurrentUser();
+            if (u && typeof msg === "string") {
+              // точное подавление только "гостевых" сообщений
+              if (msg.indexOf("Гость: только просмотр") !== -1 || msg.indexOf("Войдите, чтобы сохранять") !== -1) {
+                return true; // разрешаем действие без всплывашки
+              }
+            }
+          } catch (e) {}
+          return origConfirm.apply(window, arguments);
+        };
+      }
+
+      var origAlert = window.alert;
+      if (typeof origAlert === "function") {
+        window.alert = function (msg) {
+          try {
+            var u2 = getCurrentUser();
+            if (u2 && typeof msg === "string") {
+              if (msg.indexOf("Гость: только просмотр") !== -1 || msg.indexOf("Войдите, чтобы сохранять") !== -1) {
+                return; // просто молча подавляем
+              }
+            }
+          } catch (e) {}
+          return origAlert.apply(window, arguments);
+        };
+      }
+    } catch (e) {}
+  }
+
+function getAdminViewScope() {
+    var u = getCurrentUser();
+    if (!u || u.role !== "admin") return null;
+    try {
+      var v = localStorage.getItem(ADMIN_VIEW_SCOPE_KEY);
+      if (!v) return u.id;
+      return v;
+    } catch (e) {
+      return u.id;
+    }
+  }
+
+  function setAdminViewScope(scope) {
+    var u = getCurrentUser();
+    if (!u || u.role !== "admin") return false;
+
+    // allow "ALL" or конкретный userId
+    var ok = false;
+    if (scope === "ALL") ok = true;
+    else {
+      var users = loadUsers();
+      for (var i = 0; i < users.length; i++) {
+        if (users[i] && users[i].id === scope) { ok = true; break; }
+      }
+    }
+    if (!ok) return false;
+
+    try { localStorage.setItem(ADMIN_VIEW_SCOPE_KEY, scope); } catch (e) {}
+    return true;
+  }
+
+  function getActiveDbOwnerId() {
+    var u = getCurrentUser();
+    if (!u) return "guest";
+    if (u.role === "admin") {
+      return getAdminViewScope() || u.id;
+    }
+    return u.id;
+  }
+function renderAuthStatus() {
     var authBox = document.getElementById("authBox");
     if (!authBox) return;
 
@@ -274,10 +369,48 @@
           '<span style="margin:0 6px;">|</span>';
       }
 
+      
+      // ✅ admin: выбор базы (все / конкретный пользователь)
+      var scopeHtml = "";
+      var scopeLabelHtml = "";
+      if (u.role === "admin") {
+        var scope = getAdminViewScope() || u.id;
+        var usersList = [];
+        try { usersList = adminListUsers() || []; } catch (e) { usersList = []; }
+
+        var opts = [];
+        opts.push('<option value="' + u.id + '">база админа</option>');
+        opts.push('<option value="ALL">все базы</option>');
+        for (var i = 0; i < usersList.length; i++) {
+          var uu = usersList[i] || {};
+          if (!uu.id || uu.id === u.id) continue;
+          var label = (uu.email || uu.id);
+          opts.push('<option value="' + uu.id + '">юзер: ' + label + '</option>');
+        }
+
+        // ✅ явная метка текущей базы (чтобы не путаться)
+        var scopeHuman = (scope === "ALL") ? "все базы (только просмотр)" : (scope === u.id ? "админа" : "юзера");
+        scopeLabelHtml = '<span style="font-size:12px;">База: <b>' + scopeHuman + '</b></span>';
+
+        scopeHtml =
+          '<select id="adminDbScopeSelect" style="font-size:12px; padding:2px 6px; border:1px solid black;" ' +
+          'onchange="(function(v){ if (Auth.setAdminViewScope(v)) { location.reload(); } else { alert(\'Не удалось выбрать базу\'); } })(this.value)">' +
+            opts.join('') +
+          '</select>';
+
+        // проставим выбранное
+        setTimeout(function () {
+          try {
+            var sel = document.getElementById("adminDbScopeSelect");
+            if (sel) sel.value = scope;
+          } catch (e) {}
+        }, 0);
+      }
+
       authBox.innerHTML = [
         '<div style="display:flex; align-items:center; gap:8px;">',
           links,
-          '<span style="font-size:12px;">' + emailLabel + '</span>',
+          '<span style="font-size:12px;">' + emailLabel + '</span>', scopeLabelHtml, scopeHtml,
           '<button onclick="Auth.logoutAndRedirect()" style="font-size:12px; padding:2px 8px; border:1px solid black; background:white; cursor:pointer;">выйти</button>',
         '</div>'
       ].join("");
@@ -360,6 +493,7 @@
   }
 
   function init() {
+    patchGuestDialogsForLoggedIn();
     loadUsers(); // нормализация
     ensureSessionValid();
     renderAuthStatus();
@@ -599,6 +733,12 @@
     adminDeleteUser: pwrap(adminDeleteUser),
     adminRotateMasterKey: pwrap(adminRotateMasterKey),
     popMasterKeyOnce: popMasterKeyOnce,
+
+    // db scope
+    isGuest: isGuest,
+    getAdminViewScope: getAdminViewScope,
+    setAdminViewScope: setAdminViewScope,
+    getActiveDbOwnerId: getActiveDbOwnerId,
 
     // backup
     exportProjectStorageSnapshot: exportProjectStorageSnapshot,

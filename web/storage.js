@@ -28,15 +28,119 @@
 // ------------------------
 
 (function () {
+
+  // ============================================================
+  // 🔑 Scoped localStorage keys (per-user базы)
+  // ============================================================
+  function _getSessionUser() {
+    try { return (window.Auth && typeof Auth.getCurrentUser === "function") ? Auth.getCurrentUser() : null; } catch (e) { return null; }
+  }
+
+  function _getAdminViewScope() {
+    // keep same key as auth.js
+    var k = "jkh_admin_view_scope_v1";
+    try {
+      var u = _getSessionUser();
+      if (!u || u.role !== "admin") return null;
+      var v = localStorage.getItem(k);
+      return v || u.id;
+    } catch (e) { return null; }
+  }
+
+  function getActiveOwnerId() {
+    var u = _getSessionUser();
+    if (!u) return "guest";
+    if (u.role === "admin") return _getAdminViewScope() || u.id;
+    return u.id;
+  }
+
+  function isAllMode() {
+    return getActiveOwnerId() === "ALL";
+  }
+
+  function isGuestMode() {
+    return getActiveOwnerId() === "guest";
+  }
+
+  function scopePrefixFor(ownerId) {
+    return "jkhdb::" + String(ownerId || "guest") + "::";
+  }
+
+  function k(key, ownerId) {
+    return scopePrefixFor(ownerId || getActiveOwnerId()) + key;
+  }
+
+  function getItem(key, ownerId) {
+    return localStorage.getItem(k(key, ownerId));
+  }
+
+  function setItem(key, value, ownerId) {
+    // гость не пишет данные базы (только просмотр)
+    if (isGuestMode()) {
+      throw new Error("GUEST_READONLY");
+    }
+    if (isAllMode()) {
+      throw new Error("ALLMODE_READONLY");
+    }
+    localStorage.setItem(k(key, ownerId), value);
+  }
+
+  function removeItem(key, ownerId) {
+    if (isGuestMode()) throw new Error("GUEST_READONLY");
+    if (isAllMode()) throw new Error("ALLMODE_READONLY");
+    localStorage.removeItem(k(key, ownerId));
+  }
+
+  function keysForOwner(ownerId) {
+    var pref = scopePrefixFor(ownerId);
+    var out = [];
+    for (var i = 0; i < localStorage.length; i++) {
+      var kk = localStorage.key(i);
+      if (kk && kk.indexOf(pref) === 0) out.push(kk);
+    }
+    return out;
+  }
+
+  // global helper (used by data.js / pages)
+  window.JKHStorage = {
+    getActiveOwnerId: getActiveOwnerId,
+    isAllMode: isAllMode,
+    isGuestMode: isGuestMode,
+    k: k,
+    getItem: getItem,
+    setItem: setItem,
+    removeItem: removeItem,
+    keysForOwner: keysForOwner,
+    scopePrefixFor: scopePrefixFor
+  };
+
+  // ============================================================
+  // Legacy StorageAPI below used unscoped keys ранее.
+  // Теперь делаем их scoped через JKHStorage.k(...)
+  // ============================================================
+  function _sk(key) {
+    try { return (window.JKHStorage && typeof JKHStorage.k === 'function') ? JKHStorage.k(key) : key; } catch (e) { return key; }
+  }
+
+
     // ✅ если уже загружен — выходим (чтобы не было "already declared")
     if (window.StorageAPI && window.StorageAPI.__loaded_v2) return;
 
     const NOTES_KEY = 'abonent_notes_v1';
     const PERIODS_KEY = 'exclude_periods_v1';
 
+    // ✅ scoped keys (per-user базы)
+    function SKEY(baseKey) {
+        try {
+            if (window.JKHStorage && typeof JKHStorage.k === 'function') return JKHStorage.k(baseKey);
+        } catch (e) {}
+        return baseKey;
+    }
+
+
     function getNotes() {
         try {
-            let obj = JSON.parse(localStorage.getItem(NOTES_KEY) || '{}');
+            let obj = JSON.parse(localStorage.getItem(_sk(NOTES_KEY)) || '{}');
             return Object.assign({ general: "", exclude_period: "", payments: "" }, obj);
         } catch (e) {
             console.error("Ошибка чтения заметок:", e);
@@ -45,7 +149,7 @@
     }
 
     function saveNotes(notesObj) {
-        localStorage.setItem(NOTES_KEY, JSON.stringify(notesObj));
+        localStorage.setItem(_sk(NOTES_KEY), JSON.stringify(notesObj));
         try {
             fetch('/api/abonent-notes', {
                 method: 'POST',
@@ -57,7 +161,7 @@
 
     function getPeriods() {
         try {
-            const raw = JSON.parse(localStorage.getItem(PERIODS_KEY) || "[]");
+            const raw = JSON.parse(localStorage.getItem(_sk(PERIODS_KEY)) || "[]");
             return raw.filter(p =>
                 (p.from && p.from.trim() !== "") ||
                 (p.to && p.to.trim() !== "") ||
@@ -74,11 +178,11 @@
             (p?.to && String(p.to).trim() !== "") ||
             (p?.reason && String(p.reason).trim() !== "")
         );
-        localStorage.setItem(PERIODS_KEY, JSON.stringify(cleaned));
+        localStorage.setItem(_sk(PERIODS_KEY), JSON.stringify(cleaned));
     }
 
     function excludesKey(abonentId) {
-        return "exclude_periods_" + String(abonentId || "").trim();
+        return _sk("exclude_periods_" + String(abonentId || "").trim());
     }
 
     function normalizeExcludes(excludes) {
