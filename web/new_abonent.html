@@ -721,6 +721,9 @@ function prefillFromQueryParams() {
    СОЗДАНИЕ АБОНЕНТА
    ========================= */
 function createAbonent() {
+  try{
+    if (typeof window.canWriteOrExplain === "function" && !window.canWriteOrExplain()) return;
+  }catch(e){}
   const last = document.getElementById("na_last").value.trim();
   const first = document.getElementById("na_first").value.trim();
   const mid = document.getElementById("na_mid").value.trim();
