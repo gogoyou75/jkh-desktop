@@ -7,7 +7,8 @@
 
     <link rel="stylesheet" href="style.css">
 
-    <script src="data.js"></script>
+    <script src="access.js"></script>
+  <script src="data.js"></script>
     <script src="layout.js"></script>
 </head>
 
@@ -43,6 +44,8 @@
 </div>
 
 <script>
+const STORAGE = (window.AppContext && window.AppContext.storage) ? window.AppContext.storage : localStorage;
+const APP_CTX = window.AppContext || null;
 /* =========================================================
    exclude_period.html
    - добавление строки работает (пустая строка НЕ удаляется)
@@ -122,7 +125,7 @@ function normalizeList(list){
 function readFromLocalStorage(){
     const id = getAbonentId();
     try{
-        const raw = localStorage.getItem(periodsKey(id));
+        const raw = STORAGE.getItem(periodsKey(id));
         if (!raw) return null;
         const arr = JSON.parse(raw);
         return normalizeList(arr);
@@ -145,7 +148,7 @@ function writeToLocalStorage(list, opts){
         ? normalized
         : normalized.filter(p => p.from || p.to || p.reason);
 
-    localStorage.setItem(periodsKey(id), JSON.stringify(cleaned));
+    STORAGE.setItem(periodsKey(id), JSON.stringify(cleaned));
 }
 
 function writeToAbonent(list, opts){

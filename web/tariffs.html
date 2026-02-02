@@ -8,6 +8,7 @@
   <link rel="stylesheet" href="style.css" />
 
   <!-- ОБЯЗАТЕЛЬНО: подключаем данные и layout -->
+  <script src="access.js"></script>
   <script src="data.js"></script>
   <script src="layout.js"></script>
 
@@ -78,6 +79,8 @@
 <div id="tariffsHost" style="margin-top:14px;"></div>
 
 <script>
+const STORAGE = (window.AppContext && window.AppContext.storage) ? window.AppContext.storage : localStorage;
+const APP_CTX = window.AppContext || null;
 (function(){
   "use strict";
 
@@ -137,9 +140,9 @@
   }
 
   function loadLegacy(){
-    const raw = localStorage.getItem(KEY_LEGACY);
+    const raw = STORAGE.getItem(KEY_LEGACY);
     if (!raw){
-      localStorage.setItem(KEY_LEGACY, JSON.stringify(DEFAULT_LEGACY));
+      STORAGE.setItem(KEY_LEGACY, JSON.stringify(DEFAULT_LEGACY));
       return deepClone(DEFAULT_LEGACY);
     }
     const parsed = safeJsonParse(raw, null);
@@ -153,7 +156,7 @@
   }
 
   function migrateIfNeeded(){
-    const existing = safeJsonParse(localStorage.getItem(KEY_NEW), null);
+    const existing = safeJsonParse(STORAGE.getItem(KEY_NEW), null);
     if (Array.isArray(existing) && existing.length) return existing;
 
     const legacy = loadLegacy();
@@ -176,7 +179,7 @@
       }
     ];
 
-    localStorage.setItem(KEY_NEW, JSON.stringify(tariffs));
+    STORAGE.setItem(KEY_NEW, JSON.stringify(tariffs));
     return tariffs;
   }
 
@@ -197,8 +200,8 @@
 
   function backupLegacy(){
     try{
-      const raw = localStorage.getItem(KEY_LEGACY);
-      if (raw) localStorage.setItem(KEY_LEGACY_BACKUP, raw);
+      const raw = STORAGE.getItem(KEY_LEGACY);
+      if (raw) STORAGE.setItem(KEY_LEGACY_BACKUP, raw);
     }catch{}
   }
 
@@ -277,10 +280,10 @@
   }
 
   function saveAll(tariffs){
-    localStorage.setItem(KEY_NEW, JSON.stringify(tariffs));
+    STORAGE.setItem(KEY_NEW, JSON.stringify(tariffs));
     backupLegacy();
     const legacy = buildLegacyTimeline(tariffs);
-    localStorage.setItem(KEY_LEGACY, JSON.stringify(legacy));
+    STORAGE.setItem(KEY_LEGACY, JSON.stringify(legacy));
   }
 
   function escapeHtml(s){
@@ -396,7 +399,7 @@
 
       let code = "";
       try{
-        const cur = safeJsonParse(localStorage.getItem(KEY_NEW), []);
+        const cur = safeJsonParse(STORAGE.getItem(KEY_NEW), []);
         const old = Array.isArray(cur) ? cur.find(x => String(x?.id) === id) : null;
         code = String(old?.code || "");
       }catch{}
@@ -431,7 +434,7 @@
       active: true,
       rates: []
     });
-    localStorage.setItem(KEY_NEW, JSON.stringify(tariffs));
+    STORAGE.setItem(KEY_NEW, JSON.stringify(tariffs));
     render();
   }
 
@@ -452,7 +455,7 @@
     if (!confirm("Удалить тариф?")) return;
 
     const tariffs = loadNew().filter(t => String(t.id) !== id);
-    localStorage.setItem(KEY_NEW, JSON.stringify(tariffs));
+    STORAGE.setItem(KEY_NEW, JSON.stringify(tariffs));
     render();
   }
 
@@ -539,7 +542,7 @@
   document.addEventListener("DOMContentLoaded", () => {
     migrateIfNeeded();
     render();
-    if (!localStorage.getItem(KEY_LEGACY)) localStorage.setItem(KEY_LEGACY, JSON.stringify(DEFAULT_LEGACY));
+    if (!STORAGE.getItem(KEY_LEGACY)) STORAGE.setItem(KEY_LEGACY, JSON.stringify(DEFAULT_LEGACY));
   });
 
 })();

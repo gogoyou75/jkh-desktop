@@ -152,6 +152,11 @@
       expiresAt: ttlMs ? (nowMs() + ttlMs) : 0
     };
     saveSession(sess);
+    try {
+      if (window.AppContext && typeof window.AppContext.getActiveNamespace === "function") {
+        window.AppContext.getActiveNamespace();
+      }
+    } catch (e) {}
     return sess;
   }
 
@@ -306,7 +311,7 @@
   // Защита страниц
   function protectPages() {
     var path = window.location.pathname || "";
-    var protectedNames = ["admin.html", "import_xls.html", "tariffs.html", "requisites.html"];
+    var protectedNames = ["admin.html", "tariffs.html"];
 
     var isProtected = false;
     for (var i = 0; i < protectedNames.length; i++) {

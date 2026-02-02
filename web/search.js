@@ -1,4 +1,5 @@
 // Универсальный поиск по структуре AbonentsDB.abonents
+const STORAGE = (window.AppContext && window.AppContext.storage) ? window.AppContext.storage : localStorage;
 // Структура data.js: AbonentsDB.abonents = { "27": { fio:"", city:"", street:"", house:"", flat:"", ... } }
 
 // Подсветка совпадающих фрагментов
@@ -37,7 +38,7 @@ function runSearch() {
         const flat = (a.flat || "").toLowerCase();
 
         // Примечания храним отдельно в localStorage
-        const note = (localStorage.getItem("note_" + id) || "").toLowerCase();
+        const note = (STORAGE.getItem("note_" + id) || "").toLowerCase();
 
         // -----------------------------
         // 1. ФИО
@@ -80,7 +81,7 @@ function runSearch() {
         if (note && note.includes(q)) {
             perDiv.innerHTML += `
                 <div class="record" onclick="openAbonent('${id}')">
-                    Примечание совпало: ${highlight(localStorage.getItem("note_" + id), q)}<br>
+                    Примечание совпало: ${highlight(STORAGE.getItem("note_" + id), q)}<br>
                     Абонент: ${a.fio}
                 </div>`;
         }

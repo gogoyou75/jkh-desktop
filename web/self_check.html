@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <title>Самопроверка регрессий</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="access.js"></script>
+  <style>
+    body { font-family: Arial, sans-serif; padding: 18px; }
+    h2 { margin-top: 0; }
+    .result { padding: 8px 10px; border: 1px solid #000; margin: 8px 0; }
+    .ok { background: #eaffea; }
+    .fail { background: #ffeaea; }
+    .muted { color: #555; font-size: 13px; }
+    button { border: 1px solid #000; background: #fff; padding: 6px 12px; cursor: pointer; }
+  </style>
+</head>
+<body>
+  <h2>Самопроверка: роли + базы + регрессии страниц</h2>
+  <p class="muted">Запускает минимальные проверки из ТЗ. Данные теста пишутся в отдельные namespace.</p>
+  <button id="btnRun" type="button">Запустить проверки</button>
+  <div id="results"></div>
+  <script src="self_check.js"></script>
+</body>
+</html>

@@ -33,10 +33,11 @@
 
     const NOTES_KEY = 'abonent_notes_v1';
     const PERIODS_KEY = 'exclude_periods_v1';
+    const STORAGE = (window.AppContext && window.AppContext.storage) ? window.AppContext.storage : localStorage;
 
     function getNotes() {
         try {
-            let obj = JSON.parse(localStorage.getItem(NOTES_KEY) || '{}');
+            let obj = JSON.parse(STORAGE.getItem(NOTES_KEY) || '{}');
             return Object.assign({ general: "", exclude_period: "", payments: "" }, obj);
         } catch (e) {
             console.error("Ошибка чтения заметок:", e);
@@ -45,7 +46,7 @@
     }
 
     function saveNotes(notesObj) {
-        localStorage.setItem(NOTES_KEY, JSON.stringify(notesObj));
+        STORAGE.setItem(NOTES_KEY, JSON.stringify(notesObj));
         try {
             fetch('/api/abonent-notes', {
                 method: 'POST',
@@ -57,7 +58,7 @@
 
     function getPeriods() {
         try {
-            const raw = JSON.parse(localStorage.getItem(PERIODS_KEY) || "[]");
+            const raw = JSON.parse(STORAGE.getItem(PERIODS_KEY) || "[]");
             return raw.filter(p =>
                 (p.from && p.from.trim() !== "") ||
                 (p.to && p.to.trim() !== "") ||
@@ -74,7 +75,7 @@
             (p?.to && String(p.to).trim() !== "") ||
             (p?.reason && String(p.reason).trim() !== "")
         );
-        localStorage.setItem(PERIODS_KEY, JSON.stringify(cleaned));
+        STORAGE.setItem(PERIODS_KEY, JSON.stringify(cleaned));
     }
 
     function excludesKey(abonentId) {
@@ -107,7 +108,7 @@
         if (!abonent) return [];
 
         try {
-            const raw = localStorage.getItem(excludesKey(abonentId));
+            const raw = STORAGE.getItem(excludesKey(abonentId));
             if (raw) {
                 const arr = JSON.parse(raw);
                 if (Array.isArray(arr)) {
@@ -136,7 +137,7 @@
         abonent.defaultExcludes = cleaned;
 
         try {
-            localStorage.setItem(excludesKey(abonentId), JSON.stringify(cleaned));
+            STORAGE.setItem(excludesKey(abonentId), JSON.stringify(cleaned));
         } catch (e) {}
     }
 

@@ -6,7 +6,8 @@
     <title>Расширенный поиск</title>
 
     <link rel="stylesheet" href="style.css">
-    <script src="data.js"></script>
+    <script src="access.js"></script>
+  <script src="data.js"></script>
     <script src="layout.js"></script>
 
     <style>
@@ -128,6 +129,8 @@
 </table>
 
 <script>
+const STORAGE = (window.AppContext && window.AppContext.storage) ? window.AppContext.storage : localStorage;
+const APP_CTX = window.AppContext || null;
 window.runSearch = function () {
     const text = (document.getElementById("searchText").value || "").trim();
     const from = document.getElementById("dateFrom").value;
@@ -139,11 +142,15 @@ window.runSearch = function () {
     // Получаем данные из localStorage
     let allAbonents = {};
 
-    for (let i = 0; i < localStorage.length; i++) {
-        const key = localStorage.key(i);
+    const scanKeys = (APP_CTX && typeof APP_CTX.listBaseKeysForNamespace === "function")
+        ? APP_CTX.listBaseKeysForNamespace(APP_CTX.getReadNamespace())
+        : Object.keys(localStorage);
+
+    for (let i = 0; i < scanKeys.length; i++) {
+        const key = scanKeys[i];
         if (key && key.startsWith('abonent_')) {
             try {
-                const abonentData = JSON.parse(localStorage.getItem(key));
+                const abonentData = JSON.parse(STORAGE.getItem(key));
                 const abonentId = key.replace('abonent_', '');
                 allAbonents[abonentId] = abonentData;
             } catch (e) {

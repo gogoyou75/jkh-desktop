@@ -26,6 +26,7 @@
 // Включение: добавь ?dev=1 к URL или работай на localhost.
 // ===============================
 (function(){
+  const STORAGE = (window.AppContext && window.AppContext.storage) ? window.AppContext.storage : localStorage;
   if (typeof window.__DEV__ === "undefined") {
     window.__DEV__ = (
       (location && (location.hostname === "localhost" || location.hostname === "127.0.0.1")) ||
@@ -220,11 +221,11 @@
 
   function excludePeriodsKey(abonentId){ return "exclude_periods_" + String(abonentId || getAbonentIdFromUrl()); }
   function moratoriumKey(abonentId){ return "moratorium_" + String(abonentId || getAbonentIdFromUrl()); }
-  function isMoratoriumActive(abonentId){ return localStorage.getItem(moratoriumKey(abonentId)) === "1"; }
+  function isMoratoriumActive(abonentId){ return STORAGE.getItem(moratoriumKey(abonentId)) === "1"; }
 
   function loadExcludes(abonentId){
     try{
-      const raw = localStorage.getItem(excludePeriodsKey(abonentId));
+      const raw = STORAGE.getItem(excludePeriodsKey(abonentId));
       const arr = raw ? JSON.parse(raw) : [];
       if (!Array.isArray(arr)) return [];
       const startDay = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate(), 0,0,0,0);
@@ -250,7 +251,7 @@
   function loadRates(abonentId){
     const key = isMoratoriumActive(abonentId) ? REFI_KEY_MORA : REFI_KEY_NORMAL;
     try{
-      const raw = localStorage.getItem(key);
+      const raw = STORAGE.getItem(key);
       const arr = raw ? JSON.parse(raw) : [];
       if (!Array.isArray(arr)) return [];
       return arr.map(x => ({
@@ -314,9 +315,9 @@
     // Global "за период" toggle (если используется)
     let globalPeriod = null;
     try{
-      const active = String(localStorage.getItem('calc_period_active_' + id) || '0') === '1';
+      const active = String(STORAGE.getItem('calc_period_active_' + id) || '0') === '1';
       if (active){
-        const raw = localStorage.getItem('calc_period_' + id);
+        const raw = STORAGE.getItem('calc_period_' + id);
         if (raw){
           const obj = JSON.parse(raw);
           if (obj && (obj.from || obj.to)){

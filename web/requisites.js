@@ -1,6 +1,8 @@
 // requisites.js — Реквизиты + подписанты (localStorage вариант А)
 
 (function () {
+  const STORAGE = (window.AppContext && window.AppContext.storage) ? window.AppContext.storage : localStorage;
+  const APP_CTX = window.AppContext || null;
   const KEY_REQ = 'organization_requisites_v1';
   const KEY_SIGNERS = 'organization_signers_v1';
 
@@ -29,18 +31,18 @@
   }
 
   function loadReq() {
-    const raw = localStorage.getItem(KEY_REQ);
+    const raw = STORAGE.getItem(KEY_REQ);
     if (!raw) return { ...reqDefaults };
     const obj = safeJsonParse(raw, null);
     return { ...reqDefaults, ...(obj || {}) };
   }
 
   function saveReq(obj) {
-    localStorage.setItem(KEY_REQ, JSON.stringify(obj));
+    STORAGE.setItem(KEY_REQ, JSON.stringify(obj));
   }
 
   function loadSigners() {
-    const raw = localStorage.getItem(KEY_SIGNERS);
+    const raw = STORAGE.getItem(KEY_SIGNERS);
     if (!raw) return JSON.parse(JSON.stringify(signerDefaults));
     const arr = safeJsonParse(raw, null);
     const list = Array.isArray(arr) ? arr : [];
@@ -77,7 +79,7 @@
     });
     if (!found && cleaned[0]) cleaned[0].is_default = true;
 
-    localStorage.setItem(KEY_SIGNERS, JSON.stringify(cleaned));
+    STORAGE.setItem(KEY_SIGNERS, JSON.stringify(cleaned));
     return cleaned;
   }
 
@@ -163,11 +165,11 @@
     });
   }
 
-  function bindSigners() {
+  function bindSigners(isReadOnly) {
     const tbody = el('signersTbody');
     const btnAdd = el('btnAddSigner');
 
-    if (btnAdd) {
+    if (btnAdd && !isReadOnly) {
       btnAdd.addEventListener('click', () => {
         const list = collectSignersFromUI();
         list.push({ id: makeId(), fio: '', position: '', basis: '', is_default: false, active: true });
@@ -175,7 +177,7 @@
       });
     }
 
-    if (tbody) {
+    if (tbody && !isReadOnly) {
       tbody.addEventListener('click', (e) => {
         const btn = e.target;
         if (btn && btn.dataset && btn.dataset.action === 'delete') {
@@ -189,11 +191,12 @@
     }
   }
 
-  function bindMain() {
+  function bindMain(isReadOnly) {
     const btnSave = el('btnSave');
     const btnReset = el('btnReset');
 
     btnSave.addEventListener('click', () => {
+      if (isReadOnly) return;
       const req = readReqForm();
       if (!req.full_name) {
         setToast('Заполните поле: Полное наименование (как в суде).', 'err');
@@ -220,9 +223,10 @@
     });
 
     btnReset.addEventListener('click', () => {
+      if (isReadOnly) return;
       if (!confirm('Очистить реквизиты и подписантов?')) return;
-      localStorage.removeItem(KEY_REQ);
-      localStorage.removeItem(KEY_SIGNERS);
+      STORAGE.removeItem(KEY_REQ);
+      STORAGE.removeItem(KEY_SIGNERS);
       fillReqForm({ ...reqDefaults });
       renderSigners(JSON.parse(JSON.stringify(signerDefaults)));
       setToast('Данные очищены.', 'ok');
@@ -230,10 +234,18 @@
   }
 
   document.addEventListener('DOMContentLoaded', () => {
+    const isReadOnly = APP_CTX && typeof APP_CTX.isReadOnly === "function" && APP_CTX.isReadOnly();
     fillReqForm(loadReq());
     renderSigners(loadSigners());
-    bindSigners();
-    bindMain();
+    bindSigners(isReadOnly);
+    bindMain(isReadOnly);
+
+    if (isReadOnly) {
+      document.body.setAttribute("data-readonly", "1");
+      document.querySelectorAll('input, select, textarea, button').forEach(el => {
+        el.disabled = true;
+      });
+    }
   });
 
   window.getOrganizationRequisites = function () { return loadReq(); };

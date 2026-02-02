@@ -18,7 +18,8 @@ Doc: docs/LOGIC_SPEC_v1.5.3.md
     <link rel="stylesheet" href="style.css">
 
     <script src="constants.js"></script>
-    <script src="data.js"></script>
+    <script src="access.js"></script>
+  <script src="data.js"></script>
     <script src="layout.js"></script>
 
     <!-- 🔴 CRITICAL: движок автоначислений -->
@@ -494,6 +495,8 @@ Doc: docs/LOGIC_SPEC_v1.5.3.md
 </div>
 
 <script>
+const STORAGE = (window.AppContext && window.AppContext.storage) ? window.AppContext.storage : localStorage;
+const APP_CTX = window.AppContext || null;
 function getAbonentIdFromURL() {
     const params = new URLSearchParams(window.location.search || "");
     const uid = String(params.get("uid") || "").trim();
@@ -992,11 +995,11 @@ function migrateLocalKeys(oldId, newId) {
     pairs.forEach(([pOld, pNew]) => {
         const oldKey = pOld + oldId;
         const newKey = pNew + newId;
-        const val = localStorage.getItem(oldKey);
-        if (val !== null && localStorage.getItem(newKey) === null) {
-            localStorage.setItem(newKey, val);
+        const val = STORAGE.getItem(oldKey);
+        if (val !== null && STORAGE.getItem(newKey) === null) {
+            STORAGE.setItem(newKey, val);
         }
-        if (val !== null) localStorage.removeItem(oldKey);
+        if (val !== null) STORAGE.removeItem(oldKey);
     });
 }
 
@@ -1068,14 +1071,14 @@ function loadMoratoriumUI(){
     const id = getAbonentIdFromURL();
     const el = document.getElementById("moratoriumToggle");
     if (!el) return;
-    el.checked = localStorage.getItem(moratoriumKey(id)) === "1";
+    el.checked = STORAGE.getItem(moratoriumKey(id)) === "1";
 }
 function bindMoratoriumUI(){
     const id = getAbonentIdFromURL();
     const el = document.getElementById("moratoriumToggle");
     if (!el) return;
     el.addEventListener("change", () => {
-        localStorage.setItem(moratoriumKey(id), el.checked ? "1" : "0");
+        STORAGE.setItem(moratoriumKey(id), el.checked ? "1" : "0");
         if (window.__loadPaymentTable) window.__loadPaymentTable();
     });
 }
@@ -1086,7 +1089,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
 function openNotesModal() {
     const id = getAbonentIdFromURL();
-    const note = localStorage.getItem("note_" + id) || "";
+    const note = STORAGE.getItem("note_" + id) || "";
     document.getElementById("notesText").value = note;
     document.getElementById("notesModal").style.display = "flex";
 }
@@ -1096,7 +1099,7 @@ function closeNotesModal() {
 function saveNotes() {
     const id = getAbonentIdFromURL();
     const txt = document.getElementById("notesText").value.trim();
-    localStorage.setItem("note_" + id, txt);
+    STORAGE.setItem("note_" + id, txt);
     closeNotesModal();
     alert("Примечание сохранено");
 }
@@ -1111,7 +1114,7 @@ function loadCalcPeriodUI(){
     if (!fromEl || !toEl) return;
 
     try {
-        const raw = localStorage.getItem(calcPeriodKey(id));
+        const raw = STORAGE.getItem(calcPeriodKey(id));
         if (raw) {
             const obj = JSON.parse(raw);
             fromEl.value = obj.from || "";
@@ -1128,12 +1131,12 @@ function loadCalcPeriodUI(){
 
 function saveCalcPeriod(from, to){
     const id = getAbonentIdFromURL();
-    localStorage.setItem(calcPeriodKey(id), JSON.stringify({from: from || "", to: to || ""}));
+    STORAGE.setItem(calcPeriodKey(id), JSON.stringify({from: from || "", to: to || ""}));
 }
 
 function setCalcPeriodActive(active){
     const id = getAbonentIdFromURL();
-    localStorage.setItem(calcPeriodActiveKey(id), active ? "1" : "0");
+    STORAGE.setItem(calcPeriodActiveKey(id), active ? "1" : "0");
 }
 
 function isValidPeriod(from, to){

@@ -42,6 +42,8 @@ function ensureAuthScriptLoaded() {
 }
 ensureAuthScriptLoaded();
 
+var LAYOUT_STORAGE = (window.AppContext && window.AppContext.storage) ? window.AppContext.storage : localStorage;
+
 function ensureLayoutStyles() {
   if (document.getElementById("layoutStyles")) return;
 
@@ -347,7 +349,7 @@ function globalSearch(q) {
     const a = db[id];
     const fio = a.fio?.toLowerCase() || "";
     const adr = `${a.city || ""} ${a.street || ""} ${a.house || ""} ${a.flat || ""}`.toLowerCase();
-    const noteRaw = localStorage.getItem("note_" + id) || "";
+    const noteRaw = LAYOUT_STORAGE.getItem("note_" + id) || "";
     const note = noteRaw.toLowerCase();
 
     if (fio.includes(q)) {

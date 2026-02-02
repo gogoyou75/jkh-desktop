@@ -26,6 +26,8 @@
    ===================================================================== */
 
 (function () {
+  const STORAGE = (window.AppContext && window.AppContext.storage) ? window.AppContext.storage : localStorage;
+  const APP_CTX = window.AppContext || null;
   function qs(sel, root = document) { return root.querySelector(sel); }
   function qsa(sel, root = document) { return Array.from(root.querySelectorAll(sel)); }
   function pad2(n) { return String(n).padStart(2, "0"); }
@@ -36,10 +38,10 @@
     return `payments_ui_collapsed_${getAbonentId()}`;
   }
   function loadCollapsedMap() {
-    try { return JSON.parse(localStorage.getItem(collapseStoreKey()) || "{}") || {}; } catch { return {}; }
+    try { return JSON.parse(STORAGE.getItem(collapseStoreKey()) || "{}") || {}; } catch { return {}; }
   }
   function saveCollapsedMap(map) {
-    try { localStorage.setItem(collapseStoreKey(), JSON.stringify(map || {})); } catch {}
+    try { STORAGE.setItem(collapseStoreKey(), JSON.stringify(map || {})); } catch {}
   }
   function ymKeyOfRow(r) {
     return `${String(r.year)}-${pad2(Number(r.month))}`;
@@ -90,7 +92,7 @@
 
   function loadPaymentSources(){
     try {
-      const raw = localStorage.getItem(PAYMENT_SOURCES_KEY);
+      const raw = STORAGE.getItem(PAYMENT_SOURCES_KEY);
       if (!raw) return defaultPaymentSources();
       const arr = JSON.parse(raw);
       if (!Array.isArray(arr)) return defaultPaymentSources();
@@ -103,7 +105,7 @@
 
   function savePaymentSources(arr){
     const cleaned = (arr||[]).map(x => String(x||'').trim()).filter(Boolean);
-    localStorage.setItem(PAYMENT_SOURCES_KEY, JSON.stringify(cleaned.length ? cleaned : defaultPaymentSources()));
+    STORAGE.setItem(PAYMENT_SOURCES_KEY, JSON.stringify(cleaned.length ? cleaned : defaultPaymentSources()));
   }
 
   function ensurePaymentSources(){
@@ -114,7 +116,7 @@
       return defaultPaymentSources();
     }
     try {
-      if (!localStorage.getItem(PAYMENT_SOURCES_KEY)) savePaymentSources(cur);
+      if (!STORAGE.getItem(PAYMENT_SOURCES_KEY)) savePaymentSources(cur);
     } catch {}
     return cur;
   }
@@ -435,7 +437,7 @@ function splitAccrualByOwnership(accr, year, month, history) {
     // (год, месяц) из таблицы оплат и считаем это датой начала расчёта.
     // Это даёт автоперерасчёт начислений сразу после импорта.
     try {
-      const raw = localStorage.getItem("payments_" + id);
+      const raw = STORAGE.getItem("payments_" + id);
       if (raw) {
         const arr = JSON.parse(raw);
         if (Array.isArray(arr) && arr.length) {
@@ -458,7 +460,7 @@ function splitAccrualByOwnership(accr, year, month, history) {
               aStrict.calcStartDate = fromISO2;
               try {
                 if (typeof window.saveAbonentsDB === "function") window.saveAbonentsDB();
-                else localStorage.setItem("abonents_db_v1", JSON.stringify(window.AbonentsDB));
+                else STORAGE.setItem("abonents_db_v1", JSON.stringify(window.AbonentsDB));
               } catch (e) {}
             }
 
@@ -599,7 +601,7 @@ function getOwnershipHistoryForPremise() {
     };
 
     for (const k of keys){
-      const got = tryParse(localStorage.getItem(k));
+      const got = tryParse(STORAGE.getItem(k));
       if (got) return got;
     }
 
@@ -607,12 +609,14 @@ function getOwnershipHistoryForPremise() {
     // Берём первый подходящий массив.
     try{
       const foundKeys = [];
-      for (let i=0; i<localStorage.length; i++){
-        const k = localStorage.key(i);
+      const scanKeys = (APP_CTX && typeof APP_CTX.listBaseKeysForNamespace === "function")
+        ? APP_CTX.listBaseKeysForNamespace(APP_CTX.getReadNamespace())
+        : Object.keys(localStorage);
+      for (const k of scanKeys){
         if (!k) continue;
         if (/tarif|тариф/i.test(k)){
           foundKeys.push(k);
-          const got = tryParse(localStorage.getItem(k));
+          const got = tryParse(STORAGE.getItem(k));
           if (got) return got;
         }
       }
@@ -634,7 +638,10 @@ function getOwnershipHistoryForPremise() {
     // финальный лог: покажем какие ключи вообще есть (первые 30) — помогает сразу понять имя ключа
     try{
       const ks = [];
-      for (let i=0; i<Math.min(localStorage.length, 30); i++) ks.push(localStorage.key(i));
+      const scanKeys = (APP_CTX && typeof APP_CTX.listBaseKeysForNamespace === "function")
+        ? APP_CTX.listBaseKeysForNamespace(APP_CTX.getReadNamespace())
+        : Object.keys(localStorage);
+      for (let i=0; i<Math.min(scanKeys.length, 30); i++) ks.push(scanKeys[i]);
       console.warn("[autoaccrual] не найдены тарифы. Примеры ключей localStorage:", ks);
     }catch{
       console.warn("[autoaccrual] не найдены тарифы: localStorage или window.*");
@@ -649,7 +656,7 @@ function getOwnershipHistoryForPremise() {
       { from: "2024-01-01", content: 38.5, repair: 12 }
     ];
     try{
-      localStorage.setItem("tariffs_content_repair_v1", JSON.stringify(defaults));
+      STORAGE.setItem("tariffs_content_repair_v1", JSON.stringify(defaults));
       console.warn("[autoaccrual] тарифы не найдены — создал tariffs_content_repair_v1 (defaults)");
     }catch{}
     return defaults;
@@ -872,7 +879,7 @@ for (const p of parts) {
 
   function getCalcPeriod() {
     try {
-      const raw = localStorage.getItem(calcPeriodKey());
+      const raw = STORAGE.getItem(calcPeriodKey());
       if (!raw) return null;
       const p = JSON.parse(raw);
       const from = String(p?.from || "");
@@ -885,7 +892,7 @@ for (const p of parts) {
   }
 
   function isCalcPeriodActive() {
-    return localStorage.getItem(calcPeriodActiveKey()) === "1";
+    return STORAGE.getItem(calcPeriodActiveKey()) === "1";
   }
 
   // ✅ ФИЛЬТР: показываем оплаты, у которых "Дата оплаты" попадает в выбранный период
@@ -932,7 +939,7 @@ for (const p of parts) {
   function getPayments() {
     try {
       const key = paymentsKey();
-      const raw = localStorage.getItem(key);
+      const raw = STORAGE.getItem(key);
       if (!raw) return [];
       const arr = JSON.parse(raw);
       if (!Array.isArray(arr)) return [];
@@ -966,7 +973,7 @@ for (const p of parts) {
 
       if (changed) {
         try { normalizePaymentRows(arr); } catch {}
-        localStorage.setItem(key, JSON.stringify(arr));
+        STORAGE.setItem(key, JSON.stringify(arr));
       }
 
       return arr;
@@ -1033,7 +1040,7 @@ for (const p of parts) {
 
   function savePayments(arr) {
     try { normalizePaymentRows(arr); } catch {}
-    localStorage.setItem(paymentsKey(), JSON.stringify(arr));
+    STORAGE.setItem(paymentsKey(), JSON.stringify(arr));
   }
 
   // =========================================================
@@ -1388,7 +1395,7 @@ function applyRunningTotals(viewRows) {
   function moratoriumKey() { return "moratorium_" + getAbonentId(); }
 
   function isMoratoriumActive(){
-    return localStorage.getItem(moratoriumKey()) === "1";
+    return STORAGE.getItem(moratoriumKey()) === "1";
   }
 
   function parseDMY(dmy){
@@ -1399,7 +1406,7 @@ function applyRunningTotals(viewRows) {
 
   function loadExcludes(){
     try{
-      const raw = localStorage.getItem(excludePeriodsKey());
+      const raw = STORAGE.getItem(excludePeriodsKey());
       const arr = raw ? JSON.parse(raw) : [];
       if (!Array.isArray(arr)) return [];
 
@@ -1438,7 +1445,7 @@ function applyRunningTotals(viewRows) {
   function loadRates(){
     const key = isMoratoriumActive() ? REFI_KEY_MORA : REFI_KEY_NORMAL;
     try{
-      const raw = localStorage.getItem(key);
+      const raw = STORAGE.getItem(key);
       const arr = raw ? JSON.parse(raw) : [];
       if (!Array.isArray(arr)) return [];
       const parsed = arr

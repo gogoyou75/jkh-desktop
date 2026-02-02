@@ -38,11 +38,12 @@
 (function () {
   if (window.__SPRAVKA_SUD_JS_LOADED__) return;
   window.__SPRAVKA_SUD_JS_LOADED__ = true;
+  const STORAGE = (window.AppContext && window.AppContext.storage) ? window.AppContext.storage : localStorage;
   function $(id){ return document.getElementById(id); }
 
   function safeJSON(key, def){
     try{
-      const raw = localStorage.getItem(key);
+      const raw = STORAGE.getItem(key);
       if (!raw) return def;
       return JSON.parse(raw);
     }catch(e){ return def; }
@@ -78,8 +79,8 @@
         return { from:String(o.from), to:String(o.to) };
       }catch(e){ return null; }
     }
-    const rp = localStorage.getItem("report_period_" + ls);
-    const cp = localStorage.getItem("calc_period_" + ls);
+    const rp = STORAGE.getItem("report_period_" + ls);
+    const cp = STORAGE.getItem("calc_period_" + ls);
     return parsePeriod(rp) || parsePeriod(cp);
   }
 
@@ -356,10 +357,10 @@
     const notesEl = $("notes");
     if (notesEl){
       const keyNotes = "notes_" + ls;
-      const stored = localStorage.getItem(keyNotes);
+      const stored = STORAGE.getItem(keyNotes);
       if (stored !== null) notesEl.value = stored;
       notesEl.addEventListener("input", function(){
-        localStorage.setItem(keyNotes, notesEl.value);
+        STORAGE.setItem(keyNotes, notesEl.value);
       });
     }
   });

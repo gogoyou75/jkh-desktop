@@ -7,6 +7,7 @@
   <link rel="stylesheet" href="style.css">
 
   <!-- ОБЯЗАТЕЛЬНО подключаем базу ДО layout.js -->
+  <script src="access.js"></script>
   <script src="data.js"></script>
   <script src="layout.js"></script>
 
@@ -299,6 +300,8 @@
 </div>
 
 <script>
+const STORAGE = (window.AppContext && window.AppContext.storage) ? window.AppContext.storage : localStorage;
+const APP_CTX = window.AppContext || null;
 /* =========================
    УТИЛИТЫ
    ========================= */
@@ -468,7 +471,7 @@ function paymentsKeyForLs(ls){
 
 function loadPaymentsForLs(ls){
   try {
-    const raw = localStorage.getItem(paymentsKeyForLs(ls));
+    const raw = STORAGE.getItem(paymentsKeyForLs(ls));
     if (!raw) return [];
     const arr = JSON.parse(raw);
     return Array.isArray(arr) ? arr : [];
@@ -479,7 +482,7 @@ function loadPaymentsForLs(ls){
 
 function savePaymentsForLs(ls, arr){
   try {
-    localStorage.setItem(paymentsKeyForLs(ls), JSON.stringify(Array.isArray(arr) ? arr : []));
+    STORAGE.setItem(paymentsKeyForLs(ls), JSON.stringify(Array.isArray(arr) ? arr : []));
   } catch (e){
     console.warn('[new_abonent] savePaymentsForLs error', e);
   }
@@ -508,7 +511,7 @@ function debtsHasDuplicate(debtsArr, dmy, amount){
 
 function loadImportDraft(){
   try {
-    const raw = localStorage.getItem('import_preview_v1');
+    const raw = STORAGE.getItem('import_preview_v1');
     if (!raw) return null;
     return JSON.parse(raw);
   } catch {
@@ -674,6 +677,9 @@ function prefillFromQueryParams() {
    СОЗДАНИЕ АБОНЕНТА
    ========================= */
 function createAbonent() {
+  if (APP_CTX && typeof APP_CTX.isReadOnly === "function" && APP_CTX.isReadOnly()) {
+    return;
+  }
   const last = document.getElementById("na_last").value.trim();
   const first = document.getElementById("na_first").value.trim();
   const mid = document.getElementById("na_mid").value.trim();
@@ -934,6 +940,12 @@ document.addEventListener("DOMContentLoaded", () => {
   prefillFromQueryParams();
 
   document.getElementById("btnBackToImport")?.addEventListener("click", goBackToImport);
+
+  if (APP_CTX && typeof APP_CTX.isReadOnly === "function" && APP_CTX.isReadOnly()) {
+    document.body.setAttribute("data-readonly", "1");
+    const btn = document.getElementById("btnCreate");
+    if (btn) btn.disabled = true;
+  }
 
   const ps = document.getElementById("premiseSelect");
   if (ps) {

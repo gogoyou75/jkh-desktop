@@ -10,6 +10,7 @@
   <link rel="stylesheet" href="style.css">
 
   <!-- ОБЯЗАТЕЛЬНО подключаем базу данных ДО layout.js -->
+  <script src="access.js"></script>
   <script src="data.js"></script>
   <script src="layout.js"></script>
 
@@ -116,6 +117,8 @@
 </div>
 
 <script>
+const STORAGE = (window.AppContext && window.AppContext.storage) ? window.AppContext.storage : localStorage;
+const APP_CTX = window.AppContext || null;
 document.addEventListener('DOMContentLoaded', () => {
   const btnPreview = document.getElementById('btnPreview');
   const btnConfirm = document.getElementById('btnConfirm');
@@ -124,6 +127,15 @@ document.addEventListener('DOMContentLoaded', () => {
   const summaryHint = document.getElementById('summaryHint');
   const fileInput = document.getElementById('fileInput');
   const fileStatusHint = document.getElementById('fileStatusHint');
+  const isReadOnly = APP_CTX && typeof APP_CTX.isReadOnly === "function" && APP_CTX.isReadOnly();
+
+  if (isReadOnly) {
+    document.body.setAttribute("data-readonly", "1");
+    btnPreview.disabled = true;
+    btnConfirm.disabled = true;
+    btnResetPreview.disabled = true;
+    fileInput.disabled = true;
+  }
 
   // ====== Черновик предпросмотра (сохраняем модель до подтверждения импорта) ======
   const IMPORT_DRAFT_KEY = 'jkh_import_draft_v1';
@@ -149,7 +161,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   function saveImportDraft(model){
     try {
-      localStorage.setItem(IMPORT_DRAFT_KEY, JSON.stringify({
+      STORAGE.setItem(IMPORT_DRAFT_KEY, JSON.stringify({
         fileName: model?.fileName || '',
         rows: model?.rows || [],
         stats: model?.stats || null,
@@ -163,7 +175,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   function loadImportDraft(){
     try {
-      const raw = localStorage.getItem(IMPORT_DRAFT_KEY);
+      const raw = STORAGE.getItem(IMPORT_DRAFT_KEY);
       return raw ? JSON.parse(raw) : null;
     } catch {
       return null;
@@ -171,7 +183,7 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   function clearImportDraft(){
-    localStorage.removeItem(IMPORT_DRAFT_KEY);
+    STORAGE.removeItem(IMPORT_DRAFT_KEY);
   }
 
   // ====== КАРТА КОЛОНОК (поле 0..77 -> индекс колонки Excel) ======
@@ -328,7 +340,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   function loadPayments(ls){
     try {
-      const raw = localStorage.getItem(getPaymentsKey(ls));
+      const raw = STORAGE.getItem(getPaymentsKey(ls));
       if (!raw) return [];
       const arr = JSON.parse(raw);
       return Array.isArray(arr) ? arr : [];
@@ -339,7 +351,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   function savePayments(ls, arr){
     try {
-      localStorage.setItem(getPaymentsKey(ls), JSON.stringify(arr));
+      STORAGE.setItem(getPaymentsKey(ls), JSON.stringify(arr));
     } catch (e){
       console.warn('Не удалось сохранить payments_'+ls, e);
     }
@@ -914,7 +926,7 @@ document.addEventListener('DOMContentLoaded', () => {
       if (typeof window.saveAbonentsDB === 'function') {
         window.saveAbonentsDB();
       } else {
-        localStorage.setItem('abonents_db_v1', JSON.stringify(AbonentsDB));
+        STORAGE.setItem('abonents_db_v1', JSON.stringify(AbonentsDB));
       }
     } catch (e){
       console.warn('Не удалось сохранить AbonentsDB', e);

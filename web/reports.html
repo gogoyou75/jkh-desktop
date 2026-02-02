@@ -6,7 +6,8 @@
     <title>Справки</title>
     <link rel="stylesheet" href="style.css">
 
-    <script src="data.js"></script>
+    <script src="access.js"></script>
+  <script src="data.js"></script>
     <script src="layout.js"></script>
 
     <style>
@@ -169,6 +170,8 @@
 </div>
 
 <script>
+const STORAGE = (window.AppContext && window.AppContext.storage) ? window.AppContext.storage : localStorage;
+const APP_CTX = window.AppContext || null;
 function getAbonentIdFromURL() {
     const params = new URLSearchParams(window.location.search);
     const fromUrl = params.get("abonent");
@@ -228,7 +231,7 @@ function loadAutoPeriod() {
 
     // 1) если уже выбирали период на странице справок — берём его
     try {
-        const rawR = localStorage.getItem(reportPeriodKey(id));
+        const rawR = STORAGE.getItem(reportPeriodKey(id));
         if (rawR) {
             const p = JSON.parse(rawR);
             fromEl.value = p.from || "";
@@ -239,7 +242,7 @@ function loadAutoPeriod() {
 
     // 2) иначе — берем период из карточки абонента (если он выбран)
     try {
-        const raw = localStorage.getItem(calcPeriodKey(id));
+        const raw = STORAGE.getItem(calcPeriodKey(id));
         if (!raw) { fromEl.value = ""; toEl.value = ""; return; }
         const p = JSON.parse(raw);
         fromEl.value = p.from || "";
@@ -258,10 +261,13 @@ function isValidPeriod(from, to){
 
 function saveReportPeriod(from, to){
     const id = getAbonentIdFromURL();
-    localStorage.setItem(reportPeriodKey(id), JSON.stringify({from: from || "", to: to || ""}));
+    STORAGE.setItem(reportPeriodKey(id), JSON.stringify({from: from || "", to: to || ""}));
 }
 
 document.addEventListener("DOMContentLoaded", () => {
+    if (APP_CTX && typeof APP_CTX.isReadOnly === "function" && APP_CTX.isReadOnly()) {
+        document.body.setAttribute("data-readonly", "1");
+    }
     fillAbonentCardHeader();
     loadAutoPeriod();
 

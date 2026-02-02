@@ -19,7 +19,8 @@ Doc: docs/LOGIC_SPEC_v1.5.3.md
     <link rel="stylesheet" href="style.css">
 
     <!-- данные и лэйаут -->
-    <script src="data.js"></script>
+    <script src="access.js"></script>
+  <script src="data.js"></script>
     <script src="calc_engine.js"></script>
 <script src="layout.js"></script>
 
@@ -169,6 +170,8 @@ Doc: docs/LOGIC_SPEC_v1.5.3.md
 <div id="paginationControls"></div>
 
 <script>
+const STORAGE = (window.AppContext && window.AppContext.storage) ? window.AppContext.storage : localStorage;
+const APP_CTX = window.AppContext || null;
 /* ============================================================
      ГЛОБАЛЬНЫЕ ДАННЫЕ
 ============================================================ */
@@ -189,9 +192,9 @@ function CRITICAL_ASSERT(cond, msg, ctx){
     try {
         console.error("CRITICAL_ASSERT:", msg || "assert failed", ctx || {});
     } catch(e){}
-    // можно включить жёсткий режим: localStorage.setItem('CRITICAL_ASSERT_THROW','1')
+    // можно включить жёсткий режим: STORAGE.setItem('CRITICAL_ASSERT_THROW','1')
     try {
-        if (localStorage.getItem('CRITICAL_ASSERT_THROW') === '1') {
+        if (STORAGE.getItem('CRITICAL_ASSERT_THROW') === '1') {
             throw new Error(String(msg || "CRITICAL_ASSERT failed"));
         }
     } catch(e){ throw e; }
@@ -276,7 +279,7 @@ function getAbonentNote(id, a){
 
     // 2) запасной вариант: отдельный ключ (если карточка так сохраняла)
     try{
-        const raw = localStorage.getItem("note_" + String(id));
+        const raw = STORAGE.getItem("note_" + String(id));
         if (raw !== null && raw !== undefined) return String(raw);
     }catch(e){}
 
@@ -285,7 +288,7 @@ function getAbonentNote(id, a){
 
 function getPaymentsForAbonent(id){
     try{
-        const raw = localStorage.getItem("payments_" + id);
+        const raw = STORAGE.getItem("payments_" + id);
         if (!raw) return [];
         const arr = JSON.parse(raw);
         return Array.isArray(arr) ? arr : [];
@@ -628,7 +631,7 @@ function render() {
             }catch(e){}
 
             // запасной вариант: локально сохраняем под отдельным ключом
-            try{ localStorage.setItem("note_" + id, val); }catch(e){}
+            try{ STORAGE.setItem("note_" + id, val); }catch(e){}
 
             // если в data.js есть сохранение базы — используем его
             try{
@@ -636,7 +639,7 @@ function render() {
                 else if (typeof window.saveDB === "function") window.saveDB();
                 else {
                     // запасной вариант: типичный ключ базы (если data.js хранит её в LS)
-                    localStorage.setItem("abonents_db_v1", JSON.stringify(window.AbonentsDB));
+                    STORAGE.setItem("abonents_db_v1", JSON.stringify(window.AbonentsDB));
                 }
             }catch(e){}
         });

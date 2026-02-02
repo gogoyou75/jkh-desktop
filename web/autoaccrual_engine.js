@@ -47,6 +47,8 @@
 (function(){
   const ENGINE_KEY = 'JKH_AUTOACCRUAL_ENGINE_v1';
   if (window[ENGINE_KEY]) return; // не подключать дважды
+  const STORAGE = (window.AppContext && window.AppContext.storage) ? window.AppContext.storage : localStorage;
+  const APP_CTX = window.AppContext || null;
 
   const DAY_MS = 24*3600*1000;
 
@@ -147,14 +149,14 @@
 
   function loadPayments(ls){
     try{
-      const raw = localStorage.getItem(paymentsKey(ls));
+      const raw = STORAGE.getItem(paymentsKey(ls));
       if (!raw) return [];
       const arr = JSON.parse(raw);
       return Array.isArray(arr) ? arr : [];
     } catch { return []; }
   }
   function savePayments(ls, arr){
-    try{ localStorage.setItem(paymentsKey(ls), JSON.stringify(arr||[])); } catch {}
+    try{ STORAGE.setItem(paymentsKey(ls), JSON.stringify(arr||[])); } catch {}
   }
 
   // ----------------------------
@@ -216,7 +218,7 @@
     // 1) known keys
     for (const k of KNOWN_TARIFF_KEYS){
       try{
-        const raw = localStorage.getItem(k);
+        const raw = STORAGE.getItem(k);
         if (!raw) continue;
         const data = JSON.parse(raw);
         const rows = extractTariffRowsFromParsed(data);
@@ -225,10 +227,12 @@
     }
     // 2) scan localStorage for anything that looks like tariffs
     try{
-      const ks = Object.keys(localStorage);
+      const ks = APP_CTX && typeof APP_CTX.listBaseKeysForNamespace === "function"
+        ? APP_CTX.listBaseKeysForNamespace(APP_CTX.getReadNamespace())
+        : Object.keys(localStorage);
       for (const k of ks){
         if (!/tarif|тариф/i.test(k)) continue;
-        const raw = localStorage.getItem(k);
+        const raw = STORAGE.getItem(k);
         if (!raw) continue;
         try{
           const data = JSON.parse(raw);
@@ -320,7 +324,7 @@
 
   function loadDynamicTariffs(){
     try{
-      const raw = localStorage.getItem(DYNAMIC_TARIFFS_KEY);
+      const raw = STORAGE.getItem(DYNAMIC_TARIFFS_KEY);
       if (!raw) return [];
       const arr = JSON.parse(raw);
       return Array.isArray(arr) ? arr : [];
@@ -414,7 +418,7 @@
 
   function saveTariffsV1(rows){
     const norm = normalizeTariffs(rows);
-    localStorage.setItem('tariffs_content_repair_v1', JSON.stringify({ tariffs: norm.map(x => ({ from: x.from, content: x.content, repair: x.repair })) }));
+    STORAGE.setItem('tariffs_content_repair_v1', JSON.stringify({ tariffs: norm.map(x => ({ from: x.from, content: x.content, repair: x.repair })) }));
     return norm;
   }
 
