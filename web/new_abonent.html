@@ -2,9 +2,9 @@
 <html lang="ru">
 <head>
   <meta charset="UTF-8">
-    
-    <!-- JKH CANON FIX: suppress false "Guest: read-only" dialogs for logged-in users (must run BEFORE data.js) -->
-    <script>
+
+  <!-- JKH CANON FIX: suppress false "Guest: read-only" dialogs for logged-in users (must run BEFORE data.js) -->
+  <script>
     (function(){
       function jkhSafeParse(s){ try { return JSON.parse(s); } catch(e){ return null; } }
       function jkhHasValidSession(){
@@ -48,10 +48,15 @@
         return _confirm.call(window, msg);
       };
     })();
-    </script>
-<script src="critical_guard.js" defer></script>
+  </script>
+
+  <script src="critical_guard.js" defer></script>
   <title>Новый абонент</title>
   <link rel="stylesheet" href="style.css">
+
+  <!-- ✅ CRITICAL: auth + storage ДО data.js (иначе AbonentsDB загружается пустым) -->
+  <script src="auth.js"></script>
+  <script src="storage.js"></script>
 
   <!-- ОБЯЗАТЕЛЬНО подключаем базу ДО layout.js -->
   <script src="data.js"></script>
@@ -642,9 +647,6 @@ function importPaymentsFromDraftForNewAbonent(ls, abonentObj){
         });
         addedDebts++;
       }
-      if (addedDebts) {
-        // ничего — сохранение AbonentsDB произойдёт общим save ниже
-      }
     }
   } catch (e){
     console.warn('[new_abonent] debts append error', e);
@@ -811,7 +813,6 @@ function createAbonent() {
   });
 
   // ✅ v1.4: если абонент создаётся из импорта — переносим оплаты из предпросмотра СРАЗУ.
-  // Это решает кейс: в Excel UID пустой → оператор создаёт абонента → оплаты должны «сесть» без повторного импорта.
   const src = String(document.getElementById("na_src").value || "").trim();
   if (src === 'import_xls') {
     try {
@@ -826,7 +827,7 @@ function createAbonent() {
 
   if (window.saveAbonentsDB) window.saveAbonentsDB();
 
-  // ✅ Variant A: сразу создаём/пересчитываем начисления с даты начала (включительно)
+  // ✅ Variant A: сразу создаём/пересчитываем начисления
   try {
     if (window.JKHAutoAccrual && typeof window.JKHAutoAccrual.recalcForAbonent === 'function') {
       window.JKHAutoAccrual.recalcForAbonent(String(ls));

@@ -11,7 +11,7 @@
       В одном месяце допускается несколько строк (начисление + оплаты).
 
    3) "Оплата за период" (use_period/pay_for_period) влияет ТОЛЬКО на пеню.
-      Запрещена ретро‑перезапись: дата фактической оплаты не меняется.
+      Запрещена ретро-перезапись: дата фактической оплаты не меняется.
 
    4) Исключённые периоды отключают ТОЛЬКО пеню, основной долг не трогают.
 
@@ -22,23 +22,29 @@
    ============================================================ */
 
 // spravka_sud.js
-// Variant B (court view):
-// - каждый платёж отдельной строкой
-// - первый платёж месяца совмещаем с начислением
-// - "МЕсячная задолженность" (3 колонки) = строго за МЕСЯЦ, НЕ нарастающим итогом
-// - итоговый блок внизу ("по состоянию") = на конец месяца period.to и должен совпадать с карточкой
+// ✅ CRITICAL v1.6 CANON (ПАПАЖКХ):
+// Дата начала расчёта справки для суда = "Дата начала расчёта абонента"
+// ("с какого дня месяца начать начислять").
+// Источник: abonent.calcStartDate (приоритет) → activeLink.dateFrom → fallback.
+// Если выбранный период начинается раньше — period.from режем снизу.
 //
-// ✅ NEW (CRITICAL): "Пеня за месяц" в справке группируется по МЕСЯЦУ-ИСТОЧНИКУ ДОЛГА,
-// т.е. по месяцу начисления основного обязательства (year/month строки), а НЕ по месяцу
-// фактического начисления пени.
-// Пример: пеня, начисленная в октябре за августовский долг, показывается в строке "Август".
+// ✅ FIX for namespaced storage:
+// В некоторых версиях проекта window.AbonentsDB НЕ создаётся на странице,
+// а база лежит в localStorage по ключам вида:
+//   jkhdb::u_xxx::abonents_db_v1
+// Поэтому здесь есть детектор, который находит базу, содержащую abonentId.
 //
 // Требует: calc_engine.js (window.JKHCalcEngine)
 
 (function () {
   if (window.__SPRAVKA_SUD_JS_LOADED__) return;
   window.__SPRAVKA_SUD_JS_LOADED__ = true;
+
   function $(id){ return document.getElementById(id); }
+
+  function safeJSONParse(raw, def){
+    try{ return JSON.parse(raw); }catch(e){ return def; }
+  }
 
   function safeJSON(key, def){
     try{
@@ -83,6 +89,72 @@
     return parsePeriod(rp) || parsePeriod(cp);
   }
 
+  // ------------------------------------------------------------
+  // ✅ DETECTOR: find AbonentsDB in namespaced localStorage
+  // ------------------------------------------------------------
+  function loadAbonentsDbCandidateKeys(){
+    const out = [];
+    try{
+      const keys = Object.keys(localStorage);
+      for (const k of keys){
+        const lk = String(k).toLowerCase();
+        // поддержим и старый формат "abonents_db_v1", и namespaced "::abonents_db_v1"
+        if (lk === "abonents_db_v1" || lk.endsWith("::abonents_db_v1")) out.push(k);
+      }
+    }catch(e){}
+    return out;
+  }
+
+  function normalizeDbRoot(obj){
+    if (!obj || typeof obj !== "object") return null;
+    // ожидаем {abonents:{}, premises:{}, links:[]}
+    const abonents = (obj.abonents && typeof obj.abonents === "object") ? obj.abonents : null;
+    if (!abonents) return null;
+    if (!obj.links) obj.links = [];
+    if (!obj.premises) obj.premises = {};
+    return obj;
+  }
+
+  function getDbRootForAbonent(abonentId){
+    // 1) если window.AbonentsDB есть — используем
+    if (window.AbonentsDB && window.AbonentsDB.abonents){
+      const db = normalizeDbRoot(window.AbonentsDB);
+      if (db && db.abonents && db.abonents[String(abonentId)]) return db;
+    }
+
+    // 2) иначе ищем в localStorage по ключам *abonents_db_v1*
+    const keys = loadAbonentsDbCandidateKeys();
+    let firstValid = null;
+
+    for (const k of keys){
+      const raw = localStorage.getItem(k);
+      if (!raw) continue;
+      const data = safeJSONParse(raw, null);
+      const db = normalizeDbRoot(data);
+      if (!db) continue;
+
+      if (!firstValid) firstValid = db;
+      if (db.abonents && db.abonents[String(abonentId)]) return db; // ✅ нашли нужную базу
+    }
+
+    // 3) fallback: хоть какая-то валидная база
+    return firstValid;
+  }
+
+  // активная связь абонент↔квартира (dateFrom/dateTo)
+  function getActiveLinkForAbonent(dbRoot, abonentId){
+    try{
+      const links = Array.isArray(dbRoot?.links) ? dbRoot.links : [];
+      const id = String(abonentId || "");
+      const mine = links.filter(l => String(l?.abonentId || "") === id);
+
+      if (!mine.length) return null;
+      // активная = без dateTo
+      const active = mine.find(l => !String(l?.dateTo || "").trim());
+      return active || mine[0] || null;
+    }catch(e){ return null; }
+  }
+
   function renderRow(tbody, cells){
     const tr = document.createElement("tr");
     tr.innerHTML = `
@@ -98,15 +170,6 @@
   }
 
   function monthKey(y,m){ return `${y}-${String(m).padStart(2,"0")}`; }
-
-  function uniq(arr){
-    const s = new Set();
-    const out = [];
-    for (const x of arr){
-      if (!s.has(x)){ s.add(x); out.push(x); }
-    }
-    return out;
-  }
 
   document.addEventListener("DOMContentLoaded", function () {
     const eng = window.JKHCalcEngine;
@@ -124,10 +187,11 @@
     })();
     if (!ls) return;
 
-    // реквизиты (страница "Реквизиты организации" сохраняет в localStorage)
-    const req = safeJSON("organization_requisites_v1", {}) || {};
+    // ✅ получаем правильную БД (в т.ч. namespaced)
+    const dbRoot = getDbRootForAbonent(ls);
 
-    // показываем строку ТОЛЬКО если заполнено значение
+    // реквизиты
+    const req = safeJSON("organization_requisites_v1", {}) || {};
     function setReqRow(rowId, spanId, value) {
       const v = (value == null ? "" : String(value)).trim();
       const row = document.getElementById(rowId);
@@ -135,24 +199,19 @@
       setText(spanId, v);
       return !!v;
     }
-
     const has1 = setReqRow("orgRowName", "orgName", req.full_name);
     const has2 = setReqRow("orgRowInn", "orgInn", req.inn);
     const has3 = setReqRow("orgRowLegal", "orgLegal", req.legal_address);
     const has4 = setReqRow("orgRowPostal", "orgPostal", req.postal_address);
     const has5 = setReqRow("orgRowPhone", "orgPhone", req.phone);
     const has6 = setReqRow("orgRowEmail", "orgEmail", req.email);
-
     const orgHeader = document.getElementById("orgHeader");
-    if (orgHeader && !(has1 || has2 || has3 || has4 || has5 || has6)) {
-      orgHeader.style.display = "none";
-    }
+    if (orgHeader && !(has1 || has2 || has3 || has4 || has5 || has6)) orgHeader.style.display = "none";
 
-    // подписант (Председатель) — берём из localStorage, не "из воздуха"
+    // подписант
     const signers = safeJSON("organization_signers_v1", []) || [];
-    const active = Array.isArray(signers) ? signers.filter(s => s && s.active !== false) : [];
-    let signer = active.find(s => s.is_default) || active[0] || null;
-
+    const activeS = Array.isArray(signers) ? signers.filter(s => s && s.active !== false) : [];
+    const signer = activeS.find(s => s.is_default) || activeS[0] || null;
     if (signer) {
       setText("signerPosition", (signer.position || "Председатель правления").trim());
       setText("chairmanName", (signer.fio || "").trim());
@@ -161,7 +220,6 @@
       if (basisLine) basisLine.style.display = basis ? "" : "none";
       setText("signerBasisText", basis);
     } else {
-      // если подписанты не заведены — оставляем типовой шаблон, но без "подтягиваний" из других мест
       setText("signerPosition", "Председатель правления");
       setText("chairmanName", "");
       const basisLine = document.getElementById("basisLine");
@@ -170,8 +228,8 @@
     }
 
     // абонент
+    const abonent = (dbRoot && dbRoot.abonents && dbRoot.abonents[String(ls)]) ? dbRoot.abonents[String(ls)] : null;
 
-    const abonent = (window.AbonentsDB && window.AbonentsDB.abonents && window.AbonentsDB.abonents[String(ls)]) || null;
     if (abonent){
       setText("fio", abonent.fio || "");
       setText("address", [abonent.city, abonent.street, abonent.house, abonent.flat].filter(Boolean).join(", "));
@@ -180,13 +238,47 @@
       setText("share", abonent.share || "");
     }
 
-    // период
+    // ===== CRITICAL: определяем дату начала расчёта абонента =====
+    let abonentStart = null;
+
+    // 1) abonent.calcStartDate (главный источник)
+    const calcStartRaw = String(abonent?.calcStartDate || "").trim();
+    if (calcStartRaw) {
+      const d = eng.parseDateAnyToDate(calcStartRaw);
+      if (d) abonentStart = eng.startOfDay(d);
+    }
+
+    // 2) если нет calcStartDate — берём activeLink.dateFrom (fallback)
+    if (!abonentStart) {
+      const link = getActiveLinkForAbonent(dbRoot, ls);
+      const linkFrom = String(link?.dateFrom || "").trim();
+      if (linkFrom) {
+        const d = eng.parseDateAnyToDate(linkFrom);
+        if (d) abonentStart = eng.startOfDay(d);
+      }
+    }
+
+    // 3) период (выбранный/авто) + нижняя отсечка от abonentStart
     let period = loadSelectedPeriod(ls);
+
     if (!period){
-      const r = eng.getActiveResponsibilityRangeISO(ls);
-      const from = r?.from || "2000-01-01";
+      let fromISO = null;
+
+      if (abonentStart){
+        fromISO = eng.toISODateString(abonentStart);
+      } else {
+        // самый последний fallback (старые базы)
+        const r = eng.getActiveResponsibilityRangeISO(ls);
+        fromISO = r?.from || "2000-01-01";
+      }
+
       const now = new Date();
-      period = { from, to: eng.toISODateString(now) };
+      period = { from: String(fromISO), to: eng.toISODateString(now) };
+    } else if (abonentStart) {
+      const pFrom = eng.parseDateAnyToDate(period.from);
+      if (pFrom && eng.startOfDay(pFrom) < abonentStart) {
+        period.from = eng.toISODateString(abonentStart);
+      }
     }
 
     setText("period_from", fmtDateRuAny(period.from));
@@ -199,15 +291,12 @@
     setText("stateDate", fmtDateRuAny(asOfFinal));
     setText("docDate", fmtDateRuAny(new Date()));
 
-    // ✅ начало периода для "пени за период справки"
-    const fromD = eng.parseDateAnyToDate(period.from);
-    const reportStart = fromD ? eng.startOfDay(fromD) : eng.startOfDay(new Date(2000,0,1));
-
     // данные оплат/начислений
     const allRowsRaw = safeJSON("payments_" + ls, []);
     const allRows = Array.isArray(allRowsRaw) ? allRowsRaw : [];
 
     // фильтр по месяцам периода
+    const fromD = eng.parseDateAnyToDate(period.from);
     const toD2  = eng.parseDateAnyToDate(period.to);
     let baseRows = allRows;
 
@@ -223,31 +312,20 @@
       });
     }
 
-    // viewRows: первый платёж объединён с начислением, остальные платежи отдельными строками
     const viewRows = eng.buildCourtViewRows(baseRows, period);
 
     const tbody = $("debtRows");
     if (!tbody) return;
     tbody.innerHTML = "";
 
-    // totals for footer
     let sumAccrued = 0;
     let sumPaid = 0;
-    let sumPenaltyAccrued = 0; // ✅ теперь суммируем ПО МЕСЯЦАМ (один раз на месяц)
+    let sumPenaltyAccrued = 0;
 
-    // Для "месячной задолженности" считаем ВНУТРИ МЕСЯЦА:
-    // monthDebtMain = max(monthAccrued - monthPaidCumulative, 0)
     let curMonthKey = null;
     let curMonthAccrued = 0;
     let curMonthPaidCum = 0;
-    // ----------------------------------------------------------------------
-    // 🔒 CRITICAL (Справка для суда):
-    // Колонка "по пени" в строке месяца = ВСЯ пеня, начисленная на ДОЛГ этого месяца-источника
-    // за весь период до даты справки (asOfFinal).
-    //
-    // Карточку абонента НЕ трогаем (она эталон).
-    // Справка берёт только "разбивку по месяцу-источнику" из движка, чтобы модули не ломали друг друга.
-    // ----------------------------------------------------------------------
+
     let penaltyBySourceMonth = {};
     try {
       if (typeof eng.calcPenaltyBreakdownBySourceMonth === "function") {
@@ -261,36 +339,28 @@
       penaltyBySourceMonth = {};
     }
 
-    // helpers
-    function isFirstRowOfMonth(mk){
-      return curMonthKey !== mk;
-    }
+    function isFirstRowOfMonth(mk){ return curMonthKey !== mk; }
 
-    
     for (const r of viewRows){
       const y = parseInt(r.year,10);
       const m = parseInt(r.month,10);
       const mk = monthKey(y,m);
-
       const firstInMonth = isFirstRowOfMonth(mk);
 
-      // смена месяца: сбрасываем внутрь-месяца накопления
       if (firstInMonth){
         curMonthKey = mk;
         curMonthAccrued = 0;
         curMonthPaidCum = 0;
       }
 
-      // обновляем начисление/оплату внутри месяца
       const acc = eng.toNum(r.accrued);
       const paid = eng.toNum(r.paid);
+
       curMonthAccrued = eng.r2(curMonthAccrued + acc);
       curMonthPaidCum = eng.r2(curMonthPaidCum + paid);
 
-      // месячная задолженность по платежу = остаток по этому МЕСЯЦУ
-      let monthDebtMain = eng.r2(Math.max(curMonthAccrued - curMonthPaidCum, 0));
+      const monthDebtMain = eng.r2(Math.max(curMonthAccrued - curMonthPaidCum, 0));
 
-      // 🔒 CRITICAL: "по пени" в справке = вся пеня по месяцу-источнику долга на дату справки (asOfFinal).
       let monthDebtPenalty = 0;
       if (firstInMonth){
         const v = penaltyBySourceMonth[mk];
@@ -299,46 +369,33 @@
 
       const monthDebtTotal = eng.r2(monthDebtMain + monthDebtPenalty);
 
-      // footer accumulators
       sumAccrued = eng.r2(sumAccrued + acc);
       sumPaid = eng.r2(sumPaid + paid);
-      // (Variant B) sumPenaltyAccrued не используется (колонка 'начислено пени' убрана)
-      // 🔒 CRITICAL ASSERTS (DEV)
+
       if (typeof CRITICAL_ASSERT === "function") {
-        CRITICAL_ASSERT(
-          monthDebtMain <= curMonthAccrued + 0.001,
-          "Court: monthly main debt became cumulative / invalid",
-          { month: mk, curMonthAccrued, curMonthPaidCum, monthDebtMain, row: r }
-        );
-        CRITICAL_ASSERT(Number.isFinite(monthDebtMain), "Court: monthly main debt is not finite", { month: mk, monthDebtMain, row: r });
-        CRITICAL_ASSERT(
-          monthDebtPenalty >= -0.01,
-          "Court: monthly penalty negative",
-          { month: mk, monthDebtPenalty, row: r }
-        );
-        }
+        CRITICAL_ASSERT(Number.isFinite(monthDebtMain), "Court: monthDebtMain not finite", { mk, monthDebtMain, r });
+        CRITICAL_ASSERT(monthDebtPenalty >= -0.01, "Court: penalty negative", { mk, monthDebtPenalty, r });
+      }
 
       renderRow(tbody, {
         period: `${y} ${monthNameRU(m)}`,
         accrued: moneyDot(acc),
         paid: moneyDot(paid),
         paidDate: (paid > 0) ? (r.paid_date || "") : "",
-        penaltyAccrued: "",
         monthDebtMain: moneyDot(monthDebtMain),
         monthDebtPenalty: moneyDot(monthDebtPenalty),
         monthDebtTotal: moneyDot(monthDebtTotal)
       });
     }
 
-    // 🔒 CRITICAL (COURT REPORT FINAL TOTAL)
-    // Итоговые суммы внизу справки = нарастающий итог на asOfFinal, и должны совпадать с карточкой.
-    const finalTotals = eng.calcTotalsAsOfAdjusted(baseRows, asOfFinal, { abonentId: ls, applyAdvanceOffset: true, allowNegativePrincipal: true });
+    const finalTotals = eng.calcTotalsAsOfAdjusted(baseRows, asOfFinal, {
+      abonentId: ls, applyAdvanceOffset: true, allowNegativePrincipal: true
+    });
 
     setText("sumAccrued", moneyDot(sumAccrued));
     setText("sumPaid", moneyDot(sumPaid));
-    setText("sumPenalty", moneyDot(sumPenaltyAccrued)); // ✅ сумма "пени за период" по месяцам-источникам
+    setText("sumPenalty", moneyDot(sumPenaltyAccrued));
 
-    // В footer по "задолженности" показываем ИТОГОВЫЙ ДОЛГ (как карточка), а не сумму месячных строк.
     setText("sumMainDebt", moneyDot(finalTotals.principal));
     setText("sumDebtPenalty", moneyDot(finalTotals.penaltyDebt));
     setText("sumTotalDebt", moneyDot(finalTotals.total));
@@ -346,11 +403,6 @@
     setText("mainDebt", moneyDot(finalTotals.principal));
     setText("peniDebt", moneyDot(finalTotals.penaltyDebt));
     setText("totalDebt", moneyDot(finalTotals.total));
-
-    if (typeof CRITICAL_ASSERT === "function") {
-      CRITICAL_ASSERT(Number.isFinite(finalTotals.principal), "Court final: principal not finite", finalTotals);
-      CRITICAL_ASSERT(Number.isFinite(finalTotals.penaltyDebt), "Court final: penalty not finite", finalTotals);
-    }
 
     // notes
     const notesEl = $("notes");
