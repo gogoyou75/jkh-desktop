@@ -13,6 +13,8 @@ Doc: docs/LOGIC_SPEC_v1.5.3.md
 <html lang="ru">
 <head>
     <meta charset="UTF-8">
+    <script src="auth.js"></script>
+    <script src="storage.js"></script>
     <script src="critical_guard.js" defer></script>
     <title>Главная ЖКХ</title>
 
@@ -706,6 +708,42 @@ function renderPagination(total, from, to) {
 </script>
 
 <script>closeLayout();</script>
+
+
+<script>
+(function(){
+  function isGuest(){
+    try { return (window.Auth && typeof Auth.isGuest === 'function') ? Auth.isGuest() : true; } catch(e){ return true; }
+  }
+  function apply(){
+    if (!isGuest()) return;
+    // гость: скрываем/блокируем элементы редактирования
+    document.body.classList.add('guest-readonly');
+
+    // 1) все элементы с классом edit-link
+    var edits = document.querySelectorAll('.edit-link');
+    for (var i=0;i<edits.length;i++){ edits[i].style.display='none'; }
+
+    // 2) блокируем кнопки/ссылки с потенциальной записью
+    var candidates = document.querySelectorAll('button, a, [onclick]');
+    for (var j=0;j<candidates.length;j++){
+      var el=candidates[j];
+      var oc = (el.getAttribute('onclick')||'').toLowerCase();
+      var txt = (el.innerText||'').toLowerCase();
+      var dangerous = oc.indexOf('save')>=0 || oc.indexOf('delete')>=0 || oc.indexOf('remove')>=0 || oc.indexOf('add')>=0 ||
+                      txt.indexOf('сохран')>=0 || txt.indexOf('удал')>=0 || txt.indexOf('добав')>=0 || txt.indexOf('сброс')>=0 ||
+                      txt.indexOf('загрузить демо')>=0 || txt.indexOf('импорт')>=0;
+      if (dangerous) {
+        el.style.opacity='0.55';
+        el.style.pointerEvents='none';
+        el.title = 'Гость: только просмотр (войдите, чтобы редактировать)';
+      }
+    }
+  }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', apply);
+  else apply();
+})();
+</script>
 
 </body>
 </html>
