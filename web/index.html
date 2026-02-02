@@ -619,6 +619,9 @@ function render() {
         ta.addEventListener("click", (ev) => ev.stopPropagation());
         ta.addEventListener("keydown", (ev) => ev.stopPropagation());
         ta.addEventListener("blur", () => {
+            try{
+                if (typeof window.canWriteOrExplain === "function" && !window.canWriteOrExplain()) return;
+            }catch(e){}
             const id = String(ta.dataset.id || "").trim();
             if (!id) return;
             const val = String(ta.value || "");

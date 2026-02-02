@@ -32,6 +32,15 @@ window.PremisesAdmin = (function () {
         return getActiveOwnerId() === "guest";
     }
 
+    function canWriteOrExplainLocal() {
+        try {
+            if (typeof window.canWriteOrExplain === "function") return window.canWriteOrExplain();
+        } catch (e) {}
+        if (isGuest()) { alert('Гость: только просмотр.'); return false; }
+        if (isAllMode()) { alert('Режим "все базы" — только просмотр. Выберите конкретную базу (админ/юзер), чтобы сохранять.'); return false; }
+        return true;
+    }
+
     function kScoped(key, ownerId) {
         try { if (window.JKHStorage && typeof JKHStorage.k === "function") return JKHStorage.k(key, ownerId); } catch (e) {}
         return "jkhdb::" + String(ownerId || getActiveOwnerId()) + "::" + key;
@@ -696,8 +705,7 @@ window.PremisesAdmin = (function () {
 
 function onSave() {
         // 🔒 запрет записи для гостя и для режима "ВСЕ БАЗЫ"
-        if (isGuest()) { alert('Гость: только просмотр. Войдите, чтобы сохранять.'); return; }
-        if (isAllMode()) { alert('Режим "все базы" — только просмотр. Выберите конкретную базу (админ/юзер), чтобы сохранять.'); return; }
+        if (!canWriteOrExplainLocal()) return;
 
         const db = window.AbonentsDB;
         const f = readForm();
@@ -790,8 +798,7 @@ function onSave() {
     }
 
     function onDelete(regnum) {
-        if (isGuest()) { alert('Гость: только просмотр.'); return; }
-        if (isAllMode()) { alert('Режим "все базы" — только просмотр.'); return; }
+        if (!canWriteOrExplainLocal()) return;
         const db = window.AbonentsDB;
         const reg = String(regnum);
         if (!db?.premises?.[reg]) return;

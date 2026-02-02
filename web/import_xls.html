@@ -788,6 +788,9 @@ document.addEventListener('DOMContentLoaded', () => {
       alert('Сначала сделайте предпросмотр.');
       return;
     }
+    try{
+      if (typeof window.canWriteOrExplain === "function" && !window.canWriteOrExplain()) return;
+    }catch(e){}
 
     const rows = previewModel.rows;
 

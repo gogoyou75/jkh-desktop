@@ -29,6 +29,26 @@
     return _ownerId() === "guest";
   }
 
+  function _canWriteStorage() {
+    return !_isGuest() && !_isAllMode();
+  }
+
+  function _explainWriteBlocked() {
+    if (_isGuest()) {
+      alert("Гость: только просмотр. Войдите, чтобы сохранять.");
+      return;
+    }
+    if (_isAllMode()) {
+      alert("Режим 'все базы' — только просмотр. Выберите конкретную базу в выпадающем списке (админ).");
+    }
+  }
+
+  function canWriteOrExplain() {
+    if (_canWriteStorage()) return true;
+    _explainWriteBlocked();
+    return false;
+  }
+
   function _k(key, ownerId) {
     try {
       if (window.JKHStorage && typeof JKHStorage.k === "function") return JKHStorage.k(key, ownerId);
@@ -225,15 +245,9 @@
   }
 
   function saveToStorage(db) {
-    if (_isGuest()) {
-      alert("Гость: только просмотр. Войдите, чтобы сохранять.");
-      return;
-    }
-    if (_isAllMode()) {
-      alert("Режим 'все базы' — только просмотр. Выберите конкретную базу в выпадающем списке (админ).");
-      return;
-    }
+    if (!_canWriteStorage()) return false;
     localStorage.setItem(_k(KEY_DB), JSON.stringify(db));
+    return true;
   }
 
   function normalizeDb(db) {
@@ -302,8 +316,11 @@
   window.saveAbonentsDB = function () {
     if (!window.AbonentsDB) return;
     normalizeDb(window.AbonentsDB);
-    saveToStorage(window.AbonentsDB);
+    return saveToStorage(window.AbonentsDB);
   };
+
+  window.canWriteOrExplain = canWriteOrExplain;
+  window.canWriteToStorage = _canWriteStorage;
 
   // Если storage пустой — сохраним пустую структуру один раз
   if (!stored) {
@@ -427,6 +444,7 @@
 
   // "Сброс базы" — очистка проектных ключей
   window.testResetDatabase = function () {
+    if (!canWriteOrExplain()) return;
     const ok = confirm(
       "Тестовый сброс: удалить ВСЕ данные проекта в браузере и начать с нуля?\n\n" +
       "Это действие необратимо."
@@ -446,6 +464,7 @@
 
   // "Загрузить демо" — полностью заново: очистка + seed 1006/1008 + конфиги
   window.testLoadDemoDatabase = function () {
+    if (!canWriteOrExplain()) return;
     const ok = confirm(
       "Загрузить ДЕМО (регрессионный стенд)?\n\n" +
       "Будут загружены ТОЛЬКО абоненты 1006 и 1008.\n" +
