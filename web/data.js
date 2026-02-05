@@ -15,8 +15,9 @@
   function _ownerId() {
     try {
       if (window.Auth && typeof Auth.getActiveDbOwnerId === "function") return Auth.getActiveDbOwnerId();
+      if (window.JKHStore && typeof JKHStore.getOwnerId === "function") return JKHStore.getOwnerId();
       if (window.JKHStorage && typeof JKHStorage.getActiveOwnerId === "function") return JKHStorage.getActiveOwnerId();
-    } catch (e) {}
+    } catch (e) { }
     return "guest";
   }
 
@@ -25,7 +26,7 @@
   function _isGuest() {
     try {
       if (window.Auth && typeof Auth.isGuest === "function") return Auth.isGuest();
-    } catch (e) {}
+    } catch (e) { }
     return _ownerId() === "guest";
   }
 
@@ -51,11 +52,74 @@
 
   function _k(key, ownerId) {
     try {
+      if (window.JKHStore && typeof JKHStore.key === "function") return JKHStore.key(key, ownerId);
       if (window.JKHStorage && typeof JKHStorage.k === "function") return JKHStorage.k(key, ownerId);
-    } catch (e) {}
+    } catch (e) { }
     return "jkhdb::" + String(ownerId || _ownerId()) + "::" + key;
   }
 
+  function _getRawScoped(key, ownerId) {
+    try {
+      if (window.JKHStore && typeof JKHStore.getRaw === "function") return JKHStore.getRaw(key, ownerId);
+    } catch (e) { }
+    try {
+      if (window.JKHStorage && typeof JKHStorage.getItem === "function") return JKHStorage.getItem(key, ownerId);
+    } catch (e2) { }
+    return null;
+  }
+
+  function _setRawScoped(key, value, ownerId) {
+    try {
+      if (window.JKHStore && typeof JKHStore.setRaw === "function") return JKHStore.setRaw(key, value, ownerId);
+    } catch (e) { }
+    try {
+      if (window.JKHStorage && typeof JKHStorage.setItem === "function") return JKHStorage.setItem(key, value, ownerId);
+    } catch (e2) { }
+    return false;
+  }
+
+  function _removeRawScoped(key, ownerId) {
+    try {
+      if (window.JKHStore && typeof JKHStore.removeRaw === "function") return JKHStore.removeRaw(key, ownerId);
+    } catch (e) { }
+    try {
+      if (window.JKHStorage && typeof JKHStorage.removeItem === "function") return JKHStorage.removeItem(key, ownerId);
+    } catch (e2) { }
+    return false;
+  }
+
+  function _adminRemoveForOwner(ownerId, key) {
+    try {
+      if (window.JKHStore && JKHStore.admin && typeof JKHStore.admin.removeRawForOwner === "function") {
+        return JKHStore.admin.removeRawForOwner(ownerId, key);
+      }
+    } catch (e) { }
+    // fallback (не должен понадобиться)
+    _removeRawScoped(key, ownerId);
+  }
+
+  function _adminSetForOwner(ownerId, key, value) {
+    try {
+      if (window.JKHStore && JKHStore.admin && typeof JKHStore.admin.setRawForOwner === "function") {
+        return JKHStore.admin.setRawForOwner(ownerId, key, value);
+      }
+    } catch (e) { }
+    _setRawScoped(key, value, ownerId);
+  }
+
+  function _adminKeysForOwner(ownerId) {
+    try {
+      if (window.JKHStore && JKHStore.admin && typeof JKHStore.admin.keysForOwner === "function") {
+        return JKHStore.admin.keysForOwner(ownerId);
+      }
+    } catch (e) { }
+    try {
+      if (window.JKHStorage && typeof JKHStorage.keysForOwner === "function") {
+        return JKHStorage.keysForOwner(ownerId);
+      }
+    } catch (e2) { }
+    return [];
+  }
 
   // Список ключей/префиксов проекта для "сброс базы" и "загрузить демо"
   const PROJECT_KEY_PREFIXES = [
@@ -115,7 +179,7 @@
         if (Array.isArray(users)) {
           for (var i = 0; i < users.length; i++) if (users[i] && users[i].id) owners.push(users[i].id);
         }
-      } catch (e) {}
+      } catch (e) { }
     } else {
       owners = [_ownerId()];
     }
@@ -126,7 +190,7 @@
       // exact keys
       for (var ei = 0; ei < PROJECT_KEY_EXACT.length; ei++) {
         var ek = PROJECT_KEY_EXACT[ei];
-        try { localStorage.removeItem(_k(ek, owner)); } catch (e) {}
+        try { _adminRemoveForOwner(owner, ek); } catch (e) { }
       }
 
       // prefixes (scoped)
@@ -134,21 +198,32 @@
         ? JKHStorage.scopePrefixFor(owner)
         : ("jkhdb::" + String(owner) + "::");
 
-      for (var li = localStorage.length - 1; li >= 0; li--) {
-        var kk = localStorage.key(li);
+      var ownerKeys = [];
+      try { ownerKeys = _adminKeysForOwner(owner); } catch (e2) { ownerKeys = []; }
+
+      for (var ki = 0; ki < ownerKeys.length; ki++) {
+        var kk = ownerKeys[ki];
         if (!kk) continue;
         if (kk.indexOf(pref) !== 0) continue;
+
         var tail = kk.slice(pref.length);
         for (var pi = 0; pi < PROJECT_KEY_PREFIXES.length; pi++) {
-          if (tail.indexOf(PROJECT_KEY_PREFIXES[pi]) === 0) { try { localStorage.removeItem(kk); } catch (e) {} break; }
+          if (tail.indexOf(PROJECT_KEY_PREFIXES[pi]) === 0) {
+            // kk — уже full key, но removeRawForOwner ожидает baseKey (не full).
+            // Поэтому удаляем по baseKey = tail.
+            try { _adminRemoveForOwner(owner, tail); } catch (e3) { }
+            break;
+          }
         }
       }
     }
 
     // sessionStorage можно чистить, но НЕ трогаем Auth-сессию намеренно.
     // (логин/выбор базы остаются)
-    try { sessionStorage.clear(); } catch (e) {}
-  }// ============================================================
+    try { sessionStorage.clear(); } catch (e) { }
+  }
+
+  // ============================================================
   // AbonentsDB base (пустая структура)
   // ============================================================
   const BASE_DB = {
@@ -202,7 +277,19 @@
           for (var i = 0; i < users.length; i++) {
             var uid = users[i] && users[i].id;
             if (!uid) continue;
-            var rawU = localStorage.getItem(_k(KEY_DB, uid));
+
+            // читать чужую базу можно в ALL-mode (read-only)
+            var rawU = null;
+            try {
+              if (window.JKHStore && JKHStore.admin && typeof JKHStore.admin.getRawForOwner === "function") {
+                rawU = JKHStore.admin.getRawForOwner(uid, KEY_DB);
+              } else {
+                rawU = _getRawScoped(KEY_DB, uid);
+              }
+            } catch (e0) {
+              rawU = _getRawScoped(KEY_DB, uid);
+            }
+
             var parsedU = safeJsonParse(rawU, null);
             if (parsedU && typeof parsedU === "object") {
               // premises
@@ -233,21 +320,25 @@
             }
           }
         }
-      } catch (e) {}
+      } catch (e) { }
       window.JKH_DB_READONLY = true;
       return merged;
     }
 
     window.JKH_DB_READONLY = false;
-    const raw = localStorage.getItem(_k(KEY_DB));
+    const raw = _getRawScoped(KEY_DB);
     const parsed = safeJsonParse(raw, null);
     return parsed && typeof parsed === "object" ? parsed : null;
   }
 
   function saveToStorage(db) {
     if (!_canWriteStorage()) return false;
-    localStorage.setItem(_k(KEY_DB), JSON.stringify(db));
-    return true;
+    try {
+      _setRawScoped(KEY_DB, JSON.stringify(db));
+      return true;
+    } catch (e) {
+      return false;
+    }
   }
 
   function normalizeDb(db) {
@@ -396,44 +487,40 @@
     saveToStorage(demoDb);
 
     // 2) last abonent
-    localStorage.setItem(_k("last_abonent_id"), "1008");
+    _setRawScoped("last_abonent_id", "1008");
 
     // 3) источники платежей
-    localStorage.setItem(_k("payment_sources_v1"), JSON.stringify(["Платёж 1", "Платёж 2", "Платёж 3"]));
+    _setRawScoped("payment_sources_v1", JSON.stringify(["Платёж 1", "Платёж 2", "Платёж 3"]));
 
     // 4) тарифы (как у тебя на скрине: content/repair)
-    localStorage.setItem(_k("tariffs_content_repair_v1"), JSON.stringify({
+    _setRawScoped("tariffs_content_repair_v1", JSON.stringify({
       content: [{ date: "2025-01-01", rate: 10 }],
       repair: [{ date: "2025-01-01", rate: 10 }]
     }));
 
     // 5) ставки рефинансирования (normal + moratorium)
-    localStorage.setItem(_k("refinancing_rates_normal_v1"), JSON.stringify([
+    _setRawScoped("refinancing_rates_normal_v1", JSON.stringify([
       { from: "01.01.2025", rate: "11" }
     ]));
-    localStorage.setItem(_k("refinancing_rates_moratorium_v1"), JSON.stringify([
+    _setRawScoped("refinancing_rates_moratorium_v1", JSON.stringify([
       { from: "01.04.2025", rate: "5" }
     ]));
 
     // 6) периоды расчёта (пустые, как на скрине)
     ["1006", "1008"].forEach((id) => {
-      localStorage.setItem(_k("calc_period_" + id), JSON.stringify({ from: "", to: "" }));
-      localStorage.setItem(_k("calc_period_active_" + id), "0");
-      localStorage.setItem(_k("report_period_" + id), JSON.stringify({ from: "", to: "" }));
+      _setRawScoped("calc_period_" + id, JSON.stringify({ from: "", to: "" }));
+      _setRawScoped("calc_period_active_" + id, "0");
+      _setRawScoped("report_period_" + id, JSON.stringify({ from: "", to: "" }));
     });
 
     // 7) платежи — намеренно как “проверочный кейс”
-    //    (формат совместим с index.html, который суммирует accrued/paid и читает paid_date)
-    localStorage.setItem(_k("payments_1006"), JSON.stringify([
-      // Начисления (мы специально делаем помесячные строки начислений)
+    _setRawScoped("payments_1006", JSON.stringify([
       { id: 1, year: "2025", month: "01", accrued: 200, paid: 0, paid_date: "", source: "Платёж 1", payment_period: "" },
       { id: 2, year: "2025", month: "02", accrued: 200, paid: 0, paid_date: "", source: "Платёж 1", payment_period: "" },
-
-      // Платёж (пример крупного платежа в феврале)
       { id: 3, year: "2025", month: "02", accrued: 0, paid: 3870, paid_date: "10.02.2025", source: "Платёж 1", payment_period: "" }
     ]));
 
-    localStorage.setItem(_k("payments_1008"), JSON.stringify([
+    _setRawScoped("payments_1008", JSON.stringify([
       { id: 1, year: "2025", month: "01", accrued: 200, paid: 0, paid_date: "", source: "Платёж 1", payment_period: "" }
     ]));
   }
@@ -487,7 +574,6 @@
   // ============================================================
   // DEV CHECK (не мешает работе)
   // ============================================================
-  // Если хочешь быстро проверить, что кнопка “демо” видна:
   // console.log("data.js loaded: ", typeof window.testLoadDemoDatabase);
 
 })();
