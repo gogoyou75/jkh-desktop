@@ -518,19 +518,32 @@ function getAbonentIdFromURL() {
 }
 
 function getDb() {
+    if (window.Data && typeof window.Data.getDb === "function") {
+        const db = window.Data.getDb();
+        return db?.abonents || {};
+    }
     return window.AbonentsDB?.abonents || {};
 }
 
 function getPremisesDb(){
+    if (window.Data && typeof window.Data.getDb === "function") {
+        const db = window.Data.getDb();
+        return db?.premises || {};
+    }
     return window.AbonentsDB?.premises || {};
 }
 
 function getLinks(){
+    if (window.Data && typeof window.Data.getDb === "function") {
+        const db = window.Data.getDb();
+        return Array.isArray(db?.links) ? db.links : [];
+    }
     return Array.isArray(window.AbonentsDB?.links) ? window.AbonentsDB.links : [];
 }
 
 function canWriteOrExplainLocal(){
     try {
+        if (window.Data && typeof window.Data.ensureWriteOrExplain === "function") return window.Data.ensureWriteOrExplain();
         return (typeof window.canWriteOrExplain === "function") ? window.canWriteOrExplain() : true;
     } catch (e) {
         return true;
@@ -813,7 +826,7 @@ function openChangeResponsibleModal() {
 
     const premise = p || {};
     const db = getDb();
-    const links = Array.isArray(window.AbonentsDB?.links) ? window.AbonentsDB.links : [];
+    const links = getLinks();
 
     const active = links.find(l => String(l.regnum) === String(regnum) && !String(l.dateTo || '').trim());
     const activeId = active ? String(active.abonentId) : '';
@@ -883,13 +896,10 @@ function applyChangeResponsible() {
     const db = getDb();
     if (!db[String(newId)]) { alert('Абонент не найден: ' + newId); return; }
 
-    if (!window.AbonentsDB) window.AbonentsDB = {};
-    if (!window.AbonentsDB.links) window.AbonentsDB.links = [];
-
-    const links = window.AbonentsDB.links;
+    const allLinks = getLinks();
 
     // Ограничение: один активный объект на абонента (чтобы не было путаницы)
-    const otherActive = links.find(l => String(l.abonentId) === String(newId)
+    const otherActive = allLinks.find(l => String(l.abonentId) === String(newId)
         && !String(l.dateTo || '').trim()
         && String(l.regnum) !== String(regnum));
     if (otherActive) {
@@ -898,63 +908,62 @@ function applyChangeResponsible() {
         return;
     }
 
-    // 0) текущие активные связи по этой квартире
-    // (иногда после тестов/ошибок может оказаться >1 активной — мы это нормализуем)
-    const activeList = links.filter(l =>
+    const activeList = allLinks.filter(l =>
         String(l.regnum) === String(regnum) && !String(l.dateTo || '').trim()
     );
 
     const currentActive = activeList.length === 1 ? activeList[0] : null;
     const currentActiveId = currentActive ? String(currentActive.abonentId) : "";
 
-    // Если выбран тот же, кто уже текущий (и нет дублей) — просто выходим
     if (currentActiveId && String(currentActiveId) === String(newId)) {
         alert('Этот абонент уже является текущим ответственным по данной квартире.');
         return;
     }
 
-    // 1) закрываем ВСЕ активные связи по этой квартире (гарантия: один активный период)
     activeList.forEach(l => {
-        l.dateTo = dateFrom;
-
-        // закрываем расчёт у старого ЛС
         const oldAb = db[String(l.abonentId)];
-        if (oldAb) oldAb.calcEndDate = dateFrom;
+        if (!oldAb) return;
+        oldAb.calcEndDate = dateFrom;
+        if (window.Data && typeof window.Data.upsertAbonent === 'function') {
+            window.Data.upsertAbonent(Object.assign({}, oldAb, { id: String(l.abonentId) }));
+        }
     });
 
-    // 2) создаём новую связь
-    links.push({
-        abonentId: String(newId),
-        regnum: String(regnum),
-        dateFrom: String(dateFrom),
-        dateTo: ""
+    activeList.forEach(l => {
+        if (window.Data && typeof window.Data.unlinkAbonentFromPremise === 'function') {
+            window.Data.unlinkAbonentFromPremise(String(l.abonentId), String(regnum));
+        }
+        if (window.Data && typeof window.Data.linkAbonentToPremise === 'function') {
+            window.Data.linkAbonentToPremise(String(l.abonentId), String(regnum), String(l.dateFrom || ''), String(dateFrom));
+        }
     });
 
-    // 2а) фиксируем даты расчёта у нового ЛС (чтобы автоначисления/долг не "лезли" в чужой период)
+    if (window.Data && typeof window.Data.linkAbonentToPremise === 'function') {
+        window.Data.linkAbonentToPremise(String(newId), String(regnum), String(dateFrom), '');
+    }
+
     const newAb = db[String(newId)];
     if (newAb) {
         newAb.calcStartDate = dateFrom;
         newAb.calcEndDate = "";
     }
 
-    // 3) для обратной совместимости (пока старые поля ещё используются в UI)
-    const premise = p || (window.AbonentsDB.premises ? window.AbonentsDB.premises[String(regnum)] : null) || {};
-    const na = db[String(newId)];
-    if (na) {
-        na.regnum = String(regnum);
-        if (premise.city)   na.city = premise.city;
-        if (premise.street) na.street = premise.street;
-        if (premise.house)  na.house = premise.house;
-        if (premise.flat)   na.flat = premise.flat;
-        if (premise.square !== undefined && premise.square !== null && premise.square !== "") na.square = premise.square;
+    const premise = p || getPremisesDb()[String(regnum)] || {};
+    if (newAb) {
+        newAb.regnum = String(regnum);
+        if (premise.city)   newAb.city = premise.city;
+        if (premise.street) newAb.street = premise.street;
+        if (premise.house)  newAb.house = premise.house;
+        if (premise.flat)   newAb.flat = premise.flat;
+        if (premise.square !== undefined && premise.square !== null && premise.square !== "") newAb.square = premise.square;
+
+        if (window.Data && typeof window.Data.upsertAbonent === 'function') {
+            window.Data.upsertAbonent(Object.assign({}, newAb, { id: String(newId), premiseRegnum: String(regnum) }));
+        }
     }
 
-    saveAbonentsDB();
-
-    // Переходим на карточку нового ответственного
     window.location.href = 'abonent_card.html?abonent=' + encodeURIComponent(String(newId));
 }
-
 function openAbonentEdit() {
     const { id, a } = getCurrentAbonent();
     if (!a) { alert("Абонент не найден"); return; }
@@ -1036,23 +1045,37 @@ function saveAbonentEdit() {
         return;
     }
 
-    // ✅ НАВСЕГДА: regnum + адрес НЕ ТРОГАЕМ
-    // a.regnum = ...
-    // a.city/a.street/a.house/a.flat = ...
-
-    // можно менять ФИО / площадь / комнаты / долю / телефон
-    a.fio    = fio;
+    const updated = Object.assign({}, a);
+    updated.id = String(newId);
+    updated.fio = fio;
 
     const sq = document.getElementById("ae_square").value;
-    a.square = (sq === "" ? "" : Number(sq));
+    updated.square = (sq === "" ? "" : Number(sq));
 
-    a.rooms  = document.getElementById("ae_rooms").value.trim();
-    a.share  = document.getElementById("ae_share").value.trim();
-    a.phone  = document.getElementById("ae_phone").value.trim();
+    updated.rooms = document.getElementById("ae_rooms").value.trim();
+    updated.share = document.getElementById("ae_share").value.trim();
+    updated.phone = document.getElementById("ae_phone").value.trim();
+
+    if (window.Data && typeof window.Data.upsertAbonent === 'function') {
+        window.Data.upsertAbonent(updated);
+    }
 
     if (isIdChanged) {
-        db[String(newId)] = a;
-        delete db[String(oldId)];
+        if (window.Data && typeof window.Data.getLinksForAbonent === 'function') {
+            const oldLinks = window.Data.getLinksForAbonent(String(oldId));
+            oldLinks.forEach((l) => {
+                if (window.Data && typeof window.Data.unlinkAbonentFromPremise === 'function') {
+                    window.Data.unlinkAbonentFromPremise(String(oldId), String(l.regnum || ''));
+                }
+                if (window.Data && typeof window.Data.linkAbonentToPremise === 'function') {
+                    window.Data.linkAbonentToPremise(String(newId), String(l.regnum || ''), String(l.dateFrom || ''), String(l.dateTo || ''));
+                }
+            });
+        }
+        if (window.Data && typeof window.Data.deleteAbonent === 'function') {
+            window.Data.deleteAbonent(String(oldId));
+        }
+
         migrateLocalKeys(String(oldId), String(newId));
 
         const url = new URL(window.location.href);
@@ -1060,20 +1083,18 @@ function saveAbonentEdit() {
         window.history.replaceState({}, "", url.toString());
     }
 
-    if (window.saveAbonentsDB) window.saveAbonentsDB();
-
     closeAbonentEdit();
     fillAbonentCard();
-	
+
     loadMoratoriumUI();
 
     if (window.__loadPaymentTable) window.__loadPaymentTable();
 
     alert("Изменения сохранены");
-	renderResponsibilityHistory(regnum);
+    const activeRegnum = String(updated.premiseRegnum || updated.regnum || '').trim();
+    if (activeRegnum) renderResponsibilityHistory(activeRegnum);
 
 }
-
 function moratoriumKey(id){ return "moratorium_" + id; }
 
 function loadMoratoriumUI(){

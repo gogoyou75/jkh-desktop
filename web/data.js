@@ -413,6 +413,183 @@
   window.canWriteOrExplain = canWriteOrExplain;
   window.canWriteToStorage = _canWriteStorage;
 
+  // ============================================================
+  // Service layer API (CANON v1.6)
+  // ============================================================
+  function normalizeRegnumValue(v) {
+    return String(v || "").trim();
+  }
+
+  function listByObjectValues(obj) {
+    if (!obj || typeof obj !== "object") return [];
+    return Object.keys(obj).map(function (k) { return obj[k]; });
+  }
+
+  var Data = {
+    __canon_v16: true,
+
+    // READ
+    getDb: function () {
+      return window.AbonentsDB || null;
+    },
+    listAbonents: function () {
+      var db = this.getDb();
+      return listByObjectValues(db && db.abonents);
+    },
+    getAbonent: function (abonentId) {
+      var db = this.getDb();
+      if (!db || !db.abonents) return null;
+      return db.abonents[String(abonentId)] || null;
+    },
+    listPremises: function () {
+      var db = this.getDb();
+      return listByObjectValues(db && db.premises);
+    },
+    getPremise: function (regnum) {
+      var db = this.getDb();
+      if (!db || !db.premises) return null;
+      return db.premises[normalizeRegnumValue(regnum)] || null;
+    },
+    getLinksForAbonent: function (abonentId) {
+      var db = this.getDb();
+      if (!db || !Array.isArray(db.links)) return [];
+      var id = String(abonentId);
+      return db.links.filter(function (l) { return String(l && l.abonentId) === id; });
+    },
+    getLinksForPremise: function (regnum) {
+      var db = this.getDb();
+      if (!db || !Array.isArray(db.links)) return [];
+      var r = normalizeRegnumValue(regnum);
+      return db.links.filter(function (l) { return normalizeRegnumValue(l && l.regnum) === r; });
+    },
+
+    // WRITE
+    ensureWriteOrExplain: function () {
+      return canWriteOrExplain();
+    },
+    ensurePremise: function (premiseObj) {
+      if (!this.ensureWriteOrExplain()) return false;
+      if (!window.AbonentsDB) return false;
+
+      var regnum = normalizeRegnumValue(premiseObj && premiseObj.regnum);
+      if (!regnum) return false;
+
+      if (!window.AbonentsDB.premises || typeof window.AbonentsDB.premises !== "object") {
+        window.AbonentsDB.premises = {};
+      }
+
+      var current = window.AbonentsDB.premises[regnum] || {};
+      var merged = Object.assign({}, current, premiseObj || {});
+      merged.regnum = regnum;
+      if (!String(merged.createdAt || "").trim()) merged.createdAt = "2000-01-01";
+
+      window.AbonentsDB.premises[regnum] = merged;
+      return !!window.saveAbonentsDB && window.saveAbonentsDB();
+    },
+    linkAbonentToPremise: function (abonentId, regnum, dateFrom, dateTo) {
+      if (!this.ensureWriteOrExplain()) return false;
+      if (!window.AbonentsDB) return false;
+
+      var id = String(abonentId || "").trim();
+      var r = normalizeRegnumValue(regnum);
+      if (!id || !r) return false;
+
+      if (!Array.isArray(window.AbonentsDB.links)) window.AbonentsDB.links = [];
+
+      var existing = window.AbonentsDB.links.find(function (l) {
+        return String(l && l.abonentId) === id && normalizeRegnumValue(l && l.regnum) === r;
+      });
+
+      if (existing) {
+        if (dateFrom !== undefined) existing.dateFrom = String(dateFrom || "");
+        if (dateTo !== undefined) existing.dateTo = String(dateTo || "");
+      } else {
+        window.AbonentsDB.links.push({
+          abonentId: id,
+          regnum: r,
+          dateFrom: String(dateFrom || ""),
+          dateTo: String(dateTo || "")
+        });
+      }
+
+      return !!window.saveAbonentsDB && window.saveAbonentsDB();
+    },
+    unlinkAbonentFromPremise: function (abonentId, regnum) {
+      if (!this.ensureWriteOrExplain()) return false;
+      if (!window.AbonentsDB || !Array.isArray(window.AbonentsDB.links)) return false;
+
+      var id = String(abonentId || "").trim();
+      var r = normalizeRegnumValue(regnum);
+      var before = window.AbonentsDB.links.length;
+      window.AbonentsDB.links = window.AbonentsDB.links.filter(function (l) {
+        return !(String(l && l.abonentId) === id && normalizeRegnumValue(l && l.regnum) === r);
+      });
+
+      if (before === window.AbonentsDB.links.length) return true;
+      return !!window.saveAbonentsDB && window.saveAbonentsDB();
+    },
+    upsertAbonent: function (abonentObj) {
+      if (!this.ensureWriteOrExplain()) return false;
+      if (!window.AbonentsDB) return false;
+
+      var input = Object.assign({}, abonentObj || {});
+      var id = String(input.id || "").trim();
+      if (!id) return false;
+
+      if (!window.AbonentsDB.abonents || typeof window.AbonentsDB.abonents !== "object") {
+        window.AbonentsDB.abonents = {};
+      }
+
+      var regnum = normalizeRegnumValue(input.premiseRegnum || input.regnum);
+      if (regnum) {
+        input.premiseRegnum = regnum;
+        input.regnum = regnum;
+      }
+
+      window.AbonentsDB.abonents[id] = input;
+
+      if (regnum) {
+        var premiseObj = {
+          regnum: regnum,
+          city: input.city || "",
+          street: input.street || "",
+          house: input.house || "",
+          flat: input.flat || "",
+          square: input.square !== undefined ? input.square : (input.totalArea !== undefined ? input.totalArea : ""),
+          createdAt: input.premiseCreatedAt || input.premiseCreated || "2000-01-01"
+        };
+        this.ensurePremise(premiseObj);
+        this.linkAbonentToPremise(
+          id,
+          regnum,
+          input.calcStartDate || input.startDate || "",
+          input.calcEndDate || input.endDate || ""
+        );
+      }
+
+      return !!window.saveAbonentsDB && window.saveAbonentsDB();
+    },
+    deleteAbonent: function (abonentId) {
+      if (!this.ensureWriteOrExplain()) return false;
+      if (!window.AbonentsDB) return false;
+      var id = String(abonentId || "").trim();
+      if (!id) return false;
+
+      if (window.AbonentsDB.abonents && window.AbonentsDB.abonents[id]) {
+        delete window.AbonentsDB.abonents[id];
+      }
+      if (Array.isArray(window.AbonentsDB.links)) {
+        window.AbonentsDB.links = window.AbonentsDB.links.filter(function (l) {
+          return String(l && l.abonentId) !== id;
+        });
+      }
+
+      return !!window.saveAbonentsDB && window.saveAbonentsDB();
+    }
+  };
+
+  window.Data = Data;
+
   // Если storage пустой — сохраним пустую структуру один раз
   if (!stored) {
     window.saveAbonentsDB();
