@@ -297,6 +297,16 @@
     </div>
   </div>
 
+
+  <div id="debtTransferBox" class="readonly-box" style="display:none; border-color:#c77b00;">
+    <div class="title">Квартира уже занята</div>
+    <div class="readonly-row" id="debtTransferInfo"></div>
+    <label style="margin-top:8px; display:block;">
+      <input type="checkbox" id="na_transfer_debt" checked>
+      Перенести задолженность старого абонента новому
+    </label>
+  </div>
+
   <div id="premiseWarn" class="readonly-box" style="display:none; border-color:#b00;">
     <div class="title">Не выбрана квартира</div>
     <div class="muted">
@@ -453,6 +463,7 @@ function applyPremiseByRegnum(regnum) {
     document.getElementById("na_regnum").value = "";
     if (warn) warn.style.display = "block";
     if (info) info.style.display = "none";
+    refreshDebtTransferBox();
     return;
   }
 
@@ -479,6 +490,7 @@ function applyPremiseByRegnum(regnum) {
 
   const df = document.getElementById("na_date_from");
   if (df && !df.value) df.value = getDefaultCalcStartDate();
+  refreshDebtTransferBox();
 }
 
 /* =========================
@@ -495,11 +507,72 @@ function safeReturnUrl(u){
 }
 
 function goBackToImport(){
-  const ret = safeReturnUrl(document.getElementById("na_return").value);
-  if (!ret) { location.href = "import_xls.html?recheck=1"; return; }
+  location.href = 'import_xls.html#resume=1';
+}
 
-  const hasQ = ret.includes("?");
-  location.href = ret + (hasQ ? "&" : "?") + "recheck=1";
+
+function toIsoDate(d){
+  const y = d.getFullYear();
+  const m = String(d.getMonth()+1).padStart(2,'0');
+  const dd = String(d.getDate()).padStart(2,'0');
+  return `${y}-${m}-${dd}`;
+}
+function getTodayIso(){ return toIsoDate(new Date()); }
+function getYesterdayIso(iso){
+  const s = String(iso || '').trim();
+  const d = s ? new Date(s + 'T00:00:00') : new Date();
+  if (!Number.isFinite(d.getTime())) return getTodayIso();
+  d.setDate(d.getDate()-1);
+  return toIsoDate(d);
+}
+function activeLinkForRegnumLocal(db, regnum){
+  if (typeof window.activeLinkForRegnum === 'function') return window.activeLinkForRegnum(db, regnum);
+  const r = String(regnum || '').trim();
+  return (db && Array.isArray(db.links) ? db.links : []).find(l => String(l?.regnum || '').trim()===r && !String(l?.dateTo || '').trim()) || null;
+}
+function findAbonentByLinkId(db, abonentId){
+  const id = String(abonentId || '').trim();
+  if (!id) return null;
+  if (db.abonents[id]) return { id:id, abonent:db.abonents[id] };
+  const keys = Object.keys(db.abonents || {});
+  for (let i=0;i<keys.length;i++){
+    const k = keys[i], a = db.abonents[k];
+    if (a && String(a.uid || '').trim() === id) return { id:k, abonent:a };
+  }
+  return null;
+}
+function getAbonentDebtAmount(a){
+  if (!a) return 0;
+  const cands = [a.totalDebt, a.total_debt, a.mainDebtTotal, a.debtTotal];
+  for (let i=0;i<cands.length;i++){
+    const n = Number(cands[i]);
+    if (Number.isFinite(n)) return Math.max(0, Math.round(n*100)/100);
+  }
+  return 0;
+}
+function refreshDebtTransferBox(){
+  const box = document.getElementById('debtTransferBox');
+  const info = document.getElementById('debtTransferInfo');
+  if (!box || !info) return;
+  const db = window.AbonentsDB;
+  const regnum = String(document.getElementById('na_regnum')?.value || '').trim();
+  if (!db || !regnum){ box.style.display='none'; return; }
+  const active = activeLinkForRegnumLocal(db, regnum);
+  if (!active){ box.style.display='none'; return; }
+  const oldObj = findAbonentByLinkId(db, active.abonentId);
+  const oldA = oldObj && oldObj.abonent;
+  if (!oldA){ box.style.display='none'; return; }
+  const debt = getAbonentDebtAmount(oldA);
+  info.textContent = 'Текущий ответственный: ' + (oldA.fio || oldObj.id) + '. Задолженность: ' + debt.toFixed(2);
+  box.style.display = 'block';
+}
+function loadDraftNewAbonent(){
+  if (!window.JKHStore || !JKHStore.getJSON) return null;
+  try{ return JKHStore.getJSON('draft_new_abonent_v1', null, null); }catch(e){ return null; }
+}
+function clearDraftNewAbonent(){
+  if (!window.JKHStore || !JKHStore.setJSON) return;
+  try{ JKHStore.setJSON('draft_new_abonent_v1', null, null); }catch(e){}
 }
 
 /* =========================
@@ -678,6 +751,21 @@ function prefillFromQueryParams() {
     ret = (params.get("return") || "").trim();
   } catch {}
 
+  if (String(new URLSearchParams(window.location.search || '').get('from') || '').trim() === 'import') {
+    src = 'import_xls';
+  }
+
+  const draft = loadDraftNewAbonent();
+  if (draft) {
+    last = String(draft.fam || last || '').trim();
+    first = String(draft.name || first || '').trim();
+    mid = String(draft.otch || mid || '').trim();
+    ls = String(draft.ls || ls || '').trim();
+    square = String(draft.square || square || '').trim();
+    regnum = String(draft.regnum || regnum || '').trim();
+    src = 'import_xls';
+  }
+
   document.getElementById("na_src").value = src;
   document.getElementById("na_return").value = ret;
 
@@ -686,16 +774,17 @@ function prefillFromQueryParams() {
   if (mid) document.getElementById("na_mid").value = mid;
   if (ls) document.getElementById("na_ls").value = normalizeLs4(ls);
 
-  if (square) document.getElementById("na_square_excel").value = square;
+  if (square) {
+    document.getElementById("na_square_excel").value = square;
+    document.getElementById("na_square").value = square;
+  }
   if (uid) document.getElementById("na_uid_import").value = uid;
 
-  // UI: если пришли из импорта — покажем кнопку "вернуться"
   if (src === "import_xls" || safeReturnUrl(ret)) {
     const ta = document.getElementById("topActions");
     if (ta) ta.style.display = "flex";
   }
 
-  // подсказка "данные из Excel"
   if (src === 'import_xls') {
     const box = document.getElementById('importPrefillBox');
     const txt = document.getElementById('importPrefillText');
@@ -704,8 +793,8 @@ function prefillFromQueryParams() {
       const parts = [];
       if (fioLine) parts.push('ФИО: ' + fioLine);
       if (ls) parts.push('ЛС: ' + normalizeLs4(ls));
-      if (square) parts.push('Площадь (из Excel): ' + square);
-      if (!uid) parts.push('UID: нет (создадим новый)');
+      if (square) parts.push('Площадь: ' + square);
+      if (regnum) parts.push('regnum: ' + regnum);
       box.style.display = 'block';
       txt.textContent = parts.join(' | ');
     }
@@ -714,10 +803,11 @@ function prefillFromQueryParams() {
   populatePremiseSelect(regnum);
   applyPremiseByRegnum(regnum);
 
-  // дефолт даты
   const df = document.getElementById("na_date_from");
   if (df && !df.value) df.value = getDefaultCalcStartDate();
+  refreshDebtTransferBox();
 }
+
 
 /* =========================
    СОЗДАНИЕ АБОНЕНТА
@@ -765,8 +855,10 @@ function createAbonent() {
   const dfRaw = document.getElementById('na_date_from')?.value || '';
   const df = String(dfRaw).trim();
   const dateFrom = df || getDefaultCalcStartDate();
+  const today = getTodayIso();
 
   if (!Array.isArray(dbRoot.links)) dbRoot.links = [];
+  const prevActive = activeLinkForRegnumLocal(dbRoot, regnum);
 
   // UID: если пришёл из импорта и он валидный — используем его; иначе создаём новый
   const uidImport = String(document.getElementById("na_uid_import").value || "").trim();
@@ -804,13 +896,33 @@ function createAbonent() {
     docDate: ""
   };
 
-  // связь абонент ↔ квартира (ответственность)
+  if (prevActive && String(prevActive.abonentId || '').trim() !== String(ls)) {
+    prevActive.dateTo = getYesterdayIso(today);
+  }
+
   dbRoot.links.push({
     abonentId: String(ls),
     regnum,
-    dateFrom: dateFrom,
+    dateFrom: today,
     dateTo: ""
   });
+
+  const transferChecked = !!document.getElementById('na_transfer_debt')?.checked;
+  if (prevActive && transferChecked) {
+    const oldObj = findAbonentByLinkId(dbRoot, prevActive.abonentId);
+    const oldUid = oldObj ? String(oldObj.id || '').trim() : '';
+    const amount = getAbonentDebtAmount(oldObj && oldObj.abonent);
+    if (oldUid && amount > 0) {
+      if (!Array.isArray(dbRoot.adjustments)) dbRoot.adjustments = [];
+      dbRoot.adjustments.push({
+        from: oldUid,
+        to: String(ls),
+        amount: amount,
+        date: today,
+        reason: 'Перенос при смене ответственного'
+      });
+    }
+  }
 
   // ✅ v1.4: если абонент создаётся из импорта — переносим оплаты из предпросмотра СРАЗУ.
   const src = String(document.getElementById("na_src").value || "").trim();
@@ -839,7 +951,8 @@ function createAbonent() {
   // если пришли со страницы импорта — возвращаемся туда и запускаем recheck
   const ret = safeReturnUrl(String(document.getElementById("na_return").value || "").trim());
   if (src === "import_xls" || ret) {
-    alert("Абонент создан. Возвращаюсь к импорту для перепроверки строки (UID подтянется из базы).");
+    clearDraftNewAbonent();
+    alert("Абонент создан. Возвращаюсь к импорту.");
     goBackToImport();
     return;
   }

@@ -178,6 +178,64 @@ function getPaymentsByLS(ls){
 }
 function setPaymentsByLS(ls, arr){ if (!window.JKHStore || !JKHStore.setJSON) throw new Error('Нет JKHStore.setJSON'); return JKHStore.setJSON(payKey(ls), arr, null); }
 
+
+function saveImportResumeState(payload){
+  if (!window.JKHStore || !JKHStore.setJSON) return;
+  try{ JKHStore.setJSON('import_xls_resume_v1', payload || {}, null); }catch(e){}
+}
+function loadImportResumeState(){
+  if (!window.JKHStore || !JKHStore.getJSON) return null;
+  try{ return JKHStore.getJSON('import_xls_resume_v1', null, null); }catch(e){ return null; }
+}
+function clearImportResumeState(){
+  if (!window.JKHStore || !JKHStore.setJSON) return;
+  try{ JKHStore.setJSON('import_xls_resume_v1', null, null); }catch(e){}
+}
+function saveDraftNewAbonent(row){
+  if (!window.JKHStore || !JKHStore.setJSON) return false;
+  const draft = {
+    fam: normStr(row && row.fam),
+    name: normStr(row && row.name),
+    otch: normStr(row && row.otch),
+    ls: normStr(row && row.ls),
+    square: Number.isFinite(row && row.square) ? row.square : '',
+    regnum: '',
+    excelRow: Number(row && row.excelRow) || 0
+  };
+  try{ JKHStore.setJSON('draft_new_abonent_v1', draft, null); return true; }catch(e){ return false; }
+}
+function tryResumeFromHash(){
+  if (location.hash !== '#resume=1') return false;
+  const resume = loadImportResumeState();
+  if (!resume || !Array.isArray(resume.dataRows) || !resume.dataRows.length) return false;
+
+  dataRows = resume.dataRows;
+  primaryApplied = !!resume.primaryApplied;
+  primaryBlocked = false;
+  mode = resume.mode === 'payments' ? 'payments' : 'primary';
+  conflictDecision = resume.conflictDecision || {};
+
+  const db = getDB();
+  const target = Number(resume.targetExcelRow) || 0;
+  if (db && db.abonents && target){
+    const row = dataRows.find(x => Number(x.excelRow)===target);
+    if (row){
+      const found = findAbonentByRules(db, row);
+      if (found && found.abonent){
+        row.uid = normStr(found.abonent.uid || found.key || row.uid);
+      }
+    }
+  }
+
+  buildPreview();
+  if (target){
+    alert('Возврат из создания абонента: строка Excel #' + target + ' восстановлена. Можно продолжить импорт.');
+  }
+  clearImportResumeState();
+  history.replaceState(null, '', location.pathname + location.search);
+  return true;
+}
+
 function findHeaderRow(aoa){
   const maxScan = Math.min(80, aoa.length);
   for (let r=0; r<maxScan; r++){
@@ -702,11 +760,18 @@ $('previewBody').addEventListener('click', function(ev){
     if (!normStr(row.ls) || !normStr(row.fam)) return alert('Нельзя создать абонента: пустые ЛС/ФИО.');
     if (!Number.isFinite(row.square) || row.square<=0) return alert('Нельзя создать абонента: "Общая площадь" должна быть > 0.');
 
-    const cr = createAbonentMinimal(db, null, row.ls, row.fam, row.name, row.otch, row.square);
-    if (!cr.ok) return alert('Не удалось создать абонента: ' + cr.msg);
-    row.uid = cr.uid;
-    saveDB();
-    buildPreview();
+    const draftOK = saveDraftNewAbonent(row);
+    if (!draftOK) return alert('Не удалось сохранить draft для создания абонента.');
+
+    saveImportResumeState({
+      dataRows: dataRows,
+      primaryApplied: primaryApplied,
+      mode: mode,
+      conflictDecision: conflictDecision,
+      targetExcelRow: excelRow
+    });
+
+    location.href = 'new_abonent.html?from=import';
     return;
   }
 
@@ -720,6 +785,7 @@ $('previewBody').addEventListener('click', function(ev){
 
 (function init(){
   refreshWho();
+  tryResumeFromHash();
 
   $('fileInput').addEventListener('change', function(){ resetPreview(); setButtons(); });
   $('optAllowCreate').addEventListener('change', function(){ renderPreview(); });
