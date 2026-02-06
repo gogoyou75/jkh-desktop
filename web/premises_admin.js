@@ -346,6 +346,80 @@ window.PremisesAdmin = (function () {
         return s;
     }
 
+    // ============================================================
+    // 🔒 CRITICAL: запрет одинаковых адресов при пересечении по времени
+    // Разрешено иметь 2 premises с одинаковым адресом ТОЛЬКО если интервалы ответственности (links)
+    // НЕ пересекаются (стык допускается).
+    function addrKeyNormalized(p) {
+        return [
+            normalizeCityPart(p.city),
+            normalizeStreetPart(p.street),
+            normalizeHousePart(p.house),
+            normalizeFlatPart(p.flat),
+        ].join('|');
+    }
+    function toEndIso(d) {
+        const s = baseNorm(d);
+        return s ? s : '9999-12-31';
+    }
+    function toStartIso(d) {
+        const s = baseNorm(d);
+        return s ? s : '1900-01-01';
+    }
+    function intervalsOverlap(aFrom, aTo, bFrom, bTo) {
+        const A1 = toStartIso(aFrom);
+        const A2 = toEndIso(aTo);
+        const B1 = toStartIso(bFrom);
+        const B2 = toEndIso(bTo);
+        return (A1 <= B2) && (B1 <= A2);
+    }
+    function getIntervalsForRegnum(db, regnum) {
+        const res = [];
+        const links = Array.isArray(db.links) ? db.links : [];
+        for (let i = 0; i < links.length; i++) {
+            const l = links[i];
+            if (!l) continue;
+            if (String(l.regnum || '') !== String(regnum || '')) continue;
+            res.push({ from: l.dateFrom || '1900-01-01', to: l.dateTo || '' });
+        }
+        if (res.length) return res;
+
+        // fallback: если links ещё нет — считаем, что объект активен с createdAt (или 1900-01-01)
+        const p = db.premises && db.premises[regnum];
+        const createdAt = p && p.createdAt ? String(p.createdAt) : '1900-01-01';
+        return [{ from: createdAt, to: '' }];
+    }
+    function getIntervalsForNewPremise(form) {
+        const today = new Date().toISOString().slice(0, 10);
+        const createdAt = form && form.createdAt ? String(form.createdAt).trim() : '';
+        return [{ from: createdAt || today, to: '' }];
+    }
+    function checkAddressTimeConflict(db, addrKey, candidateIntervals, excludeRegnum) {
+        if (!db || !db.premises) return null;
+        const keys = Object.keys(db.premises || {});
+        for (let i = 0; i < keys.length; i++) {
+            const reg = keys[i];
+            if (excludeRegnum && String(reg) === String(excludeRegnum)) continue;
+
+            const p = db.premises[reg];
+            if (!p) continue;
+            if (addrKeyNormalized(p) !== addrKey) continue;
+
+            const intervalsB = getIntervalsForRegnum(db, reg);
+            for (let a = 0; a < candidateIntervals.length; a++) {
+                const ia = candidateIntervals[a];
+                for (let b = 0; b < intervalsB.length; b++) {
+                    const ib = intervalsB[b];
+                    if (intervalsOverlap(ia.from, ia.to, ib.from, ib.to)) {
+                        return { regnum: reg, a: ia, b: ib };
+                    }
+                }
+            }
+        }
+        return null;
+    }
+
+
     function addrScore(input, existing) {
         // score 0..12
         const ic = normalizeCityPart(input.city);
@@ -716,6 +790,24 @@ function onSave() {
             if (!isUnknown && !f.regnum) { setWarn('Укажите regnum (регистрационный номер квартиры) или отметьте "regnum неизвестен".', false); return; }
         }
         if (!f.city || !f.street || !f.house || !f.flat) { setWarn('Заполните адрес: город, улица, дом, квартира.', false); return; }
+
+        // 🔒 CRITICAL: запрет одинаковых адресов при пересечении по времени ответственности.
+        // Разрешено только если периоды стыкуются без пересечения.
+        const __addrKey = addrKeyNormalized(f);
+        const __candIntervals = state.editingRegnum ? getIntervalsForRegnum(db, state.editingRegnum) : getIntervalsForNewPremise(f);
+        const __conf = checkAddressTimeConflict(db, __addrKey, __candIntervals, state.editingRegnum || '');
+        if (__conf) {
+            const msg =
+                'ОШИБКА: этот адрес уже существует и пересекается по времени ответственности.\n' +
+                'Адрес: ' + (f.city + ', ' + f.street + ', ' + f.house + ', ' + f.flat) + '\n' +
+                'Конфликтующая квартира (regnum): ' + __conf.regnum + '\n' +
+                'Пересечение: [' + __conf.a.from + ' — ' + (__conf.a.to || 'по настоящее время') + '] и ' +
+                '[' + __conf.b.from + ' — ' + (__conf.b.to || 'по настоящее время') + ']\n\n' +
+                'Допустимо только если периоды стыкуются без пересечения.';
+            setWarn(msg, false);
+            return;
+        }
+
 
         const isEdit = !!state.editingRegnum;
         if (isEdit) {

@@ -179,6 +179,27 @@ function getPaymentsByLS(ls){
 function setPaymentsByLS(ls, arr){ if (!window.JKHStore || !JKHStore.setJSON) throw new Error('Нет JKHStore.setJSON'); return JKHStore.setJSON(payKey(ls), arr, null); }
 
 
+
+// --- CANON FIX: база ключуется по ЛС (db.abonents[LS]), UID хранится в поле abonent.uid.
+// Поэтому везде, где нужен поиск по UID, используем эту функцию (case-insensitive).
+function findAbonentByUid(db, uid){
+  const u = normStr(uid);
+  if (!u || !db || !db.abonents) return null;
+
+  // legacy: если вдруг UID был ключом
+  if (db.abonents[u]) return { key:u, abonent: db.abonents[u] };
+
+  const uLow = u.toLowerCase();
+  const keys = Object.keys(db.abonents || {});
+  for (let i=0;i<keys.length;i++){
+    const k = keys[i];
+    const a = db.abonents[k];
+    if (!a) continue;
+    const au = normStr(a.uid);
+    if (au && au.toLowerCase() === uLow) return { key:k, abonent:a };
+  }
+  return null;
+}
 function saveImportResumeState(payload){
   if (!window.JKHStore || !JKHStore.setJSON) return;
   try{ JKHStore.setJSON('import_xls_resume_v1', payload || {}, null); }catch(e){}
@@ -222,7 +243,7 @@ function tryResumeFromHash(){
     if (row){
       const found = findAbonentByRules(db, row);
       if (found && found.abonent){
-        row.uid = normStr(found.abonent.uid || found.key || row.uid);
+        row.uid = normStr(found.abonent.uid || row.uid);
       }
     }
   }
@@ -266,21 +287,38 @@ function findPaymentPairs(hdrRow){
 }
 
 function createAbonentMinimal(db, desiredUid, ls, fam, name, otch, square){
-  const uid = desiredUid ? String(desiredUid) : genUID();
-  if (db.abonents[uid]) return { ok:false, msg:'UID уже существует (конфликт)' };
+  const lsKey = normStr(ls);
+  if (!lsKey) return { ok:false, msg:'Пустой ЛС — нельзя создать абонента.' };
+
+  // UID: принимаем как есть (UID_/uid_ и т.п.). Если пусто — генерируем.
+  const uid = desiredUid ? String(desiredUid).trim() : genUID();
+
+  // Канон: ключуем абонентов по ЛС (а не по UID), иначе в таблицах "ЛС" превращается в UID.
+  if (db.abonents[lsKey]) return { ok:false, msg:'ЛС уже существует (конфликт): ' + lsKey };
+
   const regnum = genTempRegnum();
-  db.abonents[uid] = {
-    id: normStr(ls), uid, fio: toFio(fam,name,otch), fam: normStr(fam), name: normStr(name), otch: normStr(otch),
-    square: Number.isFinite(square) ? square : '', regnum, premiseRegnum: regnum,
-    city:'', street:'', house:'', flat:'', rooms:'', share:'', calcStartDate:'', calcEndDate:'', premiseCreatedAt:'2000-01-01'
+  db.abonents[lsKey] = {
+    id: lsKey,
+    uid: uid,
+    fio: toFio(fam,name,otch),
+    fam: normStr(fam),
+    name: normStr(name),
+    otch: normStr(otch),
+    square: Number.isFinite(square) ? square : '',
+    regnum: regnum,
+    premiseRegnum: regnum,
+    city:'', street:'', house:'', flat:'', rooms:'', share:'',
+    calcStartDate:'', calcEndDate:'',
+    premiseCreatedAt:'2000-01-01'
   };
-  return { ok:true, uid, abonent:db.abonents[uid] };
+  return { ok:true, uid: uid, abonent: db.abonents[lsKey] };
 }
 
 function findAbonentByRules(db, row){
   const uid = normStr(row.uid), ls = normStr(row.ls), fam = normStr(row.fam);
   if (uid){
-    if (db.abonents[uid]) return { type:'UID_OK', key:uid, abonent:db.abonents[uid], uid };
+    const foundU = findAbonentByUid(db, uid);
+    if (foundU && foundU.abonent) return { type:'UID_OK', key:foundU.key, abonent:foundU.abonent, uid: normStr(foundU.abonent.uid || uid) };
     return { type:'UID_MISSING', msg:'UID из Excel не найден в базе. Нельзя применить первичку.' };
   }
   if (!ls || !fam) return { type:'NO_ID', msg:'Нет ЛС/Фамилии — идентификация невозможна.' };
@@ -396,7 +434,8 @@ function evaluatePaymentsRow(db, row){
   const details = [];
   let status='OK', critical=false;
   const uid = normStr(row.uid);
-  const ab = uid ? db.abonents[uid] : null;
+  const foundU = uid ? findAbonentByUid(db, uid) : null;
+  const ab = foundU ? foundU.abonent : null;
 
   if (!uid || !ab){
     return { status:'ERROR', critical:true, details:['Платежи импортируются только по UID после шага 1.'], conflicts:0, unresolved:0 };
@@ -508,7 +547,8 @@ function renderPreview(){
     if (mode==='payments' && r.status==='CONFLICT'){
       const db = getDB();
       const rr = dataRows.find(x => x.excelRow===r.excelRow);
-      const ls = rr && rr.uid && db && db.abonents[rr.uid] ? normStr(db.abonents[rr.uid].id) : '';
+      const foundU = (rr && rr.uid && db) ? findAbonentByUid(db, rr.uid) : null;
+      const ls = foundU && foundU.abonent ? normStr(foundU.abonent.id) : '';
       if (ls){
         rr.payments.forEach(function(p){
           const per = normalizePeriod(p.periodRaw);
@@ -555,8 +595,9 @@ function hasUnresolvedConflicts(){
   for (let i=0;i<dataRows.length;i++){
     const db = getDB();
     const r = dataRows[i];
-    if (!db || !r.uid || !db.abonents[r.uid]) continue;
-    const ls = normStr(db.abonents[r.uid].id);
+    const foundU = (!db || !r.uid) ? null : findAbonentByUid(db, r.uid);
+    if (!foundU || !foundU.abonent) continue;
+    const ls = normStr(foundU.abonent.id);
     const list = getPaymentsByLS(ls);
     for (let p=0;p<r.payments.length;p++){
       const per = normalizePeriod(r.payments[p].periodRaw);
@@ -656,15 +697,14 @@ function applyPrimary(){
     let key = found.key;
     let a = found.abonent;
 
+    // Канон: ключуем по ЛС, UID — поле внутри записи.
+    // Если UID не указан в Excel, но у абонента его ещё нет — генерируем (чтобы шаг 2 мог работать по UID).
     if (!normStr(row.uid) && found.type==='FOUND_BY_LS_FAM'){
-      let newUid = normStr(a.uid);
-      if (!newUid || !db.abonents[newUid]) newUid = genUID();
-      const mg = migrateKeyToUID(db, key, newUid);
-      if (!mg.ok) continue;
-      key = mg.key;
-      a = mg.abonent;
-      row.uid = key;
-      uidAssigned++;
+      if (!normStr(a.uid)){
+        a.uid = genUID();
+        uidAssigned++;
+      }
+      row.uid = normStr(a.uid);
     } else if (normStr(row.uid)) {
       a.uid = normStr(row.uid);
     }
@@ -703,7 +743,8 @@ function applyPayments(){
   for (let i=0;i<dataRows.length;i++){
     const row = dataRows[i];
     const uid = normStr(row.uid);
-    const ab = uid ? db.abonents[uid] : null;
+    const foundU = uid ? findAbonentByUid(db, uid) : null;
+  const ab = foundU ? foundU.abonent : null;
     if (!ab) { skipped++; continue; }
 
     const ls = normStr(ab.id);

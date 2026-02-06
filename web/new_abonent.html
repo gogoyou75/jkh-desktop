@@ -862,7 +862,7 @@ function createAbonent() {
 
   // UID: если пришёл из импорта и он валидный — используем его; иначе создаём новый
   const uidImport = String(document.getElementById("na_uid_import").value || "").trim();
-  const uid = (uidImport && uidImport.startsWith("uid_")) ? uidImport : generateUid();
+  const uid = uidImport ? uidImport : generateUid();
 
   dbRoot.abonents[ls] = {
     fio,
@@ -896,14 +896,15 @@ function createAbonent() {
     docDate: ""
   };
 
+  const respStart = String(dateFrom || "").trim() || today;
   if (prevActive && String(prevActive.abonentId || '').trim() !== String(ls)) {
-    prevActive.dateTo = getYesterdayIso(today);
+    prevActive.dateTo = getYesterdayIso(respStart);
   }
 
   dbRoot.links.push({
     abonentId: String(ls),
     regnum,
-    dateFrom: today,
+    dateFrom: respStart,
     dateTo: ""
   });
 
