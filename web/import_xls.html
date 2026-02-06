@@ -27,6 +27,7 @@
 
     .btn { border:1px solid #000; background:#fff; padding:5px 10px; cursor:pointer; font-size:13px; }
     .btn[disabled]{ opacity:0.45; cursor:default; }
+    .btn.active{ background:#111; color:#fff; }
 
     table{ width:100%; border-collapse:collapse; }
     th, td{ border:1px solid #000; padding:4px 6px; font-size:12px; vertical-align:top; }
@@ -34,7 +35,6 @@
 
     .status-ok{ background:#eaffea; }
     .status-err{ background:#ffecec; }
-    .status-created{ background:#e8f2ff; }
     .status-upd{ background:#fff6e5; }
     .status-skip{ background:#f3f3f3; }
     .status-conflict{ background:#fff0f0; }
@@ -56,14 +56,17 @@
 
     <div class="block">
       <div class="row">
-        <span class="pill"><b>Единый режим:</b> первичка (ФИО/ЛС/площадь/UID) + платежи</span>
+        <span class="pill"><b>РЕЖИМ:</b></span>
+        <button class="btn active" id="btnModePrimary">Шаг 1 — Первичка</button>
+        <button class="btn" id="btnModePayments">Шаг 2 — Платежи</button>
         <span class="right small mono" id="whoInfo">—</span>
       </div>
 
       <div class="row">
         <input type="file" id="fileInput" accept=".xlsx,.xls" />
         <button class="btn" id="btnParse" disabled>Считать файл (предпросмотр)</button>
-        <button class="btn" id="btnImport" disabled>Импортировать</button>
+        <button class="btn" id="btnApplyPrimary" disabled>Применить первичку</button>
+        <button class="btn" id="btnApplyPayments" disabled>Применить платежи</button>
         <button class="btn" id="btnReset" disabled>Сбросить предпросмотр</button>
       </div>
 
@@ -74,6 +77,7 @@
         </label>
       </div>
 
+      <div class="hint mono" id="stepStateLine">Шаг 1 не применён. Шаг 2 заблокирован до успешной первички.</div>
       <div class="hint">
         Начисления НЕ импортируются — они считаются автоматически (тариф × площадь).
       </div>
@@ -85,6 +89,7 @@
         <span class="pill"><b>Итоги предпросмотра</b></span>
         <span class="small mono" id="summaryLine">Файл не выбран</span>
       </div>
+      <div class="hint" id="uidHint"></div>
       <div class="hint" id="errorsBox"></div>
     </div>
 
@@ -93,18 +98,16 @@
         <thead>
           <tr>
             <th style="width:70px">Excel</th>
-            <th style="width:115px">Статус</th>
             <th style="width:130px">UID</th>
             <th style="width:110px">ЛС</th>
             <th>ФИО</th>
-            <th style="width:110px">Тип</th>
-            <th style="width:120px">Дата</th>
-            <th style="width:140px">Сумма/Площадь</th>
-            <th>Сообщение / Действия</th>
+            <th style="width:130px">Общая площадь</th>
+            <th style="width:110px">Платежи</th>
+            <th style="width:280px">Статус / детали</th>
           </tr>
         </thead>
         <tbody id="previewBody">
-          <tr><td colspan="9" class="small">Нет предпросмотра</td></tr>
+          <tr><td colspan="7" class="small">Нет предпросмотра</td></tr>
         </tbody>
       </table>
     </div>
@@ -113,23 +116,8 @@
 <script>
 function $(id){ return document.getElementById(id); }
 function normStr(v){ return String(v==null?'':v).trim(); }
-
-// ✅ FIX: кириллицу НЕ вырезаем
 function lowKey(s){
-  return normStr(s).toLowerCase()
-    .replace(/ё/g,'е')
-    // Unicode: буквы/цифры/пробел, всё остальное → пробел
-    .replace(/[^\p{L}\p{N}\s]/gu,' ')
-    .replace(/\s+/g,' ')
-    .trim();
-}
-
-function nowISODate(){
-  const d = new Date();
-  const y = d.getFullYear();
-  const m = String(d.getMonth()+1).padStart(2,'0');
-  const day = String(d.getDate()).padStart(2,'0');
-  return `${y}-${m}-${day}`;
+  return normStr(s).toLowerCase().replace(/ё/g,'е').replace(/[^\p{L}\p{N}\s]/gu,' ').replace(/\s+/g,' ').trim();
 }
 function normNum(v){
   if (v==null) return NaN;
@@ -139,311 +127,147 @@ function normNum(v){
   const n = Number(s);
   return Number.isFinite(n) ? n : NaN;
 }
-function normDate(v){
+function toFio(fam,name,otch){ return [fam,name,otch].map(normStr).filter(Boolean).join(' '); }
+function asSquare(v){ return Number.isFinite(v) ? v : ''; }
+function genUID(){ return 'UID_' + String(Date.now()) + '_' + String(Math.floor(Math.random()*10000)).padStart(4,'0'); }
+function genTempRegnum(){ return 'TEMP-' + String(Date.now()) + '-' + String(Math.floor(Math.random()*10000)).padStart(4,'0'); }
+
+function normalizePeriod(v){
   const s = normStr(v);
-  if (!s) return "";
-  const m1 = s.match(/^(\d{4})[-.\/](\d{1,2})[-.\/](\d{1,2})/);
-  if (m1){
-    const yy=m1[1], mm=String(+m1[2]).padStart(2,'0'), dd=String(+m1[3]).padStart(2,'0');
-    return `${yy}-${mm}-${dd}`;
+  if (!s) return null;
+  let mm='', yy='';
+  let m = s.match(/^(\d{1,2})[.\/-](\d{4})$/);
+  if (m){ mm=String(+m[1]).padStart(2,'0'); yy=m[2]; }
+  if (!yy){
+    m = s.match(/^(\d{4})[.\/-](\d{1,2})$/);
+    if (m){ yy=m[1]; mm=String(+m[2]).padStart(2,'0'); }
   }
-  const m2 = s.match(/^(\d{1,2})[-.\/](\d{1,2})[-.\/](\d{4})$/);
-  if (m2){
-    const dd=String(+m2[1]).padStart(2,'0'), mm=String(+m2[2]).padStart(2,'0'), yy=m2[3];
-    return `${yy}-${mm}-${dd}`;
-  }
-  if (/^\d+(\.\d+)?$/.test(s)){
+  if (!yy && /^\d+(\.\d+)?$/.test(s)){
     try{
       const dc = XLSX.SSF.parse_date_code(Number(s));
-      if (dc && dc.y && dc.m && dc.d){
-        const yy=String(dc.y), mm=String(dc.m).padStart(2,'0'), dd=String(dc.d).padStart(2,'0');
-        return `${yy}-${mm}-${dd}`;
-      }
+      if (dc && dc.y && dc.m){ yy=String(dc.y); mm=String(dc.m).padStart(2,'0'); }
     }catch(e){}
   }
-  return "";
+  if (!yy || !mm) return null;
+  const mNum = Number(mm);
+  if (mNum < 1 || mNum > 12) return null;
+  return { period: yy + '-' + mm, date: yy + '-' + mm + '-01', display: mm + '.' + yy };
 }
 
 function canWriteOrExplain(){
+  try{ if (window.Data && typeof Data.ensureWriteOrExplain === 'function') return Data.ensureWriteOrExplain(); }catch(e){}
   try{
-    if (window.Data && typeof Data.ensureWriteOrExplain === 'function'){
-      return Data.ensureWriteOrExplain();
-    }
-  }catch(e){}
-  try{
-    if (window.JKHStore && typeof JKHStore.canWriteNow === 'function'){
-      if (!JKHStore.canWriteNow()){
-        $('writeWarning').innerHTML = '<span class="danger">Запись запрещена:</span> гостевой режим или ALL-mode.';
-        return false;
-      }
+    if (window.JKHStore && typeof JKHStore.canWriteNow === 'function' && !JKHStore.canWriteNow()){
+      $('writeWarning').innerHTML = '<span class="danger">Запись запрещена:</span> гостевой режим или ALL-mode.';
+      return false;
     }
   }catch(e){}
   return true;
 }
-
 function refreshWho(){
-  try{
-    const owner = (window.JKHStore && typeof JKHStore.getOwnerId === 'function') ? JKHStore.getOwnerId() : '—';
-    $('whoInfo').textContent = 'База: ' + owner;
-  }catch(e){
-    $('whoInfo').textContent = 'База: —';
-  }
+  try{ $('whoInfo').textContent = 'База: ' + (JKHStore.getOwnerId ? JKHStore.getOwnerId() : '—'); }
+  catch(e){ $('whoInfo').textContent = 'База: —'; }
 }
 
 function getDB(){ return window.AbonentsDB || null; }
-function saveDB(){ try{ if (typeof window.saveAbonentsDB === 'function') return window.saveAbonentsDB(); }catch(e){} return null; }
-
+function saveDB(){ try{ if (typeof window.saveAbonentsDB === 'function') return window.saveAbonentsDB(); }catch(e){} }
 function payKey(ls){ return 'payments_' + String(ls); }
 function getPaymentsByLS(ls){
-  try{
-    return (window.JKHStore && typeof JKHStore.getJSON === 'function')
-      ? (JKHStore.getJSON(payKey(ls), [], null) || [])
-      : [];
-  }catch(e){ return []; }
+  try{ return (window.JKHStore && JKHStore.getJSON) ? (JKHStore.getJSON(payKey(ls), [], null) || []) : []; }
+  catch(e){ return []; }
 }
-function setPaymentsByLS(ls, arr){
-  if (!window.JKHStore || typeof JKHStore.setJSON !== 'function') throw new Error('Нет JKHStore.setJSON');
-  return JKHStore.setJSON(payKey(ls), arr, null);
-}
+function setPaymentsByLS(ls, arr){ if (!window.JKHStore || !JKHStore.setJSON) throw new Error('Нет JKHStore.setJSON'); return JKHStore.setJSON(payKey(ls), arr, null); }
 
 function findHeaderRow(aoa){
   const maxScan = Math.min(80, aoa.length);
   for (let r=0; r<maxScan; r++){
     const row = aoa[r] || [];
     let hasUID=false, hasLS=false, hasFam=false, hasSq=false;
-
     for (let c=0;c<row.length;c++){
       const k = lowKey(row[c]);
       if (!k) continue;
-
       if (k === 'uid' || k === 'уид' || k.includes('уникальный идентификатор')) hasUID = true;
       if (k === 'лс' || k.includes('лицевой счет') || k.includes('лицевой счёт')) hasLS = true;
       if (k === 'фамилия' || k === 'фам') hasFam = true;
-      if (k.includes('площад')) hasSq = true; // "общая площадь" тоже сюда попадает
+      if (k.includes('площад')) hasSq = true;
     }
-
-    if ((hasUID || (hasLS && hasFam)) && hasSq){
-      return r;
-    }
+    if ((hasUID || (hasLS && hasFam)) && hasSq) return r;
   }
   return -1;
 }
-
 function findPaymentPairs(hdrRow){
   const pairs = [];
   for (let c=0;c<hdrRow.length-1;c++){
     const a = lowKey(hdrRow[c]);
     const b = lowKey(hdrRow[c+1]);
     const isSum = (a === 'сумма' || a.includes('сумма') || a.includes('п п сумма'));
-    const isDate = (b === 'дата' || b.includes('дата'));
-    if (isSum && isDate){
-      pairs.push({ sumCol:c, dateCol:c+1 });
-      c++;
-    }
+    const isPeriod = (b === 'период' || b.includes('период'));
+    if (isSum && isPeriod){ pairs.push({ sumCol:c, periodCol:c+1 }); c++; }
   }
   return pairs;
 }
 
-function findAbonent(db, uid, ls, fam){
-  if (!db || !db.abonents) return { type:'ERR', msg:'База абонентов не загружена' };
-
-  uid = normStr(uid);
-  ls  = normStr(ls);
-  fam = normStr(fam);
-
-  if (uid){
-    if (db.abonents[uid]) return { type:'OK', uid, abonent: db.abonents[uid] };
-    return { type:'NONE', msg:'UID не найден' };
-  }
-
-  if (!ls || !fam) return { type:'ERR', msg:'Нет UID и нет пары ЛС+Фамилия' };
-
-  const hits = [];
-  const keys = Object.keys(db.abonents);
-  for (let i=0;i<keys.length;i++){
-    const a = db.abonents[keys[i]];
-    if (!a) continue;
-    const als = normStr(a.id || '');
-    const af  = normStr(a.fam || '');
-    if (als === ls && af.toLowerCase() === fam.toLowerCase()){
-      hits.push({ uid: keys[i], abonent: a });
-    }
-  }
-
-  if (hits.length === 1) return { type:'OK', uid: hits[0].uid, abonent: hits[0].abonent };
-  if (hits.length === 0) return { type:'NONE', msg:'По ЛС+Фамилия абонент не найден' };
-  return { type:'AMBIG', msg:`Неоднозначность: найдено ${hits.length} абонента(ов) по ЛС+Фамилия` };
-}
-
-function genUID(){ return 'UID_' + String(Date.now()) + '_' + String(Math.floor(Math.random()*10000)).padStart(4,'0'); }
-function genTempRegnum(){ return 'TEMP-' + String(Date.now()) + '-' + String(Math.floor(Math.random()*10000)).padStart(4,'0'); }
-
 function createAbonentMinimal(db, desiredUid, ls, fam, name, otch, square){
   const uid = desiredUid ? String(desiredUid) : genUID();
   if (db.abonents[uid]) return { ok:false, msg:'UID уже существует (конфликт)' };
-
-  const fioParts = [fam, name, otch].map(normStr).filter(Boolean);
-  const fio = fioParts.join(' ');
-
   const regnum = genTempRegnum();
-
   db.abonents[uid] = {
-    id: normStr(ls),
-    uid: uid,
-    fio: fio,
-    fam: normStr(fam),
-    name: normStr(name),
-    otch: normStr(otch),
-    square: (Number.isFinite(square) ? square : ""),
-    regnum: regnum,
-    premiseRegnum: regnum,
-    city: "", street: "", house: "", flat: "",
-    rooms: "", share: "",
-    calcStartDate: "", calcEndDate: "",
-    premiseCreatedAt: "2000-01-01"
+    id: normStr(ls), uid, fio: toFio(fam,name,otch), fam: normStr(fam), name: normStr(name), otch: normStr(otch),
+    square: Number.isFinite(square) ? square : '', regnum, premiseRegnum: regnum,
+    city:'', street:'', house:'', flat:'', rooms:'', share:'', calcStartDate:'', calcEndDate:'', premiseCreatedAt:'2000-01-01'
   };
-
-  return { ok:true, uid, abonent: db.abonents[uid] };
+  return { ok:true, uid, abonent:db.abonents[uid] };
 }
 
-function updatePrimary(a, ls, fam, name, otch, square){
-  a.id = normStr(ls) || a.id;
-  a.fam = normStr(fam) || a.fam;
-  a.name = normStr(name) || a.name;
-  a.otch = normStr(otch) || a.otch;
-
-  const fioParts = [a.fam, a.name, a.otch].map(normStr).filter(Boolean);
-  a.fio = fioParts.join(' ');
-
-  if (Number.isFinite(square)) a.square = square;
-}
-
-let WB=null, aoa=null, headerRowIndex=-1, payPairs=[], dataRows=[], preview=[], conflictDecision={};
-
-function setButtons(){
-  const hasFile = !!$('fileInput').files && $('fileInput').files.length>0;
-  $('btnParse').disabled = !hasFile;
-
-  const hasPreview = preview && preview.length>0;
-  $('btnReset').disabled = !hasPreview;
-
-  const canWrite = canWriteOrExplain();
-  const hasCritical = preview.some(r => r.status === 'ERROR' && r.critical === true);
-  const hasUnresolvedConflict = preview.some(r => r.status === 'CONFLICT' && !r.decision);
-
-  $('btnImport').disabled = !(hasPreview && canWrite && !hasCritical && !hasUnresolvedConflict);
-}
-
-function resetPreview(){
-  preview = [];
-  dataRows = [];
-  conflictDecision = {};
-  $('previewBody').innerHTML = '<tr><td colspan="9" class="small">Нет предпросмотра</td></tr>';
-  $('summaryLine').textContent = 'Предпросмотр сброшен';
-  $('errorsBox').innerHTML = '';
-  setButtons();
-}
-
-function statusRU(s){
-  if (s==='OK') return 'ОК';
-  if (s==='ERROR') return 'ОШИБКА';
-  if (s==='CREATED') return 'СОЗДАН';
-  if (s==='UPDATED') return 'ОБНОВЛЁН';
-  if (s==='SKIP_DUPLICATE') return 'ДУБЛИКАТ';
-  if (s==='CONFLICT') return 'КОНФЛИКТ';
-  return s;
-}
-function statusClass(s){
-  if (s==='OK') return 'status-ok';
-  if (s==='ERROR') return 'status-err';
-  if (s==='CREATED') return 'status-created';
-  if (s==='UPDATED') return 'status-upd';
-  if (s==='SKIP_DUPLICATE') return 'status-skip';
-  if (s==='CONFLICT') return 'status-conflict';
-  return '';
-}
-
-function renderPreview(){
-  const body = $('previewBody');
-  body.innerHTML = '';
-  if (!preview.length){
-    body.innerHTML = '<tr><td colspan="9" class="small">Нет предпросмотра</td></tr>';
-    return;
+function findAbonentByRules(db, row){
+  const uid = normStr(row.uid), ls = normStr(row.ls), fam = normStr(row.fam);
+  if (uid){
+    if (db.abonents[uid]) return { type:'UID_OK', key:uid, abonent:db.abonents[uid], uid };
+    return { type:'UID_MISSING', msg:'UID из Excel не найден в базе. Нельзя применить первичку.' };
   }
+  if (!ls || !fam) return { type:'NO_ID', msg:'Нет ЛС/Фамилии — идентификация невозможна.' };
 
-  let ok=0, err=0, created=0, upd=0, dup=0, conf=0;
-  const errs = [];
-
-  for (let i=0;i<preview.length;i++){
-    const r = preview[i];
-    if (r.status==='OK') ok++;
-    if (r.status==='ERROR'){ err++; errs.push(r); }
-    if (r.status==='CREATED') created++;
-    if (r.status==='UPDATED') upd++;
-    if (r.status==='SKIP_DUPLICATE') dup++;
-    if (r.status==='CONFLICT') conf++;
-
-    const fio = [r.fam,r.name,r.otch].map(normStr).filter(Boolean).join(' ');
-    let actionsHTML = '';
-
-    if (r.action && r.action.type === 'ADD_ABONENT'){
-      const allow = $('optAllowCreate').checked;
-      actionsHTML =
-        `<button class="action-btn" data-act="add" data-excelrow="${r.excelRow}" ${allow?'':'disabled'}>Добавить абонента</button>` +
-        `<span class="small ${allow?'':'danger'}">${allow?'':'Включи “Разрешить создание абонента”'}</span>`;
-    }
-
-    if (r.status === 'CONFLICT'){
-      actionsHTML =
-        `<button class="action-btn" data-act="conf_over" data-key="${r.confKey}">Принять новый (заменить)</button>` +
-        `<button class="action-btn" data-act="conf_keep" data-key="${r.confKey}">Оставить старый</button>` +
-        (r.decision ? `<div class="small ok">Решение: ${r.decision==='overwrite'?'заменить':'оставить старый'}</div>` : '');
-    }
-
-    const tr = document.createElement('tr');
-    tr.className = statusClass(r.status);
-    tr.innerHTML = `
-      <td class="mono">${r.excelRow}</td>
-      <td><b>${statusRU(r.status)}</b></td>
-      <td class="mono">${r.uid||''}</td>
-      <td class="mono">${r.ls||''}</td>
-      <td>${fio}</td>
-      <td class="mono">${r.kind||''}</td>
-      <td class="mono">${r.date||''}</td>
-      <td class="mono">${(r.value!=null)?r.value:''}</td>
-      <td>${r.msg||''}<div style="margin-top:4px">${actionsHTML}</div></td>
-    `;
-    body.appendChild(tr);
+  const hits = [];
+  const keys = Object.keys(db.abonents || {});
+  for (let i=0;i<keys.length;i++){
+    const k = keys[i], a = db.abonents[k];
+    if (!a) continue;
+    if (normStr(a.id)===ls && normStr(a.fam).toLowerCase()===fam.toLowerCase()) hits.push({ key:k, abonent:a });
   }
-
-  $('summaryLine').textContent =
-    `ОК=${ok} | ОШИБКА=${err} | СОЗДАН=${created} | ОБНОВЛЁН=${upd} | ДУБЛИКАТ=${dup} | КОНФЛИКТ=${conf} | Всего=${preview.length}`;
-
-  if (errs.length){
-    const lines = errs.slice(0, 40).map(e =>
-      `<div class="danger mono">Excel ${e.excelRow}: ${e.msg}</div>`
-    ).join('');
-    $('errorsBox').innerHTML = `<div><b class="danger">Ошибки:</b></div>${lines}` +
-      (errs.length>40 ? `<div class="small">…и ещё ${errs.length-40} ошибок</div>` : '');
-  } else {
-    $('errorsBox').innerHTML = `<div class="ok">Критических ошибок нет.</div>`;
+  if (hits.length === 1){
+    const h = hits[0];
+    return { type:'FOUND_BY_LS_FAM', key:h.key, abonent:h.abonent, uid:normStr(h.abonent.uid || h.key) };
   }
-
-  setButtons();
+  if (hits.length === 0) return { type:'NOT_FOUND', msg:'Абонент не найден. Можно создать (если включено "Разрешить создание абонента").' };
+  return { type:'AMBIG', msg:'Неоднозначность: найдено ' + hits.length + ' абонента(ов) по ЛС+Фамилии.' };
 }
+
+function migrateKeyToUID(db, oldKey, newUid){
+  const a = db.abonents[oldKey];
+  if (!a) return { ok:false, msg:'Абонент не найден для миграции ключа.' };
+  if (oldKey === newUid){ a.uid = newUid; return { ok:true, key:newUid, abonent:a }; }
+  if (db.abonents[newUid]) return { ok:false, msg:'Нельзя присвоить UID: ключ уже занят.' };
+  db.abonents[newUid] = a;
+  delete db.abonents[oldKey];
+  db.abonents[newUid].uid = newUid;
+  return { ok:true, key:newUid, abonent:db.abonents[newUid] };
+}
+
+let WB=null, aoa=null, headerRowIndex=-1, payPairs=[], dataRows=[];
+let mode='primary';
+let primaryApplied=false;
+let primaryBlocked=false;
+let conflictDecision={};
+let preview=[];
 
 function parseSheetToRows(sheet){
-  aoa = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: "" });
-
+  aoa = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '' });
   headerRowIndex = findHeaderRow(aoa);
-  if (headerRowIndex < 0){
-    return { ok:false, msg:'Не нашёл строку заголовков (UID/ЛС/Фамилия/Площадь). В твоём шаблоне это обычно строка 14.' };
-  }
+  if (headerRowIndex < 0) return { ok:false, msg:'Не нашёл строку заголовков (UID/ЛС/Фамилия/Площадь).' };
 
-  const hdrRow = aoa[headerRowIndex];
+  const hdrRow = aoa[headerRowIndex] || [];
   payPairs = findPaymentPairs(hdrRow);
 
-  // индексы по факту заголовков твоей строки 14:
   const idxUID = hdrRow.findIndex(x => lowKey(x)==='uid' || lowKey(x)==='уид');
   const idxLS  = hdrRow.findIndex(x => lowKey(x)==='лс' || lowKey(x).includes('лицевой'));
   const idxFAM = hdrRow.findIndex(x => lowKey(x)==='фамилия' || lowKey(x)==='фам');
@@ -452,232 +276,272 @@ function parseSheetToRows(sheet){
   const idxSQ  = hdrRow.findIndex(x => lowKey(x).includes('площад'));
 
   if (idxFAM < 0) return { ok:false, msg:'Не найдена колонка "Фамилия".' };
-  if (idxSQ < 0)  return { ok:false, msg:'Не найдена колонка "Общая площадь".' };
+  if (idxSQ < 0) return { ok:false, msg:'Не найдена колонка "Общая площадь".' };
   if (idxLS < 0 && idxUID < 0) return { ok:false, msg:'Не найдены колонки UID или ЛС.' };
 
   const rows = [];
   for (let r=headerRowIndex+1; r<aoa.length; r++){
     const line = aoa[r] || [];
-    const allEmpty = line.every(c => normStr(c)==='');
-    if (allEmpty) continue;
+    if (line.every(c => normStr(c)==='')) continue;
 
-    const uid = (idxUID>=0) ? line[idxUID] : '';
-    const ls  = (idxLS>=0)  ? line[idxLS]  : '';
-    const fam = line[idxFAM];
-    const name= (idxNAM>=0) ? line[idxNAM] : '';
-    const otch= (idxOTC>=0) ? line[idxOTC] : '';
-    const sq  = normNum(line[idxSQ]);
+    const payments = [];
+    for (let i=0;i<payPairs.length;i++) payments.push({ amount: line[payPairs[i].sumCol], periodRaw: line[payPairs[i].periodCol] });
 
-    const pays = [];
-    for (let i=0;i<payPairs.length;i++){
-      const pc = payPairs[i];
-      pays.push({ amount: line[pc.sumCol], date: line[pc.dateCol] });
-    }
-
-    rows.push({ excelRow:(r+1), uid, ls, fam, name, otch, square:sq, payments:pays });
+    rows.push({
+      excelRow:r+1,
+      uid:(idxUID>=0)?normStr(line[idxUID]):'',
+      ls:(idxLS>=0)?normStr(line[idxLS]):'',
+      fam:normStr(line[idxFAM]),
+      name:(idxNAM>=0)?normStr(line[idxNAM]):'',
+      otch:(idxOTC>=0)?normStr(line[idxOTC]):'',
+      square:normNum(line[idxSQ]),
+      squareRaw:line[idxSQ],
+      payments
+    });
   }
-
-  return { ok:true, rows, msg:`Заголовки найдены на строке ${headerRowIndex+1}. Пар платежей (Сумма+Дата): ${payPairs.length}.` };
+  return { ok:true, rows };
 }
 
-function buildPreviewChain(){
+function evaluatePrimaryRow(db, row){
+  const messages = [], warnings = [];
+  let status='OK', critical=false, action=null;
+  const found = findAbonentByRules(db, row);
+
+  if (!Number.isFinite(row.square) || row.square <= 0){
+    status='ERROR'; critical=true; messages.push('Ошибки: "Общая площадь" должна быть числом > 0.');
+  }
+
+  if (found.type === 'UID_MISSING' || found.type === 'NO_ID' || found.type === 'AMBIG'){
+    status='ERROR'; critical=true; messages.push(found.msg);
+  } else if (found.type === 'NOT_FOUND'){
+    status='ERROR'; critical=true; messages.push(found.msg);
+    if (!normStr(row.uid)) action = { type:'ADD_ABONENT' };
+    if (!normStr(row.ls) || !normStr(row.fam)) messages.push('Для создания нужны непустые ФИО/ЛС.');
+  } else if (found.type === 'FOUND_BY_LS_FAM'){
+    status='UPDATED';
+    warnings.push('Абонент найден по ЛС/Фамилии. UID будет присвоен при применении первички.');
+  }
+
+  if (found.abonent){
+    const dbSq = normNum(found.abonent.square);
+    if (Number.isFinite(dbSq) && Number.isFinite(row.square) && dbSq !== row.square){
+      status = (status==='ERROR') ? 'ERROR' : 'UPDATED';
+      warnings.push('ПРЕДУПРЕЖДЕНИЕ: в базе площадь=' + dbSq + '; в Excel площадь=' + row.square + ' — при применении будет обновлена.');
+    }
+  }
+
+  if (!messages.length && !warnings.length) messages.push('Строка готова к применению.');
+  return { status, critical, action, found, details: messages.concat(warnings) };
+}
+
+function evaluatePaymentsRow(db, row){
+  const details = [];
+  let status='OK', critical=false;
+  const uid = normStr(row.uid);
+  const ab = uid ? db.abonents[uid] : null;
+
+  if (!uid || !ab){
+    return { status:'ERROR', critical:true, details:['Платежи импортируются только по UID после шага 1.'], conflicts:0, unresolved:0 };
+  }
+
+  const ls = normStr(ab.id);
+  const existing = getPaymentsByLS(ls);
+  let conflicts=0, unresolved=0, errs=0, dups=0, adds=0;
+
+  for (let i=0;i<row.payments.length;i++){
+    const p = row.payments[i];
+    const amountRaw = normStr(p.amount), periodRaw = normStr(p.periodRaw);
+    if (!amountRaw && !periodRaw) continue;
+
+    const amount = normNum(p.amount);
+    const per = normalizePeriod(p.periodRaw);
+
+    if (!per || !Number.isFinite(amount) || amount <= 0){
+      errs++;
+      continue;
+    }
+
+    const dup = existing.some(x => String(x.date||'')===per.date && Number(x.amount||0)===amount);
+    if (dup){ dups++; continue; }
+
+    const sameDate = existing.find(x => String(x.date||'')===per.date);
+    if (sameDate){
+      conflicts++;
+      const key = ls + '::' + per.date;
+      if (!conflictDecision[key]) unresolved++;
+      continue;
+    }
+    adds++;
+  }
+
+  if (errs>0){ status='ERROR'; critical=true; details.push('Есть ошибки платежей: нужен Период ММ.ГГГГ и сумма > 0.'); }
+  if (conflicts>0){ status = (status==='ERROR' ? status : 'CONFLICT'); details.push('КОНФЛИКТ: есть существующие платежи за тот же период. Выбери действие.'); }
+  if (!errs && !conflicts && adds===0 && dups>0){ status='SKIP_DUPLICATE'; details.push('Найдены только дубликаты — будут пропущены.'); }
+  if (!errs && !conflicts && adds>0){ status='OK'; details.push('Строка платежей готова к применению.'); }
+  if (!errs && !conflicts && adds===0 && dups===0){ details.push('Платежей в строке нет.'); }
+
+  return { status, critical, details, conflicts, unresolved };
+}
+
+function buildPreview(){
   const db = getDB();
   preview = [];
+  primaryBlocked = false;
 
   if (!db || !db.abonents){
-    preview.push({ excelRow:'—', status:'ERROR', critical:true, msg:'База абонентов не загружена (AbonentsDB отсутствует).' });
+    preview = [{ excelRow:'—', uid:'', ls:'', fio:'', square:'', paymentsBrief:'—', status:'ERROR', details:['База абонентов не загружена (AbonentsDB отсутствует).'], critical:true }];
     renderPreview();
     return;
   }
 
-  const today = nowISODate();
+  let noUidCount = 0;
 
   for (let i=0;i<dataRows.length;i++){
     const r = dataRows[i];
-    const uid = normStr(r.uid);
-    const ls  = normStr(r.ls);
-    const fam = normStr(r.fam);
-    const name= normStr(r.name);
-    const otch= normStr(r.otch);
-    const square = r.square;
+    if (!normStr(r.uid)) noUidCount++;
 
-    if (!uid && (!ls || !fam)){
-      preview.push({ excelRow:r.excelRow, status:'ERROR', critical:true, uid, ls, fam, name, otch, kind:'ИД',
-        msg:'Нет UID и нет пары ЛС+Фамилия — идентификация невозможна.' });
-      continue;
-    }
+    const p1 = evaluatePrimaryRow(db, r);
+    if (p1.critical) primaryBlocked = true;
 
-    const found = findAbonent(db, uid, ls, fam);
-
-    if (found.type === 'AMBIG' || found.type === 'ERR'){
-      preview.push({ excelRow:r.excelRow, status:'ERROR', critical:true, uid, ls, fam, name, otch, kind:'ИД', msg: found.msg });
-      continue;
-    }
-
-    if (found.type !== 'OK'){
+    if (mode === 'primary'){
       preview.push({
-        excelRow:r.excelRow, status:'ERROR', critical:true,
-        uid, ls, fam, name, otch, kind:'АБОНЕНТ',
-        msg:'Абонент не найден. Можно добавить через кнопку ниже (если UID пуст).',
-        action:{ type:'ADD_ABONENT' }
+        excelRow:r.excelRow, uid:normStr(r.uid), ls:normStr(r.ls), fio:toFio(r.fam,r.name,r.otch),
+        square:asSquare(r.square), paymentsBrief:(r.payments.filter(x => normStr(x.amount)||normStr(x.periodRaw)).length || '—') + (r.payments.filter(x => normStr(x.amount)||normStr(x.periodRaw)).length ? ' шт.' : ''),
+        status:p1.status, critical:p1.critical, action:p1.action, details:p1.details
       });
-      continue;
-    }
-
-    const abonentLS = normStr(found.abonent.id || ls);
-
-    // первичка
-    if (!Number.isFinite(square)){
-      preview.push({ excelRow:r.excelRow, status:'ERROR', critical:true, uid:found.uid, ls:abonentLS, fam, name, otch, kind:'ПЕРВИЧКА',
-        value:square, msg:'Первичка: неверная/пустая площадь.' });
     } else {
-      preview.push({ excelRow:r.excelRow, status:'UPDATED', critical:false, uid:found.uid, ls:abonentLS, fam, name, otch, kind:'ПЕРВИЧКА',
-        value:square, msg:'Будет обновлена первичка (ФИО/ЛС/площадь)' });
-    }
-
-    // платежи
-    for (let p=0;p<r.payments.length;p++){
-      const pay = r.payments[p];
-      if (!normStr(pay.date) && !normStr(pay.amount)) continue;
-
-      const date = normDate(pay.date);
-      const amount = normNum(pay.amount);
-
-      if (!date || !Number.isFinite(amount)){
-        preview.push({ excelRow:r.excelRow, status:'ERROR', critical:true, uid:found.uid, ls:abonentLS, fam, name, otch, kind:'ПЛАТЁЖ',
-          date, value:amount, msg:'Платёж: нужна и дата, и сумма (обе).' });
-        continue;
-      }
-
-      if (date > today){
-        preview.push({ excelRow:r.excelRow, status:'ERROR', critical:true, uid:found.uid, ls:abonentLS, fam, name, otch, kind:'ПЛАТЁЖ',
-          date, value:amount, msg:`Дата платежа (${date}) позже текущей (${today}).` });
-        continue;
-      }
-
-      if (amount <= 0){
-        preview.push({ excelRow:r.excelRow, status:'ERROR', critical:true, uid:found.uid, ls:abonentLS, fam, name, otch, kind:'ПЛАТЁЖ',
-          date, value:amount, msg:'Сумма платежа должна быть > 0.' });
-        continue;
-      }
-
-      const list = getPaymentsByLS(abonentLS);
-      const exactDup = list.some(x => String(x.date||'')===date && Number(x.amount||0)===amount);
-      if (exactDup){
-        preview.push({ excelRow:r.excelRow, status:'SKIP_DUPLICATE', critical:false, uid:found.uid, ls:abonentLS, fam, name, otch, kind:'ПЛАТЁЖ',
-          date, value:amount, msg:'Дубликат (дата+сумма) — будет пропущен.' });
-        continue;
-      }
-
-      const sameDate = list.find(x => String(x.date||'')===date);
-      if (sameDate){
-        const confKey = `${abonentLS}::${date}`;
-        const decision = conflictDecision[confKey] || '';
-        preview.push({ excelRow:r.excelRow, status:'CONFLICT', critical:false, uid:found.uid, ls:abonentLS, fam, name, otch, kind:'ПЛАТЁЖ',
-          date, value:amount, msg:`КОНФЛИКТ: уже есть платёж на ${date} суммой ${sameDate.amount}. Выбери действие.`,
-          confKey, decision });
-        continue;
-      }
-
-      preview.push({ excelRow:r.excelRow, status:'OK', critical:false, uid:found.uid, ls:abonentLS, fam, name, otch, kind:'ПЛАТЁЖ',
-        date, value:amount, msg:'Будет добавлен платёж.' });
+      const p2 = evaluatePaymentsRow(db, r);
+      preview.push({
+        excelRow:r.excelRow, uid:normStr(r.uid), ls:normStr(r.ls), fio:toFio(r.fam,r.name,r.otch),
+        square:asSquare(r.square), paymentsBrief:(r.payments.filter(x => normStr(x.amount)||normStr(x.periodRaw)).length || '—') + (r.payments.filter(x => normStr(x.amount)||normStr(x.periodRaw)).length ? ' шт.' : ''),
+        status:p2.status, critical:p2.critical, details:p2.details
+      });
     }
   }
 
+  $('uidHint').innerHTML = noUidCount > 0 ? 'Найдено строк без UID: <b>' + noUidCount + '</b>. Нажмите "Создать абонента" в нужной строке.' : 'Строк без UID не найдено.';
   renderPreview();
 }
 
-function applyImport(){
-  if (!canWriteOrExplain()) { setButtons(); return; }
+function statusRU(s){ return ({OK:'ОК', ERROR:'ОШИБКА', UPDATED:'ПРЕДУПРЕЖДЕНИЕ', SKIP_DUPLICATE:'ДУБЛИКАТ', CONFLICT:'КОНФЛИКТ'})[s] || s; }
+function statusClass(s){ return ({OK:'status-ok', ERROR:'status-err', UPDATED:'status-upd', SKIP_DUPLICATE:'status-skip', CONFLICT:'status-conflict'})[s] || ''; }
 
-  const db = getDB();
-  if (!db || !db.abonents){ alert('База абонентов не загружена.'); return; }
+function renderPreview(){
+  const body = $('previewBody');
+  body.innerHTML = '';
+  if (!preview.length){ body.innerHTML = '<tr><td colspan="7" class="small">Нет предпросмотра</td></tr>'; updateStateLine(); setButtons(); return; }
 
-  const hasCritical = preview.some(r => r.status === 'ERROR' && r.critical === true);
-  if (hasCritical){ alert('Импорт заблокирован: есть критические ошибки в предпросмотре.'); return; }
+  let ok=0, err=0, warn=0, dup=0, conf=0;
+  for (let i=0;i<preview.length;i++){
+    const r = preview[i];
+    if (r.status==='OK') ok++;
+    if (r.status==='ERROR') err++;
+    if (r.status==='UPDATED') warn++;
+    if (r.status==='SKIP_DUPLICATE') dup++;
+    if (r.status==='CONFLICT') conf++;
 
-  const hasUnresolvedConflict = preview.some(r => r.status === 'CONFLICT' && !conflictDecision[r.confKey]);
-  if (hasUnresolvedConflict){ alert('Импорт заблокирован: есть КОНФЛИКТЫ платежей, нужно выбрать действие.'); return; }
-
-  let updated=0, payAdded=0, paySkipped=0, payOver=0;
-  const today = nowISODate();
-
-  // первичка + платежи
-  for (let i=0;i<dataRows.length;i++){
-    const r = dataRows[i];
-    const uid = normStr(r.uid);
-    const ls  = normStr(r.ls);
-    const fam = normStr(r.fam);
-    const name= normStr(r.name);
-    const otch= normStr(r.otch);
-    const square = r.square;
-
-    const found = findAbonent(db, uid, ls, fam);
-    if (found.type !== 'OK') continue;
-
-    const abonentLS = normStr(found.abonent.id || ls);
-
-    if (Number.isFinite(square)){
-      updatePrimary(found.abonent, ls, fam, name, otch, square);
-      updated++;
+    let actionsHTML = '';
+    if (mode==='primary' && r.action && r.action.type==='ADD_ABONENT'){
+      const allow = $('optAllowCreate').checked;
+      actionsHTML = '<button class="action-btn" data-act="add" data-excelrow="' + r.excelRow + '" ' + (allow?'':'disabled') + '>Создать абонента</button>' +
+        '<span class="small ' + (allow?'':'danger') + '">' + (allow?'':'Включи "Разрешить создание абонента"') + '</span>';
     }
 
-    let list = getPaymentsByLS(abonentLS);
-
-    for (let p=0;p<r.payments.length;p++){
-      const pay = r.payments[p];
-      if (!normStr(pay.date) && !normStr(pay.amount)) continue;
-
-      const date = normDate(pay.date);
-      const amount = normNum(pay.amount);
-
-      if (!date || !Number.isFinite(amount) || amount<=0) { paySkipped++; continue; }
-      if (date > today) { paySkipped++; continue; }
-
-      const exactDup = list.some(x => String(x.date||'')===date && Number(x.amount||0)===amount);
-      if (exactDup){ paySkipped++; continue; }
-
-      const sameDateIndex = list.findIndex(x => String(x.date||'')===date);
-      if (sameDateIndex >= 0){
-        const confKey = `${abonentLS}::${date}`;
-        const decision = conflictDecision[confKey];
-        if (decision === 'overwrite'){
-          list[sameDateIndex] = { date, amount };
-          payOver++;
-        } else {
-          paySkipped++;
-        }
-        continue;
+    if (mode==='payments' && r.status==='CONFLICT'){
+      const db = getDB();
+      const rr = dataRows.find(x => x.excelRow===r.excelRow);
+      const ls = rr && rr.uid && db && db.abonents[rr.uid] ? normStr(db.abonents[rr.uid].id) : '';
+      if (ls){
+        rr.payments.forEach(function(p){
+          const per = normalizePeriod(p.periodRaw);
+          const amount = normNum(p.amount);
+          if (!per || !Number.isFinite(amount) || amount<=0) return;
+          const ex = getPaymentsByLS(ls).find(x => String(x.date||'')===per.date && Number(x.amount||0)!==amount);
+          if (!ex) return;
+          const key = ls + '::' + per.date;
+          const dec = conflictDecision[key] || '';
+          actionsHTML += '<div class="small" style="margin-bottom:6px">' + per.display + ': было ' + ex.amount + ', новое ' + amount + '</div>' +
+            '<button class="action-btn" data-act="conf_over" data-key="' + key + '">Принять новый (заменить)</button>' +
+            '<button class="action-btn" data-act="conf_keep" data-key="' + key + '">Оставить старый</button>' +
+            (dec ? '<div class="small ok">Решение: ' + (dec==='overwrite'?'заменить':'оставить старый') + '</div>' : '');
+        });
       }
-
-      list.push({ date, amount });
-      payAdded++;
     }
 
-    list.sort((a,b) => String(a.date||'').localeCompare(String(b.date||'')));
-    setPaymentsByLS(abonentLS, list);
+    const tr = document.createElement('tr');
+    tr.className = statusClass(r.status);
+    tr.innerHTML = '<td class="mono">' + r.excelRow + '</td>' +
+      '<td class="mono">' + (r.uid||'') + '</td>' +
+      '<td class="mono">' + (r.ls||'') + '</td>' +
+      '<td>' + (r.fio||'') + '</td>' +
+      '<td class="mono">' + (r.square!=='' ? r.square : '') + '</td>' +
+      '<td class="mono">' + (r.paymentsBrief||'—') + '</td>' +
+      '<td><b>' + statusRU(r.status) + '</b><div>' + (r.details||[]).join('<br>') + '</div><div style="margin-top:4px">' + actionsHTML + '</div></td>';
+    body.appendChild(tr);
   }
 
-  try{ saveDB(); }catch(e){}
+  $('summaryLine').textContent = 'Режим: ' + (mode==='primary'?'Шаг 1 — Первичка':'Шаг 2 — Платежи') +
+    ' | ОК=' + ok + ' | ПРЕДУПРЕЖДЕНИЕ=' + warn + ' | ОШИБКА=' + err + ' | ДУБЛИКАТ=' + dup + ' | КОНФЛИКТ=' + conf + ' | Всего=' + preview.length;
 
-  alert(
-    'Импорт завершён.\n\n' +
-    'Первичка обновлена: ' + updated + '\n' +
-    'Платежей добавлено: ' + payAdded + '\n' +
-    'Платежей заменено (конфликт): ' + payOver + '\n' +
-    'Платежей пропущено: ' + paySkipped
-  );
+  if (err){ $('errorsBox').innerHTML = '<span class="danger">Есть ошибки, проверь строки со статусом ОШИБКА.</span>'; }
+  else { $('errorsBox').innerHTML = '<span class="ok">Критических ошибок в текущем шаге нет.</span>'; }
 
-  resetPreview();
+  updateStateLine();
+  setButtons();
 }
 
-function readFileAsArrayBuffer(file){
-  return new Promise((resolve, reject) => {
-    const fr = new FileReader();
-    fr.onload = () => resolve(fr.result);
-    fr.onerror = () => reject(fr.error || new Error('Ошибка чтения файла'));
-    fr.readAsArrayBuffer(file);
-  });
+function hasPrimaryCritical(){ return preview.some(r => r.critical && r.status==='ERROR'); }
+function hasPaymentsCritical(){ return preview.some(r => r.critical && r.status==='ERROR'); }
+function hasUnresolvedConflicts(){
+  if (mode !== 'payments') return false;
+  for (let i=0;i<dataRows.length;i++){
+    const db = getDB();
+    const r = dataRows[i];
+    if (!db || !r.uid || !db.abonents[r.uid]) continue;
+    const ls = normStr(db.abonents[r.uid].id);
+    const list = getPaymentsByLS(ls);
+    for (let p=0;p<r.payments.length;p++){
+      const per = normalizePeriod(r.payments[p].periodRaw);
+      const amount = normNum(r.payments[p].amount);
+      if (!per || !Number.isFinite(amount) || amount<=0) continue;
+      const hasConflict = list.some(x => String(x.date||'')===per.date && Number(x.amount||0)!==amount);
+      if (hasConflict && !conflictDecision[ls + '::' + per.date]) return true;
+    }
+  }
+  return false;
+}
+
+function updateStateLine(){
+  if (!dataRows.length){ $('stepStateLine').textContent = 'Шаг 1 не применён. Шаг 2 заблокирован до успешной первички.'; return; }
+  if (primaryApplied) $('stepStateLine').textContent = 'Шаг 1 применён успешно. Шаг 2 доступен.';
+  else if (primaryBlocked) $('stepStateLine').textContent = 'Шаг 1: заблокирован (есть ошибки). Шаг 2 заблокирован до успешной первички.';
+  else $('stepStateLine').textContent = 'Шаг 1 не применён. Шаг 2 заблокирован до успешной первички.';
+}
+
+function setButtons(){
+  const hasFile = !!$('fileInput').files && $('fileInput').files.length>0;
+  $('btnParse').disabled = !hasFile;
+  $('btnReset').disabled = !dataRows.length && !preview.length;
+
+  $('btnModePrimary').classList.toggle('active', mode==='primary');
+  $('btnModePayments').classList.toggle('active', mode==='payments');
+
+  const canWrite = canWriteOrExplain();
+  const parsed = dataRows.length > 0;
+
+  $('btnModePayments').disabled = !(parsed && primaryApplied && !primaryBlocked);
+  $('btnApplyPrimary').disabled = !(mode==='primary' && parsed && canWrite && !primaryBlocked);
+  $('btnApplyPayments').disabled = !(mode==='payments' && parsed && canWrite && primaryApplied && !hasPaymentsCritical() && !hasUnresolvedConflicts());
+}
+
+function resetPreview(){
+  preview=[]; dataRows=[]; conflictDecision={}; primaryApplied=false; primaryBlocked=false; mode='primary';
+  $('summaryLine').textContent = 'Предпросмотр сброшен';
+  $('errorsBox').innerHTML='';
+  $('uidHint').innerHTML='';
+  $('previewBody').innerHTML = '<tr><td colspan="7" class="small">Нет предпросмотра</td></tr>';
+  updateStateLine();
+  setButtons();
 }
 
 async function onParse(){
@@ -687,86 +551,186 @@ async function onParse(){
   const file = $('fileInput').files[0];
   if (!file) return;
 
-  let buf;
-  try{ buf = await readFileAsArrayBuffer(file); }
-  catch(e){ alert('Не удалось прочитать файл: ' + (e && e.message ? e.message : e)); return; }
+  const buf = await new Promise(function(resolve, reject){
+    const fr = new FileReader();
+    fr.onload = function(){ resolve(fr.result); };
+    fr.onerror = function(){ reject(fr.error || new Error('Ошибка чтения файла')); };
+    fr.readAsArrayBuffer(file);
+  }).catch(function(e){ alert('Не удалось прочитать файл: ' + (e.message || e)); return null; });
+  if (!buf) return;
 
-  try{ WB = XLSX.read(buf, { type:'array' }); }
-  catch(e){ alert('Не удалось распарсить XLSX: ' + (e && e.message ? e.message : e)); return; }
-
+  try{ WB = XLSX.read(buf, { type:'array' }); }catch(e){ alert('Не удалось распарсить XLSX: ' + (e.message || e)); return; }
   if (!WB.SheetNames || !WB.SheetNames.length){ alert('В книге нет листов.'); return; }
 
-  const sheet = WB.Sheets[WB.SheetNames[0]];
-  const res = parseSheetToRows(sheet);
-
+  const res = parseSheetToRows(WB.Sheets[WB.SheetNames[0]]);
   if (!res.ok){
-    preview = [{ excelRow:'—', status:'ERROR', critical:true, msg:res.msg }];
+    preview=[{ excelRow:'—', uid:'', ls:'', fio:'', square:'', paymentsBrief:'—', status:'ERROR', critical:true, details:[res.msg] }];
+    dataRows=[];
     renderPreview();
     return;
   }
 
   dataRows = res.rows;
-  conflictDecision = {};
-  buildPreviewChain();
+  primaryApplied = false;
+  mode='primary';
+  conflictDecision={};
+  buildPreview();
 }
 
-$('previewBody').addEventListener('click', (ev) => {
+function applyPrimary(){
+  if (!canWriteOrExplain()) return setButtons();
+
+  const db = getDB();
+  if (!db || !db.abonents) return alert('База абонентов не загружена.');
+
+  mode='primary';
+  buildPreview();
+  if (primaryBlocked) return alert('Шаг 1 заблокирован: есть критические ошибки первички.');
+
+  let updated=0, uidAssigned=0;
+
+  for (let i=0;i<dataRows.length;i++){
+    const row = dataRows[i];
+    const found = findAbonentByRules(db, row);
+    if (found.type==='UID_MISSING' || found.type==='NO_ID' || found.type==='AMBIG' || found.type==='NOT_FOUND') continue;
+    if (!Number.isFinite(row.square) || row.square<=0) continue;
+
+    let key = found.key;
+    let a = found.abonent;
+
+    if (!normStr(row.uid) && found.type==='FOUND_BY_LS_FAM'){
+      let newUid = normStr(a.uid);
+      if (!newUid || !db.abonents[newUid]) newUid = genUID();
+      const mg = migrateKeyToUID(db, key, newUid);
+      if (!mg.ok) continue;
+      key = mg.key;
+      a = mg.abonent;
+      row.uid = key;
+      uidAssigned++;
+    } else if (normStr(row.uid)) {
+      a.uid = normStr(row.uid);
+    }
+
+    a.id = normStr(row.ls) || a.id;
+    a.fam = normStr(row.fam) || a.fam;
+    a.name = normStr(row.name) || a.name;
+    a.otch = normStr(row.otch) || a.otch;
+    a.fio = toFio(a.fam,a.name,a.otch);
+    a.square = row.square;
+    row.ls = a.id;
+    updated++;
+  }
+
+  saveDB();
+  primaryApplied = true;
+  mode='payments';
+  buildPreview();
+  alert('Шаг 1 применён успешно.\nОбновлено строк первички: ' + updated + '\nПрисвоено UID: ' + uidAssigned);
+}
+
+function applyPayments(){
+  if (!canWriteOrExplain()) return setButtons();
+  if (!primaryApplied) return alert('Шаг 2 заблокирован до успешной первички.');
+
+  const db = getDB();
+  if (!db || !db.abonents) return alert('База абонентов не загружена.');
+
+  mode='payments';
+  buildPreview();
+  if (hasPaymentsCritical()) return alert('Шаг 2 заблокирован: есть ошибки платежей.');
+  if (hasUnresolvedConflicts()) return alert('Шаг 2 заблокирован: есть нерешённые конфликты платежей.');
+
+  let added=0, replaced=0, skipped=0, conflicts=0;
+
+  for (let i=0;i<dataRows.length;i++){
+    const row = dataRows[i];
+    const uid = normStr(row.uid);
+    const ab = uid ? db.abonents[uid] : null;
+    if (!ab) { skipped++; continue; }
+
+    const ls = normStr(ab.id);
+    let list = getPaymentsByLS(ls);
+
+    for (let p=0;p<row.payments.length;p++){
+      const pay = row.payments[p];
+      if (!normStr(pay.amount) && !normStr(pay.periodRaw)) continue;
+      const amount = normNum(pay.amount);
+      const per = normalizePeriod(pay.periodRaw);
+      if (!per || !Number.isFinite(amount) || amount<=0){ skipped++; continue; }
+
+      const dup = list.some(x => String(x.date||'')===per.date && Number(x.amount||0)===amount);
+      if (dup){ skipped++; continue; }
+
+      const idx = list.findIndex(x => String(x.date||'')===per.date);
+      if (idx >= 0){
+        conflicts++;
+        const decision = conflictDecision[ls + '::' + per.date];
+        if (decision === 'overwrite'){
+          list[idx] = { date: per.date, amount: amount };
+          replaced++;
+        } else {
+          skipped++;
+        }
+        continue;
+      }
+
+      list.push({ date: per.date, amount: amount });
+      added++;
+    }
+
+    list.sort(function(a,b){ return String(a.date||'').localeCompare(String(b.date||'')); });
+    setPaymentsByLS(ls, list);
+  }
+
+  alert('Платежи применены.\nДобавлено: ' + added + '\nЗаменено: ' + replaced + '\nПропущено: ' + skipped + '\nКонфликтов обработано: ' + conflicts);
+  buildPreview();
+}
+
+$('previewBody').addEventListener('click', function(ev){
   const btn = ev.target.closest('button[data-act]');
   if (!btn) return;
-
   const act = btn.getAttribute('data-act');
 
   if (act === 'add'){
-    const allow = $('optAllowCreate').checked;
-    if (!allow) return;
-
+    if (!$('optAllowCreate').checked) return;
     const excelRow = Number(btn.getAttribute('data-excelrow'));
+    const row = dataRows.find(x => x.excelRow===excelRow);
     const db = getDB();
-    if (!db || !db.abonents) return;
+    if (!row || !db || !db.abonents) return;
 
-    const row = dataRows.find(x => x.excelRow === excelRow);
-    if (!row) return;
+    if (normStr(row.uid)) return alert('В строке уже указан UID.');
+    if (!normStr(row.ls) || !normStr(row.fam)) return alert('Нельзя создать абонента: пустые ЛС/ФИО.');
+    if (!Number.isFinite(row.square) || row.square<=0) return alert('Нельзя создать абонента: "Общая площадь" должна быть > 0.');
 
-    const uid = normStr(row.uid);
-    const ls  = normStr(row.ls);
-    const fam = normStr(row.fam);
-    const name= normStr(row.name);
-    const otch= normStr(row.otch);
-    const square = row.square;
-
-    if (uid){
-      alert('В этой строке указан UID. Создание из предпросмотра разрешено только когда UID пуст.');
-      return;
-    }
-    if (!ls || !fam){ alert('Нельзя создать абонента: не хватает ЛС или Фамилии.'); return; }
-    if (!Number.isFinite(square)){ alert('Нельзя создать абонента: неверная/пустая площадь.'); return; }
-
-    const cr = createAbonentMinimal(db, null, ls, fam, name, otch, square);
-    if (!cr.ok){ alert('Не удалось создать абонента: ' + cr.msg); return; }
-
-    try{ saveDB(); }catch(e){}
-    buildPreviewChain();
+    const cr = createAbonentMinimal(db, null, row.ls, row.fam, row.name, row.otch, row.square);
+    if (!cr.ok) return alert('Не удалось создать абонента: ' + cr.msg);
+    row.uid = cr.uid;
+    saveDB();
+    buildPreview();
     return;
   }
 
   if (act === 'conf_over' || act === 'conf_keep'){
     const key = btn.getAttribute('data-key');
     if (!key) return;
-    conflictDecision[key] = (act === 'conf_over') ? 'overwrite' : 'keep';
-    buildPreviewChain();
-    return;
+    conflictDecision[key] = act==='conf_over' ? 'overwrite' : 'keep';
+    buildPreview();
   }
 });
 
 (function init(){
   refreshWho();
 
-  $('fileInput').addEventListener('change', () => { resetPreview(); setButtons(); });
-  $('optAllowCreate').addEventListener('change', () => { renderPreview(); });
+  $('fileInput').addEventListener('change', function(){ resetPreview(); setButtons(); });
+  $('optAllowCreate').addEventListener('change', function(){ renderPreview(); });
+
+  $('btnModePrimary').addEventListener('click', function(){ mode='primary'; buildPreview(); });
+  $('btnModePayments').addEventListener('click', function(){ if (!primaryApplied) return; mode='payments'; buildPreview(); });
 
   $('btnParse').addEventListener('click', onParse);
   $('btnReset').addEventListener('click', resetPreview);
-  $('btnImport').addEventListener('click', applyImport);
+  $('btnApplyPrimary').addEventListener('click', applyPrimary);
+  $('btnApplyPayments').addEventListener('click', applyPayments);
 
   setButtons();
 })();
