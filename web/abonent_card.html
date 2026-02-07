@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 
 <!-- ============================================================
-🔒 CRITICAL — НЕ ТРОГАТЬ (ПАПАЖКХ) | Date: 2026-01-27
+🔒 CRITICAL — НЕ ТРОГАТЬ (ПАПАЖКХ) | Date: 2026-02-07
 Doc: docs/LOGIC_SPEC_v1.5.3.md
 Эталон: jkh_site_full_v01.27.3.zip | SHA256: 6b4254a9b3b74327fe2d2c48c34e3e446ba9ae4e3369c6c554a683bde7b6ceec
 
@@ -26,10 +26,9 @@ Doc: docs/LOGIC_SPEC_v1.5.3.md
     <!-- 🔴 CRITICAL: движок автоначислений -->
     <script src="autoaccrual_engine.js"></script>
 
-     <!-- таблица оплат / начислений -->
+    <!-- таблица оплат / начислений -->
     <script src="calc_engine.js"></script>
-     <script src="payment_table.js"></script>
-
+    <script src="payment_table.js"></script>
 
     <style>
         .uid-click{ cursor:pointer; text-decoration: underline; }
@@ -64,7 +63,7 @@ Doc: docs/LOGIC_SPEC_v1.5.3.md
             z-index: 6500;
         }
         .change-resp-card {
-            width: 560px;
+            width: 600px;
             background: #fff;
             border: 2px solid #000;
             padding: 18px;
@@ -92,10 +91,24 @@ Doc: docs/LOGIC_SPEC_v1.5.3.md
         }
         .change-resp-actions button {
             border: 2px solid #000;
-            padding: 6px 10px;
+            padding: 8px 10px;
             cursor: pointer;
             background: #fff;
+            font-size: 13px;
+            white-space: nowrap;
         }
+
+        .change-resp-hint {
+            margin-top: 10px;
+            border: 2px solid #000;
+            padding: 10px;
+            background: #f7f7f7;
+            font-size: 13px;
+            line-height: 1.35;
+        }
+        .change-resp-hint b { font-weight: 700; }
+        .change-resp-hint .row { margin-top: 6px; }
+
         .abonent-edit-card {
             width: 560px;
             background: #fff;
@@ -187,7 +200,35 @@ Doc: docs/LOGIC_SPEC_v1.5.3.md
             justify-content: flex-start;
             gap: 10px;
         }
-
+            .transfer-card{
+            margin-top: 12px;
+            border: 2px solid #000;
+            padding: 10px;
+            background: #fff7ea;
+        }
+        .transfer-title{
+            font-weight: 700;
+            font-size: 14px;
+            margin-bottom: 6px;
+        }
+        .transfer-sub{
+            font-weight: 700;
+            font-size: 13px;
+            margin-bottom: 4px;
+        }
+        .transfer-row{
+            font-size: 13px;
+            margin-top: 3px;
+        }
+        .transfer-item{
+            border-top: 1px solid #000;
+            padding-top: 6px;
+            margin-top: 6px;
+            font-size: 13px;
+        }
+        .transfer-item a{
+            text-decoration: underline;
+        }
     </style>
 </head>
 <body>
@@ -241,7 +282,6 @@ Doc: docs/LOGIC_SPEC_v1.5.3.md
     <tbody id="abonentInfoBody"></tbody>
 </table>
 
-
 <div class="premise-card" id="premiseCard">
     <div class="premise-head">
         <div>
@@ -262,30 +302,52 @@ Doc: docs/LOGIC_SPEC_v1.5.3.md
 
     <div class="premise-actions">
         <button class="btn" type="button" onclick="openChangeResponsibleModal()">Сменить ответственного</button>
-            <button class="btn" type="button" onclick="openResponsibilityReport()">Отчёт: кто ответственный</button>
+        <button class="btn" type="button" onclick="openResponsibilityReport()">Отчёт: кто ответственный</button>
     </div>
 
-<div style="margin-top:12px;">
-  <div style="font-weight:700; margin-bottom:6px;">История ответственных по квартире</div>
-  <table id="respHistoryTable" style="width:100%; border-collapse:collapse; font-size:13px;">
-    <thead>
-      <tr>
-        <th style="border:2px solid #000; padding:6px; width:160px;">Период</th>
-        <th style="border:2px solid #000; padding:6px; width:90px;">ЛС</th>
-        <th style="border:2px solid #000; padding:6px;">ФИО</th>
-        <th style="border:2px solid #000; padding:6px; width:90px;">Статус</th>
-        <th style="border:2px solid #000; padding:6px; width:130px;">Действие</th>
-      </tr>
-    </thead>
-    <tbody id="respHistoryBody"></tbody>
-  </table>
-  <div class="readonly-hint" style="margin-top:6px;">
-    🔴 История начислений/оплат не переносится — это только история ответственности (links).
-  </div>
-</div>
+    <div style="margin-top:12px;">
+      <div style="font-weight:700; margin-bottom:6px;">История ответственных по квартире</div>
+      <table id="respHistoryTable" style="width:100%; border-collapse:collapse; font-size:13px;">
+        <thead>
+          <tr>
+            <th style="border:2px solid #000; padding:6px; width:160px;">Период</th>
+            <th style="border:2px solid #000; padding:6px; width:90px;">ЛС</th>
+            <th style="border:2px solid #000; padding:6px;">ФИО</th>
+            <th style="border:2px solid #000; padding:6px; width:90px;">Статус</th>
+            <th style="border:2px solid #000; padding:6px; width:130px;">Действие</th>
+          </tr>
+        </thead>
+        <tbody id="respHistoryBody"></tbody>
+      </table>
+      <div class="readonly-hint" style="margin-top:6px;">
+        🔴 История начислений/оплат не переносится — это только история ответственности (links).
+      </div>
+    <!-- ===== Передача долга/пени (показываем на обеих карточках) ===== -->
+    <div class="transfer-card" id="transferCard" style="display:none;">
+      <div class="transfer-title">Передача долга / пени</div>
 
-</div>
+      <div id="transferIncoming" style="display:none;">
+        <div class="transfer-sub">Получено этим абонентом</div>
+        <div class="transfer-row"><b>С даты:</b> <span id="ti_start" class="mono">—</span></div>
+        <div class="transfer-row"><b>От абонента:</b> <span id="ti_from">—</span></div>
+        <div class="transfer-row"><b>Долг:</b> <span id="ti_principal" class="mono">0.00</span></div>
+        <div class="transfer-row"><b>Пеня:</b> <span id="ti_penalty" class="mono">0.00</span></div>
+        <div class="transfer-row"><b>Режим:</b> <span id="ti_mode">—</span></div>
+      </div>
 
+      <div id="transferFreeze" style="display:none; margin-top:10px;">
+        <div class="transfer-sub">Заморозка расчёта (старый владелец)</div>
+        <div class="transfer-row"><b>Пеня/итоги считаются до:</b> <span id="tf_freeze" class="mono">—</span></div>
+      </div>
+
+      <div id="transferOutgoing" style="display:none; margin-top:10px;">
+        <div class="transfer-sub">Передано этим абонентом</div>
+        <div id="to_list"></div>
+      </div>
+    </div>
+
+    </div>
+</div>
 
 <div class="options">
     <label onclick="location.href='exclude_period.html?abonent=' + encodeURIComponent(getAbonentIdFromURL())"
@@ -396,6 +458,13 @@ Doc: docs/LOGIC_SPEC_v1.5.3.md
 
         <div id="cr_info" class="muted" style="margin-top:8px;"></div>
 
+        <div class="change-resp-hint">
+            <b>Выберите вариант передачи квартиры:</b>
+            <div class="row">✅ <b>С долгом</b> — долг (и начисления/оплаты) остаются «как есть», просто меняем ответственного с указанной даты.</div>
+            <div class="row">✅ <b>Без долга</b> — фиксируем долг у старого владельца, а у нового владельца долг считается с нуля <u>с даты передачи</u>.</div>
+            <div class="row" style="margin-top:8px;"><b>Важно:</b> сейчас мы записываем режим передачи, а следующий шаг — научить расчёт реально учитывать «обнуление» в таблице оплат.</div>
+        </div>
+
         <label>Новый ответственный (лицевой счёт)</label>
         <select id="cr_newAbonent"></select>
 
@@ -403,7 +472,8 @@ Doc: docs/LOGIC_SPEC_v1.5.3.md
         <input id="cr_date" type="date">
 
         <div class="change-resp-actions">
-            <button onclick="applyChangeResponsible()">Применить</button>
+            <button onclick="applyChangeResponsible('WITH_DEBT')">Передать С ДОЛГОМ</button>
+            <button onclick="applyChangeResponsible('NO_DEBT')">Передать БЕЗ ДОЛГА</button>
             <button onclick="closeChangeResponsibleModal()">Отмена</button>
         </div>
     </div>
@@ -563,12 +633,10 @@ function getActiveLinkForAbonent(abonentId, regnum){
     const r = String(regnum || "").trim();
     const links = getLinks().filter(l => String(l?.abonentId) === id && String(l?.regnum || "").trim() === r);
     if (!links.length) return null;
-    // активная = без dateTo, иначе берём самую позднюю
     const active = links.find(l => !String(l?.dateTo || "").trim());
     if (active) return active;
     return links.slice().sort((a,b) => String(b?.dateTo||"").localeCompare(String(a?.dateTo||"")))[0];
 }
-
 
 function getActiveLinkForPremise(regnum){
     const r = String(regnum || '').trim();
@@ -579,7 +647,6 @@ function getActiveLinkForPremise(regnum){
     if (active) return active;
     return links.slice().sort((a,b) => String(b?.dateTo||"").localeCompare(String(a?.dateTo||"")))[0];
 }
-
 
 function getCurrentAbonent() {
     const id = String(getAbonentIdFromURL());
@@ -599,7 +666,6 @@ function splitFio(fio) {
 function joinFio(last, first, mid) {
     return [last, first, mid].map(x => String(x || "").trim()).filter(Boolean).join(" ");
 }
-
 
 async function copyUidFromCard(){
     const { a } = getCurrentAbonent();
@@ -624,13 +690,13 @@ async function copyUidFromCard(){
     document.body.removeChild(ta);
 }
 
+/* ✅ FIX: fillAbonentCard() — убраны лишние скобки, логика выполняется корректно */
 function fillAbonentCard() {
     const { id, a } = getCurrentAbonent();
     if (!a) return;
 
     const { regnum, p } = getPremiseForAbonent(id, a);
     const premise = p || {};
-    const link = regnum ? getActiveLinkForAbonent(id, regnum) : null;
 
     const fioParts = splitFio(a.fio);
 
@@ -662,8 +728,8 @@ function fillAbonentCard() {
     const addr = [premise.city ?? a.city, premise.street ?? a.street, premise.house ?? a.house, premise.flat ?? a.flat]
         .map(x => String(x || '').trim()).filter(Boolean).join(', ');
 
-    const setText = (id, val) => {
-        const el = document.getElementById(id);
+    const setText = (idEl, val) => {
+        const el = document.getElementById(idEl);
         if (!el) return;
         const v = String(val || '').trim();
         el.textContent = v ? v : '—';
@@ -679,84 +745,62 @@ function fillAbonentCard() {
     const activeAb = activeAbId ? (getDb()[activeAbId] || null) : null;
     const activeName = String(activeAb?.fio || '').trim();
 
+    // кто ответственный по квартире
     if (activeAbId) {
         setText('premiseResponsible', activeName ? `${activeAbId} — ${activeName}` : activeAbId);
         const df = String(activePremiseLink?.dateFrom || '').trim();
         const dt = String(activePremiseLink?.dateTo || '').trim();
-
         const periodHtml = (df || dt)
             ? `${df || '—'} — ${dt ? `<span style="color:#c00;font-weight:700;">${dt}</span>` : 'по настоящее время'}`
             : '—';
         const pp = document.getElementById('premisePeriod');
         if (pp) pp.innerHTML = periodHtml;
-
-        // Период ответственности именно этого абонента по этой квартире
-        const myLink = regnum ? getActiveLinkForAbonent(id, regnum) : null;
-        const mdf = String(myLink?.dateFrom || '').trim();
-        const mdt = String(myLink?.dateTo || '').trim();
-        const myHtml = (mdf || mdt)
-            ? `${mdf || '—'} — ${mdt ? `<span style="color:#c00;font-weight:700;">${mdt}</span>` : 'по настоящее время'}`
-            : '—';
-        const mp = document.getElementById('premiseMyPeriod');
-        if (mp) mp.innerHTML = myHtml;
     } else {
-        // Если нет связей, показываем текущего абонента как контекст
         setText('premiseResponsible', (a.fio ? `${id} — ${a.fio}` : id));
-        const df = String(link?.dateFrom || '').trim();
-        const dt = String(link?.dateTo || '').trim();
-
-        const periodHtml = (df || dt)
-            ? `${df || '—'} — ${dt ? `<span style="color:#c00;font-weight:700;">${dt}</span>` : 'по настоящее время'}`
-            : '—';
         const pp = document.getElementById('premisePeriod');
-        if (pp) pp.innerHTML = periodHtml;
+        if (pp) pp.innerHTML = '—';
+    }
 
-        // Период ответственности именно этого абонента по этой квартире
-        const myLink = regnum ? getActiveLinkForAbonent(id, regnum) : null;
-        const mdf = String(myLink?.dateFrom || '').trim();
-        const mdt = String(myLink?.dateTo || '').trim();
-        const myHtml = (mdf || mdt)
-            ? `${mdf || '—'} — ${mdt ? `<span style="color:#c00;font-weight:700;">${mdt}</span>` : 'по настоящее время'}`
-            : '—';
-        const mp = document.getElementById('premiseMyPeriod');
-        if (mp) mp.innerHTML = myHtml;
-    
+    // период ответственности этого абонента по квартире
+    const myLink = regnum ? getActiveLinkForAbonent(id, regnum) : null;
+    const mdf = String(myLink?.dateFrom || '').trim();
+    const mdt = String(myLink?.dateTo || '').trim();
+    const myHtml = (mdf || mdt)
+        ? `${mdf || '—'} — ${mdt ? `<span style="color:#c00;font-weight:700;">${mdt}</span>` : 'по настоящее время'}`
+        : '—';
+    const mp = document.getElementById('premiseMyPeriod');
+    if (mp) mp.innerHTML = myHtml;
 
     // ✅ показываем историю ответственности по квартире
     try { renderResponsibilityHistory(regnum || a.regnum || ''); } catch(e) {}
+    try { renderTransferInfo(id, regnum || a.regnum || ''); } catch(e) {}
 }
+
+// 🔴 CRITICAL: автоначисление + контроль пропусков
+function __runAutoAccrualRepairOnce(){
+    try {
+        const id = getAbonentIdFromURL();
+        if (!id) return;
+        const gk = 'jkh_autoaccrual_repair_once_v1:' + String(id);
+        if (sessionStorage.getItem(gk) === '1') return;
+        sessionStorage.setItem(gk, '1');
+
+        if (!window.JKHAutoAccrual || typeof window.JKHAutoAccrual.recalcForAbonent !== 'function') return;
+        const res = window.JKHAutoAccrual.recalcForAbonent(id);
+        if (res && res.ok && res.changed) {
+            try { if (window.__loadPaymentTable) window.__loadPaymentTable(); } catch(e) {}
+        }
+    } catch(e) {
+        try { console.warn('[autoaccrual] repairOnce error', e); } catch(_){ }
+    }
 }
-	// 🔴 CRITICAL: автоначисление + контроль пропусков
-	// Не меняет внешний вид карточки. Делает только одно:
-	// при открытии карточки вызывает движок автоначислений, чтобы восстановить
-	// пропущенные месяцы начислений (например, январь 2026), если их удалили случайно.
-	function __runAutoAccrualRepairOnce(){
-	    try {
-	        const id = getAbonentIdFromURL();
-	        if (!id) return;
-	        const gk = 'jkh_autoaccrual_repair_once_v1:' + String(id);
-	        if (sessionStorage.getItem(gk) === '1') return;
-	        sessionStorage.setItem(gk, '1');
 
-	        if (!window.JKHAutoAccrual || typeof window.JKHAutoAccrual.recalcForAbonent !== 'function') return;
-	        const res = window.JKHAutoAccrual.recalcForAbonent(id);
-	        // если что-то изменилось (добавились пропущенные начисления) — перерисуем таблицу
-	        if (res && res.ok && res.changed) {
-	            try { if (window.__loadPaymentTable) window.__loadPaymentTable(); } catch(e) {}
-	        }
-	    } catch(e) {
-	        try { console.warn('[autoaccrual] repairOnce error', e); } catch(_){ }
-	    }
-	}
+document.addEventListener("DOMContentLoaded", () => {
+    fillAbonentCard();
+    __runAutoAccrualRepairOnce();
+    try { if (window.__loadPaymentTable) window.__loadPaymentTable(); } catch(e) {}
+});
 
-	document.addEventListener("DOMContentLoaded", () => {
-	    // 1) заполнить шапку/данные абонента
-	    fillAbonentCard();
-	    // 2) восстановить пропущенные месяцы начислений (например, январь)
-	    __runAutoAccrualRepairOnce();
-	    // 3) отрисовать таблицу (если движок не перерисовал сам)
-	    try { if (window.__loadPaymentTable) window.__loadPaymentTable(); } catch(e) {}
-	});
 function renderResponsibilityHistory(regnum){
   const body = document.getElementById('respHistoryBody');
   if (!body) return;
@@ -803,6 +847,148 @@ function renderResponsibilityHistory(regnum){
   });
 }
 
+function __r2(n){
+  const x = Number(n);
+  if (!Number.isFinite(x)) return 0;
+  return Math.round(x*100)/100;
+}
+function __fmt2(n){
+  return __r2(n).toFixed(2);
+}
+
+function __getFreezeToISO(abonentId){
+  try{
+    const v = String(localStorage.getItem("jkh_freeze_to_v1:" + String(abonentId)) || "").trim();
+    return /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : "";
+  }catch(e){ return ""; }
+}
+
+function __getIncomingTransfer(abonentId, regnum){
+  try{
+    const key = "jkh_transfer_balance_v1:" + String(abonentId) + ":" + String(regnum);
+    const raw = localStorage.getItem(key);
+    if (!raw) return null;
+    const obj = JSON.parse(raw);
+    if (!obj || typeof obj !== "object") return null;
+    const startDate = String(obj.startDate || "").trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(startDate)) return null;
+    return {
+      startDate,
+      principal: __r2(obj.principal),
+      penalty: __r2(obj.penalty),
+      fromAbonentId: String(obj.fromAbonentId || "").trim(),
+      regnum: String(obj.regnum || regnum || "").trim(),
+      mode: String(obj.mode || "").trim()
+    };
+  }catch(e){ return null; }
+}
+
+function __findOutgoingTransfers(fromAbonentId){
+  const out = [];
+  try{
+    for (let i=0;i<localStorage.length;i++){
+      const k = localStorage.key(i);
+      if (!k) continue;
+      if (k.indexOf("jkh_transfer_balance_v1:") !== 0) continue;
+
+      const raw = localStorage.getItem(k);
+      if (!raw) continue;
+
+      let obj = null;
+      try{ obj = JSON.parse(raw); } catch(e){ obj = null; }
+      if (!obj || typeof obj !== "object") continue;
+
+      if (String(obj.fromAbonentId || "").trim() !== String(fromAbonentId).trim()) continue;
+
+      out.push({
+        key: k,
+        toAbonentId: (k.split(":")[1] || "").trim(),
+        regnum: (k.split(":").slice(2).join(":") || "").trim(),
+        startDate: String(obj.startDate || "").trim(),
+        principal: __r2(obj.principal),
+        penalty: __r2(obj.penalty),
+        mode: String(obj.mode || "").trim()
+      });
+    }
+  }catch(e){}
+  out.sort((a,b) => String(b.startDate||"").localeCompare(String(a.startDate||"")));
+  return out;
+}
+
+function renderTransferInfo(abonentId, regnum){
+  const card = document.getElementById("transferCard");
+  if (!card) return;
+
+  const incBox = document.getElementById("transferIncoming");
+  const frzBox = document.getElementById("transferFreeze");
+  const outBox = document.getElementById("transferOutgoing");
+
+  if (incBox) incBox.style.display = "none";
+  if (frzBox) frzBox.style.display = "none";
+  if (outBox) outBox.style.display = "none";
+
+  const incoming = __getIncomingTransfer(abonentId, regnum);
+  const freezeISO = __getFreezeToISO(abonentId);
+  const outgoing = __findOutgoingTransfers(abonentId);
+
+  let any = false;
+
+  if (incoming && incBox){
+    any = true;
+    incBox.style.display = "block";
+    document.getElementById("ti_start").textContent = incoming.startDate || "—";
+    document.getElementById("ti_principal").textContent = __fmt2(incoming.principal);
+    document.getElementById("ti_penalty").textContent = __fmt2(incoming.penalty);
+    document.getElementById("ti_mode").textContent = incoming.mode || "—";
+
+    const db = getDb();
+    const fromId = incoming.fromAbonentId || "";
+    const fio = fromId && db[fromId] ? String(db[fromId].fio || "").trim() : "";
+    const txt = fromId ? (fio ? `${fromId} — ${fio}` : fromId) : "—";
+    const el = document.getElementById("ti_from");
+    if (el) {
+      if (fromId){
+        el.innerHTML = `<a href="abonent_card.html?abonent=${encodeURIComponent(fromId)}">${txt}</a>`;
+      } else {
+        el.textContent = txt;
+      }
+    }
+  }
+
+  if (freezeISO && frzBox){
+    any = true;
+    frzBox.style.display = "block";
+    document.getElementById("tf_freeze").textContent = freezeISO;
+  }
+
+  if (outgoing && outgoing.length && outBox){
+    any = true;
+    outBox.style.display = "block";
+    const wrap = document.getElementById("to_list");
+    if (wrap){
+      const db = getDb();
+      wrap.innerHTML = outgoing.map(o => {
+        const toId = o.toAbonentId || "";
+        const fio = toId && db[toId] ? String(db[toId].fio || "").trim() : "";
+        const toTxt = toId ? (fio ? `${toId} — ${fio}` : toId) : "—";
+        const link = toId ? `<a href="abonent_card.html?abonent=${encodeURIComponent(toId)}">${toTxt}</a>` : toTxt;
+
+        return `
+          <div class="transfer-item">
+            <div><b>Кому:</b> ${link}</div>
+            <div><b>Объект:</b> ${o.regnum || "—"}</div>
+            <div><b>С даты:</b> <span class="mono">${o.startDate || "—"}</span></div>
+            <div><b>Долг:</b> <span class="mono">${__fmt2(o.principal)}</span> | <b>Пеня:</b> <span class="mono">${__fmt2(o.penalty)}</span></div>
+            <div><b>Режим:</b> ${o.mode || "—"}</div>
+          </div>
+        `;
+      }).join("");
+    }
+  }
+
+  card.style.display = any ? "block" : "none";
+}
+
 function openResponsibilityReport(){
   const { id, a } = getCurrentAbonent();
   if (!a) { alert('Абонент не найден'); return; }
@@ -812,8 +998,7 @@ function openResponsibilityReport(){
   window.location.href = 'responsibility_report.html?regnum=' + encodeURIComponent(r);
 }
 
-
-// ===== Смена ответственного (смена собственника) =====
+// ===== Смена ответственного =====
 function openChangeResponsibleModal() {
     const { id, a } = getCurrentAbonent();
     if (!a) { alert('Абонент не найден'); return; }
@@ -846,7 +1031,6 @@ function openChangeResponsibleModal() {
     const sel = document.getElementById('cr_newAbonent');
     sel.innerHTML = '';
 
-    // Сортировка по числу (если возможно)
     const ids = Object.keys(db).sort((x, y) => {
         const nx = Number(x), ny = Number(y);
         if (!Number.isNaN(nx) && !Number.isNaN(ny)) return nx - ny;
@@ -854,7 +1038,7 @@ function openChangeResponsibleModal() {
     });
 
     ids.forEach(k => {
-        if (String(k) === String(id)) return; // исключаем текущего
+        if (String(k) === String(id)) return;
         const fio = String(db[k]?.fio || '').trim();
         const opt = document.createElement('option');
         opt.value = String(k);
@@ -878,7 +1062,53 @@ function closeChangeResponsibleModal() {
     if (m) m.style.display = 'none';
 }
 
-function applyChangeResponsible() {
+/* ✅ NEW: applyChangeResponsible(mode)
+   mode = 'WITH_DEBT' | 'NO_DEBT'
+   Запоминаем режим передачи (для следующего шага в расчётах) */
+function __saveTransferMeta(newId, regnum, dateFrom, mode){
+    try{
+        const key = 'jkh_transfer_v1:' + String(newId) + ':' + String(regnum);
+        localStorage.setItem(key, JSON.stringify({
+            mode: String(mode || 'WITH_DEBT'),
+            dateFrom: String(dateFrom || ''),
+            regnum: String(regnum || ''),
+            ts: new Date().toISOString()
+        }));
+    }catch(e){}
+}
+function __isoMinusOne(iso){
+  try{
+    const d = new Date(iso + "T12:00:00");
+    d.setDate(d.getDate() - 1);
+    const y = d.getFullYear();
+    const m = String(d.getMonth()+1).padStart(2,'0');
+    const dd = String(d.getDate()).padStart(2,'0');
+    return `${y}-${m}-${dd}`;
+  }catch(e){ return iso; }
+}
+
+function __saveFreezeTo(oldId, freezeISO){
+  try{
+    localStorage.setItem("jkh_freeze_to_v1:" + String(oldId), String(freezeISO || ""));
+  }catch(e){}
+}
+
+function __saveTransferBalance(newId, regnum, startISO, principal, penalty, fromOldId, mode){
+  try{
+    const key = "jkh_transfer_balance_v1:" + String(newId) + ":" + String(regnum);
+    localStorage.setItem(key, JSON.stringify({
+      startDate: String(startISO || ""),
+      principal: Number(principal || 0),
+      penalty: Number(penalty || 0),
+      fromAbonentId: String(fromOldId || ""),
+      regnum: String(regnum || ""),
+      mode: String(mode || "WITH_DEBT"),
+      ts: new Date().toISOString()
+    }));
+  }catch(e){}
+}
+
+function applyChangeResponsible(mode) {
     if (!canWriteOrExplainLocal()) return;
     const { id, a } = getCurrentAbonent();
     if (!a) { alert('Абонент не найден'); return; }
@@ -898,7 +1128,7 @@ function applyChangeResponsible() {
 
     const allLinks = getLinks();
 
-    // Ограничение: один активный объект на абонента (чтобы не было путаницы)
+    // Ограничение: один активный объект на абонента
     const otherActive = allLinks.find(l => String(l.abonentId) === String(newId)
         && !String(l.dateTo || '').trim()
         && String(l.regnum) !== String(regnum));
@@ -907,6 +1137,42 @@ function applyChangeResponsible() {
               `Сначала закройте её период или выберите другого абонента.`);
         return;
     }
+
+    // сохраняем метаданные режима передачи (для будущего шага расчётов)
+    __saveTransferMeta(newId, regnum, dateFrom, mode);
+
+
+    // ✅ 1) вычисляем "долг + пеня" у старого на дату передачи (до передачи)
+    // Старый заканчивает накануне даты передачи.
+    const freezeISO = __isoMinusOne(dateFrom);
+
+    let oldPrincipal = 0;
+    let oldPenalty = 0;
+
+    try{
+      const oldPaymentsRaw = localStorage.getItem("payments_" + String(id));
+      const oldRows = oldPaymentsRaw ? JSON.parse(oldPaymentsRaw) : [];
+      if (window.JKHCalcEngine && typeof window.JKHCalcEngine.calcTotalsAsOfAdjusted === "function"){
+        const tot = window.JKHCalcEngine.calcTotalsAsOfAdjusted(oldRows, new Date(freezeISO + "T12:00:00"), {
+          abonentId: String(id),
+          applyAdvanceOffset: true,
+          allowNegativePrincipal: false
+        });
+        oldPrincipal = Number(tot?.principal || 0);
+        oldPenalty   = Number(tot?.penaltyDebt || 0);
+      }
+    }catch(e){}
+
+    // ✅ 2) замораживаем старого (пеня перестанет расти после freezeISO)
+    __saveFreezeTo(String(id), freezeISO);
+
+    // ✅ 3) если передача "С ДОЛГОМ" — записываем стартовое сальдо новому
+    if (String(mode) === "WITH_DEBT"){
+      __saveTransferBalance(String(newId), String(regnum), String(dateFrom), oldPrincipal, oldPenalty, String(id), "WITH_DEBT");
+    } else {
+      // "БЕЗ ДОЛГА": новому ничего не переносим
+    }
+
 
     const activeList = allLinks.filter(l =>
         String(l.regnum) === String(regnum) && !String(l.dateTo || '').trim()
@@ -920,6 +1186,7 @@ function applyChangeResponsible() {
         return;
     }
 
+    // фиксируем окончание расчёта у старого абонента
     activeList.forEach(l => {
         const oldAb = db[String(l.abonentId)];
         if (!oldAb) return;
@@ -929,6 +1196,7 @@ function applyChangeResponsible() {
         }
     });
 
+    // закрыть активные links по квартире
     activeList.forEach(l => {
         if (window.Data && typeof window.Data.unlinkAbonentFromPremise === 'function') {
             window.Data.unlinkAbonentFromPremise(String(l.abonentId), String(regnum));
@@ -938,17 +1206,20 @@ function applyChangeResponsible() {
         }
     });
 
+    // открыть link новому
     if (window.Data && typeof window.Data.linkAbonentToPremise === 'function') {
         window.Data.linkAbonentToPremise(String(newId), String(regnum), String(dateFrom), '');
     }
 
+    // старт расчёта у нового
     const newAb = db[String(newId)];
     if (newAb) {
         newAb.calcStartDate = dateFrom;
         newAb.calcEndDate = "";
     }
 
-    const premise = p || getPremisesDb()[String(regnum)] || {};
+    // подтянуть адресные поля из premises (как было)
+    const premise = (p || getPremisesDb()[String(regnum)] || {});
     if (newAb) {
         newAb.regnum = String(regnum);
         if (premise.city)   newAb.city = premise.city;
@@ -962,8 +1233,17 @@ function applyChangeResponsible() {
         }
     }
 
+    // сообщение по режиму
+    if (String(mode) === 'NO_DEBT') {
+        alert("Передача БЕЗ ДОЛГА сохранена.\nСледующий шаг: в расчёте учитываем обнуление долга с даты передачи.");
+    } else {
+        alert("Передача С ДОЛГОМ сохранена.");
+    }
+
     window.location.href = 'abonent_card.html?abonent=' + encodeURIComponent(String(newId));
 }
+
+/* ===== Редактирование абонента (оставил как у тебя) ===== */
 function openAbonentEdit() {
     const { id, a } = getCurrentAbonent();
     if (!a) { alert("Абонент не найден"); return; }
@@ -975,7 +1255,6 @@ function openAbonentEdit() {
 
     document.getElementById("ae_ls").value = id;
 
-    // ✅ НАВСЕГДА (только показ)
     document.getElementById("ae_regnum").value = regnum || a.regnum || "";
     document.getElementById("ae_city").value   = premise.city || a.city || "";
     document.getElementById("ae_street").value = premise.street || a.street || "";
@@ -1093,8 +1372,8 @@ function saveAbonentEdit() {
     alert("Изменения сохранены");
     const activeRegnum = String(updated.premiseRegnum || updated.regnum || '').trim();
     if (activeRegnum) renderResponsibilityHistory(activeRegnum);
-
 }
+
 function moratoriumKey(id){ return "moratorium_" + id; }
 
 function loadMoratoriumUI(){
@@ -1263,7 +1542,6 @@ document.addEventListener("click", (e) => {
   </div>
 </div>
 
-
 <script>
 (function(){
   function mode(){
@@ -1283,11 +1561,9 @@ document.addEventListener("click", (e) => {
       ? 'Гость: только просмотр (войдите, чтобы редактировать)'
       : "Админ: режим 'все базы' — только просмотр (выберите конкретную базу)";
 
-    // скрыть "изменить"
     var edits = document.querySelectorAll('.edit-link');
     for (var i=0;i<edits.length;i++){ edits[i].style.display='none'; }
 
-    // блокировать кнопки/ссылки, которые меняют данные
     var els = document.querySelectorAll('button, a, [onclick]');
     for (var j=0;j<els.length;j++){
       var el=els[j];
@@ -1303,7 +1579,6 @@ document.addEventListener("click", (e) => {
       }
     }
 
-    // любые input/textarea делаем readonly (на случай встроенного редактирования)
     var inputs = document.querySelectorAll('input, textarea, select');
     for (var k=0;k<inputs.length;k++){
       try{

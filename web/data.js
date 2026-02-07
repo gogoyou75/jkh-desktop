@@ -129,7 +129,10 @@
     "calc_period_",
     "calc_period_active_",
     "report_period_",
-    "payments_ui_collapsed_"
+    "payments_ui_collapsed_",
+    "jkh_transfer_v1:",
+    "jkh_transfer_balance_v1:",
+    "jkh_freeze_to_v1:"
   ];
 
   const PROJECT_KEY_EXACT = [

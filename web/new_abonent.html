@@ -44,7 +44,7 @@
         return _alert.call(window, msg);
       };
       window.confirm = function(msg){
-        if(shouldBlock(msg)) return true; // allow action to proceed for logged-in users
+        if(shouldBlock(msg)) return true;
         return _confirm.call(window, msg);
       };
     })();
@@ -54,7 +54,7 @@
   <title>Новый абонент</title>
   <link rel="stylesheet" href="style.css">
 
-  <!-- ✅ CRITICAL: auth + storage ДО data.js (иначе AbonentsDB загружается пустым) -->
+  <!-- ✅ CRITICAL: auth + storage ДО data.js -->
   <script src="auth.js"></script>
   <script src="storage.js"></script>
 
@@ -64,6 +64,8 @@
 
   <!-- ✅ Variant A: движок авто-начислений (без UI изменений) -->
   <script src="autoaccrual_engine.js"></script>
+  <!-- ✅ нужен для расчёта долга при передаче -->
+  <script src="calc_engine.js"></script>
 
   <style>
     .form-block {
@@ -233,7 +235,7 @@
     <div>
       <label>Дата начала расчёта (с какого дня месяца начать начислять)</label>
       <input id="na_date_from" type="date">
-      <div class="muted">Если оставить пустым — поставим 1-е число текущего месяца.</div>
+      <div class="muted">Если оставить пустым — поставим 1-е число текущего месяца. Эта дата также используется как старт периода ответственности при передаче квартиры.</div>
     </div>
     <div></div>
   </div>
@@ -273,7 +275,7 @@
     </div>
   </div>
 
-  <!-- ⚠️ Рег. № кв / адрес / площадь НЕ показываем (по ТЗ), но сохраняем, чтобы не ломать связи -->
+  <!-- скрытые поля привязки -->
   <input id="na_regnum" type="hidden">
   <input id="na_city" type="hidden">
   <input id="na_street" type="hidden">
@@ -281,7 +283,7 @@
   <input id="na_flat" type="hidden">
   <input id="na_square" type="hidden">
 
-  <!-- из Excel (для подсказки/логики) -->
+  <!-- из Excel -->
   <input id="na_square_excel" type="hidden">
   <input id="na_uid_import" type="hidden">
 
@@ -297,14 +299,37 @@
     </div>
   </div>
 
-
+  <!-- Блок передачи квартиры -->
   <div id="debtTransferBox" class="readonly-box" style="display:none; border-color:#c77b00;">
-    <div class="title">Квартира уже занята</div>
+    <div class="title">Квартира уже занята — передача</div>
+
     <div class="readonly-row" id="debtTransferInfo"></div>
-    <label style="margin-top:8px; display:block;">
-      <input type="checkbox" id="na_transfer_debt" checked>
-      Перенести задолженность старого абонента новому
+
+    <div class="readonly-row" style="margin-top:6px;">
+      <b>Новый период ответственности с:</b> <span id="transferStartPreview" class="mono">—</span>
+    </div>
+    <div class="readonly-row">
+      <b>Старый период закроется по:</b> <span id="transferEndPreview" class="mono">—</span>
+    </div>
+
+    <div class="readonly-row" style="margin-top:8px;">
+      <b>Долг нового абонента на старте:</b> <span id="newDebtStart" class="mono">0.00</span>
+    </div>
+
+    <!-- ВАЖНО: по ТЗ/канону — по умолчанию долг НЕ переносим, у нового старт 0 -->
+    <label style="margin-top:10px; display:block;">
+      <input type="checkbox" id="na_transfer_debt">
+      Передать долг новому абоненту (иначе у нового 0, у старого остаётся последний долг)
     </label>
+
+    <div class="muted" style="margin-top:8px;">
+      Эта кнопка делает “правильную передачу”:
+      закрывает период старого абонента, ставит новому период с выбранной даты, фиксирует долг старого, и создаёт нового абонента.
+    </div>
+
+    <button class="btn" type="button" id="btnTransferAndCreate" style="margin-top:10px; width:100%;">
+      ПЕРЕДАТЬ КВАРТИРУ (закрыть старого) и СОЗДАТЬ АБОНЕНТА
+    </button>
   </div>
 
   <div id="premiseWarn" class="readonly-box" style="display:none; border-color:#b00;">
@@ -384,7 +409,6 @@ function normalizeLs4(v){
   if (!s) return "";
   const digits = s.replace(/\D+/g,'');
   if (!digits) return "";
-  // если уже 4 цифры — ок; если меньше — дополним слева нулями до 4
   if (digits.length >= 4) return digits.slice(-4);
   return digits.padStart(4, "0");
 }
@@ -398,7 +422,6 @@ function getNextLsId(preferred) {
   const ids = Object.keys(db).map(x => parseInt(x, 10)).filter(x => Number.isFinite(x));
   if (ids.length) n = Math.max(...ids) + 1;
 
-  // выдаём новый как 4-значный
   while (db[String(String(n).padStart(4,'0'))]) n++;
   return String(n).padStart(4,'0');
 }
@@ -408,6 +431,24 @@ function esc(s){
     .replaceAll("&","&amp;").replaceAll("<","&lt;")
     .replaceAll(">","&gt;").replaceAll('"',"&quot;")
     .replaceAll("'","&#039;");
+}
+
+/* =========================
+   ДАТЫ / ПЕРИОДЫ
+   ========================= */
+function toIsoDate(d){
+  const y = d.getFullYear();
+  const m = String(d.getMonth()+1).padStart(2,'0');
+  const dd = String(d.getDate()).padStart(2,'0');
+  return `${y}-${m}-${dd}`;
+}
+function getTodayIso(){ return toIsoDate(new Date()); }
+function getYesterdayIso(iso){
+  const s = String(iso || '').trim();
+  const d = s ? new Date(s + 'T00:00:00') : new Date();
+  if (!Number.isFinite(d.getTime())) return getTodayIso();
+  d.setDate(d.getDate()-1);
+  return toIsoDate(d);
 }
 
 /* =========================
@@ -490,41 +531,28 @@ function applyPremiseByRegnum(regnum) {
 
   const df = document.getElementById("na_date_from");
   if (df && !df.value) df.value = getDefaultCalcStartDate();
+
   refreshDebtTransferBox();
 }
 
 /* =========================
-   ВОЗВРАТ НА ИМПОРТ (recheck=1)
+   ВОЗВРАТ НА ИМПОРТ
    ========================= */
 function safeReturnUrl(u){
   const s = String(u || "").trim();
-  // разрешим только локальные .html без протоколов
   if (!s) return "";
   if (s.includes("://")) return "";
   if (s.startsWith("//")) return "";
   if (!/^[a-z0-9_\-\/\.]+\.html(\?.*)?$/i.test(s)) return "";
   return s;
 }
-
 function goBackToImport(){
   location.href = 'import_xls.html#resume=1';
 }
 
-
-function toIsoDate(d){
-  const y = d.getFullYear();
-  const m = String(d.getMonth()+1).padStart(2,'0');
-  const dd = String(d.getDate()).padStart(2,'0');
-  return `${y}-${m}-${dd}`;
-}
-function getTodayIso(){ return toIsoDate(new Date()); }
-function getYesterdayIso(iso){
-  const s = String(iso || '').trim();
-  const d = s ? new Date(s + 'T00:00:00') : new Date();
-  if (!Number.isFinite(d.getTime())) return getTodayIso();
-  d.setDate(d.getDate()-1);
-  return toIsoDate(d);
-}
+/* =========================
+   LINKS HELPERS + ДОЛГ
+   ========================= */
 function activeLinkForRegnumLocal(db, regnum){
   if (typeof window.activeLinkForRegnum === 'function') return window.activeLinkForRegnum(db, regnum);
   const r = String(regnum || '').trim();
@@ -550,22 +578,168 @@ function getAbonentDebtAmount(a){
   }
   return 0;
 }
+function r2(n){
+  const x = Number(n);
+  if (!Number.isFinite(x)) return 0;
+  return Math.round(x * 100) / 100;
+}
+
+/* =========================
+   ПЕРЕДАЧА КВАРТИРЫ (CANON)
+   ========================= */
+let __jkhTransferConfirmed = false;
+let __transferCtx = null; // { regnum, oldId, oldFio, oldDebtSnapshot, oldLink }
+
+function __getDebtSnapshotByCalc(oldId, asOfIso){
+  try{
+    if (!window.JKHCalcEngine || typeof window.JKHCalcEngine.calcTotalsAsOfAdjusted !== 'function') return null;
+    const rows = loadPaymentsForLs(String(oldId));
+    const d = new Date(String(asOfIso) + "T12:00:00");
+    const tot = window.JKHCalcEngine.calcTotalsAsOfAdjusted(rows, d, {
+      abonentId: String(oldId),
+      applyAdvanceOffset: true,
+      allowNegativePrincipal: false
+    });
+    const p = Number(tot?.principal);
+    return Number.isFinite(p) ? p : null;
+  }catch(e){ return null; }
+}
+
+function __updateNewDebtStartPreview(){
+  const el = document.getElementById('newDebtStart');
+  if (!el) return;
+  const checked = !!document.getElementById('na_transfer_debt')?.checked;
+  const snap = r2(__transferCtx?.oldDebtSnapshot || 0);
+  el.textContent = (checked ? snap : 0).toFixed(2);
+}
+
+
+/* перенос долга (опционально) */
+function hasDebtTransferDuplicate(db, regnum, oldId, newId){
+  try{
+    const arr = Array.isArray(db.adjustments) ? db.adjustments : [];
+    const r = String(regnum||'').trim();
+    const o = String(oldId||'').trim();
+    const n = String(newId||'').trim();
+    return arr.some(x =>
+      String(x?.reason||'').includes('Перенос задолженности') &&
+      String(x?.regnum||'').trim()===r &&
+      String(x?.from||'').trim()===o &&
+      String(x?.to||'').trim()===n
+    );
+  }catch(e){ return false; }
+}
+function applyDebtTransfer(db, regnum, oldId, newId, amount, dateIso){
+  const a = Math.max(0, r2(amount));
+  if (!(a>0)) return { ok:true, skipped:true, reason:'zero' };
+  if (!Array.isArray(db.adjustments)) db.adjustments = [];
+  if (hasDebtTransferDuplicate(db, regnum, oldId, newId)) return { ok:true, skipped:true, reason:'dup' };
+
+  db.adjustments.push({
+    regnum: String(regnum||'').trim(),
+    from: String(oldId||'').trim(),
+    to: String(newId||'').trim(),
+    amount: a,
+    date: String(dateIso||getTodayIso()),
+    reason: 'Перенос задолженности при передаче квартиры'
+  });
+
+  try{
+    const oldA = db.abonents && db.abonents[oldId];
+    const newA = db.abonents && db.abonents[newId];
+    if (oldA){
+      if (Number.isFinite(Number(oldA.totalDebt))) oldA.totalDebt = Math.max(0, r2(Number(oldA.totalDebt) - a));
+      if (Number.isFinite(Number(oldA.mainDebtTotal))) oldA.mainDebtTotal = Math.max(0, r2(Number(oldA.mainDebtTotal) - a));
+    }
+    if (newA){
+      if (!Number.isFinite(Number(newA.totalDebt))) newA.totalDebt = 0;
+      if (!Number.isFinite(Number(newA.mainDebtTotal))) newA.mainDebtTotal = 0;
+      newA.totalDebt = r2(Number(newA.totalDebt) + a);
+      newA.mainDebtTotal = r2(Number(newA.mainDebtTotal) + a);
+    }
+  }catch(e){}
+
+  return { ok:true, skipped:false, reason:'ok' };
+}
+
+/* главное: закрыть период старого и “заморозить” начисления */
+function closeOldResponsibilityAndFreeze(db, oldId, closeToIso){
+  try{
+    const oldA = db.abonents?.[oldId];
+    if (!oldA) return false;
+
+    // ставим конец расчёта = дата закрытия ответственности
+    oldA.calcEndDate = String(closeToIso || '').trim();
+
+    // фиксируем снапшот долга (для карточки/истории)
+    const snap = getAbonentDebtAmount(oldA);
+    oldA.lastDebtSnapshot = r2(snap);
+    oldA.lastDebtSnapshotDate = String(closeToIso || '').trim();
+
+    // пометка (не обязательно, но удобно)
+    if (!oldA.history) oldA.history = [];
+    oldA.history.push({
+      type: "responsibility_closed",
+      date: String(getTodayIso()),
+      closeTo: String(closeToIso || '').trim(),
+      note: "Период ответственности закрыт при передаче квартиры"
+    });
+
+    return true;
+  }catch(e){ return false; }
+}
+
 function refreshDebtTransferBox(){
+  __jkhTransferConfirmed = false;
+  __transferCtx = null;
+
   const box = document.getElementById('debtTransferBox');
   const info = document.getElementById('debtTransferInfo');
   if (!box || !info) return;
+
   const db = window.AbonentsDB;
   const regnum = String(document.getElementById('na_regnum')?.value || '').trim();
   if (!db || !regnum){ box.style.display='none'; return; }
+
   const active = activeLinkForRegnumLocal(db, regnum);
   if (!active){ box.style.display='none'; return; }
+
   const oldObj = findAbonentByLinkId(db, active.abonentId);
   const oldA = oldObj && oldObj.abonent;
   if (!oldA){ box.style.display='none'; return; }
-  const debt = getAbonentDebtAmount(oldA);
-  info.textContent = 'Текущий ответственный: ' + (oldA.fio || oldObj.id) + '. Задолженность: ' + debt.toFixed(2);
+
+  const df0 = String(document.getElementById('na_date_from')?.value || '').trim() || getDefaultCalcStartDate();
+  const closeTo0 = getYesterdayIso(df0);
+
+  const oldId = String(oldObj.id || '').trim();
+  // сначала пробуем рассчитать долг по таблице payments_<ЛС> через calc_engine.js (если подключён)
+  let debtCalc = __getDebtSnapshotByCalc(oldId, closeTo0);
+  const debt = (debtCalc !== null) ? debtCalc : getAbonentDebtAmount(oldA);
+
+  const oldFio = String(oldA.fio || oldId).trim();
+
+  __transferCtx = {
+    regnum,
+    oldId,
+    oldFio,
+    oldDebtSnapshot: r2(debt),
+    oldLink: active
+  };
+
+  info.textContent = 'Текущий ответственный: ' + oldFio;
+  /* UI: сумма долга нового на старте зависит от галочки */
+  try { __updateNewDebtStartPreview(); } catch(e) {}
+
+  // превью дат передачи
+  document.getElementById('transferStartPreview').textContent = df0;
+  document.getElementById('transferEndPreview').textContent = closeTo0;
+
   box.style.display = 'block';
 }
+
+/* =========================
+   DRAFT (import)
+   ========================= */
 function loadDraftNewAbonent(){
   if (!window.JKHStore || !JKHStore.getJSON) return null;
   try{ return JKHStore.getJSON('draft_new_abonent_v1', null, null); }catch(e){ return null; }
@@ -576,21 +750,11 @@ function clearDraftNewAbonent(){
 }
 
 /* =========================
-   ИМПОРТ ОПЛАТ ДЛЯ НОВОГО АБОНЕНТА (из import_preview_v1)
-   CRITICAL (v1.4): use_period НЕ включаем автоматически.
-   Срабатывает ТОЛЬКО когда оператор создаёт абонента из импорта.
+   ИМПОРТ ОПЛАТ (как было)
    ========================= */
-
-function r2(n){
-  const x = Number(n);
-  if (!Number.isFinite(x)) return 0;
-  return Math.round(x * 100) / 100;
-}
-
 function paymentsKeyForLs(ls){
   return 'payments_' + String(ls || '').trim();
 }
-
 function loadPaymentsForLs(ls){
   try {
     const raw = localStorage.getItem(paymentsKeyForLs(ls));
@@ -601,7 +765,6 @@ function loadPaymentsForLs(ls){
     return [];
   }
 }
-
 function savePaymentsForLs(ls, arr){
   try {
     localStorage.setItem(paymentsKeyForLs(ls), JSON.stringify(Array.isArray(arr) ? arr : []));
@@ -609,7 +772,6 @@ function savePaymentsForLs(ls, arr){
     console.warn('[new_abonent] savePaymentsForLs error', e);
   }
 }
-
 function nextPaymentIdForArray(arr){
   let maxId = 0;
   for (const r of (arr || [])){
@@ -618,19 +780,16 @@ function nextPaymentIdForArray(arr){
   }
   return maxId + 1;
 }
-
 function paymentsHasDuplicate(arr, iso, amount){
   const a = r2(amount);
   const d = String(iso || '').trim();
   return (arr || []).some(r => r2(r?.paid) === a && String(r?.paid_date || '').trim() === d);
 }
-
 function debtsHasDuplicate(debtsArr, dmy, amount){
   const a = r2(amount);
   const dd = String(dmy || '').trim();
   return (debtsArr || []).some(r => r2(r?.paid) === a && String(r?.payDate || '').trim() === dd);
 }
-
 function loadImportDraft(){
   try {
     const raw = localStorage.getItem('import_preview_v1');
@@ -640,13 +799,11 @@ function loadImportDraft(){
     return null;
   }
 }
-
 function findDraftRowByLs(draft, ls){
   if (!draft || !Array.isArray(draft.rows)) return null;
   const key = String(ls || '').trim();
   return draft.rows.find(r => String(r?.ls || '').trim() === key) || null;
 }
-
 function importPaymentsFromDraftForNewAbonent(ls, abonentObj){
   const draft = loadImportDraft();
   const row = findDraftRowByLs(draft, ls);
@@ -655,7 +812,6 @@ function importPaymentsFromDraftForNewAbonent(ls, abonentObj){
   const pays = Array.isArray(row.payments) ? row.payments : [];
   if (!pays.length) return { ok: true, imported: 0, reason: 'no_payments' };
 
-  // payments_<LS>
   const payArr = loadPaymentsForLs(ls);
   let idCounter = nextPaymentIdForArray(payArr);
   let addedPays = 0;
@@ -677,7 +833,6 @@ function importPaymentsFromDraftForNewAbonent(ls, abonentObj){
       paid: amount,
       paid_date: iso,
       use_period: false,
-      // CRITICAL (v1.4): период НЕ включаем автоматически
       period_from_m: mm,
       period_from_y: yy,
       period_to_m: mm,
@@ -694,11 +849,9 @@ function importPaymentsFromDraftForNewAbonent(ls, abonentObj){
 
   if (addedPays) savePaymentsForLs(ls, payArr);
 
-  // debts[] (для совместимости с отчётами/старой структурой)
   try {
     if (abonentObj){
       if (!Array.isArray(abonentObj.debts)) abonentObj.debts = [];
-      let addedDebts = 0;
       for (const p of pays){
         const dmy = String(p?.dmy || '').trim();
         const iso = String(p?.iso || '').trim();
@@ -718,7 +871,6 @@ function importPaymentsFromDraftForNewAbonent(ls, abonentObj){
           mainDebt: 0,
           debtPenalty: 0
         });
-        addedDebts++;
       }
     }
   } catch (e){
@@ -805,17 +957,18 @@ function prefillFromQueryParams() {
 
   const df = document.getElementById("na_date_from");
   if (df && !df.value) df.value = getDefaultCalcStartDate();
+
   refreshDebtTransferBox();
 }
 
-
 /* =========================
-   СОЗДАНИЕ АБОНЕНТА
+   СОЗДАНИЕ АБОНЕНТА (с поддержкой передачи)
    ========================= */
 function createAbonent() {
   try{
     if (typeof window.canWriteOrExplain === "function" && !window.canWriteOrExplain()) return;
   }catch(e){}
+
   const last = document.getElementById("na_last").value.trim();
   const first = document.getElementById("na_first").value.trim();
   const mid = document.getElementById("na_mid").value.trim();
@@ -826,16 +979,10 @@ function createAbonent() {
   if (!dbRoot || !dbRoot.abonents) { alert("База AbonentsDB не найдена"); return; }
 
   const regnum = String(document.getElementById("na_regnum").value || "").trim();
-  if (!regnum) {
-    alert("Квартира не выбрана. Выберите квартиру из списка.");
-    return;
-  }
+  if (!regnum) { alert("Квартира не выбрана. Выберите квартиру из списка."); return; }
 
   const premise = dbRoot.premises?.[regnum] || null;
-  if (!premise) {
-    alert("Квартира (premises) по regnum не найдена. Сначала заведите квартиру, затем создавайте абонента.");
-    return;
-  }
+  if (!premise) { alert("Квартира (premises) по regnum не найдена. Сначала заведите квартиру, затем создавайте абонента."); return; }
 
   const city = String(document.getElementById("na_city").value || "").trim();
   const street = String(document.getElementById("na_street").value || "").trim();
@@ -856,14 +1003,24 @@ function createAbonent() {
   const df = String(dfRaw).trim();
   const dateFrom = df || getDefaultCalcStartDate();
   const today = getTodayIso();
+  const respStart = String(dateFrom || "").trim() || today;
 
   if (!Array.isArray(dbRoot.links)) dbRoot.links = [];
   const prevActive = activeLinkForRegnumLocal(dbRoot, regnum);
 
-  // UID: если пришёл из импорта и он валидный — используем его; иначе создаём новый
-  const uidImport = String(document.getElementById("na_uid_import").value || "").trim();
-  const uid = uidImport ? uidImport : generateUid();
+  // если квартира занята — требуем явную передачу кнопкой
+  if (prevActive && String(prevActive.abonentId || '').trim() && String(prevActive.abonentId || '').trim() !== String(ls).trim()){
+    if (!__jkhTransferConfirmed){
+      alert('Квартира уже занята. Чтобы правильно закрыть старого владельца и создать нового, используйте кнопку «ПЕРЕДАТЬ КВАРТИРУ и СОЗДАТЬ АБОНЕНТА».');
+      return;
+    }
+  }
 
+  // UID
+  const uidImport = String(document.getElementById("na_uid_import").value || "").trim();
+  const uid = (uidImport && uidImport.startsWith("uid_")) ? uidImport : generateUid();
+
+  // создаём нового с нулевым долгом (как и было)
   dbRoot.abonents[ls] = {
     fio,
     regnum,
@@ -886,21 +1043,40 @@ function createAbonent() {
 
     uid: uid,
 
-    // даты расчёта (если где-то уже используется)
-    calcStartDate: dateFrom,
+    calcStartDate: respStart,
     calcEndDate: "",
 
-    // старые поля (чтобы не ломать связи)
     calcDate: "",
     stateDate: "",
     docDate: ""
   };
 
-  const respStart = String(dateFrom || "").trim() || today;
-  if (prevActive && String(prevActive.abonentId || '').trim() !== String(ls)) {
-    prevActive.dateTo = getYesterdayIso(respStart);
+  // ====== если была передача — закрываем старого и фиксируем его долг ======
+  let transferMeta = null;
+  if (prevActive && __jkhTransferConfirmed && __transferCtx && __transferCtx.oldId){
+    const closeTo = getYesterdayIso(respStart);
+
+    // 1) закрыть link старого
+    prevActive.dateTo = closeTo;
+
+    // 2) “заморозить” старого (чтобы авто-начисления дальше не шли)
+    closeOldResponsibilityAndFreeze(dbRoot, __transferCtx.oldId, closeTo);
+
+    // 3) мета для карточки нового (покажем рядом с “передача долга” в abonent_card.html следующим патчем)
+    transferMeta = {
+      type: "premise_transfer",
+      regnum: regnum,
+      fromAbonentId: String(__transferCtx.oldId),
+      fromFio: String(__transferCtx.oldFio || ''),
+      oldDebtSnapshot: r2(__transferCtx.oldDebtSnapshot || 0),
+      newRespFrom: String(respStart),
+      oldRespTo: String(closeTo),
+      transferDebtApplied: false,
+      createdAt: String(today)
+    };
   }
 
+  // 4) новый link
   dbRoot.links.push({
     abonentId: String(ls),
     regnum,
@@ -908,48 +1084,36 @@ function createAbonent() {
     dateTo: ""
   });
 
+  // 5) перенос долга — только если явно галочка
   const transferChecked = !!document.getElementById('na_transfer_debt')?.checked;
-  if (prevActive && transferChecked) {
-    const oldObj = findAbonentByLinkId(dbRoot, prevActive.abonentId);
-    const oldUid = oldObj ? String(oldObj.id || '').trim() : '';
-    const amount = getAbonentDebtAmount(oldObj && oldObj.abonent);
-    if (oldUid && amount > 0) {
-      if (!Array.isArray(dbRoot.adjustments)) dbRoot.adjustments = [];
-      dbRoot.adjustments.push({
-        from: oldUid,
-        to: String(ls),
-        amount: amount,
-        date: today,
-        reason: 'Перенос при смене ответственного'
-      });
+  if (transferMeta && transferChecked){
+    const amount = r2(transferMeta.oldDebtSnapshot || 0);
+    if (amount > 0){
+      const res = applyDebtTransfer(dbRoot, regnum, transferMeta.fromAbonentId, String(ls), amount, today);
+      transferMeta.transferDebtApplied = !!(res && res.ok && !res.skipped);
     }
   }
 
-  // ✅ v1.4: если абонент создаётся из импорта — переносим оплаты из предпросмотра СРАЗУ.
+  // сохраняем мету передачи в нового абонента (для карточки)
+  if (transferMeta){
+    dbRoot.abonents[ls].transferMeta = transferMeta;
+  }
+
+  // ✅ если из импорта — переносим оплаты
   const src = String(document.getElementById("na_src").value || "").trim();
   if (src === 'import_xls') {
-    try {
-      const res = importPaymentsFromDraftForNewAbonent(String(ls), dbRoot.abonents[ls]);
-      if (res && res.imported) {
-        console.warn('[new_abonent] imported payments from draft:', { ls: String(ls), imported: res.imported });
-      }
-    } catch (e) {
-      console.warn('[new_abonent] importPaymentsFromDraftForNewAbonent error', e);
-    }
+    try { importPaymentsFromDraftForNewAbonent(String(ls), dbRoot.abonents[ls]); } catch (e) {}
   }
 
   if (window.saveAbonentsDB) window.saveAbonentsDB();
 
-  // ✅ Variant A: сразу создаём/пересчитываем начисления
+  // ✅ пересчёт начислений только для нового
   try {
     if (window.JKHAutoAccrual && typeof window.JKHAutoAccrual.recalcForAbonent === 'function') {
       window.JKHAutoAccrual.recalcForAbonent(String(ls));
     }
-  } catch (e) {
-    console.warn('[new_abonent] autoaccrual error', e);
-  }
+  } catch (e) {}
 
-  // если пришли со страницы импорта — возвращаемся туда и запускаем recheck
   const ret = safeReturnUrl(String(document.getElementById("na_return").value || "").trim());
   if (src === "import_xls" || ret) {
     clearDraftNewAbonent();
@@ -1011,14 +1175,7 @@ function buildAbonentRow(id, a){
     if (isActive) periodHtml = `<span class="period-active">${periodHtml}</span>`;
   }
 
-  return {
-    id: String(id),
-    fio,
-    addr,
-    start,
-    periodText,
-    periodHtml
-  };
+  return { id: String(id), fio, addr, start, periodText, periodHtml };
 }
 
 let __abonentsCache = [];
@@ -1026,7 +1183,6 @@ let __abonentsCache = [];
 function renderAbonentsTable(list){
   const tbody = document.getElementById("abonentsTbody");
   if (!tbody) return;
-
   tbody.innerHTML = "";
 
   list.forEach(x => {
@@ -1082,10 +1238,7 @@ function initAbonentsList(){
   __abonentsCache = ids.map(id => buildAbonentRow(id, db[id]));
   renderAbonentsTable(__abonentsCache);
 
-  document.querySelectorAll(".filter-input").forEach(el => {
-    el.addEventListener("input", applyFilters);
-  });
-
+  document.querySelectorAll(".filter-input").forEach(el => el.addEventListener("input", applyFilters));
   document.getElementById("btnFiltersReset")?.addEventListener("click", () => {
     document.querySelectorAll(".filter-input").forEach(i => i.value = "");
     applyFilters();
@@ -1096,6 +1249,11 @@ function initAbonentsList(){
    INIT
    ========================= */
 document.addEventListener("DOMContentLoaded", () => {
+  try {
+    const cb = document.getElementById('na_transfer_debt');
+    if (cb) cb.addEventListener('change', __updateNewDebtStartPreview);
+  } catch(e) {}
+
   prefillFromQueryParams();
 
   document.getElementById("btnBackToImport")?.addEventListener("click", goBackToImport);
@@ -1108,12 +1266,19 @@ document.addEventListener("DOMContentLoaded", () => {
     });
   }
 
-  // удобство: ввод ЛС сразу нормализуем до 4 цифр
+  // обновлять превью дат передачи при изменении даты
+  document.getElementById("na_date_from")?.addEventListener("change", refreshDebtTransferBox);
+
   document.getElementById("na_ls")?.addEventListener("blur", (e) => {
     e.target.value = normalizeLs4(e.target.value);
   });
 
   document.getElementById("btnCreate").addEventListener("click", createAbonent);
+
+  document.getElementById('btnTransferAndCreate')?.addEventListener('click', () => {
+    __jkhTransferConfirmed = true;
+    createAbonent();
+  });
 
   initAbonentsList();
 });

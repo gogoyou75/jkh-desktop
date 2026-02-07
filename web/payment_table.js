@@ -303,7 +303,39 @@ function splitAccrualByOwnership(accr, year, month, history) {
     return "payments_" + getAbonentId();
   }
 
-  /* =========================================================
+  
+
+  // ===== TRANSFER (стартовое сальдо при передаче квартиры) =====
+  function getCurrentRegnum(){
+    try{
+      const id = String(getAbonentId());
+      const a = window.AbonentsDB?.abonents?.[id] || null;
+      return String(a?.premiseRegnum || a?.regnum || "").trim();
+    }catch(e){ return ""; }
+  }
+
+  function readTransferBalance(){
+    try{
+      const id = String(getAbonentId());
+      const regnum = getCurrentRegnum();
+      if (!id || !regnum) return null;
+      const key = "jkh_transfer_balance_v1:" + id + ":" + regnum;
+      const raw = localStorage.getItem(key);
+      if (!raw) return null;
+      const obj = JSON.parse(raw);
+      if (!obj || typeof obj !== "object") return null;
+      const startDate = String(obj.startDate || "").trim();
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(startDate)) return null;
+      return {
+        startDate,
+        principal: Number(obj.principal || 0),
+        penalty: Number(obj.penalty || 0),
+        mode: String(obj.mode || "WITH_DEBT"),
+        fromAbonentId: String(obj.fromAbonentId || "")
+      };
+    }catch(e){ return null; }
+  }
+/* =========================================================
      АВТО-НАЧИСЛЕНИЕ (тарифы × площадь) по периоду ответственности
      Правила:
      - В одном месяце только одно начисление
@@ -1705,6 +1737,8 @@ function applyRunningTotals(viewRows) {
         #paymentTableBody tr.row-accrual td:first-child { font-weight: 700; }
         #paymentTableBody tr.row-accrual { border-top: 2px solid #d9dde3; }
         #paymentTableBody tr.row-payment td { background: #ffffff; }
+        #paymentTableBody tr.row-transfer td { background: #fff7ea; }
+        #paymentTableBody tr.row-transfer td:first-child { font-weight: 700; }
         #paymentTableBody tr.row-payment td:first-child { padding-left: 16px; opacity: 0.95; }
         #paymentTableBody tr.row-payment td:first-child .ym-title { font-weight: 500; }
         #paymentTableBody tr.row-payment td:first-child .ym-sub { font-size: 11px; opacity: 0.75; }
@@ -1752,6 +1786,32 @@ function applyRunningTotals(viewRows) {
 
     const view = applyCalcFilter(arr).slice();
     applyRunningTotals(view);
+    // ✅ Канон: визуальная строка «ПЕРЕНОС (передача квартиры)»
+    // Показываем стартовый долг/пеню, если они есть.
+    (function injectTransferRow(){
+      try{
+        const tb = readTransferBalance();
+        if (!tb) return;
+        const ym = String(tb.startDate).slice(0,7);
+        const parts = ym.split('-');
+        const y = Number(parts[0]||0);
+        const mo = Number(parts[1]||0);
+        const trRow = {
+          __transfer_row: true,
+          year: y,
+          month: String(mo).padStart(2,'0'),
+          ym: ym,
+          transfer_start: tb.startDate,
+          pay_main: Number(tb.principal || 0),
+          pay_penalty: Number(tb.penalty || 0),
+          total: Number(tb.principal || 0) + Number(tb.penalty || 0)
+        };
+        // добавляем в VIEW как отдельную строку (не записываем в payments_*)
+        view.push(trRow);
+      }catch(e){}
+    })();
+
+
 
     // сортировка отображения — год/месяц (новые сверху),
     // внутри месяца: сначала строка начисления, ниже — оплаты (Excel и ручные)
@@ -1805,6 +1865,28 @@ tbody.innerHTML = "";
   }
 
   function makeRow(r) {
+    // Специальная строка: перенос долга/пени при смене владельца
+    if (r && r.__transfer_row) {
+      const tr = document.createElement("tr");
+      tr.className = "row-transfer";
+      const title = (r.transfer_start ? (`ПЕРЕНОС (передача квартиры) с ${r.transfer_start}`) : "ПЕРЕНОС (передача квартиры)");
+      tr.innerHTML = `
+        <td><span class="ym-title">${title}</span></td>
+        <td></td>
+        <td></td>
+        <td></td>
+        <td></td>
+        <td></td>
+        <td>${fmtMoney(r.pay_main)}</td>
+        <td>${fmtMoney(r.pay_penalty)}</td>
+        <td>${fmtMoney(r.total)}</td>
+        <td style="font-size:12px;opacity:.9;">Стартовое сальдо при передаче</td>
+        <td></td>
+      `;
+      return tr;
+    }
+
+
     const tr = document.createElement("tr");
     tr.dataset.rowId = String(r.id);
 

@@ -277,6 +277,181 @@
     return rate;
   }
 
+  // ---------- TRANSFER / FREEZE (debt+penalty handover) ----------
+  function freezeKey(abonentId){
+    return "jkh_freeze_to_v1:" + String(abonentId || getAbonentIdFromUrl());
+  }
+
+  function getFreezeToISO(abonentId){
+    try{
+      const v = String(localStorage.getItem(freezeKey(abonentId)) || "").trim();
+      return /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : "";
+    }catch(e){ return ""; }
+  }
+
+    function getTransferMeta(abonentId, regnum){
+    try{
+      const id = String(abonentId || getAbonentIdFromUrl());
+      const r = String(regnum || "").trim();
+      if (!id || !r) return null;
+      const key = "jkh_transfer_v1:" + id + ":" + r;
+      const raw = localStorage.getItem(key);
+      if (!raw) return null;
+      const obj = JSON.parse(raw);
+      if (!obj || typeof obj !== "object") return null;
+      const dateFrom = String(obj.dateFrom || "").trim();
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(dateFrom)) return null;
+      const mode = String(obj.mode || "").trim() || "WITH_DEBT";
+      return { dateFrom, mode, regnum: r };
+    }catch(e){ return null; }
+  }
+
+  function findPreviousAbonentIdForTransfer(regnum, dateFromISO){
+    try{
+      const r = String(regnum || "").trim();
+      const df = String(dateFromISO || "").trim();
+      if (!r || !/^\d{4}-\d{2}-\d{2}$/.test(df)) return "";
+
+      // ищем link по квартире, у которого dateTo совпадает с датой передачи (или накануне)
+      const links = Array.isArray(window.AbonentsDB?.links) ? window.AbonentsDB.links : [];
+      let best = null;
+
+      for (const l of links){
+        if (String(l?.regnum || "").trim() !== r) continue;
+        const dt = String(l?.dateTo || "").trim();
+        if (!dt) continue;
+
+        // допускаем dt == df или dt == df-1 (на случай разных правил закрытия)
+        let ok = (dt === df);
+        if (!ok){
+          try{
+            const d = new Date(df + "T12:00:00");
+            d.setDate(d.getDate() - 1);
+            const y = d.getFullYear();
+            const m = String(d.getMonth()+1).padStart(2,'0');
+            const dd = String(d.getDate()).padStart(2,'0');
+            const dfm1 = `${y}-${m}-${dd}`;
+            ok = (dt === dfm1);
+          }catch(e){}
+        }
+        if (!ok) continue;
+
+        // выбираем самый "поздний" по dateFrom (если вдруг несколько)
+        if (!best) best = l;
+        else {
+          const a = String(l?.dateFrom || "");
+          const b = String(best?.dateFrom || "");
+          if (a && (!b || a > b)) best = l;
+        }
+      }
+
+      return best ? String(best.abonentId || "").trim() : "";
+    }catch(e){ return ""; }
+  }
+
+  function cacheTransferBalance(abonentId, regnum, startDate, principal, penalty, fromAbonentId, mode){
+    try{
+      const id = String(abonentId || "").trim();
+      const r = String(regnum || "").trim();
+      if (!id || !r) return;
+      const key = "jkh_transfer_balance_v1:" + id + ":" + r;
+      localStorage.setItem(key, JSON.stringify({
+        startDate: String(startDate || ""),
+        principal: toNum(principal),
+        penalty: toNum(penalty),
+        fromAbonentId: String(fromAbonentId || ""),
+        regnum: r,
+        mode: String(mode || "WITH_DEBT"),
+        ts: new Date().toISOString()
+      }));
+    }catch(e){}
+  }
+
+  function getTransferBalance(abonentId){
+    try{
+      const id = String(abonentId || getAbonentIdFromUrl());
+      const a = window.AbonentsDB?.abonents?.[id] || null;
+      const regnum = String(a?.premiseRegnum || a?.regnum || "").trim();
+      if (!regnum) return null;
+
+      // 1) НОВЫЙ канон: явный баланс переноса
+      const key = "jkh_transfer_balance_v1:" + id + ":" + regnum;
+      const raw = localStorage.getItem(key);
+      if (raw){
+        const obj = JSON.parse(raw);
+        if (obj && typeof obj === "object"){
+          const startDate = String(obj.startDate || "").trim();
+          if (/^\d{4}-\d{2}-\d{2}$/.test(startDate)){
+            return {
+              startDate,
+              principal: toNum(obj.principal),
+              penalty: toNum(obj.penalty),
+              regnum: String(obj.regnum || regnum),
+              fromAbonentId: String(obj.fromAbonentId || ""),
+              mode: String(obj.mode || "")
+            };
+          }
+        }
+      }
+
+      // 2) fallback: есть только meta (режим/дата передачи) — вычислим перенос сами
+      const meta = getTransferMeta(id, regnum);
+      if (!meta) return null;
+
+      // режим БЕЗ ДОЛГА — перенос отсутствует
+      if (String(meta.mode || "") === "NO_DEBT") return null;
+
+      const prevId = findPreviousAbonentIdForTransfer(regnum, meta.dateFrom);
+      if (!prevId) return null;
+
+      // считаем долг+пеню у предыдущего владельца накануне даты передачи
+      const freezeISO = (function(iso){
+        try{
+          const d = new Date(iso + "T12:00:00");
+          d.setDate(d.getDate() - 1);
+          const y = d.getFullYear();
+          const m = String(d.getMonth()+1).padStart(2,'0');
+          const dd = String(d.getDate()).padStart(2,'0');
+          return `${y}-${m}-${dd}`;
+        }catch(e){ return iso; }
+      })(meta.dateFrom);
+
+      let principal = 0;
+      let penalty = 0;
+      try{
+        const oldRaw = localStorage.getItem("payments_" + String(prevId));
+        const oldRows = oldRaw ? JSON.parse(oldRaw) : [];
+        // ВАЖНО: берём calcTotalsAsOfAdjusted, чтобы учесть правила аванса и т.п.
+        // (и возможные прошлые переносы у старого владельца)
+        const tot = calcTotalsAsOfAdjusted(oldRows, new Date(freezeISO + "T12:00:00"), {
+          abonentId: String(prevId),
+          applyAdvanceOffset: true,
+          allowNegativePrincipal: false
+        });
+        principal = toNum(tot?.principal);
+        penalty = toNum(tot?.penaltyDebt);
+      }catch(e){}
+
+      // кешируем как явный перенос, чтобы дальше всё работало быстро и прозрачно
+      cacheTransferBalance(id, regnum, meta.dateFrom, principal, penalty, prevId, "WITH_DEBT");
+
+      return {
+        startDate: meta.dateFrom,
+        principal: toNum(principal),
+        penalty: toNum(penalty),
+        regnum: regnum,
+        fromAbonentId: String(prevId),
+        mode: "WITH_DEBT"
+      };
+    }catch(e){ return null; }
+  }
+
+  function minDateObj(a,b){
+    if (!a) return b;
+    if (!b) return a;
+    return (a.getTime() <= b.getTime()) ? a : b;
+  }
+
   // ---------- FIFO obligations / payments ----------
   function ymKey(y,m){ return `${String(y)}-${pad2(m)}`; }
   function nextMonthYear(y,m){ let yy=y, mm=m+1; if (mm===13){ mm=1; yy+=1; } return { y:yy, m:mm }; }
@@ -464,7 +639,15 @@
     const excludes = loadExcludes(abonentId);
     const rates = loadRates(abonentId);
 
-    const asOfDay = startOfDay(asOfDate);
+    // ✅ FREEZE: если абонент "закрыт", пеня и итоги считаются только до freezeTo
+    let asOfEff = asOfDate;
+    const freezeISO = getFreezeToISO(abonentId);
+    if (freezeISO){
+      const fd = parseDateAnyToDate(freezeISO);
+      if (fd) asOfEff = minDateObj(asOfEff, fd);
+    }
+
+    const asOfDay = startOfDay(asOfEff);
 
     let allowedYm = null;
     try{
@@ -476,7 +659,7 @@
     }catch(e){}
 
     const allObligations = buildObligationsFromRows(rows, allowedYm);
-    const asOfYm = `${asOfDate.getFullYear()}-${pad2(asOfDate.getMonth()+1)}`;
+    const asOfYm = `${asOfEff.getFullYear()}-${pad2(asOfEff.getMonth()+1)}`;
     const obligations = allObligations.filter(ob => String(ob.key || "") <= asOfYm);
 
     const paymentsAll = buildPaymentEventsFromRows(rows, abonentId);
@@ -498,7 +681,7 @@
       const principal = Math.max(ob.amount - applied, 0);
       principalTotal += principal;
 
-      penaltyTotal += calcPenaltyForObligation(ob, asOfDate, excludes, rates);
+      penaltyTotal += calcPenaltyForObligation(ob, asOfEff, excludes, rates);
     }
 
     const applyAdvanceOffset = !!(opts && opts.applyAdvanceOffset);
@@ -512,6 +695,16 @@
     const core = calcTotalsAsOfCore(rows, asOfDate, opts);
     let principal = core.principalAdj;              // может быть отрицательным (аванс)
     let penaltyDebt = core.penaltyAccruedTotal;
+
+    // ✅ TRANSFER BALANCE: стартовый долг + стартовая пеня у нового владельца
+    const tb = getTransferBalance(opts?.abonentId || getAbonentIdFromUrl());
+    if (tb){
+      const asOfISO = `${asOfDate.getFullYear()}-${pad2(asOfDate.getMonth()+1)}-${pad2(asOfDate.getDate())}`;
+      if (asOfISO >= tb.startDate){
+        principal = r2(principal + toNum(tb.principal));
+        penaltyDebt = r2(penaltyDebt + toNum(tb.penalty));
+      }
+    }
 
     const allowNeg = !!(opts && opts.allowNegativePrincipal);
 

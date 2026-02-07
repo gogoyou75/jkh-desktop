@@ -15,6 +15,9 @@
     .row label{font-size:13px; display:flex; flex-direction:column; gap:6px;}
     input{border:2px solid #000; height:28px; padding:2px 6px; font-size:13px;}
     button{border:2px solid #000; padding:6px 10px; background:#e5e5e5; cursor:pointer;}
+    .hdrline{font-weight:700; line-height:1.35;}
+    .hdrsub{margin-top:6px; font-size:13px;}
+    .hdrsub b{font-weight:700;}
     @media print {
       .no-print{display:none !important;}
       body{background:#fff;}
@@ -27,7 +30,9 @@
 <h2>Отчёт для суда: кто был ответственным</h2>
 
 <div class="card">
-  <div id="hdr" style="font-weight:700;"></div>
+  <div id="hdr" class="hdrline"></div>
+  <div id="hdrAddr" class="hdrsub"></div>
+
   <div class="muted" style="margin-top:6px;">
     🔴 CRITICAL: отчёт строится по истории ответственности (links). Финансовая история абонента не переносится.
   </div>
@@ -62,9 +67,36 @@
 
 <script>
 function q(name){ return document.getElementById(name); }
-function getLinks(){ return Array.isArray(window.AbonentsDB?.links) ? window.AbonentsDB.links : []; }
-function getDb(){ return window.AbonentsDB?.abonents || {}; }
-function getPremises(){ return window.AbonentsDB?.premises || {}; }
+
+// ===== Доступ к данным (CANON: Data-слой или AbonentsDB) =====
+function getLinks(){
+  // если Data-слой есть — он предпочтительнее, но здесь оставляем совместимость
+  try {
+    if (window.Data && typeof window.Data.getDb === 'function') {
+      const db = window.Data.getDb();
+      return Array.isArray(db?.links) ? db.links : [];
+    }
+  } catch(e){}
+  return Array.isArray(window.AbonentsDB?.links) ? window.AbonentsDB.links : [];
+}
+function getDb(){
+  try {
+    if (window.Data && typeof window.Data.getDb === 'function') {
+      const db = window.Data.getDb();
+      return db?.abonents || {};
+    }
+  } catch(e){}
+  return window.AbonentsDB?.abonents || {};
+}
+function getPremises(){
+  try {
+    if (window.Data && typeof window.Data.getDb === 'function') {
+      const db = window.Data.getDb();
+      return db?.premises || {};
+    }
+  } catch(e){}
+  return window.AbonentsDB?.premises || {};
+}
 
 function parseISO(s){
   const v = String(s||'').trim();
@@ -82,6 +114,43 @@ function fmtISO(d){
 function maxDate(a,b){ return a && b ? (a>b?a:b) : (a||b); }
 function minDate(a,b){ return a && b ? (a<b?a:b) : (a||b); }
 
+// ===== Адрес: берём из premises, а если нет — из абонентов по links =====
+function buildAddrFromPremise(p){
+  if(!p) return '';
+  const city = String(p.city||'').trim();
+  const street = String(p.street||'').trim();
+  const house = String(p.house||'').trim();
+  const flat = String(p.flat||'').trim();
+  return [city, street, house, flat].filter(Boolean).join(', ');
+}
+function buildAddrFromAbonent(a){
+  if(!a) return '';
+  const city = String(a.city||'').trim();
+  const street = String(a.street||'').trim();
+  const house = String(a.house||'').trim();
+  const flat = String(a.flat||'').trim();
+  return [city, street, house, flat].filter(Boolean).join(', ');
+}
+function resolveAddressByRegnum(regnum){
+  const r = String(regnum||'').trim();
+  if(!r) return '';
+
+  const prem = getPremises()[r] || null;
+  const addrP = buildAddrFromPremise(prem);
+  if (addrP) return addrP;
+
+  // fallback: попробуем взять адрес из любого абонента, который фигурирует по этой квартире в links
+  const links = getLinks().filter(l => String(l?.regnum||'').trim() === r);
+  const db = getDb();
+  for (let i=0;i<links.length;i++){
+    const aid = String(links[i]?.abonentId||'').trim();
+    const a = db[aid] || null;
+    const addrA = buildAddrFromAbonent(a);
+    if (addrA) return addrA;
+  }
+  return '';
+}
+
 function splitByPeriod(regnum, from, to){
   const r = String(regnum||'').trim();
   const links = getLinks()
@@ -89,7 +158,6 @@ function splitByPeriod(regnum, from, to){
     .slice()
     .sort((a,b) => String(a?.dateFrom||'').localeCompare(String(b?.dateFrom||'')));
 
-  // нормализуем интервалы links: [dateFrom, dateTo||∞)
   const result = [];
   links.forEach(l => {
     const df = parseISO(l.dateFrom);
@@ -100,7 +168,6 @@ function splitByPeriod(regnum, from, to){
     const segFrom = from ? maxDate(df, from) : df;
     const segTo   = to ? minDate(dt || to, to) : dt;
 
-    // условие пересечения: segFrom <= segTo (если segTo null — ок)
     if(segTo && segFrom > segTo) return;
     if(!segTo && to && segFrom > to) return;
 
@@ -115,6 +182,18 @@ function splitByPeriod(regnum, from, to){
   return result;
 }
 
+function renderHeader(regnum){
+  const r = String(regnum||'').trim();
+  const addr = resolveAddressByRegnum(r);
+
+  q('hdr').textContent = r ? `Квартира (рег. №): ${r}` : 'Квартира (рег. №): —';
+
+  // адрес отдельной строкой — чтобы в суде было понятно
+  q('hdrAddr').innerHTML = addr
+    ? `<b>Адрес:</b> ${addr}`
+    : `<b>Адрес:</b> — (адрес не найден; проверьте заполнение premises или адресных полей абонента)`;
+}
+
 function run(){
   const params = new URLSearchParams(location.search);
   const regnum = params.get('regnum') || '';
@@ -125,9 +204,7 @@ function run(){
   const to = parseISO(q('to').value);
   if(from && to && from > to){ alert('Неверный период: дата "с" больше "по"'); return; }
 
-  const p = getPremises()[r] || null;
-  const addr = p ? [p.city,p.street,p.house,p.flat].filter(Boolean).join(', ') : '';
-  q('hdr').textContent = `Квартира: ${r}${addr ? ' — ' + addr : ''}`;
+  renderHeader(r);
 
   const rows = q('rows');
   rows.innerHTML = '';
@@ -157,9 +234,8 @@ function run(){
   const params = new URLSearchParams(location.search);
   const regnum = params.get('regnum') || '';
   const r = String(regnum).trim();
-  const p = getPremises()[r] || null;
-  const addr = p ? [p.city,p.street,p.house,p.flat].filter(Boolean).join(', ') : '';
-  q('hdr').textContent = r ? `Квартира: ${r}${addr ? ' — ' + addr : ''}` : 'Квартира: —';
+
+  renderHeader(r);
 
   const now = new Date();
   const from = new Date(now.getFullYear(), now.getMonth(), 1);
