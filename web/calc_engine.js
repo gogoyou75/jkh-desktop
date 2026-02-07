@@ -103,6 +103,18 @@
   function endOfMonthDate(y,m){ return new Date(y, m, 0); } // m=1..12
   function endOfMonth(d){ return startOfDay(endOfMonthDate(d.getFullYear(), d.getMonth()+1)); }
   function toISODateString(d){ return `${d.getFullYear()}-${pad2(d.getMonth()+1)}-${pad2(d.getDate())}`; }
+  function isoToLocalDate(iso){
+    const m = String(iso || "").trim().match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (!m) return null;
+    const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]), 12, 0, 0);
+    return isNaN(d) ? null : d;
+  }
+  function isoShiftDays(iso, days){
+    const d = isoToLocalDate(iso);
+    if (!d) return "";
+    d.setDate(d.getDate() + Number(days || 0));
+    return toISODateString(d);
+  }
 
   // ---------- ABONENT / RESPONSIBILITY RANGE ----------
   function getAbonentIdFromUrl(){
@@ -272,7 +284,7 @@
   }
 
   function capRateUntil2027(dateObj, rate){
-    const cutoff = new Date("2027-01-01");
+    const cutoff = new Date(2027, 0, 1, 12, 0, 0);
     if (dateObj < cutoff) return Math.min(9.5, rate);
     return rate;
   }
@@ -289,7 +301,7 @@
     }catch(e){ return ""; }
   }
 
-    function getTransferMeta(abonentId, regnum){
+  function getTransferMeta(abonentId, regnum){
     try{
       const id = String(abonentId || getAbonentIdFromUrl());
       const r = String(regnum || "").trim();
@@ -322,18 +334,8 @@
         if (!dt) continue;
 
         // допускаем dt == df или dt == df-1 (на случай разных правил закрытия)
-        let ok = (dt === df);
-        if (!ok){
-          try{
-            const d = new Date(df + "T12:00:00");
-            d.setDate(d.getDate() - 1);
-            const y = d.getFullYear();
-            const m = String(d.getMonth()+1).padStart(2,'0');
-            const dd = String(d.getDate()).padStart(2,'0');
-            const dfm1 = `${y}-${m}-${dd}`;
-            ok = (dt === dfm1);
-          }catch(e){}
-        }
+        const dfm1 = isoShiftDays(df, -1);
+        let ok = (dt === df || (dfm1 && dt === dfm1));
         if (!ok) continue;
 
         // выбираем самый "поздний" по dateFrom (если вдруг несколько)
@@ -405,16 +407,7 @@
       if (!prevId) return null;
 
       // считаем долг+пеню у предыдущего владельца накануне даты передачи
-      const freezeISO = (function(iso){
-        try{
-          const d = new Date(iso + "T12:00:00");
-          d.setDate(d.getDate() - 1);
-          const y = d.getFullYear();
-          const m = String(d.getMonth()+1).padStart(2,'0');
-          const dd = String(d.getDate()).padStart(2,'0');
-          return `${y}-${m}-${dd}`;
-        }catch(e){ return iso; }
-      })(meta.dateFrom);
+      const freezeISO = isoShiftDays(meta.dateFrom, -1) || meta.dateFrom;
 
       let principal = 0;
       let penalty = 0;
@@ -423,7 +416,9 @@
         const oldRows = oldRaw ? JSON.parse(oldRaw) : [];
         // ВАЖНО: берём calcTotalsAsOfAdjusted, чтобы учесть правила аванса и т.п.
         // (и возможные прошлые переносы у старого владельца)
-        const tot = calcTotalsAsOfAdjusted(oldRows, new Date(freezeISO + "T12:00:00"), {
+        const freezeDate = isoToLocalDate(freezeISO);
+        if (!freezeDate) throw new Error("invalid freeze date");
+        const tot = calcTotalsAsOfAdjusted(oldRows, freezeDate, {
           abonentId: String(prevId),
           applyAdvanceOffset: true,
           allowNegativePrincipal: false
@@ -639,7 +634,7 @@
     const excludes = loadExcludes(abonentId);
     const rates = loadRates(abonentId);
 
-    // ✅ FREEZE: если абонент "закрыт", пеня и итоги считаются только до freezeTo
+    // CANON TRANSFER v1: если абонент "закрыт", пеня и итоги считаются только до freezeTo
     let asOfEff = asOfDate;
     const freezeISO = getFreezeToISO(abonentId);
     if (freezeISO){
@@ -696,7 +691,7 @@
     let principal = core.principalAdj;              // может быть отрицательным (аванс)
     let penaltyDebt = core.penaltyAccruedTotal;
 
-    // ✅ TRANSFER BALANCE: стартовый долг + стартовая пеня у нового владельца
+    // CANON TRANSFER v1: стартовый долг + стартовая пеня у нового владельца
     const tb = getTransferBalance(opts?.abonentId || getAbonentIdFromUrl());
     if (tb){
       const asOfISO = `${asOfDate.getFullYear()}-${pad2(asOfDate.getMonth()+1)}-${pad2(asOfDate.getDate())}`;
@@ -833,6 +828,8 @@
     toISODateString,
     getAbonentIdFromUrl,
     getActiveResponsibilityRangeISO,
+    getTransferMeta,
+    getTransferBalance,
     loadExcludes,
     loadRates,
     calcTotalsAsOfAdjusted,
