@@ -129,7 +129,7 @@
     try{
       const p = new URLSearchParams(window.location.search || "");
       const uid = String(p.get("uid") || "").trim();
-      // CANON TRANSFER v1.6: поддерживаем id / abonent / abonent_id, чтобы не читать payments_0002
+      // CANON TRANSFER v1.6: поддерживаем id / abonent / abonent_id (LS может содержать ведущие нули, это СТРОКА)
       const fromUrl = String(p.get("id") || p.get("abonent") || p.get("abonent_id") || "").trim();
 
       if (uid){
@@ -361,19 +361,26 @@
   }
 
   // ============================================================
-  // CANON TRANSFER v1.5: Abonent ID normalization (leading zeros / numeric keys)
+  // CANON TRANSFER v1.6: Abonent ID = LS (СТРОКА), ведущие нули ЗНАЧИМЫ
+  // Правило:
+  //  - Если ключ существует в базе/хранилище как "0002", используем именно "0002".
+  //  - Нельзя принудительно приводить LS к числу (иначе получаем payments_2 вместо payments_0002).
+  // Совместимость:
+  //  - Если точного ключа нет, допускаем fallback-поиск (strip/numeric), чтобы не ломать старые базы.
   // ============================================================
   function resolveAbonentId(id){
-    const raw = String(id || "").trim();
+    const raw = String(id ?? "").trim();
     if (!raw) return "";
+
     const db = window.AbonentsDB?.abonents || {};
-    if (db[raw]) return raw;
+    // 1) Точный ключ — приоритет (в т.ч. "0002")
+    if (Object.prototype.hasOwnProperty.call(db, raw)) return raw;
 
-    // try strip leading zeros
+    // 2) Fallback: если в базе ключи без ведущих нулей, пробуем strip
     const stripped = raw.replace(/^0+/, "") || "0";
-    if (db[stripped]) return stripped;
+    if (stripped !== raw && Object.prototype.hasOwnProperty.call(db, stripped)) return stripped;
 
-    // try numeric match against existing keys
+    // 3) Fallback: numeric match against existing keys
     const n = Number(raw);
     if (Number.isFinite(n)){
       for (const k of Object.keys(db)){
@@ -384,6 +391,13 @@
   }
 
   function stGetPaymentsById(id){
+    // CANON TRANSFER v1.6: сначала пробуем КАК ЕСТЬ (LS строка, ведущие нули значимы)
+    const rawId = String(id ?? "").trim();
+    if (rawId){
+      const direct = stGet("payments_" + rawId);
+      if (direct) return direct;
+    }
+
     const rid = resolveAbonentId(id);
     let raw = stGet("payments_" + rid);
     if (raw) return raw;
@@ -490,10 +504,14 @@ function getTransferMeta(abonentId, regnum){
 
   function getTransferBalance(abonentId){
     try{
-      const id = resolveAbonentId(String(abonentId || getAbonentIdFromUrl()));
-      if (!id) return null;
+      // CANON TRANSFER v1.6: abonentId = LS строка. Сначала пробуем как есть (без нормализации).
+      const idRaw = String(abonentId || getAbonentIdFromUrl()).trim();
+      const id = resolveAbonentId(idRaw);
+      if (!idRaw && !id) return null;
+      // предпочтение: если в URL/данных фигурирует idRaw — используем его для storage-ключей
+      const idForStorage = idRaw || id;
 
-      const a = window.AbonentsDB?.abonents?.[resolveAbonentId(id)] || null;
+      const a = window.AbonentsDB?.abonents?.[resolveAbonentId(idForStorage)] || window.AbonentsDB?.abonents?.[resolveAbonentId(id)] || null;
 
       // regnum: сначала из абонента, иначе — из links (активная связь)
       let regnum = String(a?.premiseRegnum || a?.regnum || "").trim();
@@ -512,7 +530,7 @@ function getTransferMeta(abonentId, regnum){
       if (!regnum) return null;
 
       // 1) НОВЫЙ канон: явный баланс переноса
-      const key = "jkh_transfer_balance_v1:" + id + ":" + regnum;
+      const key = "jkh_transfer_balance_v1:" + idForStorage + ":" + regnum;
       const raw = stGet(key);
       if (raw){
         const obj = JSON.parse(raw);
@@ -532,7 +550,7 @@ function getTransferMeta(abonentId, regnum){
       }
 
       // 2) fallback: есть только meta (режим/дата передачи) — вычислим перенос сами
-      const meta = getTransferMeta(id, regnum);
+      const meta = getTransferMeta(idForStorage || id, regnum);
       if (!meta) return null;
 
       // режим БЕЗ ДОЛГА — перенос отсутствует
@@ -562,7 +580,7 @@ function getTransferMeta(abonentId, regnum){
       }catch(e){}
 
       // кешируем как явный перенос
-      cacheTransferBalance(id, regnum, meta.dateFrom, principal, penalty, prevId, "WITH_DEBT");
+      cacheTransferBalance(idForStorage || id, regnum, meta.dateFrom, principal, penalty, prevId, "WITH_DEBT");
 
       return {
         startDate: meta.dateFrom,

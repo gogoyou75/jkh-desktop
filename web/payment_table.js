@@ -297,7 +297,7 @@ function splitAccrualByOwnership(accr, year, month, history) {
   // ===========================
   function __resolveAbonentIdLocal(rawId) {
     try {
-      const db = window.AbonentsDB?.abonents || {};
+      const db = (window.Data && typeof window.Data.getDb === 'function' ? (window.Data.getDb()?.abonents || {}) : (window.AbonentsDB?.abonents || {}));
       const s0 = String(rawId ?? "").trim();
       if (!s0) return s0;
 
@@ -326,7 +326,7 @@ function splitAccrualByOwnership(accr, year, month, history) {
     const fromUrl = p.get("id") ?? p.get("abonent") ?? p.get("abonent_id");
     if (fromUrl) return __resolveAbonentIdLocal(fromUrl);
 
-    const db = window.AbonentsDB?.abonents || {};
+    const db = (window.Data && typeof window.Data.getDb === 'function' ? (window.Data.getDb()?.abonents || {}) : (window.AbonentsDB?.abonents || {}));
     const first = Object.keys(db)[0];
     return __resolveAbonentIdLocal(first || "27");
   }
@@ -342,7 +342,8 @@ function splitAccrualByOwnership(accr, year, month, history) {
   function getCurrentRegnum(){
     try{
       const id = String(getAbonentId());
-      const a = window.AbonentsDB?.abonents?.[id] || null;
+      const db = (window.Data && typeof window.Data.getDb === 'function' ? (window.Data.getDb()?.abonents || {}) : (window.AbonentsDB?.abonents || {}));
+      const a = db?.[id] || null;
       return String(a?.premiseRegnum || a?.regnum || "").trim();
     }catch(e){ return ""; }
   }
