@@ -129,7 +129,8 @@
     try{
       const p = new URLSearchParams(window.location.search || "");
       const uid = String(p.get("uid") || "").trim();
-      const fromUrl = String(p.get("abonent") || "").trim();
+      // CANON TRANSFER v1.6: поддерживаем id / abonent / abonent_id, чтобы не читать payments_0002
+      const fromUrl = String(p.get("id") || p.get("abonent") || p.get("abonent_id") || "").trim();
 
       if (uid){
         const db = window.AbonentsDB?.abonents || {};
@@ -792,6 +793,34 @@ function getTransferMeta(abonentId, regnum){
     const asOfYm = `${asOfEff.getFullYear()}-${pad2(asOfEff.getMonth()+1)}`;
     const obligations = allObligations.filter(ob => String(ob.key || "") <= asOfYm);
 
+    // CANON TRANSFER v1.6: перенос долга как стартовое сальдо (без переноса строк ledger).
+    // Добавляем synthetic-obligation, чтобы оплаты нового абонента гасили перенос по FIFO,
+    // а пеня после даты передачи продолжала расти по тем же правилам.
+    let transferPenaltyBase = 0;
+    const tb = getTransferBalance(opts?.abonentId || getAbonentIdFromUrl());
+    if (tb){
+      const asOfISO = `${asOfEff.getFullYear()}-${pad2(asOfEff.getMonth()+1)}-${pad2(asOfEff.getDate())}`;
+      if (asOfISO >= String(tb.startDate || "")){
+        const transferPrincipal = toNum(tb.principal);
+        transferPenaltyBase = toNum(tb.penalty);
+        if (transferPrincipal > 0.0000001){
+          const startDt = isoToLocalDate(tb.startDate);
+          if (startDt){
+            // due = startDate - 31: с даты передачи overdueIndex становится 31,
+            // поэтому пеня не «сбрасывается», а продолжает расти сразу после передачи.
+            const due = addDays(startOfDay(startDt), -31);
+            obligations.push({
+              key: `transfer:${String(tb.startDate || "")}`,
+              amount: r2(transferPrincipal),
+              dueDate: due,
+              applications: []
+            });
+            obligations.sort((a,b)=>a.dueDate-b.dueDate);
+          }
+        }
+      }
+    }
+
     const paymentsAll = buildPaymentEventsFromRows(rows, abonentId);
     // asOfDay computed above
     const payments = paymentsAll.filter(p => p && p.date && p.date.getTime() <= asOfDay.getTime());
@@ -802,7 +831,7 @@ function getTransferMeta(abonentId, regnum){
     }, 0));
 
     let principalTotal = 0;
-    let penaltyTotal = 0;
+    let penaltyTotal = toNum(transferPenaltyBase);
 
     for (const ob of obligations){
       sortApplications(ob);
@@ -825,16 +854,6 @@ function getTransferMeta(abonentId, regnum){
     const core = calcTotalsAsOfCore(rows, asOfDate, opts);
     let principal = core.principalAdj;              // может быть отрицательным (аванс)
     let penaltyDebt = core.penaltyAccruedTotal;
-
-    // CANON TRANSFER v1: стартовый долг + стартовая пеня у нового владельца
-    const tb = getTransferBalance(opts?.abonentId || getAbonentIdFromUrl());
-    if (tb){
-      const asOfISO = `${asOfDate.getFullYear()}-${pad2(asOfDate.getMonth()+1)}-${pad2(asOfDate.getDate())}`;
-      if (asOfISO >= tb.startDate){
-        principal = r2(principal + toNum(tb.principal));
-        penaltyDebt = r2(penaltyDebt + toNum(tb.penalty));
-      }
-    }
 
     const allowNeg = !!(opts && opts.allowNegativePrincipal);
 
