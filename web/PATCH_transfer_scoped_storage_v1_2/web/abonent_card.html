@@ -566,6 +566,30 @@ Doc: docs/LOGIC_SPEC_v1.5.3.md
 </div>
 
 <script>
+
+// ===========================
+// CANON TRANSFER v1 — storage wrapper (scoped storage compatible)
+// ВАЖНО: если включен JKHStore/JKHStorage (мульти-пользовательское хранилище),
+// transfer-ключи должны писаться/читаться через него (иначе ключей "не видно" в localStorage).
+function storageGet(key){
+  try{ if (window.JKHStore && typeof window.JKHStore.getRaw === 'function') return window.JKHStore.getRaw(key); }catch(e){}
+  try{ if (window.JKHStorage && typeof window.JKHStorage.getItem === 'function') return window.JKHStorage.getItem(key); }catch(e2){}
+  try{ return storageGet(key); }catch(e3){}
+  return null;
+}
+function storageSet(key, value){
+  try{ if (window.JKHStore && typeof window.JKHStore.setRaw === 'function') return window.JKHStore.setRaw(key, value); }catch(e){}
+  try{ if (window.JKHStorage && typeof window.JKHStorage.setItem === 'function') return window.JKHStorage.setItem(key, value); }catch(e2){}
+  try{ storageSet(key, value); return true; }catch(e3){}
+  return false;
+}
+function storageRemove(key){
+  try{ if (window.JKHStore && typeof window.JKHStore.removeRaw === 'function') return window.JKHStore.removeRaw(key); }catch(e){}
+  try{ if (window.JKHStorage && typeof window.JKHStorage.removeItem === 'function') return window.JKHStorage.removeItem(key); }catch(e2){}
+  try{ storageRemove(key); return true; }catch(e3){}
+  return false;
+}
+
 function getAbonentIdFromURL() {
     const params = new URLSearchParams(window.location.search || "");
     const uid = String(params.get("uid") || "").trim();
@@ -586,8 +610,6 @@ function getAbonentIdFromURL() {
     const first = Object.keys(db)[0];
     return first || "27";
 }
-// expose (для движка и дебага)
-window.getAbonentIdFromURL = getAbonentIdFromURL;
 
 function getDb() {
     if (window.Data && typeof window.Data.getDb === "function") {
@@ -652,7 +674,6 @@ function getActiveLinkForPremise(regnum){
 
 function getCurrentAbonent() {
     const id = String(getAbonentIdFromURL());
-    try{ if (id) sessionStorage.setItem("last_abonent_id", String(id)); }catch(e){}
     const db = getDb();
     return { id, a: db[id] || null };
 }
@@ -695,8 +716,7 @@ async function copyUidFromCard(){
 
 /* ✅ FIX: fillAbonentCard() — убраны лишние скобки, логика выполняется корректно */
 function fillAbonentCard() {
-    const { id: idRaw, a } = getCurrentAbonent();
-    const id = __resolveAbonentId(idRaw);
+    const { id, a } = getCurrentAbonent();
     if (!a) return;
 
     const { regnum, p } = getPremiseForAbonent(id, a);
@@ -862,7 +882,7 @@ function __fmt2(n){
 
 function __getFreezeToISO(abonentId){
   try{
-    const v = String(localStorage.getItem("jkh_freeze_to_v1:" + String(abonentId)) || "").trim();
+    const v = String(storageGet("jkh_freeze_to_v1:" + String(abonentId)) || "").trim();
     return /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : "";
   }catch(e){ return ""; }
 }
@@ -870,7 +890,7 @@ function __getFreezeToISO(abonentId){
 function __getIncomingTransfer(abonentId, regnum){
   try{
     const key = "jkh_transfer_balance_v1:" + String(abonentId) + ":" + String(regnum);
-    const raw = localStorage.getItem(key);
+    const raw = storageGet(key);
     if (!raw) return null;
     const obj = JSON.parse(raw);
     if (!obj || typeof obj !== "object") return null;
@@ -895,7 +915,7 @@ function __findOutgoingTransfers(fromAbonentId){
       if (!k) continue;
       if (k.indexOf("jkh_transfer_balance_v1:") !== 0) continue;
 
-      const raw = localStorage.getItem(k);
+      const raw = storageGet(k);
       if (!raw) continue;
 
       let obj = null;
@@ -994,8 +1014,7 @@ function renderTransferInfo(abonentId, regnum){
 }
 
 function openResponsibilityReport(){
-  const { id: idRaw, a } = getCurrentAbonent();
-    const id = __resolveAbonentId(idRaw);
+  const { id, a } = getCurrentAbonent();
   if (!a) { alert('Абонент не найден'); return; }
   const { regnum } = getPremiseForAbonent(id, a);
   const r = String(regnum || '').trim();
@@ -1005,8 +1024,7 @@ function openResponsibilityReport(){
 
 // ===== Смена ответственного =====
 function openChangeResponsibleModal() {
-    const { id: idRaw, a } = getCurrentAbonent();
-    const id = __resolveAbonentId(idRaw);
+    const { id, a } = getCurrentAbonent();
     if (!a) { alert('Абонент не найден'); return; }
 
     const { regnum, p } = getPremiseForAbonent(id, a);
@@ -1071,62 +1089,10 @@ function closeChangeResponsibleModal() {
 /* ✅ NEW: applyChangeResponsible(mode)
    mode = 'WITH_DEBT' | 'NO_DEBT'
    Запоминаем режим передачи (для следующего шага в расчётах) */
-
-/* ===== CANON TRANSFER v1.3: storage wrapper (JKHStore/JKHStorage -> localStorage) ===== */
-function __stGet(k){
-  try{
-    if (window.JKHStore && typeof window.JKHStore.getRaw === "function"){
-      const v = window.JKHStore.getRaw(String(k));
-      if (v !== undefined && v !== null) return v;
-    }
-  }catch(e){}
-  try{
-    if (window.JKHStorage && typeof window.JKHStorage.getItem === "function"){
-      const v = window.JKHStorage.getItem(String(k));
-      if (v !== undefined && v !== null) return v;
-    }
-  }catch(e){}
-  try{ return localStorage.getItem(String(k)); }catch(e){ return null; }
-}
-function __stSet(k, v){
-  try{
-    if (window.JKHStore && typeof window.JKHStore.setRaw === "function"){
-      window.JKHStore.setRaw(String(k), String(v));
-      return;
-    }
-  }catch(e){}
-  try{
-    if (window.JKHStorage && typeof window.JKHStorage.setItem === "function"){
-      window.JKHStorage.setItem(String(k), String(v));
-      return;
-    }
-  }catch(e){}
-  try{ localStorage.setItem(String(k), String(v)); }catch(e){}
-}
-
-/* ===== CANON TRANSFER v1.5: Abonent ID normalization (leading zeros / numeric keys) ===== */
-function __resolveAbonentId(id){
-  const raw = String(id || "").trim();
-  if (!raw) return "";
-  try{
-    const db = getDb() || {};
-    if (db[raw]) return raw;
-    const stripped = raw.replace(/^0+/, "") || "0";
-    if (db[stripped]) return stripped;
-    const n = Number(raw);
-    if (Number.isFinite(n)){
-      for (const k of Object.keys(db)){
-        if (Number(k) === n) return String(k);
-      }
-    }
-  }catch(e){}
-  return raw;
-}
-
 function __saveTransferMeta(newId, regnum, dateFrom, mode){
     try{
         const key = 'jkh_transfer_v1:' + String(newId) + ':' + String(regnum);
-        __stSet(key, JSON.stringify({
+        storageSet(key, JSON.stringify({
             mode: String(mode || 'WITH_DEBT'),
             dateFrom: String(dateFrom || ''),
             regnum: String(regnum || ''),
@@ -1157,14 +1123,14 @@ function __isoToLocalDate(iso){
 
 function __saveFreezeTo(oldId, freezeISO){
   try{
-    __stSet("jkh_freeze_to_v1:" + String(oldId), String(freezeISO || ""));
+    storageSet("jkh_freeze_to_v1:" + String(oldId), String(freezeISO || ""));
   }catch(e){}
 }
 
 function __saveTransferBalance(newId, regnum, startISO, principal, penalty, fromOldId, mode){
   try{
     const key = "jkh_transfer_balance_v1:" + String(newId) + ":" + String(regnum);
-    __stSet(key, JSON.stringify({
+    storageSet(key, JSON.stringify({
       startDate: String(startISO || ""),
       principal: Number(principal || 0),
       penalty: Number(penalty || 0),
@@ -1178,15 +1144,13 @@ function __saveTransferBalance(newId, regnum, startISO, principal, penalty, from
 
 function applyChangeResponsible(mode) {
     if (!canWriteOrExplainLocal()) return;
-    const { id: idRaw, a } = getCurrentAbonent();
-    const id = __resolveAbonentId(idRaw);
+    const { id, a } = getCurrentAbonent();
     if (!a) { alert('Абонент не найден'); return; }
 
     const { regnum, p } = getPremiseForAbonent(id, a);
     if (!regnum) { alert('Нет рег. № кв'); return; }
 
-    const newIdRaw = String(document.getElementById('cr_newAbonent')?.value || '').trim();
-    const newId = __resolveAbonentId(newIdRaw);
+    const newId = String(document.getElementById('cr_newAbonent')?.value || '').trim();
     const dateFrom = String(document.getElementById('cr_date')?.value || '').trim();
 
     if (!newId) { alert('Выберите нового ответственного'); return; }
@@ -1220,7 +1184,7 @@ function applyChangeResponsible(mode) {
     let oldPenalty = 0;
 
     try{
-      const oldPaymentsRaw = (__stGet("payments_" + String(id)) || __stGet("payments_" + String(String(id).replace(/^0+/, ""))) || null);
+      const oldPaymentsRaw = storageGet("payments_" + String(id));
       const oldRows = oldPaymentsRaw ? JSON.parse(oldPaymentsRaw) : [];
       if (window.JKHCalcEngine && typeof window.JKHCalcEngine.calcTotalsAsOfAdjusted === "function"){
         const freezeDate = __isoToLocalDate(freezeISO);
@@ -1317,8 +1281,7 @@ function applyChangeResponsible(mode) {
 
 /* ===== Редактирование абонента (оставил как у тебя) ===== */
 function openAbonentEdit() {
-    const { id: idRaw, a } = getCurrentAbonent();
-    const id = __resolveAbonentId(idRaw);
+    const { id, a } = getCurrentAbonent();
     if (!a) { alert("Абонент не найден"); return; }
 
     const { regnum, p } = getPremiseForAbonent(id, a);
@@ -1364,11 +1327,11 @@ function migrateLocalKeys(oldId, newId) {
     pairs.forEach(([pOld, pNew]) => {
         const oldKey = pOld + oldId;
         const newKey = pNew + newId;
-        const val = localStorage.getItem(oldKey);
-        if (val !== null && localStorage.getItem(newKey) === null) {
-            localStorage.setItem(newKey, val);
+        const val = storageGet(oldKey);
+        if (val !== null && storageGet(newKey) === null) {
+            storageSet(newKey, val);
         }
-        if (val !== null) localStorage.removeItem(oldKey);
+        if (val !== null) storageRemove(oldKey);
     });
 }
 
@@ -1453,7 +1416,7 @@ function loadMoratoriumUI(){
     const id = getAbonentIdFromURL();
     const el = document.getElementById("moratoriumToggle");
     if (!el) return;
-    el.checked = localStorage.getItem(moratoriumKey(id)) === "1";
+    el.checked = storageGet(moratoriumKey(id)) === "1";
 }
 function bindMoratoriumUI(){
     const id = getAbonentIdFromURL();
@@ -1461,10 +1424,10 @@ function bindMoratoriumUI(){
     if (!el) return;
     el.addEventListener("change", () => {
         if (!canWriteOrExplainLocal()) {
-            el.checked = localStorage.getItem(moratoriumKey(id)) === "1";
+            el.checked = storageGet(moratoriumKey(id)) === "1";
             return;
         }
-        localStorage.setItem(moratoriumKey(id), el.checked ? "1" : "0");
+        storageSet(moratoriumKey(id), el.checked ? "1" : "0");
         if (window.__loadPaymentTable) window.__loadPaymentTable();
     });
 }
@@ -1475,7 +1438,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
 function openNotesModal() {
     const id = getAbonentIdFromURL();
-    const note = localStorage.getItem("note_" + id) || "";
+    const note = storageGet("note_" + id) || "";
     document.getElementById("notesText").value = note;
     document.getElementById("notesModal").style.display = "flex";
 }
@@ -1486,7 +1449,7 @@ function saveNotes() {
     if (!canWriteOrExplainLocal()) return;
     const id = getAbonentIdFromURL();
     const txt = document.getElementById("notesText").value.trim();
-    localStorage.setItem("note_" + id, txt);
+    storageSet("note_" + id, txt);
     closeNotesModal();
     alert("Примечание сохранено");
 }
@@ -1501,7 +1464,7 @@ function loadCalcPeriodUI(){
     if (!fromEl || !toEl) return;
 
     try {
-        const raw = localStorage.getItem(calcPeriodKey(id));
+        const raw = storageGet(calcPeriodKey(id));
         if (raw) {
             const obj = JSON.parse(raw);
             fromEl.value = obj.from || "";
@@ -1518,12 +1481,12 @@ function loadCalcPeriodUI(){
 
 function saveCalcPeriod(from, to){
     const id = getAbonentIdFromURL();
-    localStorage.setItem(calcPeriodKey(id), JSON.stringify({from: from || "", to: to || ""}));
+    storageSet(calcPeriodKey(id), JSON.stringify({from: from || "", to: to || ""}));
 }
 
 function setCalcPeriodActive(active){
     const id = getAbonentIdFromURL();
-    localStorage.setItem(calcPeriodActiveKey(id), active ? "1" : "0");
+    storageSet(calcPeriodActiveKey(id), active ? "1" : "0");
 }
 
 function isValidPeriod(from, to){

@@ -695,8 +695,7 @@ async function copyUidFromCard(){
 
 /* ✅ FIX: fillAbonentCard() — убраны лишние скобки, логика выполняется корректно */
 function fillAbonentCard() {
-    const { id: idRaw, a } = getCurrentAbonent();
-    const id = __resolveAbonentId(idRaw);
+    const { id, a } = getCurrentAbonent();
     if (!a) return;
 
     const { regnum, p } = getPremiseForAbonent(id, a);
@@ -994,8 +993,7 @@ function renderTransferInfo(abonentId, regnum){
 }
 
 function openResponsibilityReport(){
-  const { id: idRaw, a } = getCurrentAbonent();
-    const id = __resolveAbonentId(idRaw);
+  const { id, a } = getCurrentAbonent();
   if (!a) { alert('Абонент не найден'); return; }
   const { regnum } = getPremiseForAbonent(id, a);
   const r = String(regnum || '').trim();
@@ -1005,8 +1003,7 @@ function openResponsibilityReport(){
 
 // ===== Смена ответственного =====
 function openChangeResponsibleModal() {
-    const { id: idRaw, a } = getCurrentAbonent();
-    const id = __resolveAbonentId(idRaw);
+    const { id, a } = getCurrentAbonent();
     if (!a) { alert('Абонент не найден'); return; }
 
     const { regnum, p } = getPremiseForAbonent(id, a);
@@ -1103,26 +1100,6 @@ function __stSet(k, v){
   }catch(e){}
   try{ localStorage.setItem(String(k), String(v)); }catch(e){}
 }
-
-/* ===== CANON TRANSFER v1.5: Abonent ID normalization (leading zeros / numeric keys) ===== */
-function __resolveAbonentId(id){
-  const raw = String(id || "").trim();
-  if (!raw) return "";
-  try{
-    const db = getDb() || {};
-    if (db[raw]) return raw;
-    const stripped = raw.replace(/^0+/, "") || "0";
-    if (db[stripped]) return stripped;
-    const n = Number(raw);
-    if (Number.isFinite(n)){
-      for (const k of Object.keys(db)){
-        if (Number(k) === n) return String(k);
-      }
-    }
-  }catch(e){}
-  return raw;
-}
-
 function __saveTransferMeta(newId, regnum, dateFrom, mode){
     try{
         const key = 'jkh_transfer_v1:' + String(newId) + ':' + String(regnum);
@@ -1178,15 +1155,13 @@ function __saveTransferBalance(newId, regnum, startISO, principal, penalty, from
 
 function applyChangeResponsible(mode) {
     if (!canWriteOrExplainLocal()) return;
-    const { id: idRaw, a } = getCurrentAbonent();
-    const id = __resolveAbonentId(idRaw);
+    const { id, a } = getCurrentAbonent();
     if (!a) { alert('Абонент не найден'); return; }
 
     const { regnum, p } = getPremiseForAbonent(id, a);
     if (!regnum) { alert('Нет рег. № кв'); return; }
 
-    const newIdRaw = String(document.getElementById('cr_newAbonent')?.value || '').trim();
-    const newId = __resolveAbonentId(newIdRaw);
+    const newId = String(document.getElementById('cr_newAbonent')?.value || '').trim();
     const dateFrom = String(document.getElementById('cr_date')?.value || '').trim();
 
     if (!newId) { alert('Выберите нового ответственного'); return; }
@@ -1220,7 +1195,7 @@ function applyChangeResponsible(mode) {
     let oldPenalty = 0;
 
     try{
-      const oldPaymentsRaw = (__stGet("payments_" + String(id)) || __stGet("payments_" + String(String(id).replace(/^0+/, ""))) || null);
+      const oldPaymentsRaw = localStorage.getItem("payments_" + String(id));
       const oldRows = oldPaymentsRaw ? JSON.parse(oldPaymentsRaw) : [];
       if (window.JKHCalcEngine && typeof window.JKHCalcEngine.calcTotalsAsOfAdjusted === "function"){
         const freezeDate = __isoToLocalDate(freezeISO);
@@ -1317,8 +1292,7 @@ function applyChangeResponsible(mode) {
 
 /* ===== Редактирование абонента (оставил как у тебя) ===== */
 function openAbonentEdit() {
-    const { id: idRaw, a } = getCurrentAbonent();
-    const id = __resolveAbonentId(idRaw);
+    const { id, a } = getCurrentAbonent();
     if (!a) { alert("Абонент не найден"); return; }
 
     const { regnum, p } = getPremiseForAbonent(id, a);

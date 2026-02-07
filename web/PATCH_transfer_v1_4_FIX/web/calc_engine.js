@@ -122,7 +122,7 @@
       // 0) если UI-слой уже умеет uid/abonent — используем его
       if (typeof window.getAbonentIdFromURL === "function"){
         const v = String(window.getAbonentIdFromURL() || "").trim();
-        if (v) return resolveAbonentId(v);
+        if (v) return v;
       }
     }catch(e){}
 
@@ -134,21 +134,21 @@
       if (uid){
         const db = window.AbonentsDB?.abonents || {};
         for (const id of Object.keys(db)){
-          if (String(db[id]?.uid || "").trim() === uid) return resolveAbonentId(String(id));
+          if (String(db[id]?.uid || "").trim() === uid) return String(id);
         }
       }
-      if (fromUrl) return resolveAbonentId(fromUrl);
+      if (fromUrl) return fromUrl;
     }catch(e){}
 
     // fallback: last opened (если url пустой)
     try{
       const last = String(sessionStorage.getItem("last_abonent_id") || "").trim();
-      if (last) return resolveAbonentId(last);
+      if (last) return last;
     }catch(e){}
 
     const db = window.AbonentsDB?.abonents || {};
     const first = Object.keys(db)[0];
-    return first ? resolveAbonentId(String(first)) : "27";
+    return first ? String(first) : "27";
   }
 
   function parseAnyDateToISO(d){
@@ -178,7 +178,7 @@
 
   // максимально "живучее" извлечение периода ответственности
   function getActiveResponsibilityRangeISO(abonentId){
-    const id = resolveAbonentId(String(abonentId || getAbonentIdFromUrl()));
+    const id = String(abonentId || getAbonentIdFromUrl());
     const db = window.AbonentsDB || {};
     const linksRaw = Array.isArray(db.links) ? db.links : (Array.isArray(db.abonentPremiseLinks) ? db.abonentPremiseLinks : []);
 
@@ -358,51 +358,6 @@
     }catch(e){}
     try{ localStorage.setItem(String(k), String(v)); }catch(e){}
   }
-
-  // ============================================================
-  // CANON TRANSFER v1.5: Abonent ID normalization (leading zeros / numeric keys)
-  // ============================================================
-  function resolveAbonentId(id){
-    const raw = String(id || "").trim();
-    if (!raw) return "";
-    const db = window.AbonentsDB?.abonents || {};
-    if (db[raw]) return raw;
-
-    // try strip leading zeros
-    const stripped = raw.replace(/^0+/, "") || "0";
-    if (db[stripped]) return stripped;
-
-    // try numeric match against existing keys
-    const n = Number(raw);
-    if (Number.isFinite(n)){
-      for (const k of Object.keys(db)){
-        if (Number(k) === n) return String(k);
-      }
-    }
-    return raw;
-  }
-
-  function stGetPaymentsById(id){
-    const rid = resolveAbonentId(id);
-    let raw = stGet("payments_" + rid);
-    if (raw) return raw;
-
-    const stripped = String(rid).replace(/^0+/, "") || "0";
-    if (stripped !== rid){
-      raw = stGet("payments_" + stripped);
-      if (raw) return raw;
-    }
-    const n = Number(rid);
-    if (Number.isFinite(n)){
-      for (const k of Object.keys(window.AbonentsDB?.abonents || {})){
-        if (Number(k) === n && k !== rid){
-          raw = stGet("payments_" + String(k));
-          if (raw) return raw;
-        }
-      }
-    }
-    return null;
-  }
   function stRemove(k){
     try{
       if (window.JKHStore && typeof window.JKHStore.removeRaw === "function"){
@@ -421,7 +376,7 @@
 
 function getTransferMeta(abonentId, regnum){
     try{
-      const id = resolveAbonentId(String(abonentId || getAbonentIdFromUrl()));
+      const id = String(abonentId || getAbonentIdFromUrl());
       const r = String(regnum || "").trim();
       if (!id || !r) return null;
       const key = "jkh_transfer_v1:" + id + ":" + r;
@@ -489,10 +444,10 @@ function getTransferMeta(abonentId, regnum){
 
   function getTransferBalance(abonentId){
     try{
-      const id = resolveAbonentId(String(abonentId || getAbonentIdFromUrl()));
+      const id = String(abonentId || getAbonentIdFromUrl());
       if (!id) return null;
 
-      const a = window.AbonentsDB?.abonents?.[resolveAbonentId(id)] || null;
+      const a = window.AbonentsDB?.abonents?.[id] || null;
 
       // regnum: сначала из абонента, иначе — из links (активная связь)
       let regnum = String(a?.premiseRegnum || a?.regnum || "").trim();
@@ -537,8 +492,7 @@ function getTransferMeta(abonentId, regnum){
       // режим БЕЗ ДОЛГА — перенос отсутствует
       if (String(meta.mode || "") === "NO_DEBT") return null;
 
-      const prevIdRaw = findPreviousAbonentIdForTransfer(regnum, meta.dateFrom);
-      const prevId = resolveAbonentId(prevIdRaw);
+      const prevId = findPreviousAbonentIdForTransfer(regnum, meta.dateFrom);
       if (!prevId) return null;
 
       // считаем долг+пеню у предыдущего владельца накануне даты передачи
@@ -547,7 +501,7 @@ function getTransferMeta(abonentId, regnum){
       let principal = 0;
       let penalty = 0;
       try{
-        const oldRaw = stGetPaymentsById(prevId);
+        const oldRaw = stGet("payments_" + String(prevId));
         const oldRows = oldRaw ? JSON.parse(oldRaw) : [];
         const freezeDate = isoToLocalDate(freezeISO);
         if (!freezeDate) throw new Error("invalid freeze date");

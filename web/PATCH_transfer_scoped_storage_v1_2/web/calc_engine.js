@@ -53,6 +53,30 @@
   function r2(x){ return Math.round(x * 100) / 100; }
   function toNum(v){ const n = parseFloat(String(v ?? "").replace(/\s+/g,"").replace(",", ".")); return Number.isFinite(n) ? n : 0; }
 
+  // ===========================
+  // CANON TRANSFER v1 — storage wrapper (scoped storage compatible)
+  // ВАЖНО: если включен JKHStore/JKHStorage (мульти-пользовательское хранилище),
+  // transfer-ключи должны жить ТАМ, а не в "голом" localStorage.
+  function storageGet(key){
+    try{ if (typeof window !== 'undefined' && window.JKHStore && typeof window.JKHStore.getRaw === 'function') return window.JKHStore.getRaw(key); }catch(e){}
+    try{ if (typeof window !== 'undefined' && window.JKHStorage && typeof window.JKHStorage.getItem === 'function') return window.JKHStorage.getItem(key); }catch(e2){}
+    try{ return storageGet(key); }catch(e3){}
+    return null;
+  }
+  function storageSet(key, value){
+    try{ if (typeof window !== 'undefined' && window.JKHStore && typeof window.JKHStore.setRaw === 'function') return window.JKHStore.setRaw(key, value); }catch(e){}
+    try{ if (typeof window !== 'undefined' && window.JKHStorage && typeof window.JKHStorage.setItem === 'function') return window.JKHStorage.setItem(key, value); }catch(e2){}
+    try{ storageSet(key, value); return true; }catch(e3){}
+    return false;
+  }
+  function storageRemove(key){
+    try{ if (typeof window !== 'undefined' && window.JKHStore && typeof window.JKHStore.removeRaw === 'function') return window.JKHStore.removeRaw(key); }catch(e){}
+    try{ if (typeof window !== 'undefined' && window.JKHStorage && typeof window.JKHStorage.removeItem === 'function') return window.JKHStorage.removeItem(key); }catch(e2){}
+    try{ storageRemove(key); return true; }catch(e3){}
+    return false;
+  }
+
+
   // ---------- ДАТЫ (без timezone-сдвигов) ----------
   function parseDateAnyToDate(value) {
     if (value === null || value === undefined) return null;
@@ -119,36 +143,13 @@
   // ---------- ABONENT / RESPONSIBILITY RANGE ----------
   function getAbonentIdFromUrl(){
     try{
-      // 0) если UI-слой уже умеет uid/abonent — используем его
-      if (typeof window.getAbonentIdFromURL === "function"){
-        const v = String(window.getAbonentIdFromURL() || "").trim();
-        if (v) return resolveAbonentId(v);
-      }
+      const p = new URLSearchParams(window.location.search);
+      const fromUrl = p.get("abonent");
+      if (fromUrl) return String(fromUrl);
     }catch(e){}
-
-    try{
-      const p = new URLSearchParams(window.location.search || "");
-      const uid = String(p.get("uid") || "").trim();
-      const fromUrl = String(p.get("abonent") || "").trim();
-
-      if (uid){
-        const db = window.AbonentsDB?.abonents || {};
-        for (const id of Object.keys(db)){
-          if (String(db[id]?.uid || "").trim() === uid) return resolveAbonentId(String(id));
-        }
-      }
-      if (fromUrl) return resolveAbonentId(fromUrl);
-    }catch(e){}
-
-    // fallback: last opened (если url пустой)
-    try{
-      const last = String(sessionStorage.getItem("last_abonent_id") || "").trim();
-      if (last) return resolveAbonentId(last);
-    }catch(e){}
-
     const db = window.AbonentsDB?.abonents || {};
     const first = Object.keys(db)[0];
-    return first ? resolveAbonentId(String(first)) : "27";
+    return first ? String(first) : "27";
   }
 
   function parseAnyDateToISO(d){
@@ -178,7 +179,7 @@
 
   // максимально "живучее" извлечение периода ответственности
   function getActiveResponsibilityRangeISO(abonentId){
-    const id = resolveAbonentId(String(abonentId || getAbonentIdFromUrl()));
+    const id = String(abonentId || getAbonentIdFromUrl());
     const db = window.AbonentsDB || {};
     const linksRaw = Array.isArray(db.links) ? db.links : (Array.isArray(db.abonentPremiseLinks) ? db.abonentPremiseLinks : []);
 
@@ -255,11 +256,11 @@
 
   function excludePeriodsKey(abonentId){ return "exclude_periods_" + String(abonentId || getAbonentIdFromUrl()); }
   function moratoriumKey(abonentId){ return "moratorium_" + String(abonentId || getAbonentIdFromUrl()); }
-  function isMoratoriumActive(abonentId){ return localStorage.getItem(moratoriumKey(abonentId)) === "1"; }
+  function isMoratoriumActive(abonentId){ return storageGet(moratoriumKey(abonentId)) === "1"; }
 
   function loadExcludes(abonentId){
     try{
-      const raw = localStorage.getItem(excludePeriodsKey(abonentId));
+      const raw = storageGet(excludePeriodsKey(abonentId));
       const arr = raw ? JSON.parse(raw) : [];
       if (!Array.isArray(arr)) return [];
       const startDay = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate(), 0,0,0,0);
@@ -285,7 +286,7 @@
   function loadRates(abonentId){
     const key = isMoratoriumActive(abonentId) ? REFI_KEY_MORA : REFI_KEY_NORMAL;
     try{
-      const raw = stGet(key);
+      const raw = storageGet(key);
       const arr = raw ? JSON.parse(raw) : [];
       if (!Array.isArray(arr)) return [];
       return arr.map(x => ({
@@ -319,113 +320,18 @@
 
   function getFreezeToISO(abonentId){
     try{
-      const v = String(stGet(freezeKey(abonentId)) || "").trim();
+      const v = String(storageGet(freezeKey(abonentId)) || "").trim();
       return /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : "";
     }catch(e){ return ""; }
   }
 
-  
-  // ============================================================
-  // CANON TRANSFER v1.3: storage wrapper (JKHStore/JKHStorage -> localStorage)
-  // ============================================================
-  function stGet(k){
+  function getTransferMeta(abonentId, regnum){
     try{
-      if (window.JKHStore && typeof window.JKHStore.getRaw === "function"){
-        const v = window.JKHStore.getRaw(String(k));
-        if (v !== undefined && v !== null) return v;
-      }
-    }catch(e){}
-    try{
-      if (window.JKHStorage && typeof window.JKHStorage.getItem === "function"){
-        const v = window.JKHStorage.getItem(String(k));
-        if (v !== undefined && v !== null) return v;
-      }
-    }catch(e){}
-    try{ return localStorage.getItem(String(k)); }catch(e){ return null; }
-  }
-  function stSet(k, v){
-    try{
-      if (window.JKHStore && typeof window.JKHStore.setRaw === "function"){
-        window.JKHStore.setRaw(String(k), String(v));
-        return;
-      }
-    }catch(e){}
-    try{
-      if (window.JKHStorage && typeof window.JKHStorage.setItem === "function"){
-        window.JKHStorage.setItem(String(k), String(v));
-        return;
-      }
-    }catch(e){}
-    try{ localStorage.setItem(String(k), String(v)); }catch(e){}
-  }
-
-  // ============================================================
-  // CANON TRANSFER v1.5: Abonent ID normalization (leading zeros / numeric keys)
-  // ============================================================
-  function resolveAbonentId(id){
-    const raw = String(id || "").trim();
-    if (!raw) return "";
-    const db = window.AbonentsDB?.abonents || {};
-    if (db[raw]) return raw;
-
-    // try strip leading zeros
-    const stripped = raw.replace(/^0+/, "") || "0";
-    if (db[stripped]) return stripped;
-
-    // try numeric match against existing keys
-    const n = Number(raw);
-    if (Number.isFinite(n)){
-      for (const k of Object.keys(db)){
-        if (Number(k) === n) return String(k);
-      }
-    }
-    return raw;
-  }
-
-  function stGetPaymentsById(id){
-    const rid = resolveAbonentId(id);
-    let raw = stGet("payments_" + rid);
-    if (raw) return raw;
-
-    const stripped = String(rid).replace(/^0+/, "") || "0";
-    if (stripped !== rid){
-      raw = stGet("payments_" + stripped);
-      if (raw) return raw;
-    }
-    const n = Number(rid);
-    if (Number.isFinite(n)){
-      for (const k of Object.keys(window.AbonentsDB?.abonents || {})){
-        if (Number(k) === n && k !== rid){
-          raw = stGet("payments_" + String(k));
-          if (raw) return raw;
-        }
-      }
-    }
-    return null;
-  }
-  function stRemove(k){
-    try{
-      if (window.JKHStore && typeof window.JKHStore.removeRaw === "function"){
-        window.JKHStore.removeRaw(String(k));
-        return;
-      }
-    }catch(e){}
-    try{
-      if (window.JKHStorage && typeof window.JKHStorage.removeItem === "function"){
-        window.JKHStorage.removeItem(String(k));
-        return;
-      }
-    }catch(e){}
-    try{ localStorage.removeItem(String(k)); }catch(e){}
-  }
-
-function getTransferMeta(abonentId, regnum){
-    try{
-      const id = resolveAbonentId(String(abonentId || getAbonentIdFromUrl()));
+      const id = String(abonentId || getAbonentIdFromUrl());
       const r = String(regnum || "").trim();
       if (!id || !r) return null;
       const key = "jkh_transfer_v1:" + id + ":" + r;
-      const raw = stGet(key);
+      const raw = storageGet(key);
       if (!raw) return null;
       const obj = JSON.parse(raw);
       if (!obj || typeof obj !== "object") return null;
@@ -475,7 +381,7 @@ function getTransferMeta(abonentId, regnum){
       const r = String(regnum || "").trim();
       if (!id || !r) return;
       const key = "jkh_transfer_balance_v1:" + id + ":" + r;
-      stSet(key, JSON.stringify({
+      storageSet(key, JSON.stringify({
         startDate: String(startDate || ""),
         principal: toNum(principal),
         penalty: toNum(penalty),
@@ -489,30 +395,14 @@ function getTransferMeta(abonentId, regnum){
 
   function getTransferBalance(abonentId){
     try{
-      const id = resolveAbonentId(String(abonentId || getAbonentIdFromUrl()));
-      if (!id) return null;
-
-      const a = window.AbonentsDB?.abonents?.[resolveAbonentId(id)] || null;
-
-      // regnum: сначала из абонента, иначе — из links (активная связь)
-      let regnum = String(a?.premiseRegnum || a?.regnum || "").trim();
-      if (!regnum){
-        try{
-          const dbAll = (window.Data && typeof window.Data.getDb==="function") ? (window.Data.getDb() || {}) : (window.AbonentsDB || {});
-          const links = Array.isArray(dbAll?.links) ? dbAll.links : (Array.isArray(window.AbonentsDB?.links) ? window.AbonentsDB.links : []);
-          const active = links.find(l => String(l?.abonentId)===String(id) && !String(l?.dateTo||"").trim() && String(l?.regnum||"").trim());
-          if (active) regnum = String(active.regnum||"").trim();
-          if (!regnum){
-            const any = links.find(l => String(l?.abonentId)===String(id) && String(l?.regnum||"").trim());
-            if (any) regnum = String(any.regnum||"").trim();
-          }
-        }catch(e){}
-      }
+      const id = String(abonentId || getAbonentIdFromUrl());
+      const a = window.AbonentsDB?.abonents?.[id] || null;
+      const regnum = String(a?.premiseRegnum || a?.regnum || "").trim();
       if (!regnum) return null;
 
       // 1) НОВЫЙ канон: явный баланс переноса
       const key = "jkh_transfer_balance_v1:" + id + ":" + regnum;
-      const raw = stGet(key);
+      const raw = storageGet(key);
       if (raw){
         const obj = JSON.parse(raw);
         if (obj && typeof obj === "object"){
@@ -537,8 +427,7 @@ function getTransferMeta(abonentId, regnum){
       // режим БЕЗ ДОЛГА — перенос отсутствует
       if (String(meta.mode || "") === "NO_DEBT") return null;
 
-      const prevIdRaw = findPreviousAbonentIdForTransfer(regnum, meta.dateFrom);
-      const prevId = resolveAbonentId(prevIdRaw);
+      const prevId = findPreviousAbonentIdForTransfer(regnum, meta.dateFrom);
       if (!prevId) return null;
 
       // считаем долг+пеню у предыдущего владельца накануне даты передачи
@@ -547,8 +436,10 @@ function getTransferMeta(abonentId, regnum){
       let principal = 0;
       let penalty = 0;
       try{
-        const oldRaw = stGetPaymentsById(prevId);
+        const oldRaw = storageGet("payments_" + String(prevId));
         const oldRows = oldRaw ? JSON.parse(oldRaw) : [];
+        // ВАЖНО: берём calcTotalsAsOfAdjusted, чтобы учесть правила аванса и т.п.
+        // (и возможные прошлые переносы у старого владельца)
         const freezeDate = isoToLocalDate(freezeISO);
         if (!freezeDate) throw new Error("invalid freeze date");
         const tot = calcTotalsAsOfAdjusted(oldRows, freezeDate, {
@@ -560,7 +451,7 @@ function getTransferMeta(abonentId, regnum){
         penalty = toNum(tot?.penaltyDebt);
       }catch(e){}
 
-      // кешируем как явный перенос
+      // кешируем как явный перенос, чтобы дальше всё работало быстро и прозрачно
       cacheTransferBalance(id, regnum, meta.dateFrom, principal, penalty, prevId, "WITH_DEBT");
 
       return {
@@ -571,9 +462,7 @@ function getTransferMeta(abonentId, regnum){
         fromAbonentId: String(prevId),
         mode: "WITH_DEBT"
       };
-    }catch(e){
-      return null;
-    }
+    }catch(e){ return null; }
   }
 
   function minDateObj(a,b){
@@ -619,9 +508,9 @@ function getTransferMeta(abonentId, regnum){
     // Global "за период" toggle (если используется)
     let globalPeriod = null;
     try{
-      const active = String(localStorage.getItem('calc_period_active_' + id) || '0') === '1';
+      const active = String(storageGet('calc_period_active_' + id) || '0') === '1';
       if (active){
-        const raw = localStorage.getItem('calc_period_' + id);
+        const raw = storageGet('calc_period_' + id);
         if (raw){
           const obj = JSON.parse(raw);
           if (obj && (obj.from || obj.to)){

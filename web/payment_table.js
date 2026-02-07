@@ -289,15 +289,48 @@ function splitAccrualByOwnership(accr, year, month, history) {
   }
   // =========================
 
+  // ===========================
+  // CANON TRANSFER v1.6: НОРМАЛИЗАЦИЯ ID ИЗ URL
+  // Причина: URL может быть ?abonent=0002, а база и ключи хранятся по id "2".
+  // Без нормализации таблица читает payments_0002 (пусто), перенос/платежи лежат в payments_2.
+  // Поддерживаем ключи: id / abonent / abonent_id.
+  // ===========================
+  function __resolveAbonentIdLocal(rawId) {
+    try {
+      const db = window.AbonentsDB?.abonents || {};
+      const s0 = String(rawId ?? "").trim();
+      if (!s0) return s0;
+
+      // 1) exact hit
+      if (Object.prototype.hasOwnProperty.call(db, s0)) return s0;
+
+      // 2) numeric normalize: "0002" -> "2"
+      const n = Number(s0);
+      if (Number.isFinite(n) && n > 0) {
+        const sN = String(n);
+        if (Object.prototype.hasOwnProperty.call(db, sN)) return sN;
+      }
+
+      // 3) strip leading zeros (safe fallback)
+      const stripped = s0.replace(/^0+/, "") || "0";
+      if (Object.prototype.hasOwnProperty.call(db, stripped)) return stripped;
+
+      return s0;
+    } catch (e) {
+      return String(rawId ?? "").trim();
+    }
+  }
+
   function getAbonentId() {
-    const p = new URLSearchParams(window.location.search);
-    const fromUrl = p.get("abonent");
-    if (fromUrl) return fromUrl;
+    const p = new URLSearchParams(window.location.search || "");
+    const fromUrl = p.get("id") ?? p.get("abonent") ?? p.get("abonent_id");
+    if (fromUrl) return __resolveAbonentIdLocal(fromUrl);
 
     const db = window.AbonentsDB?.abonents || {};
     const first = Object.keys(db)[0];
-    return first || "27";
+    return __resolveAbonentIdLocal(first || "27");
   }
+
 
   function paymentsKey() {
     return "payments_" + getAbonentId();
