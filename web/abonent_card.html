@@ -1078,13 +1078,23 @@ function __saveTransferMeta(newId, regnum, dateFrom, mode){
 }
 function __isoMinusOne(iso){
   try{
-    const d = new Date(iso + "T12:00:00");
+    const m = String(iso || "").trim().match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (!m) return String(iso || "");
+    const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]), 12, 0, 0);
+    if (isNaN(d)) return String(iso || "");
     d.setDate(d.getDate() - 1);
     const y = d.getFullYear();
-    const m = String(d.getMonth()+1).padStart(2,'0');
+    const mm = String(d.getMonth()+1).padStart(2,'0');
     const dd = String(d.getDate()).padStart(2,'0');
-    return `${y}-${m}-${dd}`;
-  }catch(e){ return iso; }
+    return `${y}-${mm}-${dd}`;
+  }catch(e){ return String(iso || ""); }
+}
+
+function __isoToLocalDate(iso){
+  const m = String(iso || "").trim().match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) return null;
+  const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]), 12, 0, 0);
+  return isNaN(d) ? null : d;
 }
 
 function __saveFreezeTo(oldId, freezeISO){
@@ -1138,11 +1148,11 @@ function applyChangeResponsible(mode) {
         return;
     }
 
-    // сохраняем метаданные режима передачи (для будущего шага расчётов)
+    // CANON TRANSFER v1: сохраняем метаданные режима передачи
     __saveTransferMeta(newId, regnum, dateFrom, mode);
 
 
-    // ✅ 1) вычисляем "долг + пеня" у старого на дату передачи (до передачи)
+    // CANON TRANSFER v1: вычисляем "долг + пеня" у старого на freezeTo = dateFrom - 1 день
     // Старый заканчивает накануне даты передачи.
     const freezeISO = __isoMinusOne(dateFrom);
 
@@ -1153,7 +1163,9 @@ function applyChangeResponsible(mode) {
       const oldPaymentsRaw = localStorage.getItem("payments_" + String(id));
       const oldRows = oldPaymentsRaw ? JSON.parse(oldPaymentsRaw) : [];
       if (window.JKHCalcEngine && typeof window.JKHCalcEngine.calcTotalsAsOfAdjusted === "function"){
-        const tot = window.JKHCalcEngine.calcTotalsAsOfAdjusted(oldRows, new Date(freezeISO + "T12:00:00"), {
+        const freezeDate = __isoToLocalDate(freezeISO);
+        if (!freezeDate) throw new Error("invalid freeze date");
+        const tot = window.JKHCalcEngine.calcTotalsAsOfAdjusted(oldRows, freezeDate, {
           abonentId: String(id),
           applyAdvanceOffset: true,
           allowNegativePrincipal: false
@@ -1163,10 +1175,10 @@ function applyChangeResponsible(mode) {
       }
     }catch(e){}
 
-    // ✅ 2) замораживаем старого (пеня перестанет расти после freezeISO)
+    // CANON TRANSFER v1: замораживаем старого (пеня/итоги после freezeISO не растут)
     __saveFreezeTo(String(id), freezeISO);
 
-    // ✅ 3) если передача "С ДОЛГОМ" — записываем стартовое сальдо новому
+    // CANON TRANSFER v1: если передача "С ДОЛГОМ" — записываем стартовое сальдо новому
     if (String(mode) === "WITH_DEBT"){
       __saveTransferBalance(String(newId), String(regnum), String(dateFrom), oldPrincipal, oldPenalty, String(id), "WITH_DEBT");
     } else {

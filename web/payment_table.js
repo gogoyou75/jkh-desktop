@@ -335,6 +335,26 @@ function splitAccrualByOwnership(accr, year, month, history) {
       };
     }catch(e){ return null; }
   }
+
+  function getTransferBalanceForTable(){
+    // CANON TRANSFER v1: UI-строка «ПЕРЕНОС» должна использовать тот же источник,
+    // что и движок расчёта (включая lazy-восстановление по jkh_transfer_v1).
+    try{
+      if (window.JKHCalcEngine && typeof window.JKHCalcEngine.getTransferBalance === "function"){
+        const tb = window.JKHCalcEngine.getTransferBalance(getAbonentId());
+        if (tb) {
+          return {
+            startDate: String(tb.startDate || "").trim(),
+            principal: Number(tb.principal || 0),
+            penalty: Number(tb.penalty || 0),
+            mode: String(tb.mode || "WITH_DEBT"),
+            fromAbonentId: String(tb.fromAbonentId || "")
+          };
+        }
+      }
+    }catch(e){}
+    return readTransferBalance();
+  }
 /* =========================================================
      АВТО-НАЧИСЛЕНИЕ (тарифы × площадь) по периоду ответственности
      Правила:
@@ -1786,11 +1806,11 @@ function applyRunningTotals(viewRows) {
 
     const view = applyCalcFilter(arr).slice();
     applyRunningTotals(view);
-    // ✅ Канон: визуальная строка «ПЕРЕНОС (передача квартиры)»
+    // CANON TRANSFER v1: визуальная строка «ПЕРЕНОС (передача квартиры)»
     // Показываем стартовый долг/пеню, если они есть.
     (function injectTransferRow(){
       try{
-        const tb = readTransferBalance();
+        const tb = getTransferBalanceForTable();
         if (!tb) return;
         const ym = String(tb.startDate).slice(0,7);
         const parts = ym.split('-');
@@ -1802,6 +1822,7 @@ function applyRunningTotals(viewRows) {
           month: String(mo).padStart(2,'0'),
           ym: ym,
           transfer_start: tb.startDate,
+          transfer_from: tb.fromAbonentId,
           pay_main: Number(tb.principal || 0),
           pay_penalty: Number(tb.penalty || 0),
           total: Number(tb.principal || 0) + Number(tb.penalty || 0)
@@ -1870,6 +1891,7 @@ tbody.innerHTML = "";
       const tr = document.createElement("tr");
       tr.className = "row-transfer";
       const title = (r.transfer_start ? (`ПЕРЕНОС (передача квартиры) с ${r.transfer_start}`) : "ПЕРЕНОС (передача квартиры)");
+      const fromTxt = String(r.transfer_from || "").trim();
       tr.innerHTML = `
         <td><span class="ym-title">${title}</span></td>
         <td></td>
@@ -1880,7 +1902,7 @@ tbody.innerHTML = "";
         <td>${fmtMoney(r.pay_main)}</td>
         <td>${fmtMoney(r.pay_penalty)}</td>
         <td>${fmtMoney(r.total)}</td>
-        <td style="font-size:12px;opacity:.9;">Стартовое сальдо при передаче</td>
+        <td style="font-size:12px;opacity:.9;">Стартовое сальдо при передаче${fromTxt ? (" · от ЛС " + escapeHtml(fromTxt)) : ""}</td>
         <td></td>
       `;
       return tr;
