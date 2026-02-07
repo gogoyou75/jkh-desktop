@@ -810,7 +810,10 @@ function getTransferMeta(abonentId, regnum){
             // поэтому пеня не «сбрасывается», а продолжает расти сразу после передачи.
             const due = addDays(startOfDay(startDt), -31);
             obligations.push({
-              key: `transfer:${String(tb.startDate || "")}`,
+              // Key must stay in YYYY-MM space so FIFO period bounds can include it.
+              // If key is outside month-sortable format, payment allocation window checks
+              // (k < minKey || k > maxKey) will never route payments to this obligation.
+              key: `${startDt.getFullYear()}-${pad2(startDt.getMonth()+1)}`,
               amount: r2(transferPrincipal),
               dueDate: due,
               applications: []
