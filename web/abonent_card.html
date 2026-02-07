@@ -569,7 +569,8 @@ Doc: docs/LOGIC_SPEC_v1.5.3.md
 function getAbonentIdFromURL() {
     const params = new URLSearchParams(window.location.search || "");
     const uid = String(params.get("uid") || "").trim();
-    const fromUrl = String(params.get("abonent") || "").trim();
+    // CANON TRANSFER v1.6: поддерживаем id / abonent / abonent_id
+    const fromUrl = String(params.get("id") || params.get("abonent") || params.get("abonent_id") || "").trim();
 
     // 1) если открыли по uid — найдём ЛС (текущий ключ) по uid
     if (uid) {
