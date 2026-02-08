@@ -591,7 +591,159 @@
     }
   };
 
-  window.Data = Data;
+  
+
+  // ============================================================
+  // TRANSFER API (CANON TRANSFER v1.7)
+  // Поддержка "передачи квартиры" с переносом долга и пени.
+  // Ключи:
+  //   jkh_freeze_to_v1:<fromId>                 — дата заморозки расчёта у старого
+  //   jkh_frozen_debt_v1:<fromId>:<freezeISO>   — снимок долга+пени на дату заморозки
+  //   jkh_transfer_to_v1:<toId>                 — мета переноса (совместимость со сторонней инструкцией)
+  //   jkh_transfer_balance_v1:<toId>:<regnum>   — КАНОН (использует calc_engine.js)
+  // ============================================================
+
+  function __isoYesterday(iso){
+    try{
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(String(iso||"").trim())) return "";
+      var d = new Date(String(iso) + "T12:00:00");
+      d.setDate(d.getDate() - 1);
+      var y = d.getFullYear();
+      var m = String(d.getMonth()+1).padStart(2,'0');
+      var dd = String(d.getDate()).padStart(2,'0');
+      return y + "-" + m + "-" + dd;
+    }catch(e){ return ""; }
+  }
+
+  function prepareDebtTransfer(oldAbonentId, newAbonentId, regnum, transferDate, transferMode){
+    if (!Data.ensureWriteOrExplain()) return false;
+
+    try{
+      var oldId = String(oldAbonentId||"").trim();
+      var newId = String(newAbonentId||"").trim();
+      var rn    = String(regnum||"").trim();
+      var td    = String(transferDate||"").trim();
+      var mode  = (String(transferMode||"WITH_DEBT").trim() === "NO_DEBT") ? "NO_DEBT" : "WITH_DEBT";
+
+      if (!oldId || !newId || !rn || !/^\d{4}-\d{2}-\d{2}$/.test(td)) return false;
+
+      // freezeDate = день ДО даты передачи
+      var freezeISO = __isoYesterday(td);
+      if (!freezeISO) return false;
+
+      // 1) Рассчитать и заморозить долг старого (principal + penalty)
+      var frozenDebt = null;
+      if (window.JKHCalcEngine && typeof window.JKHCalcEngine.calculateFrozenDebt === "function"){
+        frozenDebt = window.JKHCalcEngine.calculateFrozenDebt(oldId, freezeISO);
+      }else if (window.JKHCalcEngine && typeof window.JKHCalcEngine.calcTotalsAsOfAdjusted === "function"){
+        try{
+          var rows = (window.JKHCalcEngine.loadPaymentsForAbonent)
+            ? window.JKHCalcEngine.loadPaymentsForAbonent(oldId)
+            : (function(){
+                try{ var raw=localStorage.getItem("payments_"+oldId); return raw?JSON.parse(raw):[]; }catch(e){ return []; }
+              })();
+          var d = new Date(String(freezeISO)+"T12:00:00");
+          var tot = window.JKHCalcEngine.calcTotalsAsOfAdjusted(rows, d, { abonentId: oldId, applyAdvanceOffset:true, allowNegativePrincipal:false });
+          frozenDebt = { principal: Number(tot?.principal)||0, penalty: Number(tot?.penaltyDebt)||0, calculatedAt: freezeISO };
+        }catch(e){}
+      }
+
+      if (frozenDebt){
+        localStorage.setItem("jkh_frozen_debt_v1:" + oldId + ":" + freezeISO, JSON.stringify({
+          principal: Number(frozenDebt.principal)||0,
+          penalty: Number(frozenDebt.penalty)||0,
+          calculatedAt: String(frozenDebt.calculatedAt||freezeISO)
+        }));
+      } else {
+        // если не смогли рассчитать — всё равно пишем нули, чтобы система была детерминированной
+        localStorage.setItem("jkh_frozen_debt_v1:" + oldId + ":" + freezeISO, JSON.stringify({
+          principal: 0, penalty: 0, calculatedAt: freezeISO
+        }));
+      }
+
+      // 2) Установить дату заморозки расчёта у старого
+      localStorage.setItem("jkh_freeze_to_v1:" + oldId, freezeISO);
+
+      // 3) Записать метаданные переноса
+      if (mode === "WITH_DEBT"){
+        localStorage.setItem("jkh_transfer_to_v1:" + newId, JSON.stringify({
+          fromAbonentId: oldId,
+          regnum: rn,
+          transferDate: td,
+          transferMode: "WITH_DEBT",
+          createdAt: (new Date()).toISOString()
+        }));
+
+        // 3a) КАНОН: transfer_balance для движка (по regnum)
+        try{
+          var debtRaw = localStorage.getItem("jkh_frozen_debt_v1:" + oldId + ":" + freezeISO);
+          var dd = debtRaw ? JSON.parse(debtRaw) : { principal:0, penalty:0 };
+          localStorage.setItem("jkh_transfer_balance_v1:" + newId + ":" + rn, JSON.stringify({
+            startDate: td,
+            principal: Number(dd?.principal)||0,
+            penalty: Number(dd?.penalty)||0,
+            regnum: rn,
+            fromAbonentId: oldId,
+            mode: "WITH_DEBT"
+          }));
+        }catch(e){}
+      } else {
+        // NO_DEBT: снимаем возможные хвосты переноса на нового (на всякий случай)
+        try{ localStorage.removeItem("jkh_transfer_to_v1:" + newId); }catch(e){}
+        try{ localStorage.removeItem("jkh_transfer_balance_v1:" + newId + ":" + rn); }catch(e){}
+      }
+
+      // 4) Обновить поля периодов расчёта в AbonentsDB
+      var db = window.AbonentsDB;
+      if (db && db.abonents){
+        if (db.abonents[oldId]){
+          db.abonents[oldId].calcEndDate = freezeISO;
+          db.abonents[oldId].frozenDebtDate = freezeISO;
+        }
+        if (db.abonents[newId]){
+          db.abonents[newId].calcStartDate = td;
+          db.abonents[newId].calcEndDate = "";
+          db.abonents[newId].debtTransferredFrom = (mode === "WITH_DEBT") ? oldId : null;
+        }
+        window.saveAbonentsDB && window.saveAbonentsDB();
+      }
+
+      return true;
+    }catch(e){
+      return false;
+    }
+  }
+
+  function getAbonentTransferInfo(abonentId){
+    try{
+      var id = String(abonentId||"").trim();
+      if (!id) return null;
+
+      // recipient?
+      var trRaw = localStorage.getItem("jkh_transfer_to_v1:" + id);
+      if (trRaw){
+        try{
+          return { type: "recipient", data: JSON.parse(trRaw) };
+        }catch(e){}
+      }
+
+      // source?
+      var freezeISO = String(localStorage.getItem("jkh_freeze_to_v1:" + id) || "").trim();
+      if (freezeISO){
+        var debtRaw = localStorage.getItem("jkh_frozen_debt_v1:" + id + ":" + freezeISO);
+        var debt = null;
+        try{ debt = debtRaw ? JSON.parse(debtRaw) : null; }catch(e){}
+        return { type: "source", freezeDate: freezeISO, frozenDebt: debt };
+      }
+      return null;
+    }catch(e){ return null; }
+  }
+
+  // Экспорт в Service-layer API
+  Data.prepareDebtTransfer = prepareDebtTransfer;
+  Data.getAbonentTransferInfo = getAbonentTransferInfo;
+
+window.Data = Data;
 
   // Если storage пустой — сохраним пустую структуру один раз
   if (!stored) {

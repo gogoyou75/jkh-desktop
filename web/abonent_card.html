@@ -333,6 +333,7 @@ Doc: docs/LOGIC_SPEC_v1.5.3.md
         <div class="transfer-row"><b>Долг:</b> <span id="ti_principal" class="mono">0.00</span></div>
         <div class="transfer-row"><b>Пеня:</b> <span id="ti_penalty" class="mono">0.00</span></div>
         <div class="transfer-row"><b>Режим:</b> <span id="ti_mode">—</span></div>
+        <div class="transfer-row"><b>Статус:</b> <span id="ti_status">—</span></div>
       </div>
 
       <div id="transferFreeze" style="display:none; margin-top:10px;">
@@ -569,8 +570,7 @@ Doc: docs/LOGIC_SPEC_v1.5.3.md
 function getAbonentIdFromURL() {
     const params = new URLSearchParams(window.location.search || "");
     const uid = String(params.get("uid") || "").trim();
-    // CANON TRANSFER v1.6: поддерживаем id / abonent / abonent_id
-    const fromUrl = String(params.get("id") || params.get("abonent") || params.get("abonent_id") || "").trim();
+    const fromUrl = String(params.get("abonent") || "").trim();
 
     // 1) если открыли по uid — найдём ЛС (текущий ключ) по uid
     if (uid) {
@@ -587,8 +587,6 @@ function getAbonentIdFromURL() {
     const first = Object.keys(db)[0];
     return first || "27";
 }
-// expose (для движка и дебага)
-window.getAbonentIdFromURL = getAbonentIdFromURL;
 
 function getDb() {
     if (window.Data && typeof window.Data.getDb === "function") {
@@ -653,7 +651,6 @@ function getActiveLinkForPremise(regnum){
 
 function getCurrentAbonent() {
     const id = String(getAbonentIdFromURL());
-    try{ if (id) sessionStorage.setItem("last_abonent_id", String(id)); }catch(e){}
     const db = getDb();
     return { id, a: db[id] || null };
 }
@@ -696,8 +693,7 @@ async function copyUidFromCard(){
 
 /* ✅ FIX: fillAbonentCard() — убраны лишние скобки, логика выполняется корректно */
 function fillAbonentCard() {
-    const { id: idRaw, a } = getCurrentAbonent();
-    const id = __resolveAbonentId(idRaw);
+    const { id, a } = getCurrentAbonent();
     if (!a) return;
 
     const { regnum, p } = getPremiseForAbonent(id, a);
@@ -944,7 +940,22 @@ function renderTransferInfo(abonentId, regnum){
     document.getElementById("ti_start").textContent = incoming.startDate || "—";
     document.getElementById("ti_principal").textContent = __fmt2(incoming.principal);
     document.getElementById("ti_penalty").textContent = __fmt2(incoming.penalty);
-    document.getElementById("ti_mode").textContent = incoming.mode || "—";
+    // mode/status (human readable)
+    const _mraw = String(incoming.mode || "").trim();
+    const _m = (_mraw === "WITH_DEBT" || _mraw === "С ДОЛГОМ") ? "WITH_DEBT" : ((_mraw === "NO_DEBT" || _mraw === "WITHOUT_DEBT" || _mraw === "БЕЗ ДОЛГА") ? "NO_DEBT" : _mraw);
+    const _modeText = (_m === "WITH_DEBT") ? "С ДОЛГОМ" : ((_m === "NO_DEBT") ? "БЕЗ ДОЛГА" : (_mraw || "—"));
+    document.getElementById("ti_mode").textContent = _modeText;
+
+    const _statusEl = document.getElementById("ti_status");
+    if (_statusEl){
+      if (_m === "WITH_DEBT") {
+        _statusEl.textContent = "✅ Долг и пеня перенесены";
+      } else if (_m === "NO_DEBT") {
+        _statusEl.textContent = "⛔ Долг и пеня НЕ перенесены";
+      } else {
+        _statusEl.textContent = "—";
+      }
+    }
 
     const db = getDb();
     const fromId = incoming.fromAbonentId || "";
@@ -984,7 +995,19 @@ function renderTransferInfo(abonentId, regnum){
             <div><b>Объект:</b> ${o.regnum || "—"}</div>
             <div><b>С даты:</b> <span class="mono">${o.startDate || "—"}</span></div>
             <div><b>Долг:</b> <span class="mono">${__fmt2(o.principal)}</span> | <b>Пеня:</b> <span class="mono">${__fmt2(o.penalty)}</span></div>
-            <div><b>Режим:</b> ${o.mode || "—"}</div>
+            <div><b>Режим:</b> ${(() => {
+              const mr = String(o.mode || "").trim();
+              const m = (mr === "WITH_DEBT" || mr === "С ДОЛГОМ") ? "WITH_DEBT" : ((mr === "NO_DEBT" || mr === "WITHOUT_DEBT" || mr === "БЕЗ ДОЛГА") ? "NO_DEBT" : mr);
+              const mt = (m === "WITH_DEBT") ? "С ДОЛГОМ" : ((m === "NO_DEBT") ? "БЕЗ ДОЛГА" : (mr || "—"));
+              return mt;
+            })()}</div>
+            <div><b>Статус:</b> ${(() => {
+              const mr = String(o.mode || "").trim();
+              const m = (mr === "WITH_DEBT" || mr === "С ДОЛГОМ") ? "WITH_DEBT" : ((mr === "NO_DEBT" || mr === "WITHOUT_DEBT" || mr === "БЕЗ ДОЛГА") ? "NO_DEBT" : mr);
+              if (m === "WITH_DEBT") return '<span style="color:#0a6; font-weight:700;">✅ Долг и пеня перенесены</span>';
+              if (m === "NO_DEBT") return '<span style="color:#c00; font-weight:700;">⛔ Долг и пеня НЕ перенесены</span>';
+              return '—';
+            })()}</div>
           </div>
         `;
       }).join("");
@@ -995,8 +1018,7 @@ function renderTransferInfo(abonentId, regnum){
 }
 
 function openResponsibilityReport(){
-  const { id: idRaw, a } = getCurrentAbonent();
-    const id = __resolveAbonentId(idRaw);
+  const { id, a } = getCurrentAbonent();
   if (!a) { alert('Абонент не найден'); return; }
   const { regnum } = getPremiseForAbonent(id, a);
   const r = String(regnum || '').trim();
@@ -1006,8 +1028,7 @@ function openResponsibilityReport(){
 
 // ===== Смена ответственного =====
 function openChangeResponsibleModal() {
-    const { id: idRaw, a } = getCurrentAbonent();
-    const id = __resolveAbonentId(idRaw);
+    const { id, a } = getCurrentAbonent();
     if (!a) { alert('Абонент не найден'); return; }
 
     const { regnum, p } = getPremiseForAbonent(id, a);
@@ -1072,100 +1093,37 @@ function closeChangeResponsibleModal() {
 /* ✅ NEW: applyChangeResponsible(mode)
    mode = 'WITH_DEBT' | 'NO_DEBT'
    Запоминаем режим передачи (для следующего шага в расчётах) */
-
-/* ===== CANON TRANSFER v1.3: storage wrapper (JKHStore/JKHStorage -> localStorage) ===== */
-function __stGet(k){
-  try{
-    if (window.JKHStore && typeof window.JKHStore.getRaw === "function"){
-      const v = window.JKHStore.getRaw(String(k));
-      if (v !== undefined && v !== null) return v;
-    }
-  }catch(e){}
-  try{
-    if (window.JKHStorage && typeof window.JKHStorage.getItem === "function"){
-      const v = window.JKHStorage.getItem(String(k));
-      if (v !== undefined && v !== null) return v;
-    }
-  }catch(e){}
-  try{ return localStorage.getItem(String(k)); }catch(e){ return null; }
-}
-function __stSet(k, v){
-  try{
-    if (window.JKHStore && typeof window.JKHStore.setRaw === "function"){
-      window.JKHStore.setRaw(String(k), String(v));
-      return;
-    }
-  }catch(e){}
-  try{
-    if (window.JKHStorage && typeof window.JKHStorage.setItem === "function"){
-      window.JKHStorage.setItem(String(k), String(v));
-      return;
-    }
-  }catch(e){}
-  try{ localStorage.setItem(String(k), String(v)); }catch(e){}
-}
-
-/* ===== CANON TRANSFER v1.5: Abonent ID normalization (leading zeros / numeric keys) ===== */
-function __resolveAbonentId(id){
-  const raw = String(id || "").trim();
-  if (!raw) return "";
-  try{
-    const db = getDb() || {};
-    if (db[raw]) return raw;
-    const stripped = raw.replace(/^0+/, "") || "0";
-    if (db[stripped]) return stripped;
-    const n = Number(raw);
-    if (Number.isFinite(n)){
-      for (const k of Object.keys(db)){
-        if (Number(k) === n) return String(k);
-      }
-    }
-  }catch(e){}
-  return raw;
-}
-
 function __saveTransferMeta(newId, regnum, dateFrom, mode){
     try{
         const key = 'jkh_transfer_v1:' + String(newId) + ':' + String(regnum);
-        __stSet(key, JSON.stringify({
+        localStorage.setItem(key, JSON.stringify({
             mode: String(mode || 'WITH_DEBT'),
             dateFrom: String(dateFrom || ''),
             regnum: String(regnum || ''),
             ts: new Date().toISOString()
         }));
     }catch(e){}
-}
 function __isoMinusOne(iso){
   try{
-    const m = String(iso || "").trim().match(/^(\d{4})-(\d{2})-(\d{2})$/);
-    if (!m) return String(iso || "");
-    const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]), 12, 0, 0);
-    if (isNaN(d)) return String(iso || "");
+    const d = new Date(iso + "T12:00:00");
     d.setDate(d.getDate() - 1);
     const y = d.getFullYear();
-    const mm = String(d.getMonth()+1).padStart(2,'0');
+    const m = String(d.getMonth()+1).padStart(2,'0');
     const dd = String(d.getDate()).padStart(2,'0');
-    return `${y}-${mm}-${dd}`;
-  }catch(e){ return String(iso || ""); }
-}
-
-function __isoToLocalDate(iso){
-  const m = String(iso || "").trim().match(/^(\d{4})-(\d{2})-(\d{2})$/);
-  if (!m) return null;
-  const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]), 12, 0, 0);
-  return isNaN(d) ? null : d;
+    return `${y}-${m}-${dd}`;
+  }catch(e){ return iso; }
 }
 
 function __saveFreezeTo(oldId, freezeISO){
   try{
-    __stSet("jkh_freeze_to_v1:" + String(oldId), String(freezeISO || ""));
+    localStorage.setItem("jkh_freeze_to_v1:" + String(oldId), String(freezeISO || ""));
   }catch(e){}
 }
 
 function __saveTransferBalance(newId, regnum, startISO, principal, penalty, fromOldId, mode){
   try{
     const key = "jkh_transfer_balance_v1:" + String(newId) + ":" + String(regnum);
-    __stSet(key, JSON.stringify({
+    localStorage.setItem(key, JSON.stringify({
       startDate: String(startISO || ""),
       principal: Number(principal || 0),
       penalty: Number(penalty || 0),
@@ -1176,18 +1134,17 @@ function __saveTransferBalance(newId, regnum, startISO, principal, penalty, from
     }));
   }catch(e){}
 }
+}
 
 function applyChangeResponsible(mode) {
     if (!canWriteOrExplainLocal()) return;
-    const { id: idRaw, a } = getCurrentAbonent();
-    const id = __resolveAbonentId(idRaw);
+    const { id, a } = getCurrentAbonent();
     if (!a) { alert('Абонент не найден'); return; }
 
     const { regnum, p } = getPremiseForAbonent(id, a);
     if (!regnum) { alert('Нет рег. № кв'); return; }
 
-    const newIdRaw = String(document.getElementById('cr_newAbonent')?.value || '').trim();
-    const newId = __resolveAbonentId(newIdRaw);
+    const newId = String(document.getElementById('cr_newAbonent')?.value || '').trim();
     const dateFrom = String(document.getElementById('cr_date')?.value || '').trim();
 
     if (!newId) { alert('Выберите нового ответственного'); return; }
@@ -1209,11 +1166,11 @@ function applyChangeResponsible(mode) {
         return;
     }
 
-    // CANON TRANSFER v1: сохраняем метаданные режима передачи
+    // сохраняем метаданные режима передачи (для будущего шага расчётов)
     __saveTransferMeta(newId, regnum, dateFrom, mode);
 
 
-    // CANON TRANSFER v1: вычисляем "долг + пеня" у старого на freezeTo = dateFrom - 1 день
+    // ✅ 1) вычисляем "долг + пеня" у старого на дату передачи (до передачи)
     // Старый заканчивает накануне даты передачи.
     const freezeISO = __isoMinusOne(dateFrom);
 
@@ -1221,12 +1178,10 @@ function applyChangeResponsible(mode) {
     let oldPenalty = 0;
 
     try{
-      const oldPaymentsRaw = (__stGet("payments_" + String(id)) || __stGet("payments_" + String(String(id).replace(/^0+/, ""))) || null);
+      const oldPaymentsRaw = localStorage.getItem("payments_" + String(id));
       const oldRows = oldPaymentsRaw ? JSON.parse(oldPaymentsRaw) : [];
       if (window.JKHCalcEngine && typeof window.JKHCalcEngine.calcTotalsAsOfAdjusted === "function"){
-        const freezeDate = __isoToLocalDate(freezeISO);
-        if (!freezeDate) throw new Error("invalid freeze date");
-        const tot = window.JKHCalcEngine.calcTotalsAsOfAdjusted(oldRows, freezeDate, {
+        const tot = window.JKHCalcEngine.calcTotalsAsOfAdjusted(oldRows, new Date(freezeISO + "T12:00:00"), {
           abonentId: String(id),
           applyAdvanceOffset: true,
           allowNegativePrincipal: false
@@ -1236,10 +1191,10 @@ function applyChangeResponsible(mode) {
       }
     }catch(e){}
 
-    // CANON TRANSFER v1: замораживаем старого (пеня/итоги после freezeISO не растут)
+    // ✅ 2) замораживаем старого (пеня перестанет расти после freezeISO)
     __saveFreezeTo(String(id), freezeISO);
 
-    // CANON TRANSFER v1: если передача "С ДОЛГОМ" — записываем стартовое сальдо новому
+    // ✅ 3) если передача "С ДОЛГОМ" — записываем стартовое сальдо новому
     if (String(mode) === "WITH_DEBT"){
       __saveTransferBalance(String(newId), String(regnum), String(dateFrom), oldPrincipal, oldPenalty, String(id), "WITH_DEBT");
     } else {
@@ -1318,8 +1273,7 @@ function applyChangeResponsible(mode) {
 
 /* ===== Редактирование абонента (оставил как у тебя) ===== */
 function openAbonentEdit() {
-    const { id: idRaw, a } = getCurrentAbonent();
-    const id = __resolveAbonentId(idRaw);
+    const { id, a } = getCurrentAbonent();
     if (!a) { alert("Абонент не найден"); return; }
 
     const { regnum, p } = getPremiseForAbonent(id, a);
