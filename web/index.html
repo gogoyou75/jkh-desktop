@@ -85,6 +85,39 @@ Doc: docs/LOGIC_SPEC_v1.5.3.md
             opacity: 0.4;
             cursor: default;
         }
+
+        /* ============================================================
+           ✅ MYSQL TEST PANEL (TEMP)
+           Фикс: блок не должен залезать под левое меню.
+           Важное: кнопка названа без слов "добав/сохран/импорт",
+           чтобы гостевой режим не блокировал её.
+        ============================================================ */
+        #mysql_test_panel{
+            margin-left: 90px; /* под левое меню */
+            margin-top: 12px;
+            padding: 10px;
+            border-top: 1px solid #999;
+            background: #f7f7f7;
+        }
+        #mysql_test_panel button{
+            padding: 6px 10px;
+            border: 1px solid #000;
+            background: #fff;
+            cursor: pointer;
+        }
+        #mysql_test_panel pre{
+            margin-top: 10px;
+            background: #eee;
+            padding: 10px;
+            max-height: 260px;
+            overflow: auto;
+        }
+        #mysql_status{
+            margin-left: 10px;
+        }
+        @media (max-width: 900px){
+            #mysql_test_panel{ margin-left: 70px; }
+        }
     </style>
 </head>
 <body>
@@ -169,6 +202,63 @@ Doc: docs/LOGIC_SPEC_v1.5.3.md
 
 <div id="paginationInfo"></div>
 <div id="paginationControls"></div>
+
+<!-- ============================================================
+     ✅ MYSQL TEST PANEL (TEMP)
+     Показать JSON списка абонентов из MySQL через /api/abonents
+============================================================ -->
+<div id="mysql_test_panel">
+    <button id="btn_mysql_show" type="button">Показать абонентов из MySQL</button>
+    <span id="mysql_status"></span>
+    <pre id="abonents_out"></pre>
+</div>
+
+<script>
+(function(){
+    function $(id){ return document.getElementById(id); }
+
+    async function JKH_MYSQL_showAbonents(){
+        var statusEl = $("mysql_status");
+        var outEl = $("abonents_out");
+
+        statusEl.textContent = "загрузка...";
+        outEl.textContent = "";
+
+        try{
+            var res = await fetch("/api/abonents", { cache: "no-store" });
+            if (!res || !res.ok) throw new Error("HTTP " + (res ? res.status : "NO_RESPONSE"));
+
+            var data = await res.json();
+            outEl.textContent = JSON.stringify(data, null, 2);
+
+            var cnt = (data && data.items && Array.isArray(data.items)) ? data.items.length : 0;
+            statusEl.textContent = "OK (" + cnt + " шт.)";
+        }catch(e){
+            statusEl.textContent = "ОШИБКА: " + (e && e.message ? e.message : e);
+            outEl.textContent =
+                "ОШИБКА запроса к /api/abonents\n" +
+                String(e && e.message ? e.message : e) +
+                "\n\nПодсказка: нажми F12 → Console (там будет подробность).";
+            try{ console.error(e); }catch(_){}
+            alert("Ошибка запроса к /api/abonents: " + (e && e.message ? e.message : e));
+        }
+    }
+
+    function bind(){
+        var btn = $("btn_mysql_show");
+        if (!btn) return;
+        btn.addEventListener("click", function(){
+            JKH_MYSQL_showAbonents();
+        });
+    }
+
+    if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", bind);
+    else bind();
+})();
+</script>
+<!-- ============================================================
+     /MYSQL TEST PANEL
+============================================================ -->
 
 <script>
 /* ============================================================
@@ -269,7 +359,6 @@ function toNum(v){
     const n = parseFloat(String(v ?? "").replace(",", ".").replace(/\s+/g,""));
     return isNaN(n) ? 0 : n;
 }
-
 
 function getAbonentNote(id, a){
     // 1) из AbonentsDB полей
