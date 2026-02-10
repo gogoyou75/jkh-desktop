@@ -390,3 +390,374 @@
   window.saveExcludes = saveExcludes;
 
 })();
+
+
+/* ============================================================
+   ✅ JKH_REMOTE_SYNC_STATUS_V1 (2026-02-10)
+   Вариант 2 (ONLINE): MySQL = главный источник (через API), localStorage = кэш.
+   Добавлено:
+   - Кнопки "Загрузить/Сохранить" (работают через index.html)
+   - Авто-сохранение раз в N минут
+   - Режим "сохранять только если были изменения"
+   - Статус-строка (видно без F12)
+   ============================================================ */
+
+(function () {
+  "use strict";
+
+  // ---- settings keys ----
+  var K_MODE = "jkh_remote_mode_v1"; // "1" online, "0" offline
+  var K_AS_ENABLED = "jkh_autosave_enabled_v1";
+  var K_AS_MINUTES = "jkh_autosave_minutes_v1";
+  var K_AS_SCOPE = "jkh_autosave_scope_v1"; // "db" | "all"
+  var K_AS_ONLY_CHANGED = "jkh_autosave_only_changed_v1";
+  var K_LAST_SIG_DB = "jkh_last_sig_db_v1";
+  var K_LAST_SIG_ALL = "jkh_last_sig_all_v1";
+
+  function _nowISO() {
+    try { return new Date().toISOString(); } catch (e) { return ""; }
+  }
+
+  function _fmtTime(tsIso) {
+    if (!tsIso) return "—";
+    try {
+      var d = new Date(tsIso);
+      var hh = String(d.getHours()).padStart(2, "0");
+      var mm = String(d.getMinutes()).padStart(2, "0");
+      var ss = String(d.getSeconds()).padStart(2, "0");
+      return hh + ":" + mm + ":" + ss;
+    } catch (e) { return String(tsIso); }
+  }
+
+  function _lsGet(k, fallback) {
+    try {
+      var v = localStorage.getItem(k);
+      return (v === null || v === undefined) ? fallback : v;
+    } catch (e) { return fallback; }
+  }
+  function _lsSet(k, v) {
+    try { localStorage.setItem(k, v); } catch (e) { }
+  }
+
+  function isOnlineMode() {
+    // по умолчанию online=1 (серверный режим для тестировщика)
+    var v = _lsGet(K_MODE, "1");
+    return v === "1";
+  }
+
+  function _ownerId() {
+    if (!window.JKHStore) return "guest";
+    return window.JKHStore.getOwnerId();
+  }
+
+  function _isGuestOrAll() {
+    if (!window.JKHStore) return true;
+    return window.JKHStore.isGuestMode() || window.JKHStore.isAllMode();
+  }
+
+  // ---- status state ----
+  var status = {
+    server: "…",         // ok | offline | error | …
+    lastSaveAt: null,    // ISO
+    autosaveState: "—",
+    lastAction: "—",
+    lastError: null
+  };
+
+  function _setStatus(patch) {
+    for (var k in patch) {
+      if (Object.prototype.hasOwnProperty.call(patch, k)) status[k] = patch[k];
+    }
+    refreshStatusUI();
+  }
+
+  function refreshStatusUI() {
+    // безопасно: если блока нет — молча.
+    try {
+      var elServer = document.getElementById("syncServerState");
+      var elSave = document.getElementById("syncLastSave");
+      var elAS = document.getElementById("syncAutosaveState");
+      var elAct = document.getElementById("syncLastAction");
+      var elErr = document.getElementById("syncLastError");
+
+      if (elServer) elServer.textContent = status.server || "—";
+      if (elSave) elSave.textContent = status.lastSaveAt ? _fmtTime(status.lastSaveAt) : "—";
+      if (elAS) elAS.textContent = status.autosaveState || "—";
+      if (elAct) elAct.textContent = status.lastAction || "—";
+      if (elErr) elErr.textContent = status.lastError ? String(status.lastError) : "—";
+    } catch (e) { }
+  }
+
+  // ---- small hash (djb2) for "only if changed" ----
+  function _hashStr(s) {
+    var h = 5381;
+    for (var i = 0; i < s.length; i++) {
+      h = ((h << 5) + h) + s.charCodeAt(i);
+      h = h >>> 0;
+    }
+    return h.toString(16);
+  }
+
+  function _sigForDB(ownerId) {
+    var KEY_DB = "abonents_db_v1";
+    var obj = window.JKHStore ? window.JKHStore.getJSON(KEY_DB, null, ownerId) : null;
+    var s = "";
+    try { s = JSON.stringify(obj || {}); } catch (e) { s = String(obj); }
+    return _hashStr(s) + ":" + String(s.length);
+  }
+
+  function _sigForALL(ownerId) {
+    if (!window.JKHStore) return "0:0";
+    var scopedKeys = window.JKHStore.keysForOwner(ownerId) || [];
+    var pref = window.JKHStore.scopePrefixFor(ownerId) || "";
+    // сортируем, чтобы подпись была стабильной
+    scopedKeys.sort();
+    var out = [];
+    for (var i = 0; i < scopedKeys.length; i++) {
+      var sk = scopedKeys[i];
+      var baseKey = sk.indexOf(pref) === 0 ? sk.slice(pref.length) : sk;
+      var raw = window.JKHStore.getRaw(baseKey, ownerId) || "";
+      out.push(baseKey + "=" + raw);
+    }
+    var joined = out.join("\n");
+    return _hashStr(joined) + ":" + String(joined.length);
+  }
+
+  function _getLastSigKey(scope) {
+    return (scope === "all") ? K_LAST_SIG_ALL : K_LAST_SIG_DB;
+  }
+
+  // ---- API calls ----
+  async function _apiGet(url) {
+    var r = await fetch(url, { method: "GET", credentials: "same-origin" });
+    var txt = await r.text();
+    var data;
+    try { data = JSON.parse(txt); } catch (e) { data = null; }
+    return { okHttp: r.ok, status: r.status, data: data, text: txt };
+  }
+
+  async function _apiPost(url, bodyObj) {
+    var r = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(bodyObj),
+      credentials: "same-origin"
+    });
+    var txt = await r.text();
+    var data;
+    try { data = JSON.parse(txt); } catch (e) { data = null; }
+    return { okHttp: r.ok, status: r.status, data: data, text: txt };
+  }
+
+  async function pingServer() {
+    if (!isOnlineMode()) {
+      _setStatus({ server: "OFFLINE (локально)", lastError: null });
+      return false;
+    }
+    try {
+      var res = await _apiGet("/api/store_keys?owner=" + encodeURIComponent(_ownerId() || "guest"));
+      if (res.okHttp && res.data && res.data.ok === true) {
+        _setStatus({ server: "🟢 подключён", lastError: null });
+        return true;
+      }
+      _setStatus({ server: "🟡 нет ответа", lastError: (res.data && res.data.error) ? res.data.error : ("HTTP " + res.status) });
+      return false;
+    } catch (e) {
+      _setStatus({ server: "🔴 ошибка сети", lastError: String(e && e.message ? e.message : e) });
+      return false;
+    }
+  }
+
+  async function upload(scope) {
+    if (!isOnlineMode()) {
+      _setStatus({ lastAction: "Сохранение пропущено: OFFLINE режим", lastError: null });
+      return false;
+    }
+    if (_isGuestOrAll()) {
+      _setStatus({ lastAction: "Сохранение запрещено: Гость/ALL", lastError: "GUEST_OR_ALL_READONLY" });
+      return false;
+    }
+
+    var ownerId = _ownerId();
+    var onlyIfChanged = (_lsGet(K_AS_ONLY_CHANGED, "0") === "1");
+    var sig = (scope === "all") ? _sigForALL(ownerId) : _sigForDB(ownerId);
+    var lastSig = _lsGet(_getLastSigKey(scope), "");
+    if (onlyIfChanged && lastSig && sig === lastSig) {
+      _setStatus({ lastAction: "Изменений нет — сохранение пропущено", lastError: null });
+      return true;
+    }
+
+    try {
+      if (scope === "all") {
+        // грузим все scoped keys этого ownerId как отдельные записи
+        var scopedKeys = window.JKHStore.keysForOwner(ownerId) || [];
+        var pref = window.JKHStore.scopePrefixFor(ownerId) || "";
+        scopedKeys.sort();
+        for (var i = 0; i < scopedKeys.length; i++) {
+          var sk = scopedKeys[i];
+          var baseKey = sk.indexOf(pref) === 0 ? sk.slice(pref.length) : sk;
+          var raw = window.JKHStore.getRaw(baseKey, ownerId) || "";
+          var resSet = await _apiPost("/api/store", { owner: ownerId, key: baseKey, value: raw });
+          if (!(resSet.okHttp && resSet.data && resSet.data.ok === true)) {
+            _setStatus({ lastAction: "Ошибка сохранения (all)", lastError: (resSet.data && resSet.data.error) ? resSet.data.error : ("HTTP " + resSet.status) });
+            return false;
+          }
+        }
+      } else {
+        // db-only
+        var KEY_DB = "abonents_db_v1";
+        var rawDb = window.JKHStore.getRaw(KEY_DB, ownerId) || "";
+        var res = await _apiPost("/api/store", { owner: ownerId, key: KEY_DB, value: rawDb });
+        if (!(res.okHttp && res.data && res.data.ok === true)) {
+          _setStatus({ lastAction: "Ошибка сохранения (db)", lastError: (res.data && res.data.error) ? res.data.error : ("HTTP " + res.status) });
+          return false;
+        }
+      }
+
+      _lsSet(_getLastSigKey(scope), sig);
+      _setStatus({ lastSaveAt: _nowISO(), lastAction: "✅ Сохранено на сервер", lastError: null });
+      return true;
+    } catch (e) {
+      _setStatus({ lastAction: "Ошибка сохранения", lastError: String(e && e.message ? e.message : e) });
+      return false;
+    }
+  }
+
+  async function download(scope) {
+    if (!isOnlineMode()) {
+      _setStatus({ lastAction: "Загрузка пропущена: OFFLINE режим", lastError: null });
+      return false;
+    }
+    if (_isGuestOrAll()) {
+      _setStatus({ lastAction: "Загрузка запрещена: Гость/ALL", lastError: "GUEST_OR_ALL_READONLY" });
+      return false;
+    }
+
+    var ownerId = _ownerId();
+
+    try {
+      if (scope === "all") {
+        var resKeys = await _apiGet("/api/store_keys?owner=" + encodeURIComponent(ownerId));
+        if (!(resKeys.okHttp && resKeys.data && resKeys.data.ok === true)) {
+          _setStatus({ lastAction: "Ошибка чтения ключей", lastError: (resKeys.data && resKeys.data.error) ? resKeys.data.error : ("HTTP " + resKeys.status) });
+          return false;
+        }
+        var keys = resKeys.data.keys || [];
+        for (var i = 0; i < keys.length; i++) {
+          var baseKey = keys[i];
+          var resGet = await _apiGet("/api/store?owner=" + encodeURIComponent(ownerId) + "&key=" + encodeURIComponent(baseKey));
+          if (!(resGet.okHttp && resGet.data && resGet.data.ok === true)) {
+            _setStatus({ lastAction: "Ошибка загрузки ключа " + baseKey, lastError: (resGet.data && resGet.data.error) ? resGet.data.error : ("HTTP " + resGet.status) });
+            return false;
+          }
+          window.JKHStore.setRaw(baseKey, resGet.data.value || "", ownerId);
+        }
+      } else {
+        var KEY_DB = "abonents_db_v1";
+        var resDb = await _apiGet("/api/store?owner=" + encodeURIComponent(ownerId) + "&key=" + encodeURIComponent(KEY_DB));
+        if (!(resDb.okHttp && resDb.data && resDb.data.ok === true)) {
+          _setStatus({ lastAction: "Ошибка загрузки базы", lastError: (resDb.data && resDb.data.error) ? resDb.data.error : ("HTTP " + resDb.status) });
+          return false;
+        }
+        window.JKHStore.setRaw(KEY_DB, resDb.data.value || "", ownerId);
+      }
+
+      // пересчёт сигнатуры после загрузки
+      var sig = (scope === "all") ? _sigForALL(ownerId) : _sigForDB(ownerId);
+      _lsSet(_getLastSigKey(scope), sig);
+
+      _setStatus({ lastAction: "✅ Загружено с сервера", lastError: null });
+      try { location.reload(); } catch (e) { }
+      return true;
+    } catch (e) {
+      _setStatus({ lastAction: "Ошибка загрузки", lastError: String(e && e.message ? e.message : e) });
+      return false;
+    }
+  }
+
+  // ---- UI helpers ----
+  function getSettings() {
+    return {
+      enabled: _lsGet(K_AS_ENABLED, "0") === "1",
+      minutes: parseInt(_lsGet(K_AS_MINUTES, "5"), 10) || 5,
+      scope: _lsGet(K_AS_SCOPE, "db") || "db",
+      onlyIfChanged: _lsGet(K_AS_ONLY_CHANGED, "0") === "1"
+    };
+  }
+
+  var _timer = null;
+
+  function _stopTimer() {
+    if (_timer) {
+      try { clearInterval(_timer); } catch (e) { }
+      _timer = null;
+    }
+  }
+
+  function _startTimer() {
+    _stopTimer();
+
+    var s = getSettings();
+    if (!s.enabled) {
+      _setStatus({ autosaveState: "выключено" });
+      return;
+    }
+
+    var mins = Math.max(1, Math.min(120, s.minutes || 5));
+    _setStatus({ autosaveState: "включено (" + mins + " мин), режим: " + (s.scope === "all" ? "вся база" : "только база") + (s.onlyIfChanged ? ", только при изменениях" : "") });
+
+    _timer = setInterval(function () {
+      upload(s.scope === "all" ? "all" : "db");
+    }, mins * 60 * 1000);
+  }
+
+  function applySettingsFromUI(s) {
+    var enabled = !!s.enabled;
+    var minutes = Math.max(1, Math.min(120, parseInt(s.minutes, 10) || 5));
+    var scope = (s.scope === "all") ? "all" : "db";
+    var onlyIfChanged = !!s.onlyIfChanged;
+
+    _lsSet(K_AS_ENABLED, enabled ? "1" : "0");
+    _lsSet(K_AS_MINUTES, String(minutes));
+    _lsSet(K_AS_SCOPE, scope);
+    _lsSet(K_AS_ONLY_CHANGED, onlyIfChanged ? "1" : "0");
+
+    _setStatus({ lastAction: "Настройки авто-сохранения применены", lastError: null });
+    _startTimer();
+  }
+
+  async function uploadNow() {
+    if (_isGuestOrAll()) {
+      alert("Сохранение запрещено: режим 'Гость' или 'ALL'.\n\nПояснение:\n- Гость (Guest) = только просмотр\n- ALL = сводный просмотр админом");
+      return;
+    }
+    var s = getSettings();
+    var scope = (s.scope === "all") ? "all" : "db";
+    await upload(scope);
+  }
+
+  async function downloadNow() {
+    if (_isGuestOrAll()) {
+      alert("Загрузка запрещена: режим 'Гость' или 'ALL'.");
+      return;
+    }
+    var ok = confirm("Загрузить данные с сервера (MySQL) и заменить локальные?\n\nВНИМАНИЕ: локальные несохранённые изменения будут перезаписаны.");
+    if (!ok) return;
+    var s = getSettings();
+    var scope = (s.scope === "all") ? "all" : "db";
+    await download(scope);
+  }
+
+  // стартуем таймер при загрузке страницы (если включён)
+  try { _startTimer(); } catch (e) { }
+
+  window.JKHRemoteSync = {
+    // public
+    pingServer: pingServer,
+    uploadNow: uploadNow,
+    downloadNow: downloadNow,
+    applySettingsFromUI: applySettingsFromUI,
+    getSettings: getSettings,
+    refreshStatusUI: refreshStatusUI
+  };
+})();

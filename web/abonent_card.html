@@ -1527,7 +1527,14 @@ function bindCalcButtons(){
 
     repBtn.addEventListener("click", () => {
         const id = getAbonentIdFromURL();
-        location.href = "reports.html?abonent=" + encodeURIComponent(id);
+	        // ✅ FIX: forward active db key (if present) to reports page
+	        // to keep correct data when multiple bases exist in localStorage.
+	        let dbKey = "";
+	        try{
+	            const p = new URLSearchParams(location.search);
+	            dbKey = String(p.get("db") || "").trim();
+	        }catch(e){ dbKey = ""; }
+	        location.href = "reports.html?abonent=" + encodeURIComponent(id) + (dbKey ? ("&db=" + encodeURIComponent(dbKey)) : "");
     });
 }
 

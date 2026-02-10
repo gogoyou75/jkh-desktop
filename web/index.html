@@ -126,6 +126,93 @@ Doc: docs/LOGIC_SPEC_v1.5.3.md
 
 <h2>ОБЩАЯ ИНФОРМАЦИЯ ПО КАЖДОМУ АБОНЕНТУ</h2>
 
+<div id="jkhSyncPanel" style="margin:10px 0 14px 0; padding:10px 12px; border:1px solid #ddd; border-radius:8px; background:#fafafa;">
+  <div style="display:flex; flex-wrap:wrap; gap:8px; align-items:center;">
+    <button id="btnSyncDownload" type="button" title="Download from server = Загрузить с сервера">Загрузить с сервера (MySQL)</button>
+    <button id="btnSyncUpload" type="button" title="Upload to server = Сохранить на сервер">Сохранить на сервер (MySQL)</button>
+
+    <span style="margin-left:10px; font-weight:600;">Авто-сохранение</span>
+    <label style="display:inline-flex; align-items:center; gap:6px;">
+      <input id="autosaveEnabled" type="checkbox">
+      <span>включено</span>
+    </label>
+
+    <label style="display:inline-flex; align-items:center; gap:6px;">
+      <span>каждые</span>
+      <input id="autosaveMinutes" type="number" min="1" max="120" value="5" style="width:70px;">
+      <span>мин.</span>
+    </label>
+
+    <label style="display:inline-flex; align-items:center; gap:6px;">
+      <span>режим</span>
+      <select id="autosaveScope">
+        <option value="db">Только база (быстро)</option>
+        <option value="all">Вся база (включая платежи)</option>
+      </select>
+    </label>
+
+    <label style="display:inline-flex; align-items:center; gap:6px;">
+      <input id="autosaveOnlyChanged" type="checkbox">
+      <span>только если были изменения</span>
+    </label>
+
+    <button id="btnAutosaveApply" type="button" title="Apply = применить настройки">применить</button>
+  </div>
+
+  <div id="syncStatusLine" style="margin-top:10px; font-size:13px; line-height:1.35;">
+    <div>🛰️ Сервер: <span id="syncServerState">…</span></div>
+    <div>💾 Последнее сохранение: <span id="syncLastSave">—</span></div>
+    <div>🔄 Авто-сохранение: <span id="syncAutosaveState">—</span></div>
+    <div>ℹ️ Последнее действие: <span id="syncLastAction">—</span></div>
+    <div style="color:#b00020;">❗ Ошибка: <span id="syncLastError">—</span></div>
+  </div>
+
+  <div style="margin-top:8px; font-size:12px; color:#555;">
+    Подсказка: <b>MySQL (сервер)</b> — общая база через интернет. <b>Локально (браузер)</b> — копия (кэш).
+  </div>
+</div>
+
+<script>
+(function(){
+  function byId(id){ return document.getElementById(id); }
+
+  function initSyncPanel(){
+    if (!window.JKHRemoteSync) {
+      byId('syncServerState').textContent = 'модуль синхронизации не загружен';
+      return;
+    }
+
+    // hydrate UI from settings
+    var s = window.JKHRemoteSync.getSettings();
+    byId('autosaveEnabled').checked = !!s.enabled;
+    byId('autosaveMinutes').value = String(s.minutes || 5);
+    byId('autosaveScope').value = s.scope || 'db';
+    byId('autosaveOnlyChanged').checked = !!s.onlyIfChanged;
+
+    byId('btnSyncDownload').onclick = function(){ window.JKHRemoteSync.downloadNow(); };
+    byId('btnSyncUpload').onclick = function(){ window.JKHRemoteSync.uploadNow(); };
+    byId('btnAutosaveApply').onclick = function(){
+      window.JKHRemoteSync.applySettingsFromUI({
+        enabled: byId('autosaveEnabled').checked,
+        minutes: parseInt(byId('autosaveMinutes').value, 10) || 5,
+        scope: byId('autosaveScope').value,
+        onlyIfChanged: byId('autosaveOnlyChanged').checked
+      });
+    };
+
+    window.JKHRemoteSync.refreshStatusUI();
+    window.JKHRemoteSync.pingServer(); // обновит "Сервер: ..."
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initSyncPanel);
+  } else {
+    initSyncPanel();
+  }
+})();
+</script>
+
+
 <table id="abonentsTable" class="sticky-header">
     <thead>
         <!-- === ШАПКА === -->

@@ -327,6 +327,15 @@ document.addEventListener("DOMContentLoaded", () => {
 
     document.getElementById("openReport01").addEventListener("click", () => {
         const id = getAbonentIdFromURL();
+
+	        // ✅ FIX: если страница открыта в рамках конкретной базы (namespaced key),
+	        // прокидываем её в spravka_sud.html через параметр &db=...
+	        // Это предотвращает выбор "не той" базы при одновременном наличии нескольких баз в localStorage.
+	        let dbKey = "";
+	        try{
+	            const p = new URLSearchParams(location.search);
+	            dbKey = String(p.get("db") || "").trim();
+	        }catch(e){ dbKey = ""; }
         const from = document.getElementById("repFrom").value;
         const to   = document.getElementById("repTo").value;
 
@@ -334,8 +343,8 @@ document.addEventListener("DOMContentLoaded", () => {
         if (isValidPeriod(from, to)) saveReportPeriod(from, to);
         else saveReportPeriod("", "");
 
-        // открываем страницу справки (если она есть в проекте)
-        location.href = "spravka_sud.html?abonent=" + encodeURIComponent(id);
+	        // открываем страницу справки (если она есть в проекте)
+	        location.href = "spravka_sud.html?abonent=" + encodeURIComponent(id) + (dbKey ? ("&db=" + encodeURIComponent(dbKey)) : "");
     });
 });
 </script>

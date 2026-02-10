@@ -92,6 +92,17 @@
   // ------------------------------------------------------------
   // ✅ DETECTOR: find AbonentsDB in namespaced localStorage
   // ------------------------------------------------------------
+
+  // Если в URL передали конкретный ключ базы (db=...), используем его как приоритет.
+  // Это убирает ситуации, когда в браузере одновременно лежит несколько баз,
+  // и детектор случайно выбирает "не ту" (что приводило к другой фамилии/пустым данным).
+  function getDbKeyFromURL(){
+    try{
+      const p = new URLSearchParams(location.search);
+      const k = String(p.get("db") || "").trim();
+      return k || "";
+    }catch(e){ return ""; }
+  }
   function loadAbonentsDbCandidateKeys(){
     const out = [];
     try{
@@ -116,6 +127,17 @@
   }
 
   function getDbRootForAbonent(abonentId){
+    // 0) явный ключ базы из URL
+    const forcedKey = getDbKeyFromURL();
+    if (forcedKey){
+      const raw = localStorage.getItem(forcedKey);
+      if (raw){
+        const data = safeJSONParse(raw, null);
+        const db = normalizeDbRoot(data);
+        if (db) return db;
+      }
+    }
+
     // 1) если window.AbonentsDB есть — используем
     if (window.AbonentsDB && window.AbonentsDB.abonents){
       const db = normalizeDbRoot(window.AbonentsDB);

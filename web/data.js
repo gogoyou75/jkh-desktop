@@ -10,6 +10,23 @@
   const KEY_DB = "abonents_db_v1";
 
   // ============================================================
+  // ✅ JKH_REMOTE_DATA_SYNC v1 (2026-02-10)
+  // ONLINE (MySQL) режим без ломания синхронного кода:
+  // 1) Всегда читаем AbonentsDB из локального кэша (как раньше)
+  // 2) В фоне подтягиваем с сервера и, если получили данные — обновляем кэш и перезагружаем страницу 1 раз.
+  // Переводы:
+  //   sync = синхронизация
+  //   cache = кэш (локальная копия)
+  // ============================================================
+  function _remoteEnabled(){
+    try{ return !!(window.JKHRemote && typeof JKHRemote.isEnabled === "function" && JKHRemote.isEnabled()); }catch(e){ return false; }
+  }
+  function _fireAndForget(p){
+    try{ Promise.resolve(p).catch(function(e){ try{ console.warn("[remote] failed", e); }catch(_){ } }); }catch(e){}
+  }
+
+
+  // ============================================================
   // Scoped storage helpers (per-user базы + admin "ALL")
   // ============================================================
   function _ownerId() {
