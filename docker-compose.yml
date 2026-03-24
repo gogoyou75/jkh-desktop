@@ -30,8 +30,10 @@ services:
     restart: unless-stopped
 
   api:
-    build: ./backend
+    image: jkh-api
     container_name: jkh_api
+    volumes:
+      - ./backend:/app
     environment:
       DB_HOST: mysql
       DB_PORT: "3306"

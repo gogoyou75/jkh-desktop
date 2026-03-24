@@ -529,7 +529,7 @@
 
   // ---- API calls ----
   async function _apiGet(url) {
-    var r = await fetch(url, { method: "GET", credentials: "same-origin" });
+    var r = await fetch(url, { method: "GET", credentials: "include" });
     var txt = await r.text();
     var data;
     try { data = JSON.parse(txt); } catch (e) { data = null; }
@@ -541,7 +541,7 @@
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(bodyObj),
-      credentials: "same-origin"
+      credentials: "include"
     });
     var txt = await r.text();
     var data;
