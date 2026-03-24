@@ -108,10 +108,9 @@ def _resolve_owner(explicit_owner: str | None = None):
     user, err = _require_user()
     if err:
         return None, err
-
-    owner = (explicit_owner or "").strip()
-    if user.role == "admin" and owner:
-        return owner, None
+    # SECURITY: owner всегда берётся только из серверной сессии.
+    # Любые owner из query/body намеренно игнорируем.
+    _ = explicit_owner
     return user.id, None
 
 
@@ -322,6 +321,7 @@ def store_keys():
         text("SELECT k FROM kv_store WHERE owner=:owner ORDER BY k"),
         {"owner": owner},
     ).all()
+    app.logger.info("store_keys owner=%s count=%s", owner, len(rows))
     return jsonify(ok=True, keys=[r[0] for r in rows], owner=owner)
 
 
@@ -337,7 +337,9 @@ def store_get():
 
     row = KVStore.query.filter_by(owner=owner, k=key).first()
     if not row:
+        app.logger.info("store_get owner=%s key=%s status=not_found", owner, key)
         return jsonify(ok=False, error="not_found", value=None), 404
+    app.logger.info("store_get owner=%s key=%s size=%s status=ok", owner, key, len(row.v or ""))
     return jsonify(ok=True, value=row.v, owner=owner)
 
 
@@ -363,6 +365,7 @@ def store_set():
     else:
         db.session.add(KVStore(owner=owner, k=key, v=value))
     db.session.commit()
+    app.logger.info("store_set owner=%s key=%s size=%s status=ok", owner, key, len(value or ""))
     return jsonify(ok=True, owner=owner)
 
 
