@@ -348,6 +348,15 @@
 
     cacheSessionUser(data.user);
     _sessionReady = true;
+    console.info("[auth] login userId=%s email=%s", String(data.user && data.user.id || ""), String(data.user && data.user.email || ""));
+
+    try {
+      if (window.JKHRemoteSync && typeof window.JKHRemoteSync.autoLoadAfterLogin === "function") {
+        await window.JKHRemoteSync.autoLoadAfterLogin();
+      }
+    } catch (e) {
+      console.warn("[auth] autoLoadAfterLogin failed:", e);
+    }
 
     renderAuthStatus();
     protectPages();
@@ -369,6 +378,15 @@
 
     cacheSessionUser(data.user);
     _sessionReady = true;
+    console.info("[auth] register userId=%s email=%s role=%s", String(data.user && data.user.id || ""), String(data.user && data.user.email || ""), String(data.user && data.user.role || ""));
+
+    try {
+      if (window.JKHRemoteSync && typeof window.JKHRemoteSync.autoLoadAfterLogin === "function") {
+        await window.JKHRemoteSync.autoLoadAfterLogin();
+      }
+    } catch (e) {
+      console.warn("[auth] autoLoadAfterLogin failed:", e);
+    }
 
     renderAuthStatus();
     protectPages();
@@ -528,8 +546,15 @@
     protectPages();
 
     syncSessionFromServer(false).then(function () {
+      var u = getCurrentUser();
+      if (u) console.info("[auth] init session userId=%s email=%s", String(u.id || ""), String(u.email || ""));
       renderAuthStatus();
       protectPages();
+      try {
+        if (window.JKHRemoteSync && typeof window.JKHRemoteSync.autoLoadAfterLogin === "function") {
+          window.JKHRemoteSync.autoLoadAfterLogin().catch(function () {});
+        }
+      } catch (e) {}
     }).catch(function () {
       clearSessionCache();
       renderAuthStatus();
