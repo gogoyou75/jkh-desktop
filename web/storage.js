@@ -129,11 +129,6 @@
     "abonents_db_v1",
     "abonent_notes_v1",
     "exclude_periods_v1",
-    "tariffs_dynamic_v1",
-    "tariffs_content_repair_v1",
-    "tariffs_content_repair_v1_backup",
-    "refinancing_rates_normal_v1",
-    "refinancing_rates_moratorium_v1",
     "organization_requisites_v1",
     "organization_signers_v1",
     "payment_sources_v1",
@@ -564,14 +559,14 @@
     var kx = String(baseKey || "");
     if (!kx) return false;
     return (
-      kx === "tariffs_dynamic_v1" ||
-      kx === "tariffs_content_repair_v1" ||
-      kx === "tariffs_content_repair_v1_backup" ||
-      kx === "refinancing_rates_normal_v1" ||
-      kx === "refinancing_rates_moratorium_v1" ||
       kx.indexOf("tariffs_") === 0 ||
       kx.indexOf("ref_rates_") === 0
     );
+  }
+
+  function _isCanonicalOwnerBoundTariffRateKey(baseKey) {
+    var kx = String(baseKey || "");
+    return kx.indexOf("tariffs_") === 0 || kx.indexOf("ref_rates_") === 0;
   }
 
   // ---- status state ----
@@ -713,6 +708,7 @@
     // 1) scoped (новый канон)
     var v = window.JKHStore ? window.JKHStore.getRaw(baseKey, ownerId) : null;
     if (v !== null && v !== undefined && v !== "") return v;
+    if (_isCanonicalOwnerBoundTariffRateKey(baseKey)) return "";
     // 2) legacy plain localStorage (старые страницы)
     try { return localStorage.getItem(baseKey) || ""; } catch (e) { return ""; }
   }
@@ -720,6 +716,7 @@
   function _writeLocalCompat(baseKey, value, ownerId) {
     var v = (value === null || value === undefined) ? "" : String(value);
     if (window.JKHStore) window.JKHStore.setRaw(baseKey, v, ownerId);
+    if (_isCanonicalOwnerBoundTariffRateKey(baseKey)) return;
     // Переходная совместимость: страницы, которые ещё читают прямой localStorage.
     try { localStorage.setItem(baseKey, v); } catch (e) { }
   }
