@@ -88,10 +88,7 @@
 <script>
 /* =========================================================
    refinancing.html — CRUD ставок (обычные + мораторий)
-
-   Хранение:
-   - localStorage["refinancing_rates_normal_v1"]     = [{from:"DD.MM.YYYY", rate:"7.50"}...]
-   - localStorage["refinancing_rates_moratorium_v1"] = [{from:"DD.MM.YYYY", rate:"0.00"}...]
+   Каноническое хранение: localStorage["ref_rates_{owner}"] = { normal:[], moratorium:[] }
    ========================================================= */
 
 const KEY_NORMAL = "refinancing_rates_normal_v1";
@@ -161,7 +158,8 @@ function applyDateMaskToInput(inputEl){
 function loadList(key){
     try{
         const cache = JSON.parse(localStorage.getItem(keyCache()) || "{}");
-        const arr = Array.isArray(cache[key]) ? cache[key] : (localStorage.getItem(key) ? JSON.parse(localStorage.getItem(key)) : []);
+        const field = (key === KEY_MORA) ? "moratorium" : "normal";
+        const arr = Array.isArray(cache[field]) ? cache[field] : [];
         if (!Array.isArray(arr)) return [];
         return arr
             .map(x => ({ from: String(x.from||""), rate: String(x.rate||"") }))
@@ -185,10 +183,23 @@ function saveList(key, list){
         return da - db;
     });
 
-    localStorage.setItem(key, JSON.stringify(cleaned));
     let cache = {};
     try { cache = JSON.parse(localStorage.getItem(keyCache()) || "{}") || {}; } catch(e){ cache = {}; }
-    cache[key] = cleaned;
+    const field = (key === KEY_MORA) ? "moratorium" : "normal";
+    cache[field] = cleaned;
+    localStorage.setItem(keyCache(), JSON.stringify(cache));
+}
+
+function migrateLegacyRatesIfNeeded(){
+    let cache = {};
+    try { cache = JSON.parse(localStorage.getItem(keyCache()) || "{}") || {}; } catch(e){ cache = {}; }
+    if (Array.isArray(cache.normal) || Array.isArray(cache.moratorium)) return;
+    let legacyNormal = [];
+    let legacyMora = [];
+    try { legacyNormal = JSON.parse(localStorage.getItem(KEY_NORMAL) || "[]") || []; } catch(e){ legacyNormal = []; }
+    try { legacyMora = JSON.parse(localStorage.getItem(KEY_MORA) || "[]") || []; } catch(e){ legacyMora = []; }
+    cache.normal = Array.isArray(legacyNormal) ? legacyNormal : [];
+    cache.moratorium = Array.isArray(legacyMora) ? legacyMora : [];
     localStorage.setItem(keyCache(), JSON.stringify(cache));
 }
 
@@ -366,19 +377,7 @@ function bindTbodyHandlers(bodyId, key){
 }
 
 document.addEventListener("DOMContentLoaded", () => {
-    // Демо-значения один раз
-    if (!localStorage.getItem(KEY_NORMAL)){
-        saveList(KEY_NORMAL, [
-            { from:"01.01.2023", rate:"7.50" },
-            { from:"01.01.2024", rate:"8.00" }
-        ]);
-    }
-    if (!localStorage.getItem(KEY_MORA)){
-        saveList(KEY_MORA, [
-            { from:"01.04.2023", rate:"0.00" },
-            { from:"01.06.2023", rate:"3.00" }
-        ]);
-    }
+    migrateLegacyRatesIfNeeded();
 
     renderTable("ratesBodyNormal", KEY_NORMAL);
     renderTable("ratesBodyMora", KEY_MORA);

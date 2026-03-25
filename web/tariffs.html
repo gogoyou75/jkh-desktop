@@ -13,10 +13,7 @@
   <script src="data.js"></script>
   <script src="layout.js"></script>
 
-  <!-- ЛОГИКА автоначислений (Variant A).
-       ВАЖНО: этот файл может читать старый ключ tariffs_content_repair_v1.
-       Поэтому мы сохраняем тарифы в новом ключе tariffs_dynamic_v1 И
-       автоматически пишем совместимость в tariffs_content_repair_v1. -->
+  <!-- ЛОГИКА автоначислений (Variant A). -->
   <script src="autoaccrual_engine.js"></script>
 
   <style>
@@ -72,9 +69,8 @@
   <div class="small">
     ✅ Можно создавать любое количество тарифов.<br>
     ✅ Для каждого тарифа: <b>название</b>, <b>тип</b> (руб/м² или фикс/мес), <b>история ставок</b> и <b>галочка “участвует в расчётах”</b>.<br><br>
-    <b>Хранение:</b><br>
-    • основной ключ: <span class="mono">tariffs_dynamic_v1</span><br>
-    • совместимость (для старых расчётов): <span class="mono">tariffs_content_repair_v1</span> (генерируется автоматически)
+    <b>Хранение (канон):</b><br>
+    • owner-bound ключ: <span class="mono">tariffs_{owner}</span>
   </div>
   <div class="hint">
     ⚠️ Дата начала тарифа — <b>только 1-е число месяца</b>. Выбор даты сделан календарём “месяц/год”.
@@ -95,7 +91,6 @@
 
   const KEY_NEW = "tariffs_dynamic_v1";
   const KEY_LEGACY = "tariffs_content_repair_v1";
-  const KEY_LEGACY_BACKUP = "tariffs_content_repair_v1_backup";
   function getOwnerId(){
     try{ if(window.JKHStorage && typeof JKHStorage.getActiveOwnerId === "function") return String(JKHStorage.getActiveOwnerId() || "guest"); }catch(e){}
     try{ if(window.Auth && typeof Auth.getActiveDbOwnerId === "function") return String(Auth.getActiveDbOwnerId() || "guest"); }catch(e){}
@@ -178,12 +173,11 @@
 
   function migrateIfNeeded(){
     const existing = safeJsonParse(localStorage.getItem(cacheKey()), null);
-    if (Array.isArray(existing) && existing.length){
-      localStorage.setItem(KEY_NEW, JSON.stringify(existing));
+    if (Array.isArray(existing)){
       return existing;
     }
     const existingLegacyNew = safeJsonParse(localStorage.getItem(KEY_NEW), null);
-    if (Array.isArray(existingLegacyNew) && existingLegacyNew.length){
+    if (Array.isArray(existingLegacyNew)){
       localStorage.setItem(cacheKey(), JSON.stringify(existingLegacyNew));
       return existingLegacyNew;
     }
@@ -208,7 +202,6 @@
       }
     ];
 
-    localStorage.setItem(KEY_NEW, JSON.stringify(tariffs));
     localStorage.setItem(cacheKey(), JSON.stringify(tariffs));
     return tariffs;
   }
@@ -228,13 +221,6 @@
     }));
   }
 
-  function backupLegacy(){
-    try{
-      const raw = localStorage.getItem(KEY_LEGACY);
-      if (raw) localStorage.setItem(KEY_LEGACY_BACKUP, raw);
-    }catch{}
-  }
-
   function valueAsOf(rates, monthStartISO){
     const target = String(monthStartISO||"");
     let chosen = null;
@@ -242,43 +228,6 @@
       if (String(r.from) <= target) chosen = r;
     });
     return chosen ? r2(toNum(chosen.value)) : 0;
-  }
-
-  function buildLegacyTimeline(tariffs){
-    const per = (tariffs || []).filter(t => t.active && t.type === "per_m2" && String(t.title||"").trim());
-    const dates = new Set();
-
-    per.forEach(t => (t.rates||[]).forEach(r => { if (r.from) dates.add(normalizeISOToFirst(r.from)); }));
-    if (!dates.size) dates.add("2000-01-01");
-
-    const allDates = Array.from(new Set(Array.from(dates))).sort((a,b)=>String(a).localeCompare(String(b)));
-
-    const isRepair = (t) => String(t.code||"") === "repair" || String(t.title||"").toLowerCase().includes("ремонт");
-
-    const rows = [];
-    for (const d of allDates){
-      let sumContent = 0;
-      let sumRepair = 0;
-
-      for (const t of per){
-        const v = valueAsOf(t.rates, d);
-        if (isRepair(t)) sumRepair += v;
-        else sumContent += v;
-      }
-
-      rows.push({ from: d, content: r2(sumContent), repair: r2(sumRepair) });
-    }
-
-    const out = [];
-    let prev = null;
-    for (const r of rows){
-      if (!prev || r2(prev.content) !== r2(r.content) || r2(prev.repair) !== r2(r.repair)){
-        out.push(r);
-        prev = r;
-      }
-    }
-
-    return out.length ? out : [{ from: "2000-01-01", content: 0, repair: 0 }];
   }
 
   function validateTariffs(tariffs){
@@ -311,10 +260,6 @@
 
   function saveAll(tariffs){
     localStorage.setItem(cacheKey(), JSON.stringify(tariffs));
-    localStorage.setItem(KEY_NEW, JSON.stringify(tariffs));
-    backupLegacy();
-    const legacy = buildLegacyTimeline(tariffs);
-    localStorage.setItem(KEY_LEGACY, JSON.stringify(legacy));
   }
 
   function escapeHtml(s){
@@ -430,7 +375,7 @@
 
       let code = "";
       try{
-        const cur = safeJsonParse(localStorage.getItem(KEY_NEW), []);
+        const cur = safeJsonParse(localStorage.getItem(cacheKey()), []);
         const old = Array.isArray(cur) ? cur.find(x => String(x?.id) === id) : null;
         code = String(old?.code || "");
       }catch{}
@@ -466,7 +411,6 @@
       active: true,
       rates: []
     });
-    localStorage.setItem(KEY_NEW, JSON.stringify(tariffs));
     localStorage.setItem(cacheKey(), JSON.stringify(tariffs));
     render();
   }
@@ -489,7 +433,6 @@
     if (!confirm("Удалить тариф?")) return;
 
     const tariffs = loadNew().filter(t => String(t.id) !== id);
-    localStorage.setItem(KEY_NEW, JSON.stringify(tariffs));
     localStorage.setItem(cacheKey(), JSON.stringify(tariffs));
     render();
   }
@@ -581,7 +524,6 @@
   document.addEventListener("DOMContentLoaded", () => {
     migrateIfNeeded();
     render();
-    if (!localStorage.getItem(KEY_LEGACY)) localStorage.setItem(KEY_LEGACY, JSON.stringify(DEFAULT_LEGACY));
     if (!isAdminUser()){
       ["btnAddTariff","btnSaveAll","btnRecalcAll"].forEach(id => {
         const el = document.getElementById(id);
