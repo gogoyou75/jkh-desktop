@@ -81,6 +81,9 @@
     </div>
 
 </div>
+<div style="margin-top:12px;">
+    <button class="btn" id="reportRateErrorBtn" type="button">сообщить об ошибке ставки</button>
+</div>
 
 <script>
 /* =========================================================
@@ -93,6 +96,18 @@
 
 const KEY_NORMAL = "refinancing_rates_normal_v1";
 const KEY_MORA   = "refinancing_rates_moratorium_v1";
+function getOwnerId(){
+    try{ if(window.JKHStorage && typeof JKHStorage.getActiveOwnerId === "function") return String(JKHStorage.getActiveOwnerId() || "guest"); }catch(e){}
+    try{ if(window.Auth && typeof Auth.getActiveDbOwnerId === "function") return String(Auth.getActiveDbOwnerId() || "guest"); }catch(e){}
+    return "guest";
+}
+function keyCache(){ return "ref_rates_" + getOwnerId(); }
+function isAdminUser(){
+    try{
+        const u = window.Auth && typeof Auth.getCurrentUser === "function" ? Auth.getCurrentUser() : null;
+        return !!(u && String(u.role || "").toLowerCase() === "admin");
+    }catch(e){ return false; }
+}
 
 function esc(s){
     return String(s ?? "")
@@ -145,8 +160,8 @@ function applyDateMaskToInput(inputEl){
 
 function loadList(key){
     try{
-        const raw = localStorage.getItem(key);
-        const arr = raw ? JSON.parse(raw) : [];
+        const cache = JSON.parse(localStorage.getItem(keyCache()) || "{}");
+        const arr = Array.isArray(cache[key]) ? cache[key] : (localStorage.getItem(key) ? JSON.parse(localStorage.getItem(key)) : []);
         if (!Array.isArray(arr)) return [];
         return arr
             .map(x => ({ from: String(x.from||""), rate: String(x.rate||"") }))
@@ -171,6 +186,10 @@ function saveList(key, list){
     });
 
     localStorage.setItem(key, JSON.stringify(cleaned));
+    let cache = {};
+    try { cache = JSON.parse(localStorage.getItem(keyCache()) || "{}") || {}; } catch(e){ cache = {}; }
+    cache[key] = cleaned;
+    localStorage.setItem(keyCache(), JSON.stringify(cache));
 }
 
 function validate(list){
@@ -272,6 +291,10 @@ function addRow(bodyId){
 }
 
 function saveFromUI(key, bodyId){
+    if (!isAdminUser()){
+        alert("Ставки может изменять только admin.");
+        return;
+    }
     // на всякий случай нормализуем даты перед валидацией
     const rows = Array.from(document.querySelectorAll(`#${bodyId} .r-from`));
     rows.forEach(inp => applyDateMaskToInput(inp));
@@ -285,6 +308,24 @@ function saveFromUI(key, bodyId){
     saveList(key, list);
     alert("Сохранено");
     renderTable(bodyId, key);
+}
+
+async function reportRateError(){
+    const text = prompt("Опишите ошибку в ставке рефинансирования:");
+    if (!text || !text.trim()) return;
+    try{
+        const r = await fetch("/api/ref_rates/error_report", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            credentials: "include",
+            body: JSON.stringify({ message: text.trim() })
+        });
+        const j = await r.json().catch(() => ({}));
+        if (r.ok && j && j.ok) alert("Сообщение отправлено.");
+        else alert("Не удалось отправить сообщение.");
+    }catch(e){
+        alert("Ошибка сети при отправке сообщения.");
+    }
 }
 
 function bindTbodyHandlers(bodyId, key){
@@ -350,9 +391,17 @@ document.addEventListener("DOMContentLoaded", () => {
 
     document.getElementById("saveNormalBtn")?.addEventListener("click", () => saveFromUI(KEY_NORMAL, "ratesBodyNormal"));
     document.getElementById("saveMoraBtn")?.addEventListener("click", () => saveFromUI(KEY_MORA, "ratesBodyMora"));
+    document.getElementById("reportRateErrorBtn")?.addEventListener("click", reportRateError);
 
     bindTbodyHandlers("ratesBodyNormal", KEY_NORMAL);
     bindTbodyHandlers("ratesBodyMora", KEY_MORA);
+    if (!isAdminUser()){
+        ["addNormalBtn","addMoraBtn","saveNormalBtn","saveMoraBtn"].forEach(id => {
+            const el = document.getElementById(id);
+            if (el) el.disabled = true;
+        });
+        document.querySelectorAll("#ratesBodyNormal input, #ratesBodyNormal button, #ratesBodyMora input, #ratesBodyMora button").forEach(el => { el.disabled = true; });
+    }
 });
 </script>
 

@@ -96,6 +96,18 @@
   const KEY_NEW = "tariffs_dynamic_v1";
   const KEY_LEGACY = "tariffs_content_repair_v1";
   const KEY_LEGACY_BACKUP = "tariffs_content_repair_v1_backup";
+  function getOwnerId(){
+    try{ if(window.JKHStorage && typeof JKHStorage.getActiveOwnerId === "function") return String(JKHStorage.getActiveOwnerId() || "guest"); }catch(e){}
+    try{ if(window.Auth && typeof Auth.getActiveDbOwnerId === "function") return String(Auth.getActiveDbOwnerId() || "guest"); }catch(e){}
+    return "guest";
+  }
+  function cacheKey(){ return "tariffs_" + getOwnerId(); }
+  function isAdminUser(){
+    try{
+      const u = window.Auth && typeof Auth.getCurrentUser === "function" ? Auth.getCurrentUser() : null;
+      return !!(u && String(u.role || "").toLowerCase() === "admin");
+    }catch(e){ return false; }
+  }
 
   const DEFAULT_LEGACY = {
     content: [
@@ -165,8 +177,16 @@
   }
 
   function migrateIfNeeded(){
-    const existing = safeJsonParse(localStorage.getItem(KEY_NEW), null);
-    if (Array.isArray(existing) && existing.length) return existing;
+    const existing = safeJsonParse(localStorage.getItem(cacheKey()), null);
+    if (Array.isArray(existing) && existing.length){
+      localStorage.setItem(KEY_NEW, JSON.stringify(existing));
+      return existing;
+    }
+    const existingLegacyNew = safeJsonParse(localStorage.getItem(KEY_NEW), null);
+    if (Array.isArray(existingLegacyNew) && existingLegacyNew.length){
+      localStorage.setItem(cacheKey(), JSON.stringify(existingLegacyNew));
+      return existingLegacyNew;
+    }
 
     const legacy = loadLegacy();
     const tariffs = [
@@ -189,6 +209,7 @@
     ];
 
     localStorage.setItem(KEY_NEW, JSON.stringify(tariffs));
+    localStorage.setItem(cacheKey(), JSON.stringify(tariffs));
     return tariffs;
   }
 
@@ -289,6 +310,7 @@
   }
 
   function saveAll(tariffs){
+    localStorage.setItem(cacheKey(), JSON.stringify(tariffs));
     localStorage.setItem(KEY_NEW, JSON.stringify(tariffs));
     backupLegacy();
     const legacy = buildLegacyTimeline(tariffs);
@@ -434,6 +456,7 @@
   }
 
   function addTariff(){
+    if (!isAdminUser()) return;
     const tariffs = loadNew();
     tariffs.push({
       id: uid(),
@@ -444,6 +467,7 @@
       rates: []
     });
     localStorage.setItem(KEY_NEW, JSON.stringify(tariffs));
+    localStorage.setItem(cacheKey(), JSON.stringify(tariffs));
     render();
   }
 
@@ -459,16 +483,22 @@
   }
 
   function deleteTariff(card){
+    if (!isAdminUser()) return;
     const id = String(card.getAttribute("data-tariff-id") || "");
     if (!id) return;
     if (!confirm("Удалить тариф?")) return;
 
     const tariffs = loadNew().filter(t => String(t.id) !== id);
     localStorage.setItem(KEY_NEW, JSON.stringify(tariffs));
+    localStorage.setItem(cacheKey(), JSON.stringify(tariffs));
     render();
   }
 
   function saveAllFromUI(){
+    if (!isAdminUser()){
+      alert("Тарифы может изменять только admin.");
+      return false;
+    }
     const tariffs = readFromUI();
     const errs = validateTariffs(tariffs);
     if (errs.length){
@@ -552,6 +582,13 @@
     migrateIfNeeded();
     render();
     if (!localStorage.getItem(KEY_LEGACY)) localStorage.setItem(KEY_LEGACY, JSON.stringify(DEFAULT_LEGACY));
+    if (!isAdminUser()){
+      ["btnAddTariff","btnSaveAll","btnRecalcAll"].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.disabled = true;
+      });
+      document.querySelectorAll("#tariffsHost input, #tariffsHost select, #tariffsHost button").forEach(el => { el.disabled = true; });
+    }
   });
 
 })();
