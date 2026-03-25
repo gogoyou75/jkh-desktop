@@ -121,6 +121,28 @@ def _sync_log(action: str, owner: str, **extra):
     app.logger.info("[JKH sync] %s", " ".join(parts))
 
 
+PROTECTED_OWNER_LEVEL_KEYS = {
+    "tariffs_dynamic_v1",
+    "tariffs_content_repair_v1",
+    "tariffs_content_repair_v1_backup",
+    "refinancing_rates_normal_v1",
+    "refinancing_rates_moratorium_v1",
+}
+PROTECTED_OWNER_LEVEL_PREFIXES = (
+    "tariffs_",
+    "ref_rates_",
+)
+
+
+def _is_protected_owner_level_key(base_key: str) -> bool:
+    k = str(base_key or "").strip()
+    if not k:
+        return False
+    if k in PROTECTED_OWNER_LEVEL_KEYS:
+        return True
+    return any(k.startswith(pref) for pref in PROTECTED_OWNER_LEVEL_PREFIXES)
+
+
 @app.get("/health")
 def health():
     return jsonify(status="ok")
@@ -370,6 +392,11 @@ def store_set():
         value = ""
     if not isinstance(value, str):
         return _json_error("value_must_be_string", 400)
+    if _is_protected_owner_level_key(key):
+        admin, admin_err = _require_admin()
+        if admin_err:
+            return admin_err
+        _ = admin
 
     row = KVStore.query.filter_by(owner=owner, k=key).first()
     if row:
@@ -391,6 +418,11 @@ def store_delete():
     key = (data.get("key") or "").strip()
     if not key:
         return _json_error("key_required", 400)
+    if _is_protected_owner_level_key(key):
+        admin, admin_err = _require_admin()
+        if admin_err:
+            return admin_err
+        _ = admin
 
     row = KVStore.query.filter_by(owner=owner, k=key).first()
     if not row:
@@ -422,6 +454,33 @@ def store_dump():
 def admin_session_debug():
     user = _current_user()
     return jsonify(ok=True, session_user_id=session.get("user_id"), user=_user_payload(user) if user else None)
+
+
+@app.post("/api/ref_rates/error_report")
+def ref_rates_error_report():
+    user, err = _require_user()
+    if err:
+        return err
+
+    data = request.get_json(silent=True) or {}
+    message = str(data.get("message") or "").strip()
+    if not message:
+        return _json_error("message_required", 400)
+    if len(message) > 2000:
+        return _json_error("message_too_long", 400)
+
+    owner, owner_err = _resolve_owner(data.get("owner"))
+    if owner_err:
+        return owner_err
+
+    app.logger.warning(
+        "[ref_rates][error_report] owner=%s user_id=%s role=%s message=%s",
+        owner,
+        user.id,
+        user.role,
+        message,
+    )
+    return jsonify(ok=True, owner=owner)
 
 
 if __name__ == "__main__":

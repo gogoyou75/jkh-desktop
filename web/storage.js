@@ -143,6 +143,8 @@
     "jkh_excel_date_debug"
   ];
   var SYNC_CANON_PREFIX = [
+    "tariffs_",
+    "ref_rates_",
     "payments_",
     "exclude_periods_",
     "note_",
@@ -546,6 +548,32 @@
     return window.JKHStore.isGuestMode() || window.JKHStore.isAllMode();
   }
 
+  function _currentUserRole() {
+    try {
+      if (!window.Auth || typeof Auth.getCurrentUser !== "function") return "";
+      var u = Auth.getCurrentUser();
+      return String((u && u.role) || "").toLowerCase();
+    } catch (e) { return ""; }
+  }
+
+  function _isAdminRoleNow() {
+    return _currentUserRole() === "admin";
+  }
+
+  function _isProtectedOwnerLevelKey(baseKey) {
+    var kx = String(baseKey || "");
+    if (!kx) return false;
+    return (
+      kx === "tariffs_dynamic_v1" ||
+      kx === "tariffs_content_repair_v1" ||
+      kx === "tariffs_content_repair_v1_backup" ||
+      kx === "refinancing_rates_normal_v1" ||
+      kx === "refinancing_rates_moratorium_v1" ||
+      kx.indexOf("tariffs_") === 0 ||
+      kx.indexOf("ref_rates_") === 0
+    );
+  }
+
   // ---- status state ----
   var status = {
     server: "…",         // ok | offline | error | …
@@ -773,6 +801,10 @@
       var keysToSave = _projectKeysForScope(scopeNorm, ownerId);
       for (var i = 0; i < keysToSave.length; i++) {
         var baseKey = keysToSave[i];
+        if (!_isAdminRoleNow() && _isProtectedOwnerLevelKey(baseKey)) {
+          console.info("[JKH sync][save] owner=%s key=%s status=skip_non_admin", ownerId, baseKey);
+          continue;
+        }
         var raw = _readLocalCompat(baseKey, ownerId);
 
         // safeguard: не перезаписываем непустую базу на сервере пустой локальной базой
