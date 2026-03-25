@@ -123,6 +123,97 @@
   };
 
   // ============================================================
+  // Project key registry (единый канон sync/storage)
+  // ============================================================
+  var SYNC_CANON_EXACT = [
+    "abonents_db_v1",
+    "abonent_notes_v1",
+    "exclude_periods_v1",
+    "tariffs_dynamic_v1",
+    "tariffs_content_repair_v1",
+    "tariffs_content_repair_v1_backup",
+    "refinancing_rates_normal_v1",
+    "refinancing_rates_moratorium_v1",
+    "organization_requisites_v1",
+    "organization_signers_v1",
+    "payment_sources_v1",
+    "last_abonent_id",
+    "import_preview_v1",
+    "draft_new_abonent_v1",
+    "jkh_excel_date_debug"
+  ];
+  var SYNC_CANON_PREFIX = [
+    "payments_",
+    "exclude_periods_",
+    "note_",
+    "calc_period_",
+    "calc_period_active_",
+    "report_period_",
+    "payments_ui_collapsed_",
+    "jkh_transfer_to_v1:",
+    "jkh_transfer_balance_v1:",
+    "jkh_freeze_to_v1:",
+    "jkh_frozen_debt_v1:",
+    "moratorium_"
+  ];
+
+  function _isScopedKeyName(x) {
+    return String(x || "").indexOf("jkhdb::") === 0;
+  }
+  function _isProjectDataKey(baseKey) {
+    var kx = String(baseKey || "");
+    if (!kx || _isScopedKeyName(kx)) return false;
+    for (var i = 0; i < SYNC_CANON_EXACT.length; i++) if (kx === SYNC_CANON_EXACT[i]) return true;
+    for (var j = 0; j < SYNC_CANON_PREFIX.length; j++) if (kx.indexOf(SYNC_CANON_PREFIX[j]) === 0) return true;
+    return false;
+  }
+  function _toScopedProjectKeyMaybe(rawKey) {
+    var key = String(rawKey || "");
+    if (!key || _isScopedKeyName(key)) return key;
+    if (!_isProjectDataKey(key)) return key;
+    return k(key);
+  }
+
+  // ============================================================
+  // Bridge: прямой localStorage.* на страницах -> scoped ключи
+  // ============================================================
+  (function installProjectScopedLocalStorageBridge() {
+    try {
+      if (window.__JKH_PROJECT_SCOPE_BRIDGE_INSTALLED) return;
+      window.__JKH_PROJECT_SCOPE_BRIDGE_INSTALLED = true;
+
+      var origGet = localStorage.getItem.bind(localStorage);
+      var origSet = localStorage.setItem.bind(localStorage);
+      var origRem = localStorage.removeItem.bind(localStorage);
+
+      localStorage.getItem = function (key) {
+        var realKey = _toScopedProjectKeyMaybe(key);
+        return origGet(realKey);
+      };
+
+      localStorage.setItem = function (key, value) {
+        var realKey = _toScopedProjectKeyMaybe(key);
+        if (_isProjectDataKey(String(key || ""))) {
+          if (isGuestMode()) throw new Error("GUEST_READONLY");
+          if (isAllMode()) throw new Error("ALLMODE_READONLY");
+        }
+        return origSet(realKey, value);
+      };
+
+      localStorage.removeItem = function (key) {
+        var realKey = _toScopedProjectKeyMaybe(key);
+        if (_isProjectDataKey(String(key || ""))) {
+          if (isGuestMode()) throw new Error("GUEST_READONLY");
+          if (isAllMode()) throw new Error("ALLMODE_READONLY");
+        }
+        return origRem(realKey);
+      };
+    } catch (e) {
+      try { console.warn("[JKH storage] failed to install localStorage bridge:", e); } catch (_) {}
+    }
+  })();
+
+  // ============================================================
   // ✅ StorageAdapter (канон)
   // UI/скрипты должны работать через JKHStore, а НЕ через localStorage.*
   // ============================================================
@@ -529,16 +620,7 @@
 
   // ---- canonical sync keys ----
   var KEY_DB = "abonents_db_v1";
-  var SYNC_STATIC_KEYS = [
-    KEY_DB,
-    "tariffs_dynamic_v1",
-    "tariffs_content_repair_v1",
-    "tariffs_content_repair_v1_backup",
-    "refinancing_rates_normal_v1",
-    "refinancing_rates_moratorium_v1",
-    "organization_requisites_v1",
-    "organization_signers_v1"
-  ];
+  var SYNC_STATIC_KEYS = SYNC_CANON_EXACT.slice();
 
   function _uniq(arr) {
     var m = {};
@@ -570,18 +652,21 @@
       if (!id) continue;
       out.push("payments_" + id);
       out.push("exclude_periods_" + id);
+      out.push("note_" + id);
+      out.push("calc_period_" + id);
+      out.push("calc_period_active_" + id);
+      out.push("report_period_" + id);
+      out.push("payments_ui_collapsed_" + id);
+      out.push("jkh_transfer_to_v1:" + id);
+      out.push("jkh_freeze_to_v1:" + id);
+      out.push("moratorium_" + id);
     }
     return out;
   }
 
   function _projectKeysForScope(scope, ownerId) {
     var keys = [];
-    if (scope === "db") {
-      keys = SYNC_STATIC_KEYS.concat(_dynamicKeysFromDb(ownerId));
-      return _uniq(keys);
-    }
-
-    // all = canonical + все scoped ключи owner + исторические server keys
+    // db/all: всегда используем единый канонический список + динамика
     keys = SYNC_STATIC_KEYS.concat(_dynamicKeysFromDb(ownerId));
     if (window.JKHStore) {
       var pref = window.JKHStore.scopePrefixFor(ownerId) || "";
@@ -589,7 +674,8 @@
       for (var i = 0; i < scoped.length; i++) {
         var sk = String(scoped[i] || "");
         if (!sk) continue;
-        keys.push(sk.indexOf(pref) === 0 ? sk.slice(pref.length) : sk);
+        var baseKey = sk.indexOf(pref) === 0 ? sk.slice(pref.length) : sk;
+        if (_isProjectDataKey(baseKey)) keys.push(baseKey);
       }
     }
     return _uniq(keys);
@@ -766,7 +852,6 @@
       _lsSet(_getLastSigKey(scopeNorm), sig);
 
       _setStatus({ lastAction: "✅ Загружено с сервера", lastError: null });
-      try { location.reload(); } catch (e) { }
       return true;
     } catch (e) {
       _setStatus({ lastAction: "Ошибка загрузки", lastError: String(e && e.message ? e.message : e) });
@@ -845,6 +930,49 @@
     var s = getSettings();
     var scope = (s.scope === "all") ? "all" : "db";
     await download(scope);
+    try { location.reload(); } catch (e) { }
+  }
+
+  async function autoLoadAfterLogin() {
+    try {
+      if (!window.Auth || typeof Auth.getCurrentUser !== "function") return false;
+      var user = Auth.getCurrentUser();
+      if (!user || !user.id) return false;
+      if (_isGuestOrAll()) return false;
+      if (!isOnlineMode()) return false;
+
+      var markerKey = "jkh_sync_autoload_done_v1";
+      var markerVal = "";
+      try { markerVal = sessionStorage.getItem(markerKey) || ""; } catch (e0) { markerVal = ""; }
+      var expected = user.id + "|ok";
+      if (markerVal === expected) return true;
+
+      console.info("[JKH sync][login] userId=%s email=%s action=auto_load_start", user.id, String(user.email || ""));
+
+      var resDump = await _apiGet("/api/store_dump");
+      if (!(resDump.okHttp && resDump.data && resDump.data.ok === true)) {
+        _setStatus({ lastAction: "Автозагрузка не выполнена", lastError: (resDump.data && resDump.data.error) ? resDump.data.error : ("HTTP " + resDump.status) });
+        return false;
+      }
+
+      var data = resDump.data.data || {};
+      var keys = _uniq(Object.keys(data).concat(_projectKeysForScope("db", user.id)));
+      for (var i = 0; i < keys.length; i++) {
+        var bk = keys[i];
+        if (!_isProjectDataKey(bk)) continue;
+        var val = Object.prototype.hasOwnProperty.call(data, bk) ? data[bk] : "";
+        _writeLocalCompat(bk, val || "", user.id);
+        console.info("[JKH sync][load] owner=%s key=%s size=%s status=ok", user.id, bk, String(val || "").length);
+      }
+
+      try { sessionStorage.setItem(markerKey, expected); } catch (e1) { _lsSet(markerKey, expected); }
+      _setStatus({ lastAction: "✅ Автозагрузка после входа завершена", lastError: null });
+      console.info("[JKH sync][login] userId=%s email=%s action=auto_load_done keys=%s", user.id, String(user.email || ""), keys.length);
+      return true;
+    } catch (e) {
+      _setStatus({ lastAction: "Ошибка автозагрузки", lastError: String(e && e.message ? e.message : e) });
+      return false;
+    }
   }
 
   // стартуем таймер при загрузке страницы (если включён)
@@ -857,6 +985,8 @@
     downloadNow: downloadNow,
     applySettingsFromUI: applySettingsFromUI,
     getSettings: getSettings,
-    refreshStatusUI: refreshStatusUI
+    refreshStatusUI: refreshStatusUI,
+    autoLoadAfterLogin: autoLoadAfterLogin,
+    projectKeyCanon: function () { return { exact: SYNC_CANON_EXACT.slice(), prefix: SYNC_CANON_PREFIX.slice() }; }
   };
 })();

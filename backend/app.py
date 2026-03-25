@@ -114,6 +114,13 @@ def _resolve_owner(explicit_owner: str | None = None):
     return user.id, None
 
 
+def _sync_log(action: str, owner: str, **extra):
+    parts = [f"action={action}", f"owner={owner}"]
+    for k, v in extra.items():
+        parts.append(f"{k}={v}")
+    app.logger.info("[JKH sync] %s", " ".join(parts))
+
+
 @app.get("/health")
 def health():
     return jsonify(status="ok")
@@ -189,6 +196,7 @@ def auth_login():
 
     session.clear()
     session["user_id"] = user.id
+    app.logger.info("[auth] login_ok user_id=%s email=%s role=%s", user.id, user.email, user.role)
     return jsonify(ok=True, user=_user_payload(user))
 
 
@@ -197,11 +205,15 @@ def auth_me():
     user = _current_user()
     if not user:
         return _json_error("not_authenticated", 401)
+    app.logger.info("[auth] me_ok user_id=%s email=%s role=%s", user.id, user.email, user.role)
     return jsonify(ok=True, user=_user_payload(user))
 
 
 @app.post("/api/auth/logout")
 def auth_logout():
+    user = _current_user()
+    if user:
+        app.logger.info("[auth] logout user_id=%s email=%s", user.id, user.email)
     session.clear()
     return jsonify(ok=True)
 
@@ -321,7 +333,7 @@ def store_keys():
         text("SELECT k FROM kv_store WHERE owner=:owner ORDER BY k"),
         {"owner": owner},
     ).all()
-    app.logger.info("store_keys owner=%s count=%s", owner, len(rows))
+    _sync_log("list_keys", owner, count=len(rows))
     return jsonify(ok=True, keys=[r[0] for r in rows], owner=owner)
 
 
@@ -337,9 +349,9 @@ def store_get():
 
     row = KVStore.query.filter_by(owner=owner, k=key).first()
     if not row:
-        app.logger.info("store_get owner=%s key=%s status=not_found", owner, key)
+        _sync_log("load", owner, key=key, status="not_found")
         return jsonify(ok=False, error="not_found", value=None), 404
-    app.logger.info("store_get owner=%s key=%s size=%s status=ok", owner, key, len(row.v or ""))
+    _sync_log("load", owner, key=key, size=len(row.v or ""), status="ok")
     return jsonify(ok=True, value=row.v, owner=owner)
 
 
@@ -365,7 +377,7 @@ def store_set():
     else:
         db.session.add(KVStore(owner=owner, k=key, v=value))
     db.session.commit()
-    app.logger.info("store_set owner=%s key=%s size=%s status=ok", owner, key, len(value or ""))
+    _sync_log("save", owner, key=key, size=len(value or ""), status="ok")
     return jsonify(ok=True, owner=owner)
 
 
@@ -382,11 +394,28 @@ def store_delete():
 
     row = KVStore.query.filter_by(owner=owner, k=key).first()
     if not row:
+        _sync_log("delete", owner, key=key, status="not_found")
         return jsonify(ok=True, deleted=False)
 
     db.session.delete(row)
     db.session.commit()
+    _sync_log("delete", owner, key=key, status="ok")
     return jsonify(ok=True, deleted=True)
+
+
+@app.get("/api/store_dump")
+def store_dump():
+    owner, err = _resolve_owner(request.args.get("owner"))
+    if err:
+        return err
+
+    rows = db.session.execute(
+        text("SELECT k, v FROM kv_store WHERE owner=:owner ORDER BY k"),
+        {"owner": owner},
+    ).all()
+    data = {r[0]: r[1] for r in rows}
+    _sync_log("dump", owner, keys=len(data), status="ok")
+    return jsonify(ok=True, owner=owner, data=data)
 
 
 @app.get("/api/admin/session_debug")
