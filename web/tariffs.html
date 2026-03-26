@@ -104,19 +104,6 @@
     }catch(e){ return false; }
   }
 
-  const DEFAULT_LEGACY = {
-    content: [
-      { date: "2023-01-01", rate: 35.00 },
-      { date: "2024-01-01", rate: 38.50 }
-    ],
-    repair: [
-      { date: "2023-01-01", rate: 10.00 },
-      { date: "2024-01-01", rate: 12.00 }
-    ]
-  };
-
-  const deepClone = (obj) => JSON.parse(JSON.stringify(obj));
-
   function safeJsonParse(raw, fallback){
     try{
       if (!raw) return fallback;
@@ -157,12 +144,9 @@
 
   function loadLegacy(){
     const raw = localStorage.getItem(KEY_LEGACY);
-    if (!raw){
-      localStorage.setItem(KEY_LEGACY, JSON.stringify(DEFAULT_LEGACY));
-      return deepClone(DEFAULT_LEGACY);
-    }
+    if (!raw) return null;
     const parsed = safeJsonParse(raw, null);
-    if (!parsed || typeof parsed !== "object") return deepClone(DEFAULT_LEGACY);
+    if (!parsed || typeof parsed !== "object") return null;
     const out = { content: [], repair: [] };
     out.content = Array.isArray(parsed.content) ? parsed.content : [];
     out.repair  = Array.isArray(parsed.repair) ? parsed.repair : [];
@@ -183,6 +167,10 @@
     }
 
     const legacy = loadLegacy();
+    if (!legacy){
+      localStorage.setItem(cacheKey(), JSON.stringify([]));
+      return [];
+    }
     const tariffs = [
       {
         id: uid(),
