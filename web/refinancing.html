@@ -81,36 +81,50 @@
     </div>
 
 </div>
-<div style="margin-top:12px;">
-    <button class="btn" id="reportRateErrorBtn" type="button">сообщить об ошибке ставки</button>
-</div>
 
 <script>
 /* =========================================================
    refinancing.html — CRUD ставок (обычные + мораторий)
-   Каноническое хранение:
-   localStorage["ref_rates_{owner}"] = {
-     version: 1,
-     migration_done: true,
-     normal: [],
-     moratorium: []
-   }
+
+   Хранение:
+   - localStorage["refinancing_rates_normal_v1"]     = [{from:"DD.MM.YYYY", rate:"7.50"}...]
+   - localStorage["refinancing_rates_moratorium_v1"] = [{from:"DD.MM.YYYY", rate:"0.00"}...]
    ========================================================= */
 
 const KEY_NORMAL = "refinancing_rates_normal_v1";
 const KEY_MORA   = "refinancing_rates_moratorium_v1";
-const REF_RATES_VERSION = 1;
-function getOwnerId(){
-    try{ if(window.JKHStorage && typeof JKHStorage.getActiveOwnerId === "function") return String(JKHStorage.getActiveOwnerId() || "guest"); }catch(e){}
-    try{ if(window.Auth && typeof Auth.getActiveDbOwnerId === "function") return String(Auth.getActiveDbOwnerId() || "guest"); }catch(e){}
-    return "guest";
+
+function currentUser(){
+    try{ return (window.Auth && typeof Auth.getCurrentUser === "function") ? Auth.getCurrentUser() : null; }catch(e){ return null; }
 }
-function keyCache(){ return "ref_rates_" + getOwnerId(); }
-function isAdminUser(){
+function canEditRefRates(){
+    const u = currentUser();
+    return !!(u && u.role === "admin");
+}
+async function uploadRefRatesNow(){
     try{
-        const u = window.Auth && typeof Auth.getCurrentUser === "function" ? Auth.getCurrentUser() : null;
-        return !!(u && String(u.role || "").toLowerCase() === "admin");
-    }catch(e){ return false; }
+        if (window.JKHRemoteSync && typeof window.JKHRemoteSync.uploadNow === "function"){
+            await window.JKHRemoteSync.uploadNow();
+        }
+    }catch(e){
+        try{ console.warn("[refinancing] uploadNow failed:", e); }catch(_){}
+    }
+}
+function applyReadOnlyMode(){
+    const editable = canEditRefRates();
+    if (editable) return;
+    document.querySelectorAll("#addNormalBtn, #addMoraBtn, #saveNormalBtn, #saveMoraBtn").forEach(btn => {
+        btn.disabled = true;
+        btn.title = "Только администратор может изменять ставки рефинансирования";
+        btn.style.opacity = "0.6";
+        btn.style.cursor = "not-allowed";
+    });
+    document.querySelectorAll(".r-from, .r-rate").forEach(inp => inp.disabled = true);
+    const info = document.createElement("div");
+    info.style.cssText = "margin:10px 0 14px; padding:10px 12px; border:1px solid #d0d0d0; background:#fafafa; font-size:13px;";
+    info.textContent = "Ставки рефинансирования общие для всей системы. Изменять их может только администратор.";
+    const h2 = document.querySelector("h2");
+    if (h2 && h2.parentNode) h2.parentNode.insertBefore(info, h2.nextSibling);
 }
 
 function esc(s){
@@ -164,9 +178,8 @@ function applyDateMaskToInput(inputEl){
 
 function loadList(key){
     try{
-        const cache = normalizeRefRatesPayload(JSON.parse(localStorage.getItem(keyCache()) || "{}"));
-        const field = (key === KEY_MORA) ? "moratorium" : "normal";
-        const arr = cache[field];
+        const raw = localStorage.getItem(key);
+        const arr = raw ? JSON.parse(raw) : [];
         if (!Array.isArray(arr)) return [];
         return arr
             .map(x => ({ from: String(x.from||""), rate: String(x.rate||"") }))
@@ -190,57 +203,7 @@ function saveList(key, list){
         return da - db;
     });
 
-    let cache = {};
-    try { cache = normalizeRefRatesPayload(JSON.parse(localStorage.getItem(keyCache()) || "{}")); } catch(e){ cache = normalizeRefRatesPayload({}); }
-    const field = (key === KEY_MORA) ? "moratorium" : "normal";
-    cache[field] = cleaned;
-    cache.version = REF_RATES_VERSION;
-    cache.migration_done = true;
-    localStorage.setItem(keyCache(), JSON.stringify(cache));
-}
-
-function normalizeRatesArray(arr){
-    if (!Array.isArray(arr)) return [];
-    return arr
-        .map(x => ({ from: String(x?.from || "").trim(), rate: String(x?.rate || "").trim() }))
-        .filter(x => x.from || x.rate);
-}
-
-function normalizeRefRatesPayload(raw){
-    const obj = (raw && typeof raw === "object") ? raw : {};
-    return {
-        version: REF_RATES_VERSION,
-        migration_done: !!obj.migration_done,
-        normal: normalizeRatesArray(obj.normal),
-        moratorium: normalizeRatesArray(obj.moratorium)
-    };
-}
-
-function migrateLegacyRatesIfNeeded(){
-    const rawCanonical = localStorage.getItem(keyCache());
-    if (rawCanonical){
-        let canonical = normalizeRefRatesPayload({});
-        try{ canonical = normalizeRefRatesPayload(JSON.parse(rawCanonical || "{}")); }catch(e){ canonical = normalizeRefRatesPayload({}); }
-        if (!canonical.migration_done || canonical.version !== REF_RATES_VERSION){
-            canonical.version = REF_RATES_VERSION;
-            canonical.migration_done = true;
-            localStorage.setItem(keyCache(), JSON.stringify(canonical));
-        }
-        return;
-    }
-
-    let legacyNormal = [];
-    let legacyMora = [];
-    try { legacyNormal = JSON.parse(localStorage.getItem(KEY_NORMAL) || "[]") || []; } catch(e){ legacyNormal = []; }
-    try { legacyMora = JSON.parse(localStorage.getItem(KEY_MORA) || "[]") || []; } catch(e){ legacyMora = []; }
-
-    const cache = normalizeRefRatesPayload({
-        version: REF_RATES_VERSION,
-        migration_done: true,
-        normal: legacyNormal,
-        moratorium: legacyMora
-    });
-    localStorage.setItem(keyCache(), JSON.stringify(cache));
+    localStorage.setItem(key, JSON.stringify(cleaned));
 }
 
 function validate(list){
@@ -341,11 +304,7 @@ function addRow(bodyId){
     fromInput?.focus();
 }
 
-function saveFromUI(key, bodyId){
-    if (!isAdminUser()){
-        alert("Ставки может изменять только admin.");
-        return;
-    }
+async function saveFromUI(key, bodyId){
     // на всякий случай нормализуем даты перед валидацией
     const rows = Array.from(document.querySelectorAll(`#${bodyId} .r-from`));
     rows.forEach(inp => applyDateMaskToInput(inp));
@@ -357,26 +316,10 @@ function saveFromUI(key, bodyId){
         return;
     }
     saveList(key, list);
+    await uploadRefRatesNow();
     alert("Сохранено");
     renderTable(bodyId, key);
-}
-
-async function reportRateError(){
-    const text = prompt("Опишите ошибку в ставке рефинансирования:");
-    if (!text || !text.trim()) return;
-    try{
-        const r = await fetch("/api/ref_rates/error_report", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            credentials: "include",
-            body: JSON.stringify({ message: text.trim() })
-        });
-        const j = await r.json().catch(() => ({}));
-        if (r.ok && j && j.ok) alert("Сообщение отправлено.");
-        else alert("Не удалось отправить сообщение.");
-    }catch(e){
-        alert("Ошибка сети при отправке сообщения.");
-    }
+    applyReadOnlyMode();
 }
 
 function bindTbodyHandlers(bodyId, key){
@@ -384,9 +327,10 @@ function bindTbodyHandlers(bodyId, key){
     if (!body) return;
 
     // Удаление строки
-    body.addEventListener("click", (e) => {
+    body.addEventListener("click", async (e) => {
         const btn = e.target.closest(".row-del");
         if (!btn) return;
+        if (!canEditRefRates()) return;
 
         const tr = btn.closest("tr");
         if (!tr) return;
@@ -398,6 +342,7 @@ function bindTbodyHandlers(bodyId, key){
 
         // фиксируем состояние сразу
         saveList(key, collect(bodyId));
+        await uploadRefRatesNow();
     });
 
     // Маска даты — делегированно на tbody (работает и для новых строк)
@@ -417,7 +362,19 @@ function bindTbodyHandlers(bodyId, key){
 }
 
 document.addEventListener("DOMContentLoaded", () => {
-    migrateLegacyRatesIfNeeded();
+    // Демо-значения один раз
+    if (!localStorage.getItem(KEY_NORMAL)){
+        saveList(KEY_NORMAL, [
+            { from:"01.01.2023", rate:"7.50" },
+            { from:"01.01.2024", rate:"8.00" }
+        ]);
+    }
+    if (!localStorage.getItem(KEY_MORA)){
+        saveList(KEY_MORA, [
+            { from:"01.04.2023", rate:"0.00" },
+            { from:"01.06.2023", rate:"3.00" }
+        ]);
+    }
 
     renderTable("ratesBodyNormal", KEY_NORMAL);
     renderTable("ratesBodyMora", KEY_MORA);
@@ -430,17 +387,10 @@ document.addEventListener("DOMContentLoaded", () => {
 
     document.getElementById("saveNormalBtn")?.addEventListener("click", () => saveFromUI(KEY_NORMAL, "ratesBodyNormal"));
     document.getElementById("saveMoraBtn")?.addEventListener("click", () => saveFromUI(KEY_MORA, "ratesBodyMora"));
-    document.getElementById("reportRateErrorBtn")?.addEventListener("click", reportRateError);
 
     bindTbodyHandlers("ratesBodyNormal", KEY_NORMAL);
     bindTbodyHandlers("ratesBodyMora", KEY_MORA);
-    if (!isAdminUser()){
-        ["addNormalBtn","addMoraBtn","saveNormalBtn","saveMoraBtn"].forEach(id => {
-            const el = document.getElementById(id);
-            if (el) el.disabled = true;
-        });
-        document.querySelectorAll("#ratesBodyNormal input, #ratesBodyNormal button, #ratesBodyMora input, #ratesBodyMora button").forEach(el => { el.disabled = true; });
-    }
+    applyReadOnlyMode();
 });
 </script>
 
