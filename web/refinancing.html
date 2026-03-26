@@ -88,11 +88,18 @@
 <script>
 /* =========================================================
    refinancing.html — CRUD ставок (обычные + мораторий)
-   Каноническое хранение: localStorage["ref_rates_{owner}"] = { normal:[], moratorium:[] }
+   Каноническое хранение:
+   localStorage["ref_rates_{owner}"] = {
+     version: 1,
+     migration_done: true,
+     normal: [],
+     moratorium: []
+   }
    ========================================================= */
 
 const KEY_NORMAL = "refinancing_rates_normal_v1";
 const KEY_MORA   = "refinancing_rates_moratorium_v1";
+const REF_RATES_VERSION = 1;
 function getOwnerId(){
     try{ if(window.JKHStorage && typeof JKHStorage.getActiveOwnerId === "function") return String(JKHStorage.getActiveOwnerId() || "guest"); }catch(e){}
     try{ if(window.Auth && typeof Auth.getActiveDbOwnerId === "function") return String(Auth.getActiveDbOwnerId() || "guest"); }catch(e){}
@@ -157,9 +164,9 @@ function applyDateMaskToInput(inputEl){
 
 function loadList(key){
     try{
-        const cache = JSON.parse(localStorage.getItem(keyCache()) || "{}");
+        const cache = normalizeRefRatesPayload(JSON.parse(localStorage.getItem(keyCache()) || "{}"));
         const field = (key === KEY_MORA) ? "moratorium" : "normal";
-        const arr = Array.isArray(cache[field]) ? cache[field] : [];
+        const arr = cache[field];
         if (!Array.isArray(arr)) return [];
         return arr
             .map(x => ({ from: String(x.from||""), rate: String(x.rate||"") }))
@@ -184,22 +191,55 @@ function saveList(key, list){
     });
 
     let cache = {};
-    try { cache = JSON.parse(localStorage.getItem(keyCache()) || "{}") || {}; } catch(e){ cache = {}; }
+    try { cache = normalizeRefRatesPayload(JSON.parse(localStorage.getItem(keyCache()) || "{}")); } catch(e){ cache = normalizeRefRatesPayload({}); }
     const field = (key === KEY_MORA) ? "moratorium" : "normal";
     cache[field] = cleaned;
+    cache.version = REF_RATES_VERSION;
+    cache.migration_done = true;
     localStorage.setItem(keyCache(), JSON.stringify(cache));
 }
 
+function normalizeRatesArray(arr){
+    if (!Array.isArray(arr)) return [];
+    return arr
+        .map(x => ({ from: String(x?.from || "").trim(), rate: String(x?.rate || "").trim() }))
+        .filter(x => x.from || x.rate);
+}
+
+function normalizeRefRatesPayload(raw){
+    const obj = (raw && typeof raw === "object") ? raw : {};
+    return {
+        version: REF_RATES_VERSION,
+        migration_done: !!obj.migration_done,
+        normal: normalizeRatesArray(obj.normal),
+        moratorium: normalizeRatesArray(obj.moratorium)
+    };
+}
+
 function migrateLegacyRatesIfNeeded(){
-    let cache = {};
-    try { cache = JSON.parse(localStorage.getItem(keyCache()) || "{}") || {}; } catch(e){ cache = {}; }
-    if (Array.isArray(cache.normal) || Array.isArray(cache.moratorium)) return;
+    const rawCanonical = localStorage.getItem(keyCache());
+    if (rawCanonical){
+        let canonical = normalizeRefRatesPayload({});
+        try{ canonical = normalizeRefRatesPayload(JSON.parse(rawCanonical || "{}")); }catch(e){ canonical = normalizeRefRatesPayload({}); }
+        if (!canonical.migration_done || canonical.version !== REF_RATES_VERSION){
+            canonical.version = REF_RATES_VERSION;
+            canonical.migration_done = true;
+            localStorage.setItem(keyCache(), JSON.stringify(canonical));
+        }
+        return;
+    }
+
     let legacyNormal = [];
     let legacyMora = [];
     try { legacyNormal = JSON.parse(localStorage.getItem(KEY_NORMAL) || "[]") || []; } catch(e){ legacyNormal = []; }
     try { legacyMora = JSON.parse(localStorage.getItem(KEY_MORA) || "[]") || []; } catch(e){ legacyMora = []; }
-    cache.normal = Array.isArray(legacyNormal) ? legacyNormal : [];
-    cache.moratorium = Array.isArray(legacyMora) ? legacyMora : [];
+
+    const cache = normalizeRefRatesPayload({
+        version: REF_RATES_VERSION,
+        migration_done: true,
+        normal: legacyNormal,
+        moratorium: legacyMora
+    });
     localStorage.setItem(keyCache(), JSON.stringify(cache));
 }
 
