@@ -435,7 +435,7 @@ function splitAccrualByOwnership(accr, year, month, history) {
     // (год, месяц) из таблицы оплат и считаем это датой начала расчёта.
     // Это даёт автоперерасчёт начислений сразу после импорта.
     try {
-      const raw = localStorage.getItem("payments_" + id);
+      const raw = (window.JKHStore && JKHStore.getRaw) ? JKHStore.getRaw("payments_" + id) : null;
       if (raw) {
         const arr = JSON.parse(raw);
         if (Array.isArray(arr) && arr.length) {
@@ -458,7 +458,7 @@ function splitAccrualByOwnership(accr, year, month, history) {
               aStrict.calcStartDate = fromISO2;
               try {
                 if (typeof window.saveAbonentsDB === "function") window.saveAbonentsDB();
-                else localStorage.setItem("abonents_db_v1", JSON.stringify(window.AbonentsDB));
+                else if (window.JKHStore && JKHStore.setRaw) JKHStore.setRaw("abonents_db_v1", JSON.stringify(window.AbonentsDB));
               } catch (e) {}
             }
 
@@ -649,7 +649,7 @@ function getOwnershipHistoryForPremise() {
       { from: "2024-01-01", content: 38.5, repair: 12 }
     ];
     try{
-      localStorage.setItem("tariffs_content_repair_v1", JSON.stringify(defaults));
+      if (window.JKHStore && JKHStore.setRaw) JKHStore.setRaw("tariffs_content_repair_v1", JSON.stringify(defaults));
       console.warn("[autoaccrual] тарифы не найдены — создал tariffs_content_repair_v1 (defaults)");
     }catch{}
     return defaults;

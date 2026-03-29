@@ -350,12 +350,14 @@
     _sessionReady = true;
     console.info("[auth] login userId=%s email=%s", String(data.user && data.user.id || ""), String(data.user && data.user.email || ""));
 
-    try {
-      if (window.JKHRemoteSync && typeof window.JKHRemoteSync.autoLoadAfterLogin === "function") {
-        await window.JKHRemoteSync.autoLoadAfterLogin();
-      }
-    } catch (e) {
-      console.warn("[auth] autoLoadAfterLogin failed:", e);
+    if (!window.JKHRemoteSync || typeof window.JKHRemoteSync.autoLoadAfterLogin !== "function") {
+      window.JKH_DATA_READY = false;
+      throw new Error("AUTOLOAD_REQUIRED");
+    }
+    var loaded = await window.JKHRemoteSync.autoLoadAfterLogin();
+    if (!loaded) {
+      window.JKH_DATA_READY = false;
+      throw new Error("AUTOLOAD_REQUIRED");
     }
 
     renderAuthStatus();
@@ -380,12 +382,14 @@
     _sessionReady = true;
     console.info("[auth] register userId=%s email=%s role=%s", String(data.user && data.user.id || ""), String(data.user && data.user.email || ""), String(data.user && data.user.role || ""));
 
-    try {
-      if (window.JKHRemoteSync && typeof window.JKHRemoteSync.autoLoadAfterLogin === "function") {
-        await window.JKHRemoteSync.autoLoadAfterLogin();
-      }
-    } catch (e) {
-      console.warn("[auth] autoLoadAfterLogin failed:", e);
+    if (!window.JKHRemoteSync || typeof window.JKHRemoteSync.autoLoadAfterLogin !== "function") {
+      window.JKH_DATA_READY = false;
+      throw new Error("AUTOLOAD_REQUIRED");
+    }
+    var loaded = await window.JKHRemoteSync.autoLoadAfterLogin();
+    if (!loaded) {
+      window.JKH_DATA_READY = false;
+      throw new Error("AUTOLOAD_REQUIRED");
     }
 
     renderAuthStatus();
@@ -552,7 +556,9 @@
       protectPages();
       try {
         if (window.JKHRemoteSync && typeof window.JKHRemoteSync.autoLoadAfterLogin === "function") {
-          window.JKHRemoteSync.autoLoadAfterLogin().catch(function () {});
+          window.JKHRemoteSync.autoLoadAfterLogin().then(function(ok){ if (!ok) window.JKH_DATA_READY = false; }).catch(function () { window.JKH_DATA_READY = false; });
+        } else {
+          window.JKH_DATA_READY = false;
         }
       } catch (e) {}
     }).catch(function () {

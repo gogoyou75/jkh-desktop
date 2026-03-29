@@ -93,6 +93,8 @@
 
 const KEY_NORMAL = "refinancing_rates_normal_v1";
 const KEY_MORA   = "refinancing_rates_moratorium_v1";
+function storeGet(key){ return (window.JKHStore && JKHStore.getRaw) ? JKHStore.getRaw(key) : null; }
+function storeSet(key, value){ if (window.JKHStore && JKHStore.setRaw) JKHStore.setRaw(key, value); }
 
 function currentUser(){
     try{ return (window.Auth && typeof Auth.getCurrentUser === "function") ? Auth.getCurrentUser() : null; }catch(e){ return null; }
@@ -178,7 +180,7 @@ function applyDateMaskToInput(inputEl){
 
 function loadList(key){
     try{
-        const raw = localStorage.getItem(key);
+        const raw = storeGet(key);
         const arr = raw ? JSON.parse(raw) : [];
         if (!Array.isArray(arr)) return [];
         return arr
@@ -203,7 +205,7 @@ function saveList(key, list){
         return da - db;
     });
 
-    localStorage.setItem(key, JSON.stringify(cleaned));
+    storeSet(key, JSON.stringify(cleaned));
 }
 
 function validate(list){
@@ -363,13 +365,13 @@ function bindTbodyHandlers(bodyId, key){
 
 document.addEventListener("DOMContentLoaded", () => {
     // Демо-значения один раз
-    if (!localStorage.getItem(KEY_NORMAL)){
+    if (!storeGet(KEY_NORMAL)){
         saveList(KEY_NORMAL, [
             { from:"01.01.2023", rate:"7.50" },
             { from:"01.01.2024", rate:"8.00" }
         ]);
     }
-    if (!localStorage.getItem(KEY_MORA)){
+    if (!storeGet(KEY_MORA)){
         saveList(KEY_MORA, [
             { from:"01.04.2023", rate:"0.00" },
             { from:"01.06.2023", rate:"3.00" }

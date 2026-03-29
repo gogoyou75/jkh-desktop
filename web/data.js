@@ -111,21 +111,21 @@
     try {
       if (window.JKHStore && typeof JKHStore.getRaw === "function") return JKHStore.getRaw(key);
     } catch (e) { }
-    try { return localStorage.getItem(key); } catch (e2) { return null; }
+    return null;
   }
 
   function _setProjectRaw(key, value) {
     try {
       if (window.JKHStore && typeof JKHStore.setRaw === "function") return JKHStore.setRaw(key, value);
     } catch (e) { }
-    try { localStorage.setItem(key, String(value == null ? "" : value)); } catch (e2) { }
+    return false;
   }
 
   function _removeProjectRaw(key) {
     try {
       if (window.JKHStore && typeof JKHStore.removeRaw === "function") return JKHStore.removeRaw(key);
     } catch (e) { }
-    try { localStorage.removeItem(key); } catch (e2) { }
+    return false;
   }
 
   function _adminRemoveForOwner(ownerId, key) {
@@ -444,6 +444,7 @@
   // INIT global DB
   // ============================================================
   const stored = loadFromStorage();
+  if (!_isAllMode()) window.JKH_DATA_READY = !!stored;
   window.AbonentsDB = stored ? mergePreferStored(BASE_DB, stored) : deepClone(BASE_DB);
   normalizeDb(window.AbonentsDB);
 
