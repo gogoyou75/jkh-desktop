@@ -100,33 +100,39 @@
     return scopePrefixFor(resolveOwnerForKey(key, ownerId)) + key;
   }
 
+  function _lsGetDirect(fullKey) {
+    return Storage.prototype.getItem.call(localStorage, fullKey);
+  }
+  function _lsSetDirect(fullKey, value) {
+    return Storage.prototype.setItem.call(localStorage, fullKey, value);
+  }
+  function _lsRemoveDirect(fullKey) {
+    return Storage.prototype.removeItem.call(localStorage, fullKey);
+  }
+
   function getItem(key, ownerId) {
-    return localStorage.getItem(k(key, ownerId));
+    if (_isProjectDataKey(key)) return _cacheGet(key, ownerId);
+    return _lsGetDirect(k(key, ownerId));
   }
 
   function setItem(key, value, ownerId) {
-    // гость не пишет данные базы (только просмотр)
     if (isGuestMode()) throw new Error("GUEST_READONLY");
     if (isAllMode()) throw new Error("ALLMODE_READONLY");
     if (isGlobalProjectKey(key) && !_isAdmin()) throw new Error("GLOBAL_ADMIN_ONLY");
-    localStorage.setItem(k(key, ownerId), value);
+    if (_isProjectDataKey(key)) { _cacheSet(key, value, ownerId); return; }
+    _lsSetDirect(k(key, ownerId), value);
   }
 
   function removeItem(key, ownerId) {
     if (isGuestMode()) throw new Error("GUEST_READONLY");
     if (isAllMode()) throw new Error("ALLMODE_READONLY");
     if (isGlobalProjectKey(key) && !_isAdmin()) throw new Error("GLOBAL_ADMIN_ONLY");
-    localStorage.removeItem(k(key, ownerId));
+    if (_isProjectDataKey(key)) { _cacheRemove(key, ownerId); return; }
+    _lsRemoveDirect(k(key, ownerId));
   }
 
   function keysForOwner(ownerId) {
-    var pref = scopePrefixFor(ownerId);
-    var out = [];
-    for (var i = 0; i < localStorage.length; i++) {
-      var kk = localStorage.key(i);
-      if (kk && kk.indexOf(pref) === 0) out.push(kk);
-    }
-    return out;
+    return _cacheKeysForOwner(ownerId);
   }
 
   // global helper (used by data.js / pages)
@@ -255,21 +261,53 @@
     return true;
   }
 
+
+
+  // server-centric cache: project data lives in runtime memory, not plain localStorage
+  var _serverCache = Object.create(null);
+
+  function _cacheKey(baseKey, ownerId) {
+    return k(baseKey, ownerId);
+  }
+
+  function _cacheGet(baseKey, ownerId) {
+    return Object.prototype.hasOwnProperty.call(_serverCache, _cacheKey(baseKey, ownerId))
+      ? _serverCache[_cacheKey(baseKey, ownerId)]
+      : null;
+  }
+
+  function _cacheSet(baseKey, value, ownerId) {
+    _serverCache[_cacheKey(baseKey, ownerId)] = (value === null || value === undefined) ? "" : String(value);
+  }
+
+  function _cacheRemove(baseKey, ownerId) {
+    delete _serverCache[_cacheKey(baseKey, ownerId)];
+  }
+
+  function _cacheKeysForOwner(ownerId) {
+    var pref = scopePrefixFor(ownerId);
+    var out = [];
+    for (var kk in _serverCache) {
+      if (!Object.prototype.hasOwnProperty.call(_serverCache, kk)) continue;
+      if (kk.indexOf(pref) === 0) out.push(kk);
+    }
+    return out;
+  }
   // Админская "техоперация": разрешаем работать по другим ownerId даже когда admin в ALL-mode
   function _adminMaintenanceAllowed() {
     return _isAdmin(); // достаточно на офлайн-прототипе
   }
 
   function _adminGetItemForOwner(ownerId, key) {
-    return localStorage.getItem(k(key, ownerId));
+    return getItem(key, ownerId);
   }
   function _adminSetItemForOwner(ownerId, key, value) {
     if (!_adminMaintenanceAllowed()) throw new Error("ADMIN_REQUIRED");
-    localStorage.setItem(k(key, ownerId), value);
+    setItem(key, value, ownerId);
   }
   function _adminRemoveItemForOwner(ownerId, key) {
     if (!_adminMaintenanceAllowed()) throw new Error("ADMIN_REQUIRED");
-    localStorage.removeItem(k(key, ownerId));
+    removeItem(key, ownerId);
   }
   function _adminKeysForOwner(ownerId) {
     if (!_adminMaintenanceAllowed()) throw new Error("ADMIN_REQUIRED");
@@ -576,7 +614,10 @@
     lastSaveAt: null,    // ISO
     autosaveState: "—",
     lastAction: "—",
-    lastError: null
+    lastError: null,
+    ownerId: "—",
+    loadSource: "—",
+    lastReadAt: null
   };
 
   function _setStatus(patch) {
@@ -594,12 +635,18 @@
       var elAS = document.getElementById("syncAutosaveState");
       var elAct = document.getElementById("syncLastAction");
       var elErr = document.getElementById("syncLastError");
+      var elOwner = document.getElementById("syncOwnerId");
+      var elSource = document.getElementById("syncLoadSource");
+      var elRead = document.getElementById("syncLastRead");
 
       if (elServer) elServer.textContent = status.server || "—";
       if (elSave) elSave.textContent = status.lastSaveAt ? _fmtTime(status.lastSaveAt) : "—";
       if (elAS) elAS.textContent = status.autosaveState || "—";
       if (elAct) elAct.textContent = status.lastAction || "—";
       if (elErr) elErr.textContent = status.lastError ? String(status.lastError) : "—";
+      if (elOwner) elOwner.textContent = status.ownerId || "—";
+      if (elSource) elSource.textContent = status.loadSource || "—";
+      if (elRead) elRead.textContent = status.lastReadAt ? _fmtTime(status.lastReadAt) : "—";
     } catch (e) { }
   }
 
@@ -706,18 +753,13 @@
   }
 
   function _readLocalCompat(baseKey, ownerId) {
-    // 1) scoped (новый канон)
     var v = window.JKHStore ? window.JKHStore.getRaw(baseKey, ownerId) : null;
-    if (v !== null && v !== undefined && v !== "") return v;
-    // 2) legacy plain localStorage (старые страницы)
-    try { return localStorage.getItem(baseKey) || ""; } catch (e) { return ""; }
+    return (v === null || v === undefined) ? "" : String(v);
   }
 
   function _writeLocalCompat(baseKey, value, ownerId) {
     var v = (value === null || value === undefined) ? "" : String(value);
     if (window.JKHStore) window.JKHStore.setRaw(baseKey, v, ownerId);
-    // Переходная совместимость: страницы, которые ещё читают прямой localStorage.
-    try { localStorage.setItem(baseKey, v); } catch (e) { }
   }
 
   function _isDbEffectivelyEmpty(rawDb) {
@@ -820,7 +862,7 @@
       }
 
       _lsSet(_getLastSigKey(scopeNorm), sig);
-      _setStatus({ lastSaveAt: _nowISO(), lastAction: "✅ Сохранено на сервер", lastError: null });
+      _setStatus({ lastSaveAt: _nowISO(), lastAction: "✅ Сохранено на сервер", lastError: null, ownerId: ownerId, loadSource: "server" });
       return true;
     } catch (e) {
       _setStatus({ lastAction: "Ошибка сохранения", lastError: String(e && e.message ? e.message : e) });
@@ -875,7 +917,7 @@
       var sig = (scopeNorm === "all") ? _sigForALL(ownerId) : _sigForDB(ownerId);
       _lsSet(_getLastSigKey(scopeNorm), sig);
 
-      _setStatus({ lastAction: "✅ Загружено с сервера", lastError: null });
+      _setStatus({ lastAction: "✅ Загружено с сервера", lastError: null, ownerId: ownerId, loadSource: "server", lastReadAt: _nowISO() });
       return true;
     } catch (e) {
       _setStatus({ lastAction: "Ошибка загрузки", lastError: String(e && e.message ? e.message : e) });
@@ -957,6 +999,37 @@
     try { location.reload(); } catch (e) { }
   }
 
+  async function migrateLegacyLocalOnce(ownerId) {
+    try {
+      if (!ownerId || ownerId === "guest" || ownerId === "ALL") return false;
+      var mk = "jkh_storage_migration_v2::" + ownerId;
+      if (_lsGet(mk, "") === "done") return true;
+      var moved = 0;
+      var keys = SYNC_CANON_EXACT.slice();
+      for (var i = 0; i < localStorage.length; i++) {
+        var lk = localStorage.key(i) || "";
+        if (!_isProjectDataKey(lk)) continue;
+        keys.push(lk);
+      }
+      keys = _uniq(keys);
+      for (var j = 0; j < keys.length; j++) {
+        var bk = keys[j];
+        var legacy = localStorage.getItem(bk);
+        if (legacy === null || legacy === undefined || legacy === "") continue;
+        var cur = _readLocalCompat(bk, ownerId);
+        if (cur && String(cur).trim()) continue;
+        _writeLocalCompat(bk, legacy, ownerId);
+        moved++;
+      }
+      _lsSet(mk, "done");
+      _setStatus({ lastAction: "Миграция legacy завершена: " + moved + " ключей", ownerId: ownerId, loadSource: "legacy-migration" });
+      return true;
+    } catch (e) {
+      _setStatus({ lastError: "MIGRATION_ERROR: " + String(e && e.message ? e.message : e) });
+      return false;
+    }
+  }
+
   async function autoLoadAfterLogin() {
     try {
       if (!window.Auth || typeof Auth.getCurrentUser !== "function") return false;
@@ -972,6 +1045,7 @@
       if (markerVal === expected) return true;
 
       console.info("[JKH sync][login] userId=%s email=%s action=auto_load_start", user.id, String(user.email || ""));
+      await migrateLegacyLocalOnce(user.id);
 
       var resDump = await _apiGet("/api/store_dump");
       if (!(resDump.okHttp && resDump.data && resDump.data.ok === true)) {
@@ -990,7 +1064,7 @@
       }
 
       try { sessionStorage.setItem(markerKey, expected); } catch (e1) { _lsSet(markerKey, expected); }
-      _setStatus({ lastAction: "✅ Автозагрузка после входа завершена", lastError: null });
+      _setStatus({ lastAction: "✅ Автозагрузка после входа завершена", lastError: null, ownerId: user.id, loadSource: "server:auto", lastReadAt: _nowISO() });
       console.info("[JKH sync][login] userId=%s email=%s action=auto_load_done keys=%s", user.id, String(user.email || ""), keys.length);
       return true;
     } catch (e) {
@@ -1000,7 +1074,7 @@
   }
 
   // стартуем таймер при загрузке страницы (если включён)
-  try { _startTimer(); } catch (e) { }
+  try { _setStatus({ ownerId: _ownerId() }); _startTimer(); } catch (e) { }
 
   window.JKHRemoteSync = {
     // public

@@ -105,6 +105,29 @@
     return false;
   }
 
+
+
+  function _getProjectRaw(key) {
+    try {
+      if (window.JKHStore && typeof JKHStore.getRaw === "function") return JKHStore.getRaw(key);
+    } catch (e) { }
+    try { return localStorage.getItem(key); } catch (e2) { return null; }
+  }
+
+  function _setProjectRaw(key, value) {
+    try {
+      if (window.JKHStore && typeof JKHStore.setRaw === "function") return JKHStore.setRaw(key, value);
+    } catch (e) { }
+    try { localStorage.setItem(key, String(value == null ? "" : value)); } catch (e2) { }
+  }
+
+  function _removeProjectRaw(key) {
+    try {
+      if (window.JKHStore && typeof JKHStore.removeRaw === "function") return JKHStore.removeRaw(key);
+    } catch (e) { }
+    try { localStorage.removeItem(key); } catch (e2) { }
+  }
+
   function _adminRemoveForOwner(ownerId, key) {
     try {
       if (window.JKHStore && JKHStore.admin && typeof JKHStore.admin.removeRawForOwner === "function") {
@@ -657,7 +680,7 @@
           var rows = (window.JKHCalcEngine.loadPaymentsForAbonent)
             ? window.JKHCalcEngine.loadPaymentsForAbonent(oldId)
             : (function(){
-                try{ var raw=localStorage.getItem("payments_"+oldId); return raw?JSON.parse(raw):[]; }catch(e){ return []; }
+                try{ var raw=_getProjectRaw("payments_"+oldId); return raw?JSON.parse(raw):[]; }catch(e){ return []; }
               })();
           var d = new Date(String(freezeISO)+"T12:00:00");
           var tot = window.JKHCalcEngine.calcTotalsAsOfAdjusted(rows, d, { abonentId: oldId, applyAdvanceOffset:true, allowNegativePrincipal:false });
@@ -666,24 +689,24 @@
       }
 
       if (frozenDebt){
-        localStorage.setItem("jkh_frozen_debt_v1:" + oldId + ":" + freezeISO, JSON.stringify({
+        _setProjectRaw("jkh_frozen_debt_v1:" + oldId + ":" + freezeISO, JSON.stringify({
           principal: Number(frozenDebt.principal)||0,
           penalty: Number(frozenDebt.penalty)||0,
           calculatedAt: String(frozenDebt.calculatedAt||freezeISO)
         }));
       } else {
         // если не смогли рассчитать — всё равно пишем нули, чтобы система была детерминированной
-        localStorage.setItem("jkh_frozen_debt_v1:" + oldId + ":" + freezeISO, JSON.stringify({
+        _setProjectRaw("jkh_frozen_debt_v1:" + oldId + ":" + freezeISO, JSON.stringify({
           principal: 0, penalty: 0, calculatedAt: freezeISO
         }));
       }
 
       // 2) Установить дату заморозки расчёта у старого
-      localStorage.setItem("jkh_freeze_to_v1:" + oldId, freezeISO);
+      _setProjectRaw("jkh_freeze_to_v1:" + oldId, freezeISO);
 
       // 3) Записать метаданные переноса
       if (mode === "WITH_DEBT"){
-        localStorage.setItem("jkh_transfer_to_v1:" + newId, JSON.stringify({
+        _setProjectRaw("jkh_transfer_to_v1:" + newId, JSON.stringify({
           fromAbonentId: oldId,
           regnum: rn,
           transferDate: td,
@@ -693,9 +716,9 @@
 
         // 3a) КАНОН: transfer_balance для движка (по regnum)
         try{
-          var debtRaw = localStorage.getItem("jkh_frozen_debt_v1:" + oldId + ":" + freezeISO);
+          var debtRaw = _getProjectRaw("jkh_frozen_debt_v1:" + oldId + ":" + freezeISO);
           var dd = debtRaw ? JSON.parse(debtRaw) : { principal:0, penalty:0 };
-          localStorage.setItem("jkh_transfer_balance_v1:" + newId + ":" + rn, JSON.stringify({
+          _setProjectRaw("jkh_transfer_balance_v1:" + newId + ":" + rn, JSON.stringify({
             startDate: td,
             principal: Number(dd?.principal)||0,
             penalty: Number(dd?.penalty)||0,
@@ -706,8 +729,8 @@
         }catch(e){}
       } else {
         // NO_DEBT: снимаем возможные хвосты переноса на нового (на всякий случай)
-        try{ localStorage.removeItem("jkh_transfer_to_v1:" + newId); }catch(e){}
-        try{ localStorage.removeItem("jkh_transfer_balance_v1:" + newId + ":" + rn); }catch(e){}
+        try{ _removeProjectRaw("jkh_transfer_to_v1:" + newId); }catch(e){}
+        try{ _removeProjectRaw("jkh_transfer_balance_v1:" + newId + ":" + rn); }catch(e){}
       }
 
       // 4) Обновить поля периодов расчёта в AbonentsDB
@@ -737,7 +760,7 @@
       if (!id) return null;
 
       // recipient?
-      var trRaw = localStorage.getItem("jkh_transfer_to_v1:" + id);
+      var trRaw = _getProjectRaw("jkh_transfer_to_v1:" + id);
       if (trRaw){
         try{
           return { type: "recipient", data: JSON.parse(trRaw) };
@@ -745,9 +768,9 @@
       }
 
       // source?
-      var freezeISO = String(localStorage.getItem("jkh_freeze_to_v1:" + id) || "").trim();
+      var freezeISO = String(_getProjectRaw("jkh_freeze_to_v1:" + id) || "").trim();
       if (freezeISO){
-        var debtRaw = localStorage.getItem("jkh_frozen_debt_v1:" + id + ":" + freezeISO);
+        var debtRaw = _getProjectRaw("jkh_frozen_debt_v1:" + id + ":" + freezeISO);
         var debt = null;
         try{ debt = debtRaw ? JSON.parse(debtRaw) : null; }catch(e){}
         return { type: "source", freezeDate: freezeISO, frozenDebt: debt };
