@@ -1,0 +1,49 @@
+name: Safe Deploy
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: production-deploy
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Check Python syntax
+        run: |
+          python -m py_compile backend/app.py
+
+      - name: Validate docker-compose
+        run: |
+          docker compose -f docker-compose.yml config
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: validate
+
+    steps:
+      - name: Setup SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SERVER_SSH_KEY }}" > ~/.ssh/key
+          chmod 600 ~/.ssh/key
+          ssh-keyscan -H ${{ secrets.SERVER_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Deploy on server
+        run: |
+          ssh -i ~/.ssh/key -p ${{ secrets.SERVER_PORT }} ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} '
+            set -e
+            cd /root/jkh
+            git pull origin main
+            docker compose up -d --build
+            docker compose ps
+          '
