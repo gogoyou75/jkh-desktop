@@ -305,7 +305,7 @@
   // и преобразуем её в формат transfer_balance (на лету).
   function loadPaymentsForAbonent(abonentId){
     try{
-      const raw = localStorage.getItem("payments_" + String(abonentId));
+      const raw = (window.JKHStore && JKHStore.getRaw) ? JKHStore.getRaw("payments_" + String(abonentId)) : null;
       const arr = raw ? JSON.parse(raw) : [];
       return Array.isArray(arr) ? arr : [];
     }catch(e){ return []; }

@@ -34,6 +34,8 @@
 (function () {
   "use strict";
 
+  if (typeof window.JKH_DATA_READY !== "boolean") window.JKH_DATA_READY = false;
+
   // ============================================================
   // 🔑 Scoped localStorage keys (per-user базы)
   // ============================================================
@@ -213,29 +215,29 @@
       var origRem = localStorage.removeItem.bind(localStorage);
 
       localStorage.getItem = function (key) {
-        var realKey = _toScopedProjectKeyMaybe(key);
+        var baseKey = String(key || "");
+        if (_isProjectDataKey(baseKey)) return getItem(baseKey);
+        var realKey = _toScopedProjectKeyMaybe(baseKey);
         return origGet(realKey);
       };
 
       localStorage.setItem = function (key, value) {
         var baseKey = String(key || "");
-        var realKey = _toScopedProjectKeyMaybe(baseKey);
         if (_isProjectDataKey(baseKey)) {
-          if (isGuestMode()) throw new Error("GUEST_READONLY");
-          if (isAllMode()) throw new Error("ALLMODE_READONLY");
-          if (isGlobalProjectKey(baseKey) && !_isAdmin()) throw new Error("GLOBAL_ADMIN_ONLY");
+          setItem(baseKey, value);
+          return;
         }
+        var realKey = _toScopedProjectKeyMaybe(baseKey);
         return origSet(realKey, value);
       };
 
       localStorage.removeItem = function (key) {
         var baseKey = String(key || "");
-        var realKey = _toScopedProjectKeyMaybe(baseKey);
         if (_isProjectDataKey(baseKey)) {
-          if (isGuestMode()) throw new Error("GUEST_READONLY");
-          if (isAllMode()) throw new Error("ALLMODE_READONLY");
-          if (isGlobalProjectKey(baseKey) && !_isAdmin()) throw new Error("GLOBAL_ADMIN_ONLY");
+          removeItem(baseKey);
+          return;
         }
+        var realKey = _toScopedProjectKeyMaybe(baseKey);
         return origRem(realKey);
       };
     } catch (e) {
@@ -1000,34 +1002,7 @@
   }
 
   async function migrateLegacyLocalOnce(ownerId) {
-    try {
-      if (!ownerId || ownerId === "guest" || ownerId === "ALL") return false;
-      var mk = "jkh_storage_migration_v2::" + ownerId;
-      if (_lsGet(mk, "") === "done") return true;
-      var moved = 0;
-      var keys = SYNC_CANON_EXACT.slice();
-      for (var i = 0; i < localStorage.length; i++) {
-        var lk = localStorage.key(i) || "";
-        if (!_isProjectDataKey(lk)) continue;
-        keys.push(lk);
-      }
-      keys = _uniq(keys);
-      for (var j = 0; j < keys.length; j++) {
-        var bk = keys[j];
-        var legacy = localStorage.getItem(bk);
-        if (legacy === null || legacy === undefined || legacy === "") continue;
-        var cur = _readLocalCompat(bk, ownerId);
-        if (cur && String(cur).trim()) continue;
-        _writeLocalCompat(bk, legacy, ownerId);
-        moved++;
-      }
-      _lsSet(mk, "done");
-      _setStatus({ lastAction: "Миграция legacy завершена: " + moved + " ключей", ownerId: ownerId, loadSource: "legacy-migration" });
-      return true;
-    } catch (e) {
-      _setStatus({ lastError: "MIGRATION_ERROR: " + String(e && e.message ? e.message : e) });
-      return false;
-    }
+    return true;
   }
 
   async function autoLoadAfterLogin() {
@@ -1045,10 +1020,9 @@
       if (markerVal === expected) return true;
 
       console.info("[JKH sync][login] userId=%s email=%s action=auto_load_start", user.id, String(user.email || ""));
-      await migrateLegacyLocalOnce(user.id);
-
       var resDump = await _apiGet("/api/store_dump");
       if (!(resDump.okHttp && resDump.data && resDump.data.ok === true)) {
+        window.JKH_DATA_READY = false;
         _setStatus({ lastAction: "Автозагрузка не выполнена", lastError: (resDump.data && resDump.data.error) ? resDump.data.error : ("HTTP " + resDump.status) });
         return false;
       }
@@ -1064,10 +1038,12 @@
       }
 
       try { sessionStorage.setItem(markerKey, expected); } catch (e1) { _lsSet(markerKey, expected); }
+      window.JKH_DATA_READY = true;
       _setStatus({ lastAction: "✅ Автозагрузка после входа завершена", lastError: null, ownerId: user.id, loadSource: "server:auto", lastReadAt: _nowISO() });
       console.info("[JKH sync][login] userId=%s email=%s action=auto_load_done keys=%s", user.id, String(user.email || ""), keys.length);
       return true;
     } catch (e) {
+      window.JKH_DATA_READY = false;
       _setStatus({ lastAction: "Ошибка автозагрузки", lastError: String(e && e.message ? e.message : e) });
       return false;
     }

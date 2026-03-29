@@ -414,7 +414,7 @@
 
   function saveTariffsV1(rows){
     const norm = normalizeTariffs(rows);
-    localStorage.setItem('tariffs_content_repair_v1', JSON.stringify({ tariffs: norm.map(x => ({ from: x.from, content: x.content, repair: x.repair })) }));
+    if (window.JKHStore && JKHStore.setRaw) JKHStore.setRaw('tariffs_content_repair_v1', JSON.stringify({ tariffs: norm.map(x => ({ from: x.from, content: x.content, repair: x.repair })) }));
     return norm;
   }
 

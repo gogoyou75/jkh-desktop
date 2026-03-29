@@ -97,6 +97,8 @@
     return "guest";
   }
   function cacheKey(){ return "tariffs_" + getOwnerId(); }
+  function storeGet(key){ return (window.JKHStore && JKHStore.getRaw) ? JKHStore.getRaw(key) : null; }
+  function storeSet(key, value){ if (window.JKHStore && JKHStore.setRaw) JKHStore.setRaw(key, value); }
   function isAdminUser(){
     try{
       const u = window.Auth && typeof Auth.getCurrentUser === "function" ? Auth.getCurrentUser() : null;
@@ -143,7 +145,7 @@
   }
 
   function loadLegacy(){
-    const raw = localStorage.getItem(KEY_LEGACY);
+    const raw = storeGet(KEY_LEGACY);
     if (!raw) return null;
     const parsed = safeJsonParse(raw, null);
     if (!parsed || typeof parsed !== "object") return null;
@@ -156,19 +158,19 @@
   }
 
   function migrateIfNeeded(){
-    const existing = safeJsonParse(localStorage.getItem(cacheKey()), null);
+    const existing = safeJsonParse(storeGet(cacheKey()), null);
     if (Array.isArray(existing)){
       return existing;
     }
-    const existingLegacyNew = safeJsonParse(localStorage.getItem(KEY_NEW), null);
+    const existingLegacyNew = safeJsonParse(storeGet(KEY_NEW), null);
     if (Array.isArray(existingLegacyNew)){
-      localStorage.setItem(cacheKey(), JSON.stringify(existingLegacyNew));
+      storeSet(cacheKey(), JSON.stringify(existingLegacyNew));
       return existingLegacyNew;
     }
 
     const legacy = loadLegacy();
     if (!legacy){
-      localStorage.setItem(cacheKey(), JSON.stringify([]));
+      storeSet(cacheKey(), JSON.stringify([]));
       return [];
     }
     const tariffs = [
@@ -190,7 +192,7 @@
       }
     ];
 
-    localStorage.setItem(cacheKey(), JSON.stringify(tariffs));
+    storeSet(cacheKey(), JSON.stringify(tariffs));
     return tariffs;
   }
 
@@ -247,7 +249,7 @@
   }
 
   function saveAll(tariffs){
-    localStorage.setItem(cacheKey(), JSON.stringify(tariffs));
+    storeSet(cacheKey(), JSON.stringify(tariffs));
   }
 
   function escapeHtml(s){
@@ -363,7 +365,7 @@
 
       let code = "";
       try{
-        const cur = safeJsonParse(localStorage.getItem(cacheKey()), []);
+        const cur = safeJsonParse(storeGet(cacheKey()), []);
         const old = Array.isArray(cur) ? cur.find(x => String(x?.id) === id) : null;
         code = String(old?.code || "");
       }catch{}
@@ -399,7 +401,7 @@
       active: true,
       rates: []
     });
-    localStorage.setItem(cacheKey(), JSON.stringify(tariffs));
+    storeSet(cacheKey(), JSON.stringify(tariffs));
     render();
   }
 
@@ -421,7 +423,7 @@
     if (!confirm("Удалить тариф?")) return;
 
     const tariffs = loadNew().filter(t => String(t.id) !== id);
-    localStorage.setItem(cacheKey(), JSON.stringify(tariffs));
+    storeSet(cacheKey(), JSON.stringify(tariffs));
     render();
   }
 

@@ -1178,7 +1178,7 @@ function applyChangeResponsible(mode) {
     let oldPenalty = 0;
 
     try{
-      const oldPaymentsRaw = localStorage.getItem("payments_" + String(id));
+      const oldPaymentsRaw = (window.JKHStore && JKHStore.getRaw) ? JKHStore.getRaw("payments_" + String(id)) : null;
       const oldRows = oldPaymentsRaw ? JSON.parse(oldPaymentsRaw) : [];
       if (window.JKHCalcEngine && typeof window.JKHCalcEngine.calcTotalsAsOfAdjusted === "function"){
         const tot = window.JKHCalcEngine.calcTotalsAsOfAdjusted(oldRows, new Date(freezeISO + "T12:00:00"), {

@@ -128,7 +128,7 @@ Doc: docs/LOGIC_SPEC_v1.5.3.md
 
 <div id="jkhSyncPanel" style="margin:10px 0 14px 0; padding:10px 12px; border:1px solid #ddd; border-radius:8px; background:#fafafa;">
   <div style="display:flex; flex-wrap:wrap; gap:8px; align-items:center;">
-    <button id="btnSyncDownload" type="button" title="Download from server = Загрузить с сервера">Загрузить с сервера (MySQL)</button>
+    <button id="btnSyncDownload" type="button" title="Download from server = Загрузить с сервера">Ручная загрузка с сервера (override)</button>
     <button id="btnSyncUpload" type="button" title="Upload to server = Сохранить на сервер">Сохранить на сервер (MySQL)</button>
 
     <span style="margin-left:10px; font-weight:600;">Авто-сохранение</span>
@@ -463,7 +463,7 @@ function getAbonentNote(id, a){
 
 function getPaymentsForAbonent(id){
     try{
-        const raw = localStorage.getItem("payments_" + id);
+        const raw = (window.JKHStore && JKHStore.getRaw) ? JKHStore.getRaw("payments_" + id) : null;
         if (!raw) return [];
         const arr = JSON.parse(raw);
         return Array.isArray(arr) ? arr : [];
@@ -623,6 +623,18 @@ function calcTotalsFromPayments(id, abonentObj){
      ЗАГРУЗКА ДАННЫХ ИЗ data.js + (при наличии) из payments_<id>
 ============================================================ */
 document.addEventListener("DOMContentLoaded", () => {
+
+    if (window.JKH_DATA_READY !== true) {
+        const table = document.getElementById("abonentsTable");
+        if (table) table.style.display = "none";
+        const blocker = document.createElement("div");
+        blocker.id = "dataNotReadyBlock";
+        blocker.style.cssText = "margin:16px 0;padding:12px;border:1px solid #b00020;border-radius:8px;background:#fff4f4;color:#7a0016;";
+        blocker.textContent = "Данные не загружены с сервера. Интерфейс заблокирован до успешной автозагрузки.";
+        var anchor = document.querySelector("h2");
+        if (anchor && anchor.parentNode) anchor.parentNode.insertBefore(blocker, anchor.nextSibling);
+        return;
+    }
 
     const db = window.AbonentsDB?.abonents || {};
 
@@ -817,7 +829,7 @@ function render() {
                 else if (typeof window.saveDB === "function") window.saveDB();
                 else {
                     // запасной вариант: типичный ключ базы (если data.js хранит её в LS)
-                    localStorage.setItem("abonents_db_v1", JSON.stringify(window.AbonentsDB));
+                    if (window.JKHStore && JKHStore.setRaw) JKHStore.setRaw("abonents_db_v1", JSON.stringify(window.AbonentsDB));
                 }
             }catch(e){}
         });
