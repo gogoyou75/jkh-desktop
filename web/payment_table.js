@@ -29,17 +29,31 @@
   function qs(sel, root = document) { return root.querySelector(sel); }
   function qsa(sel, root = document) { return Array.from(root.querySelectorAll(sel)); }
   function pad2(n) { return String(n).padStart(2, "0"); }
+  function isDataReady(){ return window.JKH_DATA_READY === true; }
+  function storeGetRaw(key){
+    if (!isDataReady()) return null;
+    if (!(window.JKHStore && typeof window.JKHStore.getRaw === "function")) return null;
+    try { return JKHStore.getRaw(String(key)); } catch { return null; }
+  }
+  function storeSetRaw(key, value){
+    if (!(window.JKHStore && typeof window.JKHStore.setRaw === "function")) return;
+    try { JKHStore.setRaw(String(key), value); } catch {}
+  }
+  function storeRemoveRaw(key){
+    if (!(window.JKHStore && typeof window.JKHStore.removeRaw === "function")) return;
+    try { JKHStore.removeRaw(String(key)); } catch {}
+  }
   // ===========================
   // UI: сворачиваемые блоки месяца (ledger)
-  // хранение состояния: localStorage key `payments_ui_collapsed_<LS>` -> {"YYYY-MM": true/false}
+  // хранение состояния: `payments_ui_collapsed_<LS>` -> {"YYYY-MM": true/false}
   function collapseStoreKey() {
     return `payments_ui_collapsed_${getAbonentId()}`;
   }
   function loadCollapsedMap() {
-    try { return JSON.parse(localStorage.getItem(collapseStoreKey()) || "{}") || {}; } catch { return {}; }
+    try { return JSON.parse(storeGetRaw(collapseStoreKey()) || "{}") || {}; } catch { return {}; }
   }
   function saveCollapsedMap(map) {
-    try { localStorage.setItem(collapseStoreKey(), JSON.stringify(map || {})); } catch {}
+    storeSetRaw(collapseStoreKey(), JSON.stringify(map || {}));
   }
   function ymKeyOfRow(r) {
     return `${String(r.year)}-${pad2(Number(r.month))}`;
@@ -90,7 +104,7 @@
 
   function loadPaymentSources(){
     try {
-      const raw = localStorage.getItem(PAYMENT_SOURCES_KEY);
+      const raw = storeGetRaw(PAYMENT_SOURCES_KEY);
       if (!raw) return defaultPaymentSources();
       const arr = JSON.parse(raw);
       if (!Array.isArray(arr)) return defaultPaymentSources();
@@ -103,7 +117,7 @@
 
   function savePaymentSources(arr){
     const cleaned = (arr||[]).map(x => String(x||'').trim()).filter(Boolean);
-    localStorage.setItem(PAYMENT_SOURCES_KEY, JSON.stringify(cleaned.length ? cleaned : defaultPaymentSources()));
+    storeSetRaw(PAYMENT_SOURCES_KEY, JSON.stringify(cleaned.length ? cleaned : defaultPaymentSources()));
   }
 
   function ensurePaymentSources(){
@@ -114,7 +128,7 @@
       return defaultPaymentSources();
     }
     try {
-      if (!localStorage.getItem(PAYMENT_SOURCES_KEY)) savePaymentSources(cur);
+      if (!storeGetRaw(PAYMENT_SOURCES_KEY)) savePaymentSources(cur);
     } catch {}
     return cur;
   }
@@ -568,7 +582,7 @@ function getOwnershipHistoryForPremise() {
 
   
   function loadTariffTable(){
-    // 1) localStorage — известные ключи (старые/новые версии)
+    // 1) JKHStore — известные ключи (старые/новые версии)
     const keys = [
       "tariffs_content_repair_v1",
       "tariffs_content_repair",
@@ -599,27 +613,9 @@ function getOwnershipHistoryForPremise() {
     };
 
     for (const k of keys){
-      const got = tryParse(localStorage.getItem(k));
+      const got = tryParse(storeGetRaw(k));
       if (got) return got;
     }
-
-    // 1b) локальное сканирование: если ключ другой (напр. "tariffs_tszh_" или "tariffRates")
-    // Берём первый подходящий массив.
-    try{
-      const foundKeys = [];
-      for (let i=0; i<localStorage.length; i++){
-        const k = localStorage.key(i);
-        if (!k) continue;
-        if (/tarif|тариф/i.test(k)){
-          foundKeys.push(k);
-          const got = tryParse(localStorage.getItem(k));
-          if (got) return got;
-        }
-      }
-      if (foundKeys.length){
-        console.warn("[autoaccrual] найдены ключи с 'tarif/тариф' в localStorage, но не распознаны как таблица:", foundKeys);
-      }
-    }catch{}
 
     // 2) window.* — если тарифы держатся в data.js/глобалах
     const w = window;
@@ -631,14 +627,7 @@ function getOwnershipHistoryForPremise() {
     for (const c of candidates){
       if (Array.isArray(c)) return c;
     }
-    // финальный лог: покажем какие ключи вообще есть (первые 30) — помогает сразу понять имя ключа
-    try{
-      const ks = [];
-      for (let i=0; i<Math.min(localStorage.length, 30); i++) ks.push(localStorage.key(i));
-      console.warn("[autoaccrual] не найдены тарифы. Примеры ключей localStorage:", ks);
-    }catch{
-      console.warn("[autoaccrual] не найдены тарифы: localStorage или window.*");
-    }
+    console.warn("[autoaccrual] не найдены тарифы: JKHStore или window.*");
 
     // ✅ FALLBACK (чтобы начисления не были нулевыми на чистой базе):
     // Если тарифы ещё нигде не сохранены (tariffs.html пока статическая),
@@ -649,7 +638,7 @@ function getOwnershipHistoryForPremise() {
       { from: "2024-01-01", content: 38.5, repair: 12 }
     ];
     try{
-      if (window.JKHStore && JKHStore.setRaw) JKHStore.setRaw("tariffs_content_repair_v1", JSON.stringify(defaults));
+      storeSetRaw("tariffs_content_repair_v1", JSON.stringify(defaults));
       console.warn("[autoaccrual] тарифы не найдены — создал tariffs_content_repair_v1 (defaults)");
     }catch{}
     return defaults;
@@ -748,7 +737,7 @@ function getOwnershipHistoryForPremise() {
     let changed = false;
 
     // 🔒 Блокировка ручного/внешнего "впрыска" начислений вне периода.
-    // Даже если кто-то вручную подменит localStorage и поставит accrued,
+    // Даже если кто-то вручную подменит хранилище и поставит accrued,
     // мы обнулим начисления в месяцах вне allowedYm.
     for (const r of arr){
       const y = String(r.year || "");
@@ -802,7 +791,7 @@ for (const p of parts) {
 
       if (sumRate == null){
         // тарифы не найдены / не распознаны — это главная причина "не происходит начисление"
-        console.warn(`[autoaccrual] нет тарифа на ${mm.month}.${mm.year} (проверь таблицу тарифов и ключи localStorage)`);
+        console.warn(`[autoaccrual] нет тарифа на ${mm.month}.${mm.year} (проверь таблицу тарифов и ключи JKHStore)`);
       }
 
       if (!rows.length){
@@ -872,7 +861,7 @@ for (const p of parts) {
 
   function getCalcPeriod() {
     try {
-      const raw = localStorage.getItem(calcPeriodKey());
+      const raw = storeGetRaw(calcPeriodKey());
       if (!raw) return null;
       const p = JSON.parse(raw);
       const from = String(p?.from || "");
@@ -885,7 +874,7 @@ for (const p of parts) {
   }
 
   function isCalcPeriodActive() {
-    return localStorage.getItem(calcPeriodActiveKey()) === "1";
+    return storeGetRaw(calcPeriodActiveKey()) === "1";
   }
 
   // ✅ ФИЛЬТР: показываем оплаты, у которых "Дата оплаты" попадает в выбранный период
@@ -932,7 +921,7 @@ for (const p of parts) {
   function getPayments() {
     try {
       const key = paymentsKey();
-      const raw = localStorage.getItem(key);
+      const raw = storeGetRaw(key);
       if (!raw) return [];
       const arr = JSON.parse(raw);
       if (!Array.isArray(arr)) return [];
@@ -966,7 +955,7 @@ for (const p of parts) {
 
       if (changed) {
         try { normalizePaymentRows(arr); } catch {}
-        localStorage.setItem(key, JSON.stringify(arr));
+        storeSetRaw(key, JSON.stringify(arr));
       }
 
       return arr;
@@ -1033,7 +1022,7 @@ for (const p of parts) {
 
   function savePayments(arr) {
     try { normalizePaymentRows(arr); } catch {}
-    localStorage.setItem(paymentsKey(), JSON.stringify(arr));
+    storeSetRaw(paymentsKey(), JSON.stringify(arr));
   }
 
   // =========================================================
@@ -1374,7 +1363,7 @@ function applyRunningTotals(viewRows) {
 }
 
   // =============================================================
-  // КЛЮЧИ localStorage для ставок рефинансирования
+  // КЛЮЧИ JKHStore для ставок рефинансирования
   // (вынесены в constants.js; здесь — безопасные fallback'и)
   // =============================================================
   const REFI_KEY_NORMAL = (window.JKH_CONST && window.JKH_CONST.REFI_KEY_NORMAL)
@@ -1388,7 +1377,7 @@ function applyRunningTotals(viewRows) {
   function moratoriumKey() { return "moratorium_" + getAbonentId(); }
 
   function isMoratoriumActive(){
-    return localStorage.getItem(moratoriumKey()) === "1";
+    return storeGetRaw(moratoriumKey()) === "1";
   }
 
   function parseDMY(dmy){
@@ -1399,7 +1388,7 @@ function applyRunningTotals(viewRows) {
 
   function loadExcludes(){
     try{
-      const raw = localStorage.getItem(excludePeriodsKey());
+      const raw = storeGetRaw(excludePeriodsKey());
       const arr = raw ? JSON.parse(raw) : [];
       if (!Array.isArray(arr)) return [];
 
@@ -1438,7 +1427,7 @@ function applyRunningTotals(viewRows) {
   function loadRates(){
     const key = isMoratoriumActive() ? REFI_KEY_MORA : REFI_KEY_NORMAL;
     try{
-      const raw = localStorage.getItem(key);
+      const raw = storeGetRaw(key);
       const arr = raw ? JSON.parse(raw) : [];
       if (!Array.isArray(arr)) return [];
       const parsed = arr
@@ -1652,7 +1641,7 @@ function applyRunningTotals(viewRows) {
     try {
       if (window.JKHAutoAccrual && typeof window.JKHAutoAccrual.recalcForAbonent === 'function') {
         window.JKHAutoAccrual.recalcForAbonent(getAbonentId());
-        // движок сам пишет в localStorage -> перечитываем
+        // движок сам пишет в JKHStore -> перечитываем
         arr = getPayments();
       } else {
         if (ensureAutoAccruals(arr)) {
@@ -1730,7 +1719,7 @@ function applyRunningTotals(viewRows) {
     try {
       if (window.JKHAutoAccrual && typeof window.JKHAutoAccrual.recalcForAbonent === 'function') {
         window.JKHAutoAccrual.recalcForAbonent(getAbonentId());
-        // движок сам пишет в localStorage -> перечитываем
+        // движок сам пишет в JKHStore -> перечитываем
         arr = getPayments();
       } else {
         if (ensureAutoAccruals(arr)) {

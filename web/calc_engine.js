@@ -44,7 +44,7 @@
 // calc_engine.js
 // ЕДИНЫЙ ДВИЖОК РАСЧЁТОВ (вариант B: "как карточка")
 // Без ES-модулей (никаких export/import) — только window.JKHCalcEngine.
-// Использует localStorage + AbonentsDB (если есть) для периода ответственности.
+// Использует JKHStore + AbonentsDB (если есть) для периода ответственности.
 // Платёж гасит: сначала ОСНОВНОЙ ДОЛГ (FIFO), потом ПЕНИ (если есть переплата).
 (function () {
   if (window.JKHCalcEngine) return; // не переопределяем
@@ -52,6 +52,12 @@
   function pad2(n){ return String(n).padStart(2,"0"); }
   function r2(x){ return Math.round(x * 100) / 100; }
   function toNum(v){ const n = parseFloat(String(v ?? "").replace(/\s+/g,"").replace(",", ".")); return Number.isFinite(n) ? n : 0; }
+  function isDataReady(){ return window.JKH_DATA_READY === true; }
+  function storeGetRaw(key){
+    if (!isDataReady()) return null;
+    if (!(window.JKHStore && typeof window.JKHStore.getRaw === "function")) return null;
+    try{ return JKHStore.getRaw(String(key)); }catch(e){ return null; }
+  }
 
   // ---------- ДАТЫ (без timezone-сдвигов) ----------
   function parseDateAnyToDate(value) {
@@ -220,11 +226,11 @@
 
   function excludePeriodsKey(abonentId){ return "exclude_periods_" + String(abonentId || getAbonentIdFromUrl()); }
   function moratoriumKey(abonentId){ return "moratorium_" + String(abonentId || getAbonentIdFromUrl()); }
-  function isMoratoriumActive(abonentId){ return localStorage.getItem(moratoriumKey(abonentId)) === "1"; }
+  function isMoratoriumActive(abonentId){ return storeGetRaw(moratoriumKey(abonentId)) === "1"; }
 
   function loadExcludes(abonentId){
     try{
-      const raw = localStorage.getItem(excludePeriodsKey(abonentId));
+      const raw = storeGetRaw(excludePeriodsKey(abonentId));
       const arr = raw ? JSON.parse(raw) : [];
       if (!Array.isArray(arr)) return [];
       const startDay = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate(), 0,0,0,0);
@@ -256,7 +262,7 @@
   function loadRates(abonentId){
     const key = isMoratoriumActive(abonentId) ? REFI_KEY_MORA : REFI_KEY_NORMAL;
     try{
-      const raw = localStorage.getItem(key);
+      const raw = storeGetRaw(key);
       let arr = raw ? JSON.parse(raw) : [];
       if (!Array.isArray(arr) || arr.length === 0){
         // ✅ CANON safety: if rates storage missing, use fallback so penalty does not become 0 silently
@@ -337,7 +343,7 @@
       // 1) Канон: transfer_balance_v1 (обрабатывается в calcTotalsAsOfAdjusted через getTransferBalance)
       // Здесь только альтернативная схема:
 
-      const transferRaw = localStorage.getItem("jkh_transfer_to_v1:" + id);
+      const transferRaw = storeGetRaw("jkh_transfer_to_v1:" + id);
       if (!transferRaw) return null;
       const tr = JSON.parse(transferRaw);
       if (!tr || !tr.fromAbonentId) return null;
@@ -349,10 +355,10 @@
       const fromId = String(tr.fromAbonentId || "").trim();
       if (!fromId) return null;
 
-      const freezeISO = String(localStorage.getItem("jkh_freeze_to_v1:" + fromId) || "").trim();
+      const freezeISO = String(storeGetRaw("jkh_freeze_to_v1:" + fromId) || "").trim();
       if (!/^\d{4}-\d{2}-\d{2}$/.test(freezeISO)) return null;
 
-      const debtRaw = localStorage.getItem("jkh_frozen_debt_v1:" + fromId + ":" + freezeISO);
+      const debtRaw = storeGetRaw("jkh_frozen_debt_v1:" + fromId + ":" + freezeISO);
       if (!debtRaw) return null;
       const debt = JSON.parse(debtRaw);
       if (!debt || typeof debt !== "object") return null;
@@ -375,7 +381,7 @@
 
   function getFreezeToISO(abonentId){
     try{
-      const v = String(localStorage.getItem(freezeKey(abonentId)) || "").trim();
+      const v = String(storeGetRaw(freezeKey(abonentId)) || "").trim();
       return /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : "";
     }catch(e){ return ""; }
   }
@@ -392,7 +398,7 @@
       // ---- 1) Канон: jkh_transfer_balance_v1:<to>:<regnum>
       if (keyRegnum){
         const key = "jkh_transfer_balance_v1:" + id + ":" + keyRegnum;
-        const raw = localStorage.getItem(key);
+        const raw = storeGetRaw(key);
         if (raw){
           const obj = JSON.parse(raw);
           if (obj && typeof obj === "object"){
@@ -412,7 +418,7 @@
       }
 
       // ---- 2) Совместимость: jkh_transfer_to_v1:<to> + jkh_frozen_debt_v1:<from>:<freezeISO>
-      const trRaw = localStorage.getItem("jkh_transfer_to_v1:" + id);
+      const trRaw = storeGetRaw("jkh_transfer_to_v1:" + id);
       if (!trRaw) return null;
       const tr = JSON.parse(trRaw);
       if (!tr || typeof tr !== "object") return null;
@@ -423,10 +429,10 @@
       const fromId = String(tr.fromAbonentId || "").trim();
       if (!fromId) return null;
 
-      const freezeISO = String(localStorage.getItem("jkh_freeze_to_v1:" + fromId) || "").trim();
+      const freezeISO = String(storeGetRaw("jkh_freeze_to_v1:" + fromId) || "").trim();
       if (!/^\d{4}-\d{2}-\d{2}$/.test(freezeISO)) return null;
 
-      const debtRaw = localStorage.getItem("jkh_frozen_debt_v1:" + fromId + ":" + freezeISO);
+      const debtRaw = storeGetRaw("jkh_frozen_debt_v1:" + fromId + ":" + freezeISO);
       if (!debtRaw) return null;
 
       const debt = JSON.parse(debtRaw);
@@ -489,9 +495,9 @@
     // Global "за период" toggle (если используется)
     let globalPeriod = null;
     try{
-      const active = String(localStorage.getItem('calc_period_active_' + id) || '0') === '1';
+      const active = String(storeGetRaw('calc_period_active_' + id) || '0') === '1';
       if (active){
-        const raw = localStorage.getItem('calc_period_' + id);
+        const raw = storeGetRaw('calc_period_' + id);
         if (raw){
           const obj = JSON.parse(raw);
           if (obj && (obj.from || obj.to)){
