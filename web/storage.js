@@ -185,6 +185,12 @@
     "moratorium_"
   ];
 
+  // canonical registry exported for other closures in this file (and diagnostics)
+  window.JKH_SYNC_CANON = {
+    exact: SYNC_CANON_EXACT.slice(),
+    prefix: SYNC_CANON_PREFIX.slice()
+  };
+
   function _isScopedKeyName(x) {
     return String(x || "").indexOf("jkhdb::") === 0;
   }
@@ -693,7 +699,10 @@
 
   // ---- canonical sync keys ----
   var KEY_DB = "abonents_db_v1";
-  var SYNC_STATIC_KEYS = SYNC_CANON_EXACT.slice();
+  var SYNC_CANON = (window.JKH_SYNC_CANON && Array.isArray(window.JKH_SYNC_CANON.exact))
+    ? window.JKH_SYNC_CANON
+    : { exact: [KEY_DB], prefix: [] };
+  var SYNC_STATIC_KEYS = SYNC_CANON.exact.slice();
 
   function _uniq(arr) {
     var m = {};
@@ -1061,6 +1070,6 @@
     getSettings: getSettings,
     refreshStatusUI: refreshStatusUI,
     autoLoadAfterLogin: autoLoadAfterLogin,
-    projectKeyCanon: function () { return { exact: SYNC_CANON_EXACT.slice(), prefix: SYNC_CANON_PREFIX.slice() }; }
+    projectKeyCanon: function () { return { exact: SYNC_CANON.exact.slice(), prefix: SYNC_CANON.prefix.slice() }; }
   };
 })();
