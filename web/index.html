@@ -448,13 +448,16 @@ function toNum(v){
 }
 
 function getAbonentNote(id, a){
+    const storeGet = (key) => {
+        try { return (window.JKHStore && JKHStore.getRaw) ? JKHStore.getRaw(key) : null; } catch { return null; }
+    };
     // 1) из AbonentsDB полей
     const fromA = (a && (a.defaultNote || a.note || a.comment || a.prim || a.primNote || a.noteText)) ? (a.defaultNote || a.note || a.comment || a.prim || a.primNote || a.noteText) : "";
     if (String(fromA || "").trim()) return String(fromA);
 
     // 2) запасной вариант: отдельный ключ (если карточка так сохраняла)
     try{
-        const raw = localStorage.getItem("note_" + String(id));
+        const raw = storeGet("note_" + String(id));
         if (raw !== null && raw !== undefined) return String(raw);
     }catch(e){}
 
@@ -821,7 +824,7 @@ function render() {
             }catch(e){}
 
             // запасной вариант: локально сохраняем под отдельным ключом
-            try{ localStorage.setItem("note_" + id, val); }catch(e){}
+            try{ if (window.JKHStore && JKHStore.setRaw) JKHStore.setRaw("note_" + id, val); }catch(e){}
 
             // если в data.js есть сохранение базы — используем его
             try{

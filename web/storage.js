@@ -421,7 +421,7 @@
 
   function getNotes() {
     try {
-      let obj = JSON.parse(localStorage.getItem(_sk(NOTES_KEY)) || '{}');
+      let obj = JSON.parse(getItem(NOTES_KEY) || '{}');
       return Object.assign({ general: "", exclude_period: "", payments: "" }, obj);
     } catch (e) {
       console.error("Ошибка чтения заметок:", e);
@@ -430,7 +430,7 @@
   }
 
   function saveNotes(notesObj) {
-    localStorage.setItem(_sk(NOTES_KEY), JSON.stringify(notesObj));
+    setItem(NOTES_KEY, JSON.stringify(notesObj));
     try {
       fetch('/api/abonent-notes', {
         method: 'POST',
@@ -442,7 +442,7 @@
 
   function getPeriods() {
     try {
-      const raw = JSON.parse(localStorage.getItem(_sk(PERIODS_KEY)) || "[]");
+      const raw = JSON.parse(getItem(PERIODS_KEY) || "[]");
       return raw.filter(p =>
         (p.from && p.from.trim() !== "") ||
         (p.to && p.to.trim() !== "") ||
@@ -459,11 +459,11 @@
       (p?.to && String(p.to).trim() !== "") ||
       (p?.reason && String(p.reason).trim() !== "")
     );
-    localStorage.setItem(_sk(PERIODS_KEY), JSON.stringify(cleaned));
+    setItem(PERIODS_KEY, JSON.stringify(cleaned));
   }
 
   function excludesKey(abonentId) {
-    return _sk("exclude_periods_" + String(abonentId || "").trim());
+    return "exclude_periods_" + String(abonentId || "").trim();
   }
 
   function normalizeExcludes(excludes) {
@@ -492,7 +492,7 @@
     if (!abonent) return [];
 
     try {
-      const raw = localStorage.getItem(excludesKey(abonentId));
+      const raw = getItem(excludesKey(abonentId));
       if (raw) {
         const arr = JSON.parse(raw);
         if (Array.isArray(arr)) {
@@ -521,7 +521,7 @@
     abonent.defaultExcludes = cleaned;
 
     try {
-      localStorage.setItem(excludesKey(abonentId), JSON.stringify(cleaned));
+      setItem(excludesKey(abonentId), JSON.stringify(cleaned));
     } catch (e) { }
   }
 

@@ -856,10 +856,30 @@ function __r2(n){
 function __fmt2(n){
   return __r2(n).toFixed(2);
 }
+function storeGet(key){
+  try { return (window.JKHStore && JKHStore.getRaw) ? JKHStore.getRaw(key) : null; } catch(e){ return null; }
+}
+function storeSet(key, value){
+  try { if (window.JKHStore && JKHStore.setRaw) JKHStore.setRaw(key, value); } catch(e){}
+}
+function storeRemove(key){
+  try { if (window.JKHStore && JKHStore.removeRaw) JKHStore.removeRaw(key); } catch(e){}
+}
+function storeKeysForOwner(ownerId){
+  try { return (window.JKHStore && JKHStore.keysForOwner) ? JKHStore.keysForOwner(ownerId) : []; } catch(e){ return []; }
+}
+function storeCurrentScopePrefix(){
+  try {
+    if (window.JKHStore && JKHStore.scopePrefixFor && JKHStore.getOwnerId) {
+      return JKHStore.scopePrefixFor(JKHStore.getOwnerId());
+    }
+  } catch(e){}
+  return "";
+}
 
 function __getFreezeToISO(abonentId){
   try{
-    const v = String(localStorage.getItem("jkh_freeze_to_v1:" + String(abonentId)) || "").trim();
+    const v = String(storeGet("jkh_freeze_to_v1:" + String(abonentId)) || "").trim();
     return /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : "";
   }catch(e){ return ""; }
 }
@@ -867,7 +887,7 @@ function __getFreezeToISO(abonentId){
 function __getIncomingTransfer(abonentId, regnum){
   try{
     const key = "jkh_transfer_balance_v1:" + String(abonentId) + ":" + String(regnum);
-    const raw = localStorage.getItem(key);
+    const raw = storeGet(key);
     if (!raw) return null;
     const obj = JSON.parse(raw);
     if (!obj || typeof obj !== "object") return null;
@@ -887,12 +907,16 @@ function __getIncomingTransfer(abonentId, regnum){
 function __findOutgoingTransfers(fromAbonentId){
   const out = [];
   try{
-    for (let i=0;i<localStorage.length;i++){
-      const k = localStorage.key(i);
+    const keys = storeKeysForOwner((window.JKHStore && JKHStore.getOwnerId) ? JKHStore.getOwnerId() : undefined);
+    const prefix = storeCurrentScopePrefix();
+    for (let i=0;i<keys.length;i++){
+      const kScoped = keys[i];
+      if (!kScoped) continue;
+      const k = (prefix && kScoped.indexOf(prefix) === 0) ? kScoped.slice(prefix.length) : kScoped;
       if (!k) continue;
       if (k.indexOf("jkh_transfer_balance_v1:") !== 0) continue;
 
-      const raw = localStorage.getItem(k);
+      const raw = storeGet(k);
       if (!raw) continue;
 
       let obj = null;
@@ -1096,13 +1120,14 @@ function closeChangeResponsibleModal() {
 function __saveTransferMeta(newId, regnum, dateFrom, mode){
     try{
         const key = 'jkh_transfer_v1:' + String(newId) + ':' + String(regnum);
-        localStorage.setItem(key, JSON.stringify({
+        storeSet(key, JSON.stringify({
             mode: String(mode || 'WITH_DEBT'),
             dateFrom: String(dateFrom || ''),
             regnum: String(regnum || ''),
             ts: new Date().toISOString()
         }));
     }catch(e){}
+}
 function __isoMinusOne(iso){
   try{
     const d = new Date(iso + "T12:00:00");
@@ -1116,14 +1141,14 @@ function __isoMinusOne(iso){
 
 function __saveFreezeTo(oldId, freezeISO){
   try{
-    localStorage.setItem("jkh_freeze_to_v1:" + String(oldId), String(freezeISO || ""));
+    storeSet("jkh_freeze_to_v1:" + String(oldId), String(freezeISO || ""));
   }catch(e){}
 }
 
 function __saveTransferBalance(newId, regnum, startISO, principal, penalty, fromOldId, mode){
   try{
     const key = "jkh_transfer_balance_v1:" + String(newId) + ":" + String(regnum);
-    localStorage.setItem(key, JSON.stringify({
+    storeSet(key, JSON.stringify({
       startDate: String(startISO || ""),
       principal: Number(principal || 0),
       penalty: Number(penalty || 0),
@@ -1133,7 +1158,6 @@ function __saveTransferBalance(newId, regnum, startISO, principal, penalty, from
       ts: new Date().toISOString()
     }));
   }catch(e){}
-}
 }
 
 function applyChangeResponsible(mode) {
@@ -1319,11 +1343,11 @@ function migrateLocalKeys(oldId, newId) {
     pairs.forEach(([pOld, pNew]) => {
         const oldKey = pOld + oldId;
         const newKey = pNew + newId;
-        const val = localStorage.getItem(oldKey);
-        if (val !== null && localStorage.getItem(newKey) === null) {
-            localStorage.setItem(newKey, val);
+        const val = storeGet(oldKey);
+        if (val !== null && storeGet(newKey) === null) {
+            storeSet(newKey, val);
         }
-        if (val !== null) localStorage.removeItem(oldKey);
+        if (val !== null) storeRemove(oldKey);
     });
 }
 
@@ -1408,7 +1432,7 @@ function loadMoratoriumUI(){
     const id = getAbonentIdFromURL();
     const el = document.getElementById("moratoriumToggle");
     if (!el) return;
-    el.checked = localStorage.getItem(moratoriumKey(id)) === "1";
+    el.checked = storeGet(moratoriumKey(id)) === "1";
 }
 function bindMoratoriumUI(){
     const id = getAbonentIdFromURL();
@@ -1416,10 +1440,10 @@ function bindMoratoriumUI(){
     if (!el) return;
     el.addEventListener("change", () => {
         if (!canWriteOrExplainLocal()) {
-            el.checked = localStorage.getItem(moratoriumKey(id)) === "1";
+            el.checked = storeGet(moratoriumKey(id)) === "1";
             return;
         }
-        localStorage.setItem(moratoriumKey(id), el.checked ? "1" : "0");
+        storeSet(moratoriumKey(id), el.checked ? "1" : "0");
         if (window.__loadPaymentTable) window.__loadPaymentTable();
     });
 }
@@ -1430,7 +1454,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
 function openNotesModal() {
     const id = getAbonentIdFromURL();
-    const note = localStorage.getItem("note_" + id) || "";
+    const note = storeGet("note_" + id) || "";
     document.getElementById("notesText").value = note;
     document.getElementById("notesModal").style.display = "flex";
 }
@@ -1441,7 +1465,7 @@ function saveNotes() {
     if (!canWriteOrExplainLocal()) return;
     const id = getAbonentIdFromURL();
     const txt = document.getElementById("notesText").value.trim();
-    localStorage.setItem("note_" + id, txt);
+    storeSet("note_" + id, txt);
     closeNotesModal();
     alert("Примечание сохранено");
 }
@@ -1456,7 +1480,7 @@ function loadCalcPeriodUI(){
     if (!fromEl || !toEl) return;
 
     try {
-        const raw = localStorage.getItem(calcPeriodKey(id));
+        const raw = storeGet(calcPeriodKey(id));
         if (raw) {
             const obj = JSON.parse(raw);
             fromEl.value = obj.from || "";
@@ -1473,12 +1497,12 @@ function loadCalcPeriodUI(){
 
 function saveCalcPeriod(from, to){
     const id = getAbonentIdFromURL();
-    localStorage.setItem(calcPeriodKey(id), JSON.stringify({from: from || "", to: to || ""}));
+    storeSet(calcPeriodKey(id), JSON.stringify({from: from || "", to: to || ""}));
 }
 
 function setCalcPeriodActive(active){
     const id = getAbonentIdFromURL();
-    localStorage.setItem(calcPeriodActiveKey(id), active ? "1" : "0");
+    storeSet(calcPeriodActiveKey(id), active ? "1" : "0");
 }
 
 function isValidPeriod(from, to){
