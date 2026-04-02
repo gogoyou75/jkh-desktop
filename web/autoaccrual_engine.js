@@ -56,6 +56,16 @@
     const n = parseFloat(String(v ?? '').replace(',', '.'));
     return Number.isFinite(n) ? n : 0;
   }
+  function isDataReady(){ return window.JKH_DATA_READY === true; }
+  function storeGetRaw(key){
+    if (!isDataReady()) return null;
+    if (!(window.JKHStore && typeof window.JKHStore.getRaw === 'function')) return null;
+    try{ return JKHStore.getRaw(String(key)); } catch { return null; }
+  }
+  function storeSetRaw(key, value){
+    if (!(window.JKHStore && typeof window.JKHStore.setRaw === 'function')) return;
+    try{ JKHStore.setRaw(String(key), value); } catch {}
+  }
 
   function iso(y,m,d){ return `${y}-${pad2(m)}-${pad2(d)}`; }
   function isISODate(s){ return /^\d{4}-\d{2}-\d{2}$/.test(String(s||'')); }
@@ -141,20 +151,20 @@
   }
 
   // ----------------------------
-  // localStorage helpers
+  // JKHStore helpers
   // ----------------------------
   function paymentsKey(ls){ return `payments_${ls}`; }
 
   function loadPayments(ls){
     try{
-      const raw = localStorage.getItem(paymentsKey(ls));
+      const raw = storeGetRaw(paymentsKey(ls));
       if (!raw) return [];
       const arr = JSON.parse(raw);
       return Array.isArray(arr) ? arr : [];
     } catch { return []; }
   }
   function savePayments(ls, arr){
-    try{ localStorage.setItem(paymentsKey(ls), JSON.stringify(arr||[])); } catch {}
+    storeSetRaw(paymentsKey(ls), JSON.stringify(arr||[]));
   }
 
   // ----------------------------
@@ -213,30 +223,16 @@
   }
 
   function detectTariffTable(){
-    // 1) known keys
+    // known keys (без эвристик сканирования хранилища)
     for (const k of KNOWN_TARIFF_KEYS){
       try{
-        const raw = localStorage.getItem(k);
+        const raw = storeGetRaw(k);
         if (!raw) continue;
         const data = JSON.parse(raw);
         const rows = extractTariffRowsFromParsed(data);
         if (Array.isArray(rows) && rows.length) return rows;
       } catch {}
     }
-    // 2) scan localStorage for anything that looks like tariffs
-    try{
-      const ks = Object.keys(localStorage);
-      for (const k of ks){
-        if (!/tarif|тариф/i.test(k)) continue;
-        const raw = localStorage.getItem(k);
-        if (!raw) continue;
-        try{
-          const data = JSON.parse(raw);
-          const rows = extractTariffRowsFromParsed(data);
-          if (Array.isArray(rows) && rows.length) return rows;
-        } catch {}
-      }
-    } catch {}
     return null;
   }
 
@@ -320,7 +316,7 @@
 
   function loadDynamicTariffs(){
     try{
-      const raw = localStorage.getItem(DYNAMIC_TARIFFS_KEY);
+      const raw = storeGetRaw(DYNAMIC_TARIFFS_KEY);
       if (!raw) return [];
       const arr = JSON.parse(raw);
       return Array.isArray(arr) ? arr : [];
@@ -414,7 +410,7 @@
 
   function saveTariffsV1(rows){
     const norm = normalizeTariffs(rows);
-    if (window.JKHStore && JKHStore.setRaw) JKHStore.setRaw('tariffs_content_repair_v1', JSON.stringify({ tariffs: norm.map(x => ({ from: x.from, content: x.content, repair: x.repair })) }));
+    storeSetRaw('tariffs_content_repair_v1', JSON.stringify({ tariffs: norm.map(x => ({ from: x.from, content: x.content, repair: x.repair })) }));
     return norm;
   }
 
