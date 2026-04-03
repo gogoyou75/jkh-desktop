@@ -19,6 +19,7 @@
 
   var _sessionReady = false;
   var _syncPromise = null;
+  var _autoLoadAfterLoginPromise = null;
 
   function safeJsonParse(s, fallback) {
     try { return JSON.parse(s); } catch (e) { return fallback; }
@@ -350,15 +351,7 @@
     _sessionReady = true;
     console.info("[auth] login userId=%s email=%s", String(data.user && data.user.id || ""), String(data.user && data.user.email || ""));
 
-    if (!window.JKHRemoteSync || typeof window.JKHRemoteSync.autoLoadAfterLogin !== "function") {
-      window.JKH_DATA_READY = false;
-      throw new Error("AUTOLOAD_REQUIRED");
-    }
-    var loaded = await window.JKHRemoteSync.autoLoadAfterLogin();
-    if (!loaded) {
-      window.JKH_DATA_READY = false;
-      throw new Error("AUTOLOAD_REQUIRED");
-    }
+    await runAutoLoadAfterLoginOnce("login");
 
     renderAuthStatus();
     protectPages();
@@ -382,15 +375,7 @@
     _sessionReady = true;
     console.info("[auth] register userId=%s email=%s role=%s", String(data.user && data.user.id || ""), String(data.user && data.user.email || ""), String(data.user && data.user.role || ""));
 
-    if (!window.JKHRemoteSync || typeof window.JKHRemoteSync.autoLoadAfterLogin !== "function") {
-      window.JKH_DATA_READY = false;
-      throw new Error("AUTOLOAD_REQUIRED");
-    }
-    var loaded = await window.JKHRemoteSync.autoLoadAfterLogin();
-    if (!loaded) {
-      window.JKH_DATA_READY = false;
-      throw new Error("AUTOLOAD_REQUIRED");
-    }
+    await runAutoLoadAfterLoginOnce("register");
 
     renderAuthStatus();
     protectPages();
@@ -544,6 +529,30 @@
     return null;
   }
 
+  async function runAutoLoadAfterLoginOnce(reason) {
+    if (!window.JKHRemoteSync || typeof window.JKHRemoteSync.autoLoadAfterLogin !== "function") {
+      window.JKH_DATA_READY = false;
+      throw new Error("AUTOLOAD_REQUIRED");
+    }
+    if (_autoLoadAfterLoginPromise) {
+      return _autoLoadAfterLoginPromise;
+    }
+    _autoLoadAfterLoginPromise = (async function () {
+      var loaded = await window.JKHRemoteSync.autoLoadAfterLogin();
+      if (!loaded) {
+        window.JKH_DATA_READY = false;
+        throw new Error("AUTOLOAD_REQUIRED");
+      }
+      return true;
+    })();
+    try {
+      return await _autoLoadAfterLoginPromise;
+    } finally {
+      _autoLoadAfterLoginPromise = null;
+      if (reason) console.info("[auth] autoLoadAfterLogin completed reason=%s", String(reason));
+    }
+  }
+
   function init() {
     patchGuestDialogsForLoggedIn();
     renderAuthStatus();
@@ -556,7 +565,7 @@
       protectPages();
       try {
         if (window.JKHRemoteSync && typeof window.JKHRemoteSync.autoLoadAfterLogin === "function") {
-          window.JKHRemoteSync.autoLoadAfterLogin().then(function(ok){ if (!ok) window.JKH_DATA_READY = false; }).catch(function () { window.JKH_DATA_READY = false; });
+          runAutoLoadAfterLoginOnce("init").catch(function () { window.JKH_DATA_READY = false; });
         } else {
           window.JKH_DATA_READY = false;
         }

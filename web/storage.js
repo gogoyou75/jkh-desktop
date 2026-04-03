@@ -35,6 +35,8 @@
   "use strict";
 
   if (typeof window.JKH_DATA_READY !== "boolean") window.JKH_DATA_READY = false;
+  if (typeof window.__JKH_AUTOLOAD_IN_PROGRESS !== "boolean") window.__JKH_AUTOLOAD_IN_PROGRESS = false;
+  if (!window.__JKH_AUTOLOAD_PROMISE) window.__JKH_AUTOLOAD_PROMISE = null;
 
   // ============================================================
   // 🔑 Scoped localStorage keys (per-user базы)
@@ -1015,6 +1017,11 @@
   }
 
   async function autoLoadAfterLogin() {
+    if (window.__JKH_AUTOLOAD_IN_PROGRESS) {
+      return window.__JKH_AUTOLOAD_PROMISE || false;
+    }
+    window.__JKH_AUTOLOAD_IN_PROGRESS = true;
+    window.__JKH_AUTOLOAD_PROMISE = (async function () {
     try {
       if (!window.Auth || typeof Auth.getCurrentUser !== "function") return false;
       var user = Auth.getCurrentUser();
@@ -1055,7 +1062,12 @@
       window.JKH_DATA_READY = false;
       _setStatus({ lastAction: "Ошибка автозагрузки", lastError: String(e && e.message ? e.message : e) });
       return false;
+    } finally {
+      window.__JKH_AUTOLOAD_IN_PROGRESS = false;
+      window.__JKH_AUTOLOAD_PROMISE = null;
     }
+    })();
+    return window.__JKH_AUTOLOAD_PROMISE;
   }
 
   // стартуем таймер при загрузке страницы (если включён)
