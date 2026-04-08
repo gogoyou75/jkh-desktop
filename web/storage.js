@@ -1015,47 +1015,72 @@
   }
 
   async function autoLoadAfterLogin() {
-    try {
-      if (!window.Auth || typeof Auth.getCurrentUser !== "function") return false;
-      var user = Auth.getCurrentUser();
-      if (!user || !user.id) return false;
-      if (_isGuestOrAll()) return false;
-      if (!isOnlineMode()) return false;
-
-      var markerKey = "jkh_sync_autoload_done_v1";
-      var markerVal = "";
-      try { markerVal = sessionStorage.getItem(markerKey) || ""; } catch (e0) { markerVal = ""; }
-      var expected = user.id + "|ok";
-      if (markerVal === expected) return true;
-
-      console.info("[JKH sync][login] userId=%s email=%s action=auto_load_start", user.id, String(user.email || ""));
-      var resDump = await _apiGet("/api/store_dump");
-      if (!(resDump.okHttp && resDump.data && resDump.data.ok === true)) {
-        window.JKH_DATA_READY = false;
-        _setStatus({ lastAction: "Автозагрузка не выполнена", lastError: (resDump.data && resDump.data.error) ? resDump.data.error : ("HTTP " + resDump.status) });
-        return false;
-      }
-
-      var data = resDump.data.data || {};
-      var keys = _uniq(Object.keys(data).concat(_projectKeysForScope("db", user.id)));
-      for (var i = 0; i < keys.length; i++) {
-        var bk = keys[i];
-        if (!_isProjectDataKey(bk)) continue;
-        var val = Object.prototype.hasOwnProperty.call(data, bk) ? data[bk] : "";
-        _writeLocalCompat(bk, val || "", user.id);
-        console.info("[JKH sync][load] owner=%s key=%s size=%s status=ok", user.id, bk, String(val || "").length);
-      }
-
-      try { sessionStorage.setItem(markerKey, expected); } catch (e1) { _lsSet(markerKey, expected); }
-      window.JKH_DATA_READY = true;
-      _setStatus({ lastAction: "✅ Автозагрузка после входа завершена", lastError: null, ownerId: user.id, loadSource: "server:auto", lastReadAt: _nowISO() });
-      console.info("[JKH sync][login] userId=%s email=%s action=auto_load_done keys=%s", user.id, String(user.email || ""), keys.length);
-      return true;
-    } catch (e) {
-      window.JKH_DATA_READY = false;
-      _setStatus({ lastAction: "Ошибка автозагрузки", lastError: String(e && e.message ? e.message : e) });
-      return false;
+    if (window.__JKH_AUTOLOAD_IN_PROGRESS === true && window.__JKH_AUTOLOAD_PROMISE) {
+      return window.__JKH_AUTOLOAD_PROMISE;
     }
+
+    window.__JKH_AUTOLOAD_PROMISE = (async function () {
+      window.__JKH_AUTOLOAD_IN_PROGRESS = true;
+      try {
+        if (!window.Auth || typeof Auth.getCurrentUser !== "function") return false;
+        var user = Auth.getCurrentUser();
+        if (!user || !user.id) return false;
+        if (_isGuestOrAll()) return false;
+        if (!isOnlineMode()) return false;
+
+        var markerKey = "jkh_sync_autoload_done_v1";
+        var expected = user.id + "|ok";
+        var pageGateKey = "__JKH_AUTOLOAD_DONE::" + expected;
+        if (window[pageGateKey] === true || window.__JKH_AUTOLOAD_DONE_FOR_USER === expected) {
+          window.JKH_DATA_READY = true;
+          return true;
+        }
+
+        var markerVal = "";
+        try { markerVal = sessionStorage.getItem(markerKey) || ""; } catch (e0) { markerVal = ""; }
+        if (markerVal === expected) {
+          window[pageGateKey] = true;
+          window.__JKH_AUTOLOAD_DONE_FOR_USER = expected;
+          window.JKH_DATA_READY = true;
+          return true;
+        }
+
+        console.info("[JKH sync][login] userId=%s email=%s action=auto_load_start", user.id, String(user.email || ""));
+        var resDump = await _apiGet("/api/store_dump");
+        if (!(resDump.okHttp && resDump.data && resDump.data.ok === true)) {
+          window.JKH_DATA_READY = false;
+          _setStatus({ lastAction: "Автозагрузка не выполнена", lastError: (resDump.data && resDump.data.error) ? resDump.data.error : ("HTTP " + resDump.status) });
+          return false;
+        }
+
+        var data = resDump.data.data || {};
+        var keys = _uniq(Object.keys(data).concat(_projectKeysForScope("db", user.id)));
+        for (var i = 0; i < keys.length; i++) {
+          var bk = keys[i];
+          if (!_isProjectDataKey(bk)) continue;
+          var val = Object.prototype.hasOwnProperty.call(data, bk) ? data[bk] : "";
+          _writeLocalCompat(bk, val || "", user.id);
+          console.info("[JKH sync][load] owner=%s key=%s size=%s status=ok", user.id, bk, String(val || "").length);
+        }
+
+        try { sessionStorage.setItem(markerKey, expected); } catch (e1) { _lsSet(markerKey, expected); }
+        window[pageGateKey] = true;
+        window.__JKH_AUTOLOAD_DONE_FOR_USER = expected;
+        window.JKH_DATA_READY = true;
+        _setStatus({ lastAction: "✅ Автозагрузка после входа завершена", lastError: null, ownerId: user.id, loadSource: "server:auto", lastReadAt: _nowISO() });
+        console.info("[JKH sync][login] userId=%s email=%s action=auto_load_done keys=%s", user.id, String(user.email || ""), keys.length);
+        return true;
+      } catch (e) {
+        window.JKH_DATA_READY = false;
+        _setStatus({ lastAction: "Ошибка автозагрузки", lastError: String(e && e.message ? e.message : e) });
+        return false;
+      } finally {
+        window.__JKH_AUTOLOAD_IN_PROGRESS = false;
+        window.__JKH_AUTOLOAD_PROMISE = null;
+      }
+    })();
+
+    return window.__JKH_AUTOLOAD_PROMISE;
   }
 
   // стартуем таймер при загрузке страницы (если включён)
