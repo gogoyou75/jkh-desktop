@@ -74,11 +74,15 @@
       try {
         var loaded = await window.JKHRemoteSync.autoLoadAfterLogin();
         if (!loaded) {
-          gate.failed = true;
-          gate.lastResult = false;
-          window.JKH_DATA_READY = false;
-          throw new Error("AUTOLOAD_REQUIRED");
-        }
+  gate.failed = true;
+  gate.lastResult = false;
+  window.JKH_DATA_READY = false;
+
+  console.warn("[auth] autoload failed but login allowed");
+
+  // ❗ НЕ ЛОМАЕМ ЛОГИН
+  return false;
+}
         gate.done = true;
         gate.failed = false;
         gate.lastResult = true;
