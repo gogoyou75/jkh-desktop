@@ -1018,7 +1018,12 @@
     if (window.__JKH_AUTOLOAD_IN_PROGRESS === true && window.__JKH_AUTOLOAD_PROMISE) {
       return window.__JKH_AUTOLOAD_PROMISE;
     }
-
+   // 🔒 HARD GUARD: защита от двойного запуска (усиленная)
+  if (window.__JKH_AUTOLOAD_LOCK === true) {
+   console.warn("[JKH] autoload prevented (LOCK)");
+  return false;
+    }
+    window.__JKH_AUTOLOAD_LOCK = true;
     window.__JKH_AUTOLOAD_PROMISE = (async function () {
       window.__JKH_AUTOLOAD_IN_PROGRESS = true;
       try {
@@ -1075,9 +1080,14 @@
         _setStatus({ lastAction: "Ошибка автозагрузки", lastError: String(e && e.message ? e.message : e) });
         return false;
       } finally {
-        window.__JKH_AUTOLOAD_IN_PROGRESS = false;
-        window.__JKH_AUTOLOAD_PROMISE = null;
-      }
+  window.__JKH_AUTOLOAD_IN_PROGRESS = false;
+  window.__JKH_AUTOLOAD_PROMISE = null;
+
+  // 🔓 снимаем lock
+  setTimeout(function () {
+    window.__JKH_AUTOLOAD_LOCK = false;
+  }, 500);
+}
     })();
 
     return window.__JKH_AUTOLOAD_PROMISE;
@@ -1097,4 +1107,14 @@
     autoLoadAfterLogin: autoLoadAfterLogin,
     projectKeyCanon: function () { return { exact: SYNC_CANON.exact.slice(), prefix: SYNC_CANON.prefix.slice() }; }
   };
+     // 🔧 MANUAL RESET (для отладки и logout)
+window.resetAutoLoadGate = function () {
+  try {
+    window.__JKH_AUTOLOAD_IN_PROGRESS = false;
+    window.__JKH_AUTOLOAD_PROMISE = null;
+    window.__JKH_AUTOLOAD_DONE_FOR_USER = null;
+    window.__JKH_AUTOLOAD_LOCK = false;
+    console.info("[JKH] autoload gate reset");
+  } catch (e) {}
+};
 })();
