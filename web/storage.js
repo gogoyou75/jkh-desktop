@@ -34,8 +34,6 @@
 (function () {
   "use strict";
 
-  if (typeof window.JKH_DATA_READY !== "boolean") window.JKH_DATA_READY = false;
-
   // ============================================================
   // 🔑 Scoped localStorage keys (per-user базы)
   // ============================================================
@@ -261,6 +259,21 @@
 
   function _safeJsonStringify(v) {
     try { return JSON.stringify(v); } catch (e) { return ""; }
+  }
+
+  function _ensureUIState() {
+    if (!window.JKH_UI_STATE || typeof window.JKH_UI_STATE !== "object") {
+      window.JKH_UI_STATE = { auth: "guest", data: "idle", message: "" };
+    }
+    return window.JKH_UI_STATE;
+  }
+
+  function _setUIState(patch) {
+    var st = _ensureUIState();
+    for (var kx in patch) {
+      if (Object.prototype.hasOwnProperty.call(patch, kx)) st[kx] = patch[kx];
+    }
+    return st;
   }
 
   function _cacheGet(baseKey, ownerId) {
@@ -762,6 +775,7 @@
   }
 
   var ownerId = _ownerId();
+  _setUIState({ data: "loading", message: "" });
 
   try {
     // ✅ ЕДИНСТВЕННЫЙ источник — store_dump
@@ -773,6 +787,10 @@
         lastError: (resDump.data && resDump.data.error)
           ? resDump.data.error
           : ("HTTP " + resDump.status)
+      });
+      _setUIState({
+        data: "error",
+        message: "Ошибка загрузки данных с сервера: " + ((resDump.data && resDump.data.error) ? resDump.data.error : ("HTTP " + resDump.status))
       });
       return false;
     }
@@ -825,14 +843,17 @@
       loadSource: "server",
       lastReadAt: _nowISO()
     });
+    _setUIState({ data: "ready", message: "" });
 
     return true;
 
   } catch (e) {
+    var errMsg = String(e && e.message ? e.message : e);
     _setStatus({
       lastAction: "Ошибка загрузки",
-      lastError: String(e && e.message ? e.message : e)
+      lastError: errMsg
     });
+    _setUIState({ data: "error", message: "Ошибка загрузки данных с сервера: " + errMsg });
     return false;
   }
 }
@@ -932,9 +953,7 @@
     window.__JKH_AUTOLOAD_PROMISE = (async function () {
       window.__JKH_AUTOLOAD_IN_PROGRESS = true;
       try {
-		  if (window.JKH_UI_STATE) {
-  window.JKH_UI_STATE.data = "loading";
-}
+        _setUIState({ data: "loading", message: "" });
         if (!window.Auth || typeof Auth.getCurrentUser !== "function") return false;
         var user = Auth.getCurrentUser();
         if (!user || !user.id) return false;
@@ -945,7 +964,7 @@
         var expected = user.id + "|ok";
         var pageGateKey = "__JKH_AUTOLOAD_DONE::" + expected;
         if (window[pageGateKey] === true || window.__JKH_AUTOLOAD_DONE_FOR_USER === expected) {
-          window.JKH_DATA_READY = true;
+          _setUIState({ data: "ready", message: "" });
           _setStatus({ lastAction: "✅ Автозагрузка уже выполнена", lastError: null, ownerId: user.id, loadSource: "server:auto", lastReadAt: _nowISO() });
           return true;
         }
@@ -955,7 +974,7 @@
         if (markerVal === expected) {
           window[pageGateKey] = true;
           window.__JKH_AUTOLOAD_DONE_FOR_USER = expected;
-          window.JKH_DATA_READY = true;
+          _setUIState({ data: "ready", message: "" });
           _setStatus({ lastAction: "✅ Автозагрузка уже выполнена", lastError: null, ownerId: user.id, loadSource: "server:auto", lastReadAt: _nowISO() });
           return true;
         }
@@ -963,16 +982,13 @@
         console.info("[JKH sync][login] userId=%s email=%s action=auto_load_start", user.id, String(user.email || ""));
         var resDump = await _apiGet("/api/store_dump");
         if (!(resDump.okHttp && resDump.data && resDump.data.ok === true)) {
-          window.JKH_DATA_READY = false;
-          _setStatus({ lastAction: "Автозагрузка не выполнена", lastError: (resDump.data && resDump.data.error) ? resDump.data.error : ("HTTP " + resDump.status) });
+          var httpErr = (resDump.data && resDump.data.error) ? resDump.data.error : ("HTTP " + resDump.status);
+          _setUIState({ data: "error", message: "Автозагрузка данных не выполнена: " + httpErr });
+          _setStatus({ lastAction: "Автозагрузка не выполнена", lastError: httpErr });
           return false;
         }
 
         var data = resDump.data.data || {};
-		if (window.JKH_UI_STATE) {
-  window.JKH_UI_STATE.data = "ready";
-  window.JKH_UI_STATE.message = "";
-}
         var keys = _uniq(Object.keys(data).concat(_projectKeysForScope("db", user.id)));
         for (var i = 0; i < keys.length; i++) {
           var bk = keys[i];
@@ -994,18 +1010,22 @@
         try { sessionStorage.setItem(markerKey, expected); } catch (e1) { _lsSet(markerKey, expected); }
         window[pageGateKey] = true;
         window.__JKH_AUTOLOAD_DONE_FOR_USER = expected;
-        window.JKH_DATA_READY = true;
+        _setUIState({ data: "ready", message: "" });
         _setStatus({ lastAction: "✅ Автозагрузка после входа завершена", lastError: null, ownerId: user.id, loadSource: "server:auto", lastReadAt: _nowISO() });
         console.info("[JKH sync][login] userId=%s email=%s action=auto_load_done keys=%s", user.id, String(user.email || ""), keys.length);
         return true;
       } catch (e) {
-
-  if (window.JKH_UI_STATE) {
-    window.JKH_UI_STATE.data = "error";
-    window.JKH_UI_STATE.message = "Ошибка загрузки данных с сервера";
-  }
-
-  window.JKH_DATA_READY = false;
+        var msg = String(e && e.message ? e.message : e);
+        _setUIState({
+          data: "error",
+          message: "Ошибка загрузки данных с сервера: " + msg
+        });
+        _setStatus({ lastAction: "Автозагрузка не выполнена", lastError: msg });
+        return false;
+      } finally {
+        window.__JKH_AUTOLOAD_IN_PROGRESS = false;
+        window.__JKH_AUTOLOAD_LOCK = false;
+        window.__JKH_AUTOLOAD_PROMISE = null;
       }
     })();
 

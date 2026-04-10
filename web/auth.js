@@ -75,7 +75,6 @@
   async function runAutoLoadAfterLoginOnce(sourceTag) {
     var tag = String(sourceTag || "unknown");
     if (!window.JKHRemoteSync || typeof window.JKHRemoteSync.autoLoadAfterLogin !== "function") {
-      window.JKH_DATA_READY = false;
       console.warn("[auth] autoload adapter missing; continue without blocking login");
       return false;
     }
@@ -85,7 +84,7 @@
     var gate = _getAutoLoadGate();
     _resetAutoLoadGate(uid);
 
-    if (gate.done && gate.doneForUserId === uid && window.JKH_DATA_READY === true) {
+    if (gate.done && gate.doneForUserId === uid) {
       return true;
     }
 
@@ -101,7 +100,6 @@
           gate.done = false;
           gate.failed = true;
           gate.lastResult = false;
-          window.JKH_DATA_READY = false;
           console.warn("[auth] autoload failed but login allowed source=%s userId=%s", tag, uid);
           return false;
         }
@@ -109,14 +107,12 @@
         gate.failed = false;
         gate.lastResult = true;
         gate.doneForUserId = uid;
-        window.JKH_DATA_READY = true;
         console.info("[auth] autoload gate done source=%s userId=%s", tag, uid);
         return true;
       } catch (e) {
         gate.done = false;
         gate.failed = true;
         gate.lastResult = false;
-        window.JKH_DATA_READY = false;
         console.warn("[auth] autoload exception but login allowed source=%s userId=%s:", tag, uid, e);
         return false;
       } finally {
@@ -476,6 +472,11 @@ function _setUIState(patch) {
 
     cacheSessionUser(data.user);
     _sessionReady = true;
+    _setUIState({
+      auth: (data.user && data.user.role === "admin") ? "admin" : "user",
+      data: "loading",
+      message: ""
+    });
     console.info("[auth] login userId=%s email=%s", String(data.user && data.user.id || ""), String(data.user && data.user.email || ""));
 
     try {
@@ -504,6 +505,11 @@ function _setUIState(patch) {
 
     cacheSessionUser(data.user);
     _sessionReady = true;
+    _setUIState({
+      auth: (data.user && data.user.role === "admin") ? "admin" : "user",
+      data: "loading",
+      message: ""
+    });
     console.info("[auth] register userId=%s email=%s role=%s", String(data.user && data.user.id || ""), String(data.user && data.user.email || ""), String(data.user && data.user.role || ""));
 
     try {
@@ -538,8 +544,12 @@ function _setUIState(patch) {
       gate.failed = false;
       gate.lastResult = null;
       gate.doneForUserId = "";
-      window.JKH_DATA_READY = false;
     } catch (e2) {}
+    _setUIState({
+      auth: "guest",
+      data: "idle",
+      message: ""
+    });
     renderAuthStatus();
   }
 
@@ -693,7 +703,6 @@ function _setUIState(patch) {
           data: "idle",
           message: ""
         });
-        window.JKH_DATA_READY = true;
         renderAuthStatus();
         protectPages();
         return true;
@@ -720,8 +729,6 @@ function _setUIState(patch) {
           data: "error",
           message: "Не удалось автоматически загрузить данные"
         });
-        // не роняем UI целиком
-        window.JKH_DATA_READY = true;
       }
 
       renderAuthStatus();
@@ -736,7 +743,6 @@ function _setUIState(patch) {
         data: "idle",
         message: ""
       });
-      window.JKH_DATA_READY = true;
       renderAuthStatus();
       protectPages();
       return true;

@@ -639,8 +639,8 @@ document.addEventListener("DOMContentLoaded", () => {
     if (!user || uiState.auth === "guest") {
         console.warn("[JKH] guest mode — UI not blocked");
     }
-    // ✅ Блокируем только вошедшего пользователя, у которого данные реально не готовы
-    else if (window.JKH_DATA_READY !== true || uiState.data === "error" || uiState.data === "loading") {
+    // ✅ Для вошедшего пользователя показываем блокировку только при data=error
+    else if (uiState.data === "error") {
         const table = document.getElementById("abonentsTable");
         if (table) table.style.display = "none";
 
@@ -653,6 +653,13 @@ document.addEventListener("DOMContentLoaded", () => {
         if (anchor && anchor.parentNode) anchor.parentNode.insertBefore(blocker, anchor.nextSibling);
 
         return;
+    } else if (uiState.data === "loading") {
+        const warn = document.createElement("div");
+        warn.id = "dataLoadingWarn";
+        warn.style.cssText = "margin:16px 0;padding:12px;border:1px solid #d4a017;border-radius:8px;background:#fff8e1;color:#6d4c00;";
+        warn.textContent = uiState.message || "Выполняется загрузка данных с сервера…";
+        var h2Anchor = document.querySelector("h2");
+        if (h2Anchor && h2Anchor.parentNode) h2Anchor.parentNode.insertBefore(warn, h2Anchor.nextSibling);
     }
 
     const db = window.AbonentsDB?.abonents || {};
