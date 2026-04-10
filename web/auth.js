@@ -128,8 +128,29 @@
   }
 
   function safeJsonParse(s, fallback) {
-    try { return JSON.parse(s); } catch (e) { return fallback; }
+  try { return JSON.parse(s); } catch (e) { return fallback; }
+}
+
+function _ensureUIState() {
+  if (!window.JKH_UI_STATE || typeof window.JKH_UI_STATE !== "object") {
+    window.JKH_UI_STATE = {
+      auth: "guest",   // guest | user | admin
+      data: "idle",    // idle | loading | ready | error
+      message: ""
+    };
   }
+  return window.JKH_UI_STATE;
+}
+
+function _setUIState(patch) {
+  var st = _ensureUIState();
+  for (var k in patch) {
+    if (Object.prototype.hasOwnProperty.call(patch, k)) {
+      st[k] = patch[k];
+    }
+  }
+  return st;
+}
 
   function safeJsonStringify(v) {
     try { return JSON.stringify(v); } catch (e) { return ""; }
@@ -665,22 +686,41 @@
       await syncSessionFromServer(false);
       var u = getCurrentUser();
 
-      // ✅ ГОСТЬ / НЕ ЗАЛОГИНЕН:
-      // это не ошибка и не повод держать UI в заблокированном состоянии
+      // ✅ Гость: это нормальное состояние, не ошибка
       if (!u) {
+        _setUIState({
+          auth: "guest",
+          data: "idle",
+          message: ""
+        });
         window.JKH_DATA_READY = true;
         renderAuthStatus();
         protectPages();
         return true;
       }
 
+      _setUIState({
+        auth: (u.role === "admin" ? "admin" : "user"),
+        data: "loading",
+        message: ""
+      });
+
       console.info("[auth] init session userId=%s email=%s", String(u.id || ""), String(u.email || ""));
       var loaded = await runAutoLoadAfterLoginOnce("Auth.init");
 
-      // ✅ если автозагрузка не удалась, но пользователь залогинен,
-      // UI не должен выглядеть как "сломанный вход".
-      // Данные могут быть догружены вручную.
-      if (!loaded) {
+      if (loaded) {
+        _setUIState({
+          auth: (u.role === "admin" ? "admin" : "user"),
+          data: "ready",
+          message: ""
+        });
+      } else {
+        _setUIState({
+          auth: (u.role === "admin" ? "admin" : "user"),
+          data: "error",
+          message: "Не удалось автоматически загрузить данные"
+        });
+        // не роняем UI целиком
         window.JKH_DATA_READY = true;
       }
 
@@ -689,9 +729,13 @@
       return true;
 
     } catch (e) {
-      // ✅ 401 на /api/auth/me для гостя — нормальный сценарий.
-      // Не держим публичный UI заблокированным.
+      // ✅ 401 для гостя — не ошибка приложения
       clearSessionCache();
+      _setUIState({
+        auth: "guest",
+        data: "idle",
+        message: ""
+      });
       window.JKH_DATA_READY = true;
       renderAuthStatus();
       protectPages();

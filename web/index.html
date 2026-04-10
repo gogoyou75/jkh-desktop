@@ -627,15 +627,31 @@ function calcTotalsFromPayments(id, abonentObj){
 ============================================================ */
 document.addEventListener("DOMContentLoaded", () => {
 
-    if (window.JKH_DATA_READY !== true) {
+        var uiState = (window.JKH_UI_STATE && typeof window.JKH_UI_STATE === "object")
+        ? window.JKH_UI_STATE
+        : { auth: "guest", data: "idle", message: "" };
+
+    var user = (window.Auth && typeof Auth.getCurrentUser === "function")
+        ? Auth.getCurrentUser()
+        : null;
+
+    // ✅ Гость никогда не получает блокировку главной страницы
+    if (!user || uiState.auth === "guest") {
+        console.warn("[JKH] guest mode — UI not blocked");
+    }
+    // ✅ Блокируем только вошедшего пользователя, у которого данные реально не готовы
+    else if (window.JKH_DATA_READY !== true || uiState.data === "error" || uiState.data === "loading") {
         const table = document.getElementById("abonentsTable");
         if (table) table.style.display = "none";
+
         const blocker = document.createElement("div");
         blocker.id = "dataNotReadyBlock";
         blocker.style.cssText = "margin:16px 0;padding:12px;border:1px solid #b00020;border-radius:8px;background:#fff4f4;color:#7a0016;";
-        blocker.textContent = "Данные не загружены с сервера. Интерфейс заблокирован до успешной автозагрузки.";
+        blocker.textContent = uiState.message || "Данные не загружены с сервера. Интерфейс заблокирован до успешной автозагрузки.";
+
         var anchor = document.querySelector("h2");
         if (anchor && anchor.parentNode) anchor.parentNode.insertBefore(blocker, anchor.nextSibling);
+
         return;
     }
 
