@@ -466,6 +466,13 @@
     if (!window.JKHStore) return true;
     return window.JKHStore.isGuestMode() || window.JKHStore.isAllMode();
   }
+    function _isGuestUser() {
+    try {
+      return !!(window.Auth && typeof Auth.isGuest === "function" && Auth.isGuest());
+    } catch (e) {
+      return true;
+    }
+  }
 
   function _lsGet(key, def) {
     try {
@@ -675,10 +682,20 @@
     return { okHttp: r.ok, status: r.status, data: data, text: txt };
   }
 
- async function pingServer() {
+  async function pingServer() {
   if (!isOnlineMode()) {
     _setStatus({ server: "OFFLINE (локально)", lastError: null });
     return false;
+  }
+
+  // ✅ Гость = нормальный режим, а не ошибка сервера
+  if (_isGuestUser()) {
+    _setStatus({
+      server: "гость (без серверной сессии)",
+      lastError: null,
+      lastAction: "Гостевой режим: проверка серверной базы не требуется"
+    });
+    return true;
   }
 
   try {
@@ -687,6 +704,16 @@
 
     if (res.okHttp && res.data && res.data.ok === true) {
       _setStatus({ server: "🟢 подключён", lastError: null });
+      return true;
+    }
+
+    // ✅ 401 для гостя не считаем ошибкой
+    if (res.status === 401 && _isGuestUser()) {
+      _setStatus({
+        server: "гость (без серверной сессии)",
+        lastError: null,
+        lastAction: "Гостевой режим: серверная авторизация отсутствует"
+      });
       return true;
     }
 
@@ -707,16 +734,29 @@
     return false;
   }
 }
+}
 
   async function upload(scope) {
     if (!isOnlineMode()) {
       _setStatus({ lastAction: "Сохранение пропущено: OFFLINE режим", lastError: null });
       return false;
     }
-    if (_isGuestOrAll()) {
-      _setStatus({ lastAction: "Сохранение запрещено: Гость/ALL", lastError: "GUEST_OR_ALL_READONLY" });
-      return false;
+      if (_isGuestOrAll()) {
+    if (_isGuestUser()) {
+      _setStatus({
+        lastAction: "Гостевой режим: серверная загрузка не требуется",
+        lastError: null
+      });
+      _setUIState({ data: "idle", message: "" });
+      return true;
     }
+
+    _setStatus({
+      lastAction: "Загрузка запрещена: режим ALL",
+      lastError: "ALLMODE_READONLY"
+    });
+    return false;
+  }
 
     var ownerId = _ownerId();
     var onlyIfChanged = (_lsGet(K_AS_ONLY_CHANGED, "0") === "1");
@@ -769,8 +809,20 @@
     return false;
   }
 
-  if (_isGuestOrAll()) {
-    _setStatus({ lastAction: "Загрузка запрещена: Гость/ALL", lastError: "GUEST_OR_ALL_READONLY" });
+    if (_isGuestOrAll()) {
+    if (_isGuestUser()) {
+      _setStatus({
+        lastAction: "Гостевой режим: серверная загрузка не требуется",
+        lastError: null
+      });
+      _setUIState({ data: "idle", message: "" });
+      return true;
+    }
+
+    _setStatus({
+      lastAction: "Загрузка запрещена: режим ALL",
+      lastError: "ALLMODE_READONLY"
+    });
     return false;
   }
 
@@ -781,7 +833,20 @@
     // ✅ ЕДИНСТВЕННЫЙ источник — store_dump
     var resDump = await _apiGet("/api/store_dump");
 
-    if (!(resDump.okHttp && resDump.data && resDump.data.ok === true)) {
+        if (!(resDump.okHttp && resDump.data && resDump.data.ok === true)) {
+      // ✅ Для гостя 401 не является ошибкой приложения
+      if (resDump.status === 401 && _isGuestUser()) {
+        _setStatus({
+          lastAction: "Гостевой режим: серверная загрузка пропущена",
+          lastError: null
+        });
+        _setUIState({
+          data: "idle",
+          message: ""
+        });
+        return true;
+      }
+
       _setStatus({
         lastAction: "Ошибка загрузки",
         lastError: (resDump.data && resDump.data.error)
