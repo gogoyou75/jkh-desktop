@@ -258,352 +258,190 @@
   function _safeJsonParse(raw, fallback) {
     try { return JSON.parse(raw); } catch (e) { return fallback; }
   }
+
   function _safeJsonStringify(v) {
     try { return JSON.stringify(v); } catch (e) { return ""; }
   }
 
-  function canWriteNow() {
-    // канон: guest и ALL-mode не пишут
-    if (isGuestMode()) return false;
-    if (isAllMode()) return false;
-    return true;
-  }
-
-
-
-  // server-centric cache: project data lives in runtime memory, not plain localStorage
-  var _serverCache = Object.create(null);
-
-  function _cacheKey(baseKey, ownerId) {
-    return k(baseKey, ownerId);
-  }
-
   function _cacheGet(baseKey, ownerId) {
-    return Object.prototype.hasOwnProperty.call(_serverCache, _cacheKey(baseKey, ownerId))
-      ? _serverCache[_cacheKey(baseKey, ownerId)]
-      : null;
+    return _lsGetDirect(k(baseKey, ownerId));
   }
 
   function _cacheSet(baseKey, value, ownerId) {
-    _serverCache[_cacheKey(baseKey, ownerId)] = (value === null || value === undefined) ? "" : String(value);
+    _lsSetDirect(k(baseKey, ownerId), String(value));
   }
 
   function _cacheRemove(baseKey, ownerId) {
-    delete _serverCache[_cacheKey(baseKey, ownerId)];
+    _lsRemoveDirect(k(baseKey, ownerId));
   }
 
   function _cacheKeysForOwner(ownerId) {
-    var pref = scopePrefixFor(ownerId);
     var out = [];
-    for (var kk in _serverCache) {
-      if (!Object.prototype.hasOwnProperty.call(_serverCache, kk)) continue;
+    var pref = scopePrefixFor(ownerId || getActiveOwnerId());
+    for (var i = 0; i < localStorage.length; i++) {
+      var kk = localStorage.key(i) || "";
       if (kk.indexOf(pref) === 0) out.push(kk);
     }
     return out;
   }
-  // Админская "техоперация": разрешаем работать по другим ownerId даже когда admin в ALL-mode
-  function _adminMaintenanceAllowed() {
-    return _isAdmin(); // достаточно на офлайн-прототипе
+
+  function _adminGetItemForOwner(ownerId, baseKey) {
+    var u = _getSessionUser();
+    if (!u || u.role !== "admin") throw new Error("ADMIN_ONLY");
+    var oid = String(ownerId || "");
+    if (!oid) throw new Error("OWNER_REQUIRED");
+    return _lsGetDirect(k(baseKey, oid));
   }
 
-  function _adminGetItemForOwner(ownerId, key) {
-    return getItem(key, ownerId);
-  }
-  function _adminSetItemForOwner(ownerId, key, value) {
-    if (!_adminMaintenanceAllowed()) throw new Error("ADMIN_REQUIRED");
-    setItem(key, value, ownerId);
-  }
-  function _adminRemoveItemForOwner(ownerId, key) {
-    if (!_adminMaintenanceAllowed()) throw new Error("ADMIN_REQUIRED");
-    removeItem(key, ownerId);
-  }
-  function _adminKeysForOwner(ownerId) {
-    if (!_adminMaintenanceAllowed()) throw new Error("ADMIN_REQUIRED");
-    return keysForOwner(ownerId);
+  function _adminSetItemForOwner(ownerId, baseKey, value) {
+    var u = _getSessionUser();
+    if (!u || u.role !== "admin") throw new Error("ADMIN_ONLY");
+    var oid = String(ownerId || "");
+    if (!oid) throw new Error("OWNER_REQUIRED");
+    _lsSetDirect(k(baseKey, oid), String(value));
   }
 
   window.JKHStore = {
-    // режимы/контекст
-    getOwnerId: getActiveOwnerId,
-    isAllMode: isAllMode,
+    // identity/scope
+    getOwnerId: function () { return getActiveOwnerId(); },
     isGuestMode: isGuestMode,
-    canWriteNow: canWriteNow,
-
-    // ключи
-    key: function (baseKey, ownerId) { return k(baseKey, ownerId); },
+    isAllMode: isAllMode,
     scopePrefixFor: scopePrefixFor,
 
-    // raw (scoped) — ОСНОВНАЯ ДВЕРЬ
+    // raw scoped
     getRaw: function (baseKey, ownerId) { return getItem(baseKey, ownerId); },
     setRaw: function (baseKey, value, ownerId) { return setItem(baseKey, value, ownerId); },
     removeRaw: function (baseKey, ownerId) { return removeItem(baseKey, ownerId); },
 
-    // json (scoped)
+    // JSON helpers
     getJSON: function (baseKey, fallback, ownerId) {
       var raw = getItem(baseKey, ownerId);
-      if (!raw) return fallback;
+      if (raw === null || raw === undefined || raw === "") return fallback;
       return _safeJsonParse(raw, fallback);
     },
     setJSON: function (baseKey, obj, ownerId) {
-      return setItem(baseKey, _safeJsonStringify(obj), ownerId);
+      setItem(baseKey, _safeJsonStringify(obj), ownerId);
     },
 
-    // keys listing (scoped)
-    keysForOwner: function (ownerId) { return keysForOwner(ownerId); },
+    // keys
+    keysForOwner: keysForOwner,
 
-    // admin maintenance
+    // admin-only cross-owner access
     admin: {
-      allowed: _adminMaintenanceAllowed,
       getRawForOwner: function (ownerId, baseKey) { return _adminGetItemForOwner(ownerId, baseKey); },
-      setRawForOwner: function (ownerId, baseKey, value) { return _adminSetItemForOwner(ownerId, baseKey, value); },
-      removeRawForOwner: function (ownerId, baseKey) { return _adminRemoveItemForOwner(ownerId, baseKey); },
-      keysForOwner: function (ownerId) { return _adminKeysForOwner(ownerId); },
-      setJSONForOwner: function (ownerId, baseKey, obj) { return _adminSetItemForOwner(ownerId, baseKey, _safeJsonStringify(obj)); }
+      setRawForOwner: function (ownerId, baseKey, value) { return _adminSetItemForOwner(ownerId, baseKey, value); }
     }
   };
 
   // ============================================================
-  // DEV GUARD: предупреждаем о localStorage.* вне storage.js
-  // (мягко: только console.warn, без поломки)
-  // Включение: ?dev=1 или window.JKH_DEV_GUARD = true
+  // Strict mode guard for direct localStorage usage (dev assist)
   // ============================================================
-  (function installDevGuard() {
+  (function installStrictLocalStorageGuard() {
     try {
-      if (window.__JKH_LS_GUARD_INSTALLED) return;
-      window.__JKH_LS_GUARD_INSTALLED = true;
+      if (window.__JKH_STRICT_GUARD_INSTALLED) return;
+      window.__JKH_STRICT_GUARD_INSTALLED = true;
 
-      var enabled = false;
-      try {
-        if (window.JKH_DEV_GUARD === true) enabled = true;
-        if (String(location.search || "").indexOf("dev=1") !== -1) enabled = true;
-      } catch (e) {}
+      var allow = {
+        "storage.js": true,
+        "auth.js": true
+      };
 
-      if (!enabled) return;
-
-      var origGet = localStorage.getItem.bind(localStorage);
-      var origSet = localStorage.setItem.bind(localStorage);
-      var origRem = localStorage.removeItem.bind(localStorage);
-
-      function warn(op) {
-        try {
-          var st = (new Error()).stack || "";
-          // если стека нет — просто молчим
-          if (!st) return;
-          // если вызов из storage.js — не предупреждаем
-          if (st.indexOf("storage.js") !== -1) return;
-
-          // ограничиваем спам: один раз на страницу
-          if (!window.__JKH_LS_GUARD_WARNED) window.__JKH_LS_GUARD_WARNED = {};
-          if (window.__JKH_LS_GUARD_WARNED[op]) return;
-          window.__JKH_LS_GUARD_WARNED[op] = true;
-
-          console.warn(
-            "⚠️ ПАПАЖКХ: прямой localStorage." + op + " вне storage.js запрещён. " +
-            "Используй JKHStore / JKHStorage."
-          );
-        } catch (e) {}
+      function _isAllowedStack(stack) {
+        if (!stack) return true;
+        var s = String(stack);
+        for (var k in allow) {
+          if (Object.prototype.hasOwnProperty.call(allow, k) && s.indexOf(k) !== -1) return true;
+        }
+        return false;
       }
 
-      localStorage.getItem = function () { warn("getItem"); return origGet.apply(null, arguments); };
-      localStorage.setItem = function () { warn("setItem"); return origSet.apply(null, arguments); };
-      localStorage.removeItem = function () { warn("removeItem"); return origRem.apply(null, arguments); };
+      var origGet = Storage.prototype.getItem;
+      var origSet = Storage.prototype.setItem;
+      var origRem = Storage.prototype.removeItem;
+
+      Storage.prototype.getItem = function (key) {
+        try {
+          var st = (new Error()).stack || "";
+          if (!_isAllowedStack(st)) {
+            console.warn(
+              "[JKH strict] direct localStorage.getItem outside storage/auth is discouraged. key=%s\n" +
+              "Используй JKHStore / JKHStorage.",
+              String(key || "")
+            );
+          }
+        } catch (e) {}
+        return origGet.apply(this, arguments);
+      };
+
+      Storage.prototype.setItem = function (key, val) {
+        try {
+          var st = (new Error()).stack || "";
+          if (!_isAllowedStack(st)) {
+            console.warn(
+              "[JKH strict] direct localStorage.setItem outside storage/auth is discouraged. key=%s\n" +
+              "Используй JKHStore / JKHStorage.",
+              String(key || "")
+            );
+          }
+        } catch (e) {}
+        return origSet.apply(this, arguments);
+      };
+
+      Storage.prototype.removeItem = function (key) {
+        try {
+          var st = (new Error()).stack || "";
+          if (!_isAllowedStack(st)) {
+            console.warn(
+              "[JKH strict] direct localStorage.removeItem outside storage/auth is discouraged. key=%s\n" +
+              "Используй JKHStore / JKHStorage.",
+              String(key || "")
+            );
+          }
+        } catch (e) {}
+        return origRem.apply(this, arguments);
+      };
     } catch (e) {}
   })();
 
   // ============================================================
-  // Legacy StorageAPI below used unscoped keys ранее.
-  // Теперь делаем их scoped через JKHStorage.k(...)
+  // Sync module
   // ============================================================
-  function _sk(key) {
-    try { return (window.JKHStorage && typeof JKHStorage.k === 'function') ? JKHStorage.k(key) : key; }
-    catch (e) { return key; }
-  }
+  var KEY_DB = "abonents_db_v1";
+  var K_MODE = "jkh_sync_mode_v1";            // online/offline
+  var K_AS_ENABLED = "jkh_sync_as_enabled_v1";
+  var K_AS_MINUTES = "jkh_sync_as_minutes_v1";
+  var K_AS_SCOPE = "jkh_sync_as_scope_v1";    // db/all
+  var K_AS_ONLY_CHANGED = "jkh_sync_as_onlychg_v1";
+  var K_STATUS = "jkh_sync_status_v1";
+  var K_LAST_SIG_DB = "jkh_sync_last_sig_db_v1";
+  var K_LAST_SIG_ALL = "jkh_sync_last_sig_all_v1";
 
-  // ✅ если уже загружен — выходим (чтобы не было "already declared")
-  if (window.StorageAPI && window.StorageAPI.__loaded_v2) return;
+  var SYNC_STATIC_KEYS = [
+    "abonents_db_v1",
+    "abonent_notes_v1",
+    "exclude_periods_v1",
+    "tariffs_dynamic_v1",
+    "tariffs_content_repair_v1",
+    "tariffs_content_repair_v1_backup",
+    "refinancing_rates_normal_v1",
+    "refinancing_rates_moratorium_v1",
+    "organization_requisites_v1",
+    "organization_signers_v1",
+    "payment_sources_v1",
+    "last_abonent_id",
+    "import_preview_v1",
+    "draft_new_abonent_v1",
+    "jkh_excel_date_debug"
+  ];
 
-  const NOTES_KEY = 'abonent_notes_v1';
-  const PERIODS_KEY = 'exclude_periods_v1';
-
-  function getNotes() {
-    try {
-      let obj = JSON.parse(getItem(NOTES_KEY) || '{}');
-      return Object.assign({ general: "", exclude_period: "", payments: "" }, obj);
-    } catch (e) {
-      console.error("Ошибка чтения заметок:", e);
-      return { general: "", exclude_period: "", payments: "" };
-    }
-  }
-
-  function saveNotes(notesObj) {
-    setItem(NOTES_KEY, JSON.stringify(notesObj));
-    try {
-      fetch('/api/abonent-notes', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(notesObj)
-      }).catch(() => { });
-    } catch (e) { }
-  }
-
-  function getPeriods() {
-    try {
-      const raw = JSON.parse(getItem(PERIODS_KEY) || "[]");
-      return raw.filter(p =>
-        (p.from && p.from.trim() !== "") ||
-        (p.to && p.to.trim() !== "") ||
-        (p.reason && p.reason.trim() !== "")
-      );
-    } catch {
-      return [];
-    }
-  }
-
-  function savePeriods(periodsArray) {
-    const cleaned = (Array.isArray(periodsArray) ? periodsArray : []).filter(p =>
-      (p?.from && String(p.from).trim() !== "") ||
-      (p?.to && String(p.to).trim() !== "") ||
-      (p?.reason && String(p.reason).trim() !== "")
-    );
-    setItem(PERIODS_KEY, JSON.stringify(cleaned));
-  }
-
-  function excludesKey(abonentId) {
-    return "exclude_periods_" + String(abonentId || "").trim();
-  }
-
-  function normalizeExcludes(excludes) {
-    return (Array.isArray(excludes) ? excludes : [])
-      .map(p => ({
-        from: String(p?.from || "").trim(),
-        to: String(p?.to || "").trim(),
-        reason: String(p?.reason || "").trim()
-      }));
-  }
-
-  function cleanExcludes(excludes) {
-    return normalizeExcludes(excludes).filter(p => p.from || p.to || p.reason);
-  }
-
-  function getAbonentById(abonentId) {
-    try {
-      return window.AbonentsDB?.abonents?.[String(abonentId)] || null;
-    } catch {
-      return null;
-    }
-  }
-
-  function loadExcludes(abonentId) {
-    const abonent = getAbonentById(abonentId);
-    if (!abonent) return [];
-
-    try {
-      const raw = getItem(excludesKey(abonentId));
-      if (raw) {
-        const arr = JSON.parse(raw);
-        if (Array.isArray(arr)) {
-          const cleaned = cleanExcludes(arr);
-          abonent.defaultExcludes = cleaned;
-          return cleaned;
-        }
-      }
-    } catch (e) { }
-
-    if (Array.isArray(abonent.defaultExcludes)) {
-      const cleaned = cleanExcludes(abonent.defaultExcludes);
-      abonent.defaultExcludes = cleaned;
-      return cleaned;
-    }
-
-    abonent.defaultExcludes = [];
-    return [];
-  }
-
-  function saveExcludes(abonentId, excludes) {
-    const abonent = getAbonentById(abonentId);
-    if (!abonent) return;
-
-    const cleaned = cleanExcludes(excludes);
-    abonent.defaultExcludes = cleaned;
-
-    try {
-      setItem(excludesKey(abonentId), JSON.stringify(cleaned));
-    } catch (e) { }
-  }
-
-  // ✅ Новый API
-  window.StorageAPI = {
-    __loaded_v2: true,
-    getNotes,
-    saveNotes,
-    getPeriods,
-    savePeriods,
-    loadExcludes,
-    saveExcludes
+  // keep compatibility alias if old code reads SYNC_CANON
+  var SYNC_CANON = {
+    exact: SYNC_CANON_EXACT,
+    prefix: SYNC_CANON_PREFIX
   };
-
-  // ✅ Обратная совместимость (старый код мог вызывать так)
-  window.getNotes = getNotes;
-  window.saveNotes = saveNotes;
-  window.getPeriods = getPeriods;
-  window.savePeriods = savePeriods;
-  window.loadExcludes = loadExcludes;
-  window.saveExcludes = saveExcludes;
-
-})();
-
-
-/* ============================================================
-   ✅ JKH_REMOTE_SYNC_STATUS_V1 (2026-02-10)
-   Вариант 2 (ONLINE): MySQL = главный источник (через API), localStorage = кэш.
-   Добавлено:
-   - Кнопки "Загрузить/Сохранить" (работают через index.html)
-   - Авто-сохранение раз в N минут
-   - Режим "сохранять только если были изменения"
-   - Статус-строка (видно без F12)
-   ============================================================ */
-
-(function () {
-  "use strict";
-
-  // ---- settings keys ----
-  var K_MODE = "jkh_remote_mode_v1"; // "1" online, "0" offline
-  var K_AS_ENABLED = "jkh_autosave_enabled_v1";
-  var K_AS_MINUTES = "jkh_autosave_minutes_v1";
-  var K_AS_SCOPE = "jkh_autosave_scope_v1"; // "db" | "all"
-  var K_AS_ONLY_CHANGED = "jkh_autosave_only_changed_v1";
-  var K_LAST_SIG_DB = "jkh_last_sig_db_v1";
-  var K_LAST_SIG_ALL = "jkh_last_sig_all_v1";
 
   function _nowISO() {
     try { return new Date().toISOString(); } catch (e) { return ""; }
-  }
-
-  function _fmtTime(tsIso) {
-    if (!tsIso) return "—";
-    try {
-      var d = new Date(tsIso);
-      var hh = String(d.getHours()).padStart(2, "0");
-      var mm = String(d.getMinutes()).padStart(2, "0");
-      var ss = String(d.getSeconds()).padStart(2, "0");
-      return hh + ":" + mm + ":" + ss;
-    } catch (e) { return String(tsIso); }
-  }
-
-  function _lsGet(k, fallback) {
-    try {
-      var v = localStorage.getItem(k);
-      return (v === null || v === undefined) ? fallback : v;
-    } catch (e) { return fallback; }
-  }
-  function _lsSet(k, v) {
-    try { localStorage.setItem(k, v); } catch (e) { }
-  }
-
-  function isOnlineMode() {
-    // по умолчанию online=1 (серверный режим для тестировщика)
-    var v = _lsGet(K_MODE, "1");
-    return v === "1";
   }
 
   function _ownerId() {
@@ -616,106 +454,114 @@
     return window.JKHStore.isGuestMode() || window.JKHStore.isAllMode();
   }
 
-  // ---- status state ----
-  var status = {
-    server: "…",         // ok | offline | error | …
-    lastSaveAt: null,    // ISO
-    autosaveState: "—",
-    lastAction: "—",
-    lastError: null,
-    ownerId: "—",
-    loadSource: "—",
-    lastReadAt: null
-  };
+  function _lsGet(key, def) {
+    try {
+      var v = Storage.prototype.getItem.call(localStorage, key);
+      return (v === null || v === undefined) ? def : v;
+    } catch (e) {
+      return def;
+    }
+  }
+
+  function _lsSet(key, val) {
+    try { Storage.prototype.setItem.call(localStorage, key, String(val)); } catch (e) {}
+  }
+
+  function _getMode() {
+    return _lsGet(K_MODE, "online") === "offline" ? "offline" : "online";
+  }
+
+  function _setMode(mode) {
+    _lsSet(K_MODE, mode === "offline" ? "offline" : "online");
+    refreshStatusUI();
+  }
+
+  function isOnlineMode() {
+    return _getMode() === "online";
+  }
+
+  function getStatus() {
+    var raw = _lsGet(K_STATUS, "");
+    var st = _safeJsonParse(raw, null);
+    if (!st || typeof st !== "object") {
+      st = {
+        server: "не проверен",
+        lastAction: "",
+        lastError: "",
+        lastSaveAt: "",
+        lastReadAt: "",
+        autosaveState: "не настроено",
+        ownerId: _ownerId(),
+        loadSource: ""
+      };
+    }
+    return st;
+  }
 
   function _setStatus(patch) {
-    for (var k in patch) {
-      if (Object.prototype.hasOwnProperty.call(patch, k)) status[k] = patch[k];
-    }
+    var st = getStatus();
+    for (var kx in patch) if (Object.prototype.hasOwnProperty.call(patch, kx)) st[kx] = patch[kx];
+    _lsSet(K_STATUS, _safeJsonStringify(st));
     refreshStatusUI();
   }
 
   function refreshStatusUI() {
-    // безопасно: если блока нет — молча.
-    try {
-      var elServer = document.getElementById("syncServerState");
-      var elSave = document.getElementById("syncLastSave");
-      var elAS = document.getElementById("syncAutosaveState");
-      var elAct = document.getElementById("syncLastAction");
-      var elErr = document.getElementById("syncLastError");
-      var elOwner = document.getElementById("syncOwnerId");
-      var elSource = document.getElementById("syncLoadSource");
-      var elRead = document.getElementById("syncLastRead");
-
-      if (elServer) elServer.textContent = status.server || "—";
-      if (elSave) elSave.textContent = status.lastSaveAt ? _fmtTime(status.lastSaveAt) : "—";
-      if (elAS) elAS.textContent = status.autosaveState || "—";
-      if (elAct) elAct.textContent = status.lastAction || "—";
-      if (elErr) elErr.textContent = status.lastError ? String(status.lastError) : "—";
-      if (elOwner) elOwner.textContent = status.ownerId || "—";
-      if (elSource) elSource.textContent = status.loadSource || "—";
-      if (elRead) elRead.textContent = status.lastReadAt ? _fmtTime(status.lastReadAt) : "—";
-    } catch (e) { }
+    var box = document.getElementById("syncStatus");
+    if (!box) return;
+    var s = getStatus();
+    var mode = isOnlineMode() ? "🟢 ONLINE (MySQL)" : "🟡 OFFLINE (local)";
+    box.innerHTML =
+      '<div style="font-size:12px;line-height:1.45;">' +
+      "<div><b>Режим:</b> " + mode + "</div>" +
+      "<div><b>Сервер:</b> " + String(s.server || "") + "</div>" +
+      "<div><b>База:</b> " + String(s.ownerId || "") + "</div>" +
+      "<div><b>Последнее действие:</b> " + String(s.lastAction || "") + "</div>" +
+      "<div><b>Последнее чтение:</b> " + String(s.lastReadAt || "") + "</div>" +
+      "<div><b>Последнее сохранение:</b> " + String(s.lastSaveAt || "") + "</div>" +
+      "<div><b>Авто-сохранение:</b> " + String(s.autosaveState || "") + "</div>" +
+      (s.lastError ? ('<div style="color:#b00000;"><b>Ошибка:</b> ' + String(s.lastError) + "</div>") : "") +
+      "</div>";
   }
 
-  // ---- small hash (djb2) for "only if changed" ----
-  function _hashStr(s) {
-    var h = 5381;
-    for (var i = 0; i < s.length; i++) {
-      h = ((h << 5) + h) + s.charCodeAt(i);
-      h = h >>> 0;
-    }
-    return h.toString(16);
+  function _isProjectDataKeyLocal(baseKey) {
+    var kx = String(baseKey || "");
+    for (var i = 0; i < SYNC_CANON.exact.length; i++) if (kx === SYNC_CANON.exact[i]) return true;
+    for (var j = 0; j < SYNC_CANON.prefix.length; j++) if (kx.indexOf(SYNC_CANON.prefix[j]) === 0) return true;
+    return false;
   }
 
   function _sigForDB(ownerId) {
-    var KEY_DB = "abonents_db_v1";
     var obj = window.JKHStore ? window.JKHStore.getJSON(KEY_DB, null, ownerId) : null;
-    var s = "";
-    try { s = JSON.stringify(obj || {}); } catch (e) { s = String(obj); }
-    return _hashStr(s) + ":" + String(s.length);
+    var ab = (obj && obj.abonents) ? Object.keys(obj.abonents).length : 0;
+    var pr = (obj && obj.premises) ? Object.keys(obj.premises).length : 0;
+    return String(ab) + ":" + String(pr);
   }
 
   function _sigForALL(ownerId) {
     if (!window.JKHStore) return "0:0";
     var scopedKeys = window.JKHStore.keysForOwner(ownerId) || [];
     var pref = window.JKHStore.scopePrefixFor(ownerId) || "";
-    // сортируем, чтобы подпись была стабильной
-    scopedKeys.sort();
-    var out = [];
+    var cnt = 0;
+    var sum = 0;
     for (var i = 0; i < scopedKeys.length; i++) {
-      var sk = scopedKeys[i];
+      var sk = String(scopedKeys[i] || "");
+      if (!sk) continue;
       var baseKey = sk.indexOf(pref) === 0 ? sk.slice(pref.length) : sk;
+      if (!_isProjectDataKeyLocal(baseKey)) continue;
       var raw = window.JKHStore.getRaw(baseKey, ownerId) || "";
-      out.push(baseKey + "=" + raw);
+      cnt++;
+      sum += String(raw).length;
     }
-    var joined = out.join("\n");
-    return _hashStr(joined) + ":" + String(joined.length);
+    return String(cnt) + ":" + String(sum);
   }
 
-  function _getLastSigKey(scope) {
-    return (scope === "all") ? K_LAST_SIG_ALL : K_LAST_SIG_DB;
-  }
-
-  // ---- canonical sync keys ----
-  var KEY_DB = "abonents_db_v1";
-  var SYNC_CANON = (window.JKH_SYNC_CANON && Array.isArray(window.JKH_SYNC_CANON.exact))
-    ? window.JKH_SYNC_CANON
-    : { exact: [KEY_DB], prefix: [] };
-  var SYNC_STATIC_KEYS = SYNC_CANON.exact.slice();
-
-  // NOTE: this IIFE has its own scope; keep local helper to avoid cross-IIFE leakage.
-  function _isProjectDataKeyLocal(baseKey) {
-    var kx = String(baseKey || "");
-    if (!kx || kx.indexOf("jkhdb::") === 0) return false;
-    for (var i = 0; i < SYNC_CANON.exact.length; i++) if (kx === SYNC_CANON.exact[i]) return true;
-    for (var j = 0; j < SYNC_CANON.prefix.length; j++) if (kx.indexOf(SYNC_CANON.prefix[j]) === 0) return true;
-    return false;
+  function _getLastSigKey(scopeNorm) {
+    return scopeNorm === "all" ? K_LAST_SIG_ALL : K_LAST_SIG_DB;
   }
 
   function _uniq(arr) {
-    var m = {};
     var out = [];
+    var m = {};
     for (var i = 0; i < arr.length; i++) {
       var x = String(arr[i] || "");
       if (!x || m[x]) continue;
@@ -1027,10 +873,14 @@
     if (window.__JKH_AUTOLOAD_IN_PROGRESS === true && window.__JKH_AUTOLOAD_PROMISE) {
       return window.__JKH_AUTOLOAD_PROMISE;
     }
-   // 🔒 HARD GUARD: защита от двойного запуска (усиленная)
-  if (window.__JKH_AUTOLOAD_LOCK === true) {
-   console.warn("[JKH] autoload prevented (LOCK)");
-  return false;
+    // 🔒 HARD GUARD: защита от двойного запуска (усиленная)
+    if (window.__JKH_AUTOLOAD_LOCK === true) {
+      if (window.__JKH_AUTOLOAD_PROMISE) {
+        return window.__JKH_AUTOLOAD_PROMISE;
+      }
+      // stale lock: сбрасываем и продолжаем, чтобы не блокировать init
+      console.warn("[JKH] autoload stale lock detected, reset");
+      window.__JKH_AUTOLOAD_LOCK = false;
     }
     window.__JKH_AUTOLOAD_LOCK = true;
     window.__JKH_AUTOLOAD_PROMISE = (async function () {
@@ -1047,6 +897,7 @@
         var pageGateKey = "__JKH_AUTOLOAD_DONE::" + expected;
         if (window[pageGateKey] === true || window.__JKH_AUTOLOAD_DONE_FOR_USER === expected) {
           window.JKH_DATA_READY = true;
+          _setStatus({ lastAction: "✅ Автозагрузка уже выполнена", lastError: null, ownerId: user.id, loadSource: "server:auto", lastReadAt: _nowISO() });
           return true;
         }
 
@@ -1056,6 +907,7 @@
           window[pageGateKey] = true;
           window.__JKH_AUTOLOAD_DONE_FOR_USER = expected;
           window.JKH_DATA_READY = true;
+          _setStatus({ lastAction: "✅ Автозагрузка уже выполнена", lastError: null, ownerId: user.id, loadSource: "server:auto", lastReadAt: _nowISO() });
           return true;
         }
 
@@ -1073,8 +925,17 @@
           var bk = keys[i];
           if (!_isProjectDataKeyLocal(bk)) continue;
           var val = Object.prototype.hasOwnProperty.call(data, bk) ? data[bk] : "";
-          _writeLocalCompat(bk, val || "", user.id);
-          console.info("[JKH sync][load] owner=%s key=%s size=%s status=ok", user.id, bk, String(val || "").length);
+          try {
+            _writeLocalCompat(bk, val || "", user.id);
+            console.info("[JKH sync][load] owner=%s key=%s size=%s status=ok", user.id, bk, String(val || "").length);
+          } catch (eWrite) {
+            var code = String((eWrite && eWrite.message) || eWrite || "");
+            if (code === "GLOBAL_ADMIN_ONLY") {
+              console.info("[JKH sync][load] owner=%s key=%s status=skip_global_readonly", user.id, bk);
+              continue;
+            }
+            throw eWrite;
+          }
         }
 
         try { sessionStorage.setItem(markerKey, expected); } catch (e1) { _lsSet(markerKey, expected); }
@@ -1089,14 +950,11 @@
         _setStatus({ lastAction: "Ошибка автозагрузки", lastError: String(e && e.message ? e.message : e) });
         return false;
       } finally {
-  window.__JKH_AUTOLOAD_IN_PROGRESS = false;
-  window.__JKH_AUTOLOAD_PROMISE = null;
-
-  // 🔓 снимаем lock
-  setTimeout(function () {
-    window.__JKH_AUTOLOAD_LOCK = false;
-  }, 500);
-}
+        window.__JKH_AUTOLOAD_IN_PROGRESS = false;
+        window.__JKH_AUTOLOAD_PROMISE = null;
+        // 🔓 снимаем lock сразу после завершения, чтобы init не зависал в ложном блоке
+        window.__JKH_AUTOLOAD_LOCK = false;
+      }
     })();
 
     return window.__JKH_AUTOLOAD_PROMISE;

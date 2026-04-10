@@ -49,6 +49,29 @@
     if (!gate.doneForUserId && uid) gate.doneForUserId = uid;
   }
 
+  function _withTimeout(promise, ms) {
+    var t = Math.max(1000, parseInt(ms, 10) || 20000);
+    return new Promise(function (resolve, reject) {
+      var done = false;
+      var timer = setTimeout(function () {
+        if (done) return;
+        done = true;
+        reject(new Error("AUTOLOAD_TIMEOUT_" + t));
+      }, t);
+      Promise.resolve(promise).then(function (v) {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        resolve(v);
+      }).catch(function (e) {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        reject(e);
+      });
+    });
+  }
+
   async function runAutoLoadAfterLoginOnce(sourceTag) {
     var tag = String(sourceTag || "unknown");
     if (!window.JKHRemoteSync || typeof window.JKHRemoteSync.autoLoadAfterLogin !== "function") {
@@ -73,12 +96,13 @@
     gate.inFlight = (async function () {
       console.info("[auth] autoload gate start source=%s userId=%s", tag, uid);
       try {
-        var loaded = await window.JKHRemoteSync.autoLoadAfterLogin();
+        var loaded = await _withTimeout(window.JKHRemoteSync.autoLoadAfterLogin(), 25000);
         if (!loaded) {
+          gate.done = false;
           gate.failed = true;
           gate.lastResult = false;
           window.JKH_DATA_READY = false;
-          console.warn("[auth] autoload failed but login allowed");
+          console.warn("[auth] autoload failed but login allowed source=%s userId=%s", tag, uid);
           return false;
         }
         gate.done = true;
@@ -86,12 +110,14 @@
         gate.lastResult = true;
         gate.doneForUserId = uid;
         window.JKH_DATA_READY = true;
+        console.info("[auth] autoload gate done source=%s userId=%s", tag, uid);
         return true;
       } catch (e) {
+        gate.done = false;
         gate.failed = true;
         gate.lastResult = false;
         window.JKH_DATA_READY = false;
-        console.warn("[auth] autoload exception but login allowed:", e);
+        console.warn("[auth] autoload exception but login allowed source=%s userId=%s:", tag, uid, e);
         return false;
       } finally {
         gate.inFlight = null;
@@ -484,6 +510,15 @@
 
     clearSessionCache();
     _sessionReady = true;
+    try {
+      var gate = _getAutoLoadGate();
+      gate.inFlight = null;
+      gate.done = false;
+      gate.failed = false;
+      gate.lastResult = null;
+      gate.doneForUserId = "";
+      window.JKH_DATA_READY = false;
+    } catch (e2) {}
     renderAuthStatus();
   }
 
