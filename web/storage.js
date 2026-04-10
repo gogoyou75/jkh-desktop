@@ -662,24 +662,38 @@
     return { okHttp: r.ok, status: r.status, data: data, text: txt };
   }
 
-  async function pingServer() {
-    if (!isOnlineMode()) {
-      _setStatus({ server: "OFFLINE (локально)", lastError: null });
-      return false;
-    }
-    try {
-      var res = await _apiGet("/api/store_keys");
-      if (res.okHttp && res.data && res.data.ok === true) {
-        _setStatus({ server: "🟢 подключён", lastError: null });
-        return true;
-      }
-      _setStatus({ server: "🟡 нет ответа", lastError: (res.data && res.data.error) ? res.data.error : ("HTTP " + res.status) });
-      return false;
-    } catch (e) {
-      _setStatus({ server: "🔴 ошибка сети", lastError: String(e && e.message ? e.message : e) });
-      return false;
-    }
+ async function pingServer() {
+  if (!isOnlineMode()) {
+    _setStatus({ server: "OFFLINE (локально)", lastError: null });
+    return false;
   }
+
+  try {
+    // ✅ ПИНГ через store_dump (единый канон)
+    var res = await _apiGet("/api/store_dump");
+
+    if (res.okHttp && res.data && res.data.ok === true) {
+      _setStatus({ server: "🟢 подключён", lastError: null });
+      return true;
+    }
+
+    _setStatus({
+      server: "🟡 нет ответа",
+      lastError: (res.data && res.data.error)
+        ? res.data.error
+        : ("HTTP " + res.status)
+    });
+
+    return false;
+
+  } catch (e) {
+    _setStatus({
+      server: "🔴 ошибка сети",
+      lastError: String(e && e.message ? e.message : e)
+    });
+    return false;
+  }
+}
 
   async function upload(scope) {
     if (!isOnlineMode()) {
@@ -737,59 +751,91 @@
   }
 
   async function download(scope) {
-    if (!isOnlineMode()) {
-      _setStatus({ lastAction: "Загрузка пропущена: OFFLINE режим", lastError: null });
-      return false;
-    }
-    if (_isGuestOrAll()) {
-      _setStatus({ lastAction: "Загрузка запрещена: Гость/ALL", lastError: "GUEST_OR_ALL_READONLY" });
-      return false;
-    }
-
-    var ownerId = _ownerId();
-
-    try {
-      var scopeNorm = (scope === "all") ? "all" : "db";
-      var keysToLoad = [];
-      if (scopeNorm === "all") {
-        var resKeys = await _apiGet("/api/store_keys");
-        if (!(resKeys.okHttp && resKeys.data && resKeys.data.ok === true)) {
-          _setStatus({ lastAction: "Ошибка чтения ключей", lastError: (resKeys.data && resKeys.data.error) ? resKeys.data.error : ("HTTP " + resKeys.status) });
-          return false;
-        }
-        keysToLoad = _uniq((resKeys.data.keys || []).concat(_projectKeysForScope(scopeNorm, ownerId)));
-      } else {
-        keysToLoad = _projectKeysForScope(scopeNorm, ownerId);
-      }
-
-      for (var i = 0; i < keysToLoad.length; i++) {
-        var baseKey = keysToLoad[i];
-        var resGet = await _apiGet("/api/store?key=" + encodeURIComponent(baseKey));
-        if (!(resGet.okHttp && resGet.data && resGet.data.ok === true)) {
-          // для части ключей отсутствие на сервере допустимо (например новый клиент)
-          if (resGet.status === 404) {
-            console.info("[JKH sync][load] owner=%s key=%s status=not_found", ownerId, baseKey);
-            continue;
-          }
-          _setStatus({ lastAction: "Ошибка загрузки ключа " + baseKey, lastError: (resGet.data && resGet.data.error) ? resGet.data.error : ("HTTP " + resGet.status) });
-          console.warn("[JKH sync][load] owner=%s key=%s status=error", ownerId, baseKey);
-          return false;
-        }
-        _writeLocalCompat(baseKey, resGet.data.value || "", ownerId);
-        console.info("[JKH sync][load] owner=%s key=%s size=%s status=ok", ownerId, baseKey, String(resGet.data.value || "").length);
-      }
-
-      // пересчёт сигнатуры после загрузки
-      var sig = (scopeNorm === "all") ? _sigForALL(ownerId) : _sigForDB(ownerId);
-      _lsSet(_getLastSigKey(scopeNorm), sig);
-
-      _setStatus({ lastAction: "✅ Загружено с сервера", lastError: null, ownerId: ownerId, loadSource: "server", lastReadAt: _nowISO() });
-      return true;
-    } catch (e) {
-      _setStatus({ lastAction: "Ошибка загрузки", lastError: String(e && e.message ? e.message : e) });
-      return false;
-    }
+  if (!isOnlineMode()) {
+    _setStatus({ lastAction: "Загрузка пропущена: OFFLINE режим", lastError: null });
+    return false;
   }
+
+  if (_isGuestOrAll()) {
+    _setStatus({ lastAction: "Загрузка запрещена: Гость/ALL", lastError: "GUEST_OR_ALL_READONLY" });
+    return false;
+  }
+
+  var ownerId = _ownerId();
+
+  try {
+    // ✅ ЕДИНСТВЕННЫЙ источник — store_dump
+    var resDump = await _apiGet("/api/store_dump");
+
+    if (!(resDump.okHttp && resDump.data && resDump.data.ok === true)) {
+      _setStatus({
+        lastAction: "Ошибка загрузки",
+        lastError: (resDump.data && resDump.data.error)
+          ? resDump.data.error
+          : ("HTTP " + resDump.status)
+      });
+      return false;
+    }
+
+    var data = resDump.data.data || {};
+    var keys = Object.keys(data);
+
+    for (var i = 0; i < keys.length; i++) {
+      var baseKey = keys[i];
+
+      // только проектные ключи
+      if (!_isProjectDataKeyLocal(baseKey)) continue;
+
+      var val = data[baseKey] || "";
+
+      try {
+        _writeLocalCompat(baseKey, val, ownerId);
+
+        console.info(
+          "[JKH sync][load] owner=%s key=%s size=%s status=ok",
+          ownerId,
+          baseKey,
+          String(val || "").length
+        );
+
+      } catch (eWrite) {
+        var code = String((eWrite && eWrite.message) || eWrite || "");
+
+        if (code === "GLOBAL_ADMIN_ONLY") {
+          console.info(
+            "[JKH sync][load] owner=%s key=%s status=skip_global_readonly",
+            ownerId,
+            baseKey
+          );
+          continue;
+        }
+
+        throw eWrite;
+      }
+    }
+
+    // пересчёт сигнатуры
+    var sig = _sigForALL(ownerId);
+    _lsSet(_getLastSigKey("all"), sig);
+
+    _setStatus({
+      lastAction: "✅ Загружено с сервера",
+      lastError: null,
+      ownerId: ownerId,
+      loadSource: "server",
+      lastReadAt: _nowISO()
+    });
+
+    return true;
+
+  } catch (e) {
+    _setStatus({
+      lastAction: "Ошибка загрузки",
+      lastError: String(e && e.message ? e.message : e)
+    });
+    return false;
+  }
+}
 
   // ---- UI helpers ----
   function getSettings() {
