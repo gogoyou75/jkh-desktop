@@ -932,6 +932,9 @@
     window.__JKH_AUTOLOAD_PROMISE = (async function () {
       window.__JKH_AUTOLOAD_IN_PROGRESS = true;
       try {
+		  if (window.JKH_UI_STATE) {
+  window.JKH_UI_STATE.data = "loading";
+}
         if (!window.Auth || typeof Auth.getCurrentUser !== "function") return false;
         var user = Auth.getCurrentUser();
         if (!user || !user.id) return false;
@@ -966,6 +969,10 @@
         }
 
         var data = resDump.data.data || {};
+		if (window.JKH_UI_STATE) {
+  window.JKH_UI_STATE.data = "ready";
+  window.JKH_UI_STATE.message = "";
+}
         var keys = _uniq(Object.keys(data).concat(_projectKeysForScope("db", user.id)));
         for (var i = 0; i < keys.length; i++) {
           var bk = keys[i];
@@ -992,14 +999,13 @@
         console.info("[JKH sync][login] userId=%s email=%s action=auto_load_done keys=%s", user.id, String(user.email || ""), keys.length);
         return true;
       } catch (e) {
-        window.JKH_DATA_READY = false;
-        _setStatus({ lastAction: "Ошибка автозагрузки", lastError: String(e && e.message ? e.message : e) });
-        return false;
-      } finally {
-        window.__JKH_AUTOLOAD_IN_PROGRESS = false;
-        window.__JKH_AUTOLOAD_PROMISE = null;
-        // 🔓 снимаем lock сразу после завершения, чтобы init не зависал в ложном блоке
-        window.__JKH_AUTOLOAD_LOCK = false;
+
+  if (window.JKH_UI_STATE) {
+    window.JKH_UI_STATE.data = "error";
+    window.JKH_UI_STATE.message = "Ошибка загрузки данных с сервера";
+  }
+
+  window.JKH_DATA_READY = false;
       }
     })();
 
