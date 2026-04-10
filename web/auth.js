@@ -653,35 +653,54 @@
   }
 
   function init() {
-    if (_initStarted) return _initPromise;
-    _initStarted = true;
+  if (_initStarted) return _initPromise;
+  _initStarted = true;
 
-    _initPromise = (async function () {
-      patchGuestDialogsForLoggedIn();
-      renderAuthStatus();
-      protectPages();
+  _initPromise = (async function () {
+    patchGuestDialogsForLoggedIn();
+    renderAuthStatus();
+    protectPages();
 
-      try {
-        await syncSessionFromServer(false);
-        var u = getCurrentUser();
-        if (u) {
-          console.info("[auth] init session userId=%s email=%s", String(u.id || ""), String(u.email || ""));
-          try {
-            await runAutoLoadAfterLoginOnce("Auth.init");
-          } catch (e1) {
-            console.warn("[auth] init autoload ignored:", e1);
-          }
-        }
+    try {
+      await syncSessionFromServer(false);
+      var u = getCurrentUser();
+
+      // ✅ ГОСТЬ / НЕ ЗАЛОГИНЕН:
+      // это не ошибка и не повод держать UI в заблокированном состоянии
+      if (!u) {
+        window.JKH_DATA_READY = true;
         renderAuthStatus();
         protectPages();
-      } catch (e) {
-        clearSessionCache();
-        renderAuthStatus();
+        return true;
       }
-    })();
 
-    return _initPromise;
-  }
+      console.info("[auth] init session userId=%s email=%s", String(u.id || ""), String(u.email || ""));
+      var loaded = await runAutoLoadAfterLoginOnce("Auth.init");
+
+      // ✅ если автозагрузка не удалась, но пользователь залогинен,
+      // UI не должен выглядеть как "сломанный вход".
+      // Данные могут быть догружены вручную.
+      if (!loaded) {
+        window.JKH_DATA_READY = true;
+      }
+
+      renderAuthStatus();
+      protectPages();
+      return true;
+
+    } catch (e) {
+      // ✅ 401 на /api/auth/me для гостя — нормальный сценарий.
+      // Не держим публичный UI заблокированным.
+      clearSessionCache();
+      window.JKH_DATA_READY = true;
+      renderAuthStatus();
+      protectPages();
+      return true;
+    }
+  })();
+
+  return _initPromise;
+}
 
   window.Auth = {
     isAuthEnabled: authEnabled,
