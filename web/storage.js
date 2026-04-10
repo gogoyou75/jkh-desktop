@@ -704,6 +704,15 @@
     : { exact: [KEY_DB], prefix: [] };
   var SYNC_STATIC_KEYS = SYNC_CANON.exact.slice();
 
+  // NOTE: this IIFE has its own scope; keep local helper to avoid cross-IIFE leakage.
+  function _isProjectDataKeyLocal(baseKey) {
+    var kx = String(baseKey || "");
+    if (!kx || kx.indexOf("jkhdb::") === 0) return false;
+    for (var i = 0; i < SYNC_CANON.exact.length; i++) if (kx === SYNC_CANON.exact[i]) return true;
+    for (var j = 0; j < SYNC_CANON.prefix.length; j++) if (kx.indexOf(SYNC_CANON.prefix[j]) === 0) return true;
+    return false;
+  }
+
   function _uniq(arr) {
     var m = {};
     var out = [];
@@ -757,7 +766,7 @@
         var sk = String(scoped[i] || "");
         if (!sk) continue;
         var baseKey = sk.indexOf(pref) === 0 ? sk.slice(pref.length) : sk;
-        if (_isProjectDataKey(baseKey)) keys.push(baseKey);
+        if (_isProjectDataKeyLocal(baseKey)) keys.push(baseKey);
       }
     }
     return _uniq(keys);
@@ -1062,7 +1071,7 @@
         var keys = _uniq(Object.keys(data).concat(_projectKeysForScope("db", user.id)));
         for (var i = 0; i < keys.length; i++) {
           var bk = keys[i];
-          if (!_isProjectDataKey(bk)) continue;
+          if (!_isProjectDataKeyLocal(bk)) continue;
           var val = Object.prototype.hasOwnProperty.call(data, bk) ? data[bk] : "";
           _writeLocalCompat(bk, val || "", user.id);
           console.info("[JKH sync][load] owner=%s key=%s size=%s status=ok", user.id, bk, String(val || "").length);

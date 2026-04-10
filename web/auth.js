@@ -53,7 +53,8 @@
     var tag = String(sourceTag || "unknown");
     if (!window.JKHRemoteSync || typeof window.JKHRemoteSync.autoLoadAfterLogin !== "function") {
       window.JKH_DATA_READY = false;
-      throw new Error("AUTOLOAD_REQUIRED");
+      console.warn("[auth] autoload adapter missing; continue without blocking login");
+      return false;
     }
 
     var user = getCurrentUser();
@@ -74,21 +75,24 @@
       try {
         var loaded = await window.JKHRemoteSync.autoLoadAfterLogin();
         if (!loaded) {
-  gate.failed = true;
-  gate.lastResult = false;
-  window.JKH_DATA_READY = false;
-
-  console.warn("[auth] autoload failed but login allowed");
-
-  // ❗ НЕ ЛОМАЕМ ЛОГИН
-  return false;
-}
+          gate.failed = true;
+          gate.lastResult = false;
+          window.JKH_DATA_READY = false;
+          console.warn("[auth] autoload failed but login allowed");
+          return false;
+        }
         gate.done = true;
         gate.failed = false;
         gate.lastResult = true;
         gate.doneForUserId = uid;
         window.JKH_DATA_READY = true;
         return true;
+      } catch (e) {
+        gate.failed = true;
+        gate.lastResult = false;
+        window.JKH_DATA_READY = false;
+        console.warn("[auth] autoload exception but login allowed:", e);
+        return false;
       } finally {
         gate.inFlight = null;
       }
@@ -427,7 +431,11 @@
     _sessionReady = true;
     console.info("[auth] login userId=%s email=%s", String(data.user && data.user.id || ""), String(data.user && data.user.email || ""));
 
-    await runAutoLoadAfterLoginOnce("loginByPassword");
+    try {
+      await runAutoLoadAfterLoginOnce("loginByPassword");
+    } catch (e) {
+      console.warn("[auth] login autoload ignored:", e);
+    }
 
     renderAuthStatus();
     protectPages();
@@ -451,7 +459,11 @@
     _sessionReady = true;
     console.info("[auth] register userId=%s email=%s role=%s", String(data.user && data.user.id || ""), String(data.user && data.user.email || ""), String(data.user && data.user.role || ""));
 
-    await runAutoLoadAfterLoginOnce("registerUser");
+    try {
+      await runAutoLoadAfterLoginOnce("registerUser");
+    } catch (e) {
+      console.warn("[auth] register autoload ignored:", e);
+    }
 
     renderAuthStatus();
     protectPages();
@@ -619,7 +631,11 @@
         var u = getCurrentUser();
         if (u) {
           console.info("[auth] init session userId=%s email=%s", String(u.id || ""), String(u.email || ""));
-          await runAutoLoadAfterLoginOnce("Auth.init");
+          try {
+            await runAutoLoadAfterLoginOnce("Auth.init");
+          } catch (e1) {
+            console.warn("[auth] init autoload ignored:", e1);
+          }
         }
         renderAuthStatus();
         protectPages();
