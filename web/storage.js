@@ -733,6 +733,7 @@
     });
     return false;
   }
+  }
 
   async function upload(scope) {
     if (!isOnlineMode()) {
