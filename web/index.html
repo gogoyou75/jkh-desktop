@@ -145,20 +145,6 @@ Doc: docs/LOGIC_SPEC_v1.5.3.md
 (function(){
   function byId(id){ return document.getElementById(id); }
 
-  function fmtNow(d){
-    try {
-      var dt = d ? new Date(d) : new Date();
-      if (dt.toString() === 'Invalid Date') return '—';
-      var dd = String(dt.getDate()).padStart(2, '0');
-      var mm = String(dt.getMonth() + 1).padStart(2, '0');
-      var hh = String(dt.getHours()).padStart(2, '0');
-      var mi = String(dt.getMinutes()).padStart(2, '0');
-      return dd + '.' + mm + ' ' + hh + ':' + mi;
-    } catch(e) {
-      return '—';
-    }
-  }
-
   function readUIState(){
     if (!window.JKH_UI_STATE || typeof window.JKH_UI_STATE !== 'object') {
       return { auth: 'guest', data: 'idle', message: '' };
@@ -166,29 +152,32 @@ Doc: docs/LOGIC_SPEC_v1.5.3.md
     return window.JKH_UI_STATE;
   }
 
+  function fmtNow(){
+    var dt = new Date();
+    var dd = String(dt.getDate()).padStart(2, '0');
+    var mm = String(dt.getMonth() + 1).padStart(2, '0');
+    var hh = String(dt.getHours()).padStart(2, '0');
+    var mi = String(dt.getMinutes()).padStart(2, '0');
+    return dd + '.' + mm + ' ' + hh + ':' + mi;
+  }
+
   function renderSystemPanel(){
+    var st = readUIState();
+
     var serverEl = byId('sysServerState');
     var dataEl = byId('sysDataState');
     var updatedEl = byId('sysUpdatedAt');
 
     if (!serverEl || !dataEl || !updatedEl) return;
 
-    var st = readUIState();
-    var isGuest = !!(window.Auth && typeof Auth.isGuest === 'function' && Auth.isGuest());
-
-    if (!window.JKHRemoteSync) {
-      serverEl.textContent = 'модуль не загружен';
-      dataEl.textContent = 'неизвестно';
-      updatedEl.textContent = '—';
-      return;
-    }
-
-    if (isGuest || st.auth === 'guest') {
+    // сервер
+    if (st.auth === 'guest') {
       serverEl.textContent = 'гость';
     } else {
       serverEl.textContent = 'подключён';
     }
 
+    // данные
     if (st.data === 'loading') {
       dataEl.textContent = 'загрузка…';
     } else if (st.data === 'ready') {
@@ -196,54 +185,28 @@ Doc: docs/LOGIC_SPEC_v1.5.3.md
     } else if (st.data === 'error') {
       dataEl.textContent = 'ошибка';
     } else {
-      dataEl.textContent = isGuest ? 'гостевой режим' : 'нет данных';
+      dataEl.textContent = 'нет данных';
     }
 
-    try {
-      var raw = localStorage.getItem('jkh_sync_status_v1');
-      var syncStatus = raw ? JSON.parse(raw) : null;
-      var lastReadAt = syncStatus && syncStatus.lastReadAt ? syncStatus.lastReadAt : '';
-      updatedEl.textContent = lastReadAt ? fmtNow(lastReadAt) : '—';
-    } catch(e) {
-      updatedEl.textContent = '—';
-    }
+    updatedEl.textContent = fmtNow();
   }
 
-  function initSystemPanel(){
+  function init(){
     var btn = byId('btnRefreshData');
 
     if (btn) {
-      btn.onclick = async function(){
-        try {
-          if (!window.JKHRemoteSync || typeof window.JKHRemoteSync.downloadNow !== 'function') return;
-          await window.JKHRemoteSync.downloadNow();
-          renderSystemPanel();
-        } catch(e) {}
+      btn.onclick = function(){
+        location.reload();
       };
     }
 
     renderSystemPanel();
-
-    try {
-      if (window.JKHRemoteSync && typeof window.JKHRemoteSync.pingServer === 'function') {
-        window.JKHRemoteSync.pingServer().finally(function(){
-          renderSystemPanel();
-        });
-      }
-    } catch(e) {}
-
-    window.addEventListener('focus', renderSystemPanel);
-    document.addEventListener('visibilitychange', function(){
-      if (!document.hidden) renderSystemPanel();
-    });
-
-    setInterval(renderSystemPanel, 3000);
   }
 
   if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', initSystemPanel);
+    document.addEventListener('DOMContentLoaded', init);
   } else {
-    initSystemPanel();
+    init();
   }
 })();
 </script>
