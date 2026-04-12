@@ -261,18 +261,48 @@
     try { return JSON.stringify(v); } catch (e) { return ""; }
   }
 
+  function _defaultUIState() {
+    return {
+      auth: {
+        status: "unknown",
+        userId: null,
+        email: "",
+        role: "guest"
+      },
+      server: {
+        status: "unknown",
+        checkedAt: "",
+        message: ""
+      },
+      data: {
+        status: "idle",
+        loadedAt: "",
+        source: "none",
+        message: ""
+      }
+    };
+  }
+
   function _ensureUIState() {
-    if (!window.JKH_UI_STATE || typeof window.JKH_UI_STATE !== "object") {
-      window.JKH_UI_STATE = { auth: "guest", data: "idle", message: "" };
+    var def = _defaultUIState();
+    var st = window.JKH_UI_STATE;
+    if (!st || typeof st !== "object") {
+      window.JKH_UI_STATE = def;
+      return window.JKH_UI_STATE;
     }
-    return window.JKH_UI_STATE;
+    st.auth = Object.assign({}, def.auth, (st.auth && typeof st.auth === "object") ? st.auth : {});
+    st.server = Object.assign({}, def.server, (st.server && typeof st.server === "object") ? st.server : {});
+    st.data = Object.assign({}, def.data, (st.data && typeof st.data === "object") ? st.data : {});
+    window.JKH_UI_STATE = st;
+    return st;
   }
 
   function _setUIState(patch) {
+    patch = patch || {};
     var st = _ensureUIState();
-    for (var kx in patch) {
-      if (Object.prototype.hasOwnProperty.call(patch, kx)) st[kx] = patch[kx];
-    }
+    if (patch.auth && typeof patch.auth === "object") st.auth = Object.assign({}, st.auth, patch.auth);
+    if (patch.server && typeof patch.server === "object") st.server = Object.assign({}, st.server, patch.server);
+    if (patch.data && typeof patch.data === "object") st.data = Object.assign({}, st.data, patch.data);
     return st;
   }
 
@@ -683,8 +713,10 @@
   }
 
   async function pingServer() {
+  var checkedAt = _nowISO();
   if (!isOnlineMode()) {
     _setStatus({ server: "OFFLINE (локально)", lastError: null });
+    _setUIState({ server: { status: "offline", checkedAt: checkedAt, message: "OFFLINE mode" } });
     return false;
   }
 
@@ -695,6 +727,7 @@
       lastError: null,
       lastAction: "Гостевой режим: проверка серверной базы не требуется"
     });
+    _setUIState({ server: { status: "unauthorized", checkedAt: checkedAt, message: "" } });
     return true;
   }
 
@@ -704,33 +737,40 @@
 
     if (res.okHttp && res.data && res.data.ok === true) {
       _setStatus({ server: "🟢 подключён", lastError: null });
+      _setUIState({ server: { status: "online", checkedAt: checkedAt, message: "" } });
       return true;
     }
 
     // ✅ 401 для гостя не считаем ошибкой
-    if (res.status === 401 && _isGuestUser()) {
+    if (res.status === 401 || _isGuestUser()) {
       _setStatus({
         server: "гость (без серверной сессии)",
         lastError: null,
         lastAction: "Гостевой режим: серверная авторизация отсутствует"
       });
+      _setUIState({ server: { status: "unauthorized", checkedAt: checkedAt, message: "" } });
       return true;
     }
 
+    var msg = (res.data && res.data.error)
+      ? res.data.error
+      : ("HTTP " + res.status);
+
     _setStatus({
       server: "🟡 нет ответа",
-      lastError: (res.data && res.data.error)
-        ? res.data.error
-        : ("HTTP " + res.status)
+      lastError: msg
     });
+    _setUIState({ server: { status: "offline", checkedAt: checkedAt, message: msg } });
 
     return false;
 
   } catch (e) {
+    var err = String(e && e.message ? e.message : e);
     _setStatus({
       server: "🔴 ошибка сети",
-      lastError: String(e && e.message ? e.message : e)
+      lastError: err
     });
+    _setUIState({ server: { status: "offline", checkedAt: checkedAt, message: err } });
     return false;
   }
   }
@@ -746,7 +786,7 @@
         lastAction: "Гостевой режим: серверная загрузка не требуется",
         lastError: null
       });
-      _setUIState({ data: "idle", message: "" });
+      _setUIState({ data: { status: "idle", source: "none", message: "" } });
       return true;
     }
 
@@ -805,6 +845,7 @@
   async function download(scope) {
   if (!isOnlineMode()) {
     _setStatus({ lastAction: "Загрузка пропущена: OFFLINE режим", lastError: null });
+    _setUIState({ server: { status: "offline", checkedAt: _nowISO(), message: "OFFLINE mode" } });
     return false;
   }
 
@@ -814,7 +855,7 @@
         lastAction: "Гостевой режим: серверная загрузка не требуется",
         lastError: null
       });
-      _setUIState({ data: "idle", message: "" });
+      _setUIState({ data: { status: "idle", source: "none", message: "" } });
       return true;
     }
 
@@ -826,7 +867,10 @@
   }
 
   var ownerId = _ownerId();
-  _setUIState({ data: "loading", message: "" });
+  _setUIState({
+    server: { status: "online", checkedAt: _nowISO(), message: "" },
+    data: { status: "loading", source: "server", message: "" }
+  });
 
   try {
     // ✅ ЕДИНСТВЕННЫЙ источник — store_dump
@@ -839,10 +883,7 @@
           lastAction: "Гостевой режим: серверная загрузка пропущена",
           lastError: null
         });
-        _setUIState({
-          data: "idle",
-          message: ""
-        });
+        _setUIState({ data: { status: "idle", source: "none", message: "" } });
         return true;
       }
 
@@ -853,8 +894,16 @@
           : ("HTTP " + resDump.status)
       });
       _setUIState({
-        data: "error",
-        message: "Ошибка загрузки данных с сервера: " + ((resDump.data && resDump.data.error) ? resDump.data.error : ("HTTP " + resDump.status))
+        server: {
+          status: (resDump.status === 401 ? "unauthorized" : "offline"),
+          checkedAt: _nowISO(),
+          message: (resDump.status === 401 ? "" : ((resDump.data && resDump.data.error) ? resDump.data.error : ("HTTP " + resDump.status)))
+        },
+        data: {
+          status: "error",
+          source: "server",
+          message: "Ошибка загрузки данных с сервера: " + ((resDump.data && resDump.data.error) ? resDump.data.error : ("HTTP " + resDump.status))
+        }
       });
       return false;
     }
@@ -907,7 +956,10 @@
       loadSource: "server",
       lastReadAt: _nowISO()
     });
-    _setUIState({ data: "ready", message: "" });
+    _setUIState({
+      server: { status: "online", checkedAt: _nowISO(), message: "" },
+      data: { status: (keys.length ? "ready" : "empty"), loadedAt: _nowISO(), source: "server", message: "" }
+    });
 
     return true;
 
@@ -917,7 +969,10 @@
       lastAction: "Ошибка загрузки",
       lastError: errMsg
     });
-    _setUIState({ data: "error", message: "Ошибка загрузки данных с сервера: " + errMsg });
+    _setUIState({
+      server: { status: "offline", checkedAt: _nowISO(), message: errMsg },
+      data: { status: "error", source: "server", message: "Ошибка загрузки данных с сервера: " + errMsg }
+    });
     return false;
   }
 }
@@ -1017,7 +1072,7 @@
     window.__JKH_AUTOLOAD_PROMISE = (async function () {
       window.__JKH_AUTOLOAD_IN_PROGRESS = true;
       try {
-        _setUIState({ data: "loading", message: "" });
+        _setUIState({ data: { status: "loading", source: "server", message: "" } });
         if (!window.Auth || typeof Auth.getCurrentUser !== "function") return false;
         var user = Auth.getCurrentUser();
         if (!user || !user.id) return false;
@@ -1028,7 +1083,7 @@
         var expected = user.id + "|ok";
         var pageGateKey = "__JKH_AUTOLOAD_DONE::" + expected;
         if (window[pageGateKey] === true || window.__JKH_AUTOLOAD_DONE_FOR_USER === expected) {
-          _setUIState({ data: "ready", message: "" });
+          _setUIState({ data: { status: "ready", loadedAt: _nowISO(), source: "server", message: "" }, server: { status: "online", checkedAt: _nowISO(), message: "" } });
           _setStatus({ lastAction: "✅ Автозагрузка уже выполнена", lastError: null, ownerId: user.id, loadSource: "server:auto", lastReadAt: _nowISO() });
           return true;
         }
@@ -1038,7 +1093,7 @@
         if (markerVal === expected) {
           window[pageGateKey] = true;
           window.__JKH_AUTOLOAD_DONE_FOR_USER = expected;
-          _setUIState({ data: "ready", message: "" });
+          _setUIState({ data: { status: "ready", loadedAt: _nowISO(), source: "server", message: "" }, server: { status: "online", checkedAt: _nowISO(), message: "" } });
           _setStatus({ lastAction: "✅ Автозагрузка уже выполнена", lastError: null, ownerId: user.id, loadSource: "server:auto", lastReadAt: _nowISO() });
           return true;
         }
@@ -1047,7 +1102,7 @@
         var resDump = await _apiGet("/api/store_dump");
         if (!(resDump.okHttp && resDump.data && resDump.data.ok === true)) {
           var httpErr = (resDump.data && resDump.data.error) ? resDump.data.error : ("HTTP " + resDump.status);
-          _setUIState({ data: "error", message: "Автозагрузка данных не выполнена: " + httpErr });
+          _setUIState({ data: { status: "error", source: "server", message: "Автозагрузка данных не выполнена: " + httpErr }, server: { status: (resDump.status === 401 ? "unauthorized" : "offline"), checkedAt: _nowISO(), message: (resDump.status === 401 ? "" : httpErr) } });
           _setStatus({ lastAction: "Автозагрузка не выполнена", lastError: httpErr });
           return false;
         }
@@ -1074,16 +1129,13 @@
         try { sessionStorage.setItem(markerKey, expected); } catch (e1) { _lsSet(markerKey, expected); }
         window[pageGateKey] = true;
         window.__JKH_AUTOLOAD_DONE_FOR_USER = expected;
-        _setUIState({ data: "ready", message: "" });
+        _setUIState({ data: { status: (keys.length ? "ready" : "empty"), loadedAt: _nowISO(), source: "server", message: "" }, server: { status: "online", checkedAt: _nowISO(), message: "" } });
         _setStatus({ lastAction: "✅ Автозагрузка после входа завершена", lastError: null, ownerId: user.id, loadSource: "server:auto", lastReadAt: _nowISO() });
         console.info("[JKH sync][login] userId=%s email=%s action=auto_load_done keys=%s", user.id, String(user.email || ""), keys.length);
         return true;
       } catch (e) {
         var msg = String(e && e.message ? e.message : e);
-        _setUIState({
-          data: "error",
-          message: "Ошибка загрузки данных с сервера: " + msg
-        });
+        _setUIState({ data: { status: "error", source: "server", message: "Ошибка загрузки данных с сервера: " + msg }, server: { status: "offline", checkedAt: _nowISO(), message: msg } });
         _setStatus({ lastAction: "Автозагрузка не выполнена", lastError: msg });
         return false;
       } finally {

@@ -146,14 +146,22 @@ Doc: docs/LOGIC_SPEC_v1.5.3.md
   function byId(id){ return document.getElementById(id); }
 
   function readUIState(){
-    if (!window.JKH_UI_STATE || typeof window.JKH_UI_STATE !== 'object') {
-      return { auth: 'guest', data: 'idle', message: '' };
-    }
-    return window.JKH_UI_STATE;
+    var def = {
+      auth: { status: 'unknown', userId: null, email: '', role: 'guest' },
+      server: { status: 'unknown', checkedAt: '', message: '' },
+      data: { status: 'idle', loadedAt: '', source: 'none', message: '' }
+    };
+    var st = (window.JKH_UI_STATE && typeof window.JKH_UI_STATE === 'object') ? window.JKH_UI_STATE : {};
+    st.auth = Object.assign({}, def.auth, (st.auth && typeof st.auth === 'object') ? st.auth : {});
+    st.server = Object.assign({}, def.server, (st.server && typeof st.server === 'object') ? st.server : {});
+    st.data = Object.assign({}, def.data, (st.data && typeof st.data === 'object') ? st.data : {});
+    return st;
   }
 
-  function fmtNow(){
-    var dt = new Date();
+  function formatLoadedAt(iso){
+    if (!iso) return '—';
+    var dt = new Date(iso);
+    if (!dt || isNaN(dt.getTime())) return '—';
     var dd = String(dt.getDate()).padStart(2, '0');
     var mm = String(dt.getMonth() + 1).padStart(2, '0');
     var hh = String(dt.getHours()).padStart(2, '0');
@@ -167,29 +175,40 @@ Doc: docs/LOGIC_SPEC_v1.5.3.md
     var serverEl = byId('sysServerState');
     var dataEl = byId('sysDataState');
     var updatedEl = byId('sysUpdatedAt');
+    var hintEl = byId('sysHint');
 
-    if (!serverEl || !dataEl || !updatedEl) return;
+    if (!serverEl || !dataEl || !updatedEl || !hintEl) return;
 
-    // сервер
-    // сервер — это не про роль, а про доступность
-if (st.auth === 'guest') {
-  serverEl.textContent = 'нет подключения';
-} else {
-  serverEl.textContent = 'подключён';
-}
+    var serverMap = {
+      online: 'подключён',
+      offline: 'нет связи',
+      unauthorized: 'без сессии',
+      unknown: 'не проверен'
+    };
+    serverEl.textContent = serverMap[st.server.status] || 'не проверен';
 
-    // данные
-    if (st.data === 'loading') {
-      dataEl.textContent = 'загрузка…';
-    } else if (st.data === 'ready') {
-      dataEl.textContent = 'загружены';
-    } else if (st.data === 'error') {
-      dataEl.textContent = 'ошибка';
+    var dataMap = {
+      idle: 'ожидание',
+      loading: 'загрузка…',
+      ready: 'загружены',
+      empty: 'нет данных',
+      error: 'ошибка'
+    };
+    dataEl.textContent = dataMap[st.data.status] || 'ожидание';
+
+    updatedEl.textContent = formatLoadedAt(st.data.loadedAt);
+
+    if (st.auth.status === 'guest' || st.server.status === 'unauthorized') {
+      hintEl.textContent = 'Гостевой режим: данные с сервера не загружаются, доступен только просмотр.';
+    } else if (st.data.status === 'loading') {
+      hintEl.textContent = 'Выполняется загрузка данных с сервера…';
+    } else if (st.data.status === 'error') {
+      hintEl.textContent = st.data.message || 'Ошибка загрузки данных.';
+    } else if (st.data.status === 'ready' || st.data.status === 'empty') {
+      hintEl.textContent = 'Сервер — главный источник данных. После входа база загружается автоматически.';
     } else {
-      dataEl.textContent = 'нет данных';
+      hintEl.textContent = 'Сервер — главный источник данных. После входа база загружается автоматически.';
     }
-
-    updatedEl.textContent = fmtNow();
   }
 
   function init(){
@@ -629,35 +648,35 @@ document.addEventListener("DOMContentLoaded", () => {
 
         var uiState = (window.JKH_UI_STATE && typeof window.JKH_UI_STATE === "object")
         ? window.JKH_UI_STATE
-        : { auth: "guest", data: "idle", message: "" };
+        : { auth: { status: "unknown", userId: null, email: "", role: "guest" }, server: { status: "unknown", checkedAt: "", message: "" }, data: { status: "idle", loadedAt: "", source: "none", message: "" } };
 
     var user = (window.Auth && typeof Auth.getCurrentUser === "function")
         ? Auth.getCurrentUser()
         : null;
 
     // ✅ Гость никогда не получает блокировку главной страницы
-    if (!user || uiState.auth === "guest") {
+    if (!user || (uiState.auth && uiState.auth.status === "guest")) {
         console.warn("[JKH] guest mode — UI not blocked");
     }
     // ✅ Для вошедшего пользователя показываем блокировку только при data=error
-    else if (uiState.data === "error") {
+    else if (uiState.data && uiState.data.status === "error") {
         const table = document.getElementById("abonentsTable");
         if (table) table.style.display = "none";
 
         const blocker = document.createElement("div");
         blocker.id = "dataNotReadyBlock";
         blocker.style.cssText = "margin:16px 0;padding:12px;border:1px solid #b00020;border-radius:8px;background:#fff4f4;color:#7a0016;";
-        blocker.textContent = uiState.message || "Данные не загружены с сервера. Интерфейс заблокирован до успешной автозагрузки.";
+        blocker.textContent = (uiState.data && uiState.data.message) || "Данные не загружены с сервера. Интерфейс заблокирован до успешной автозагрузки.";
 
         var anchor = document.querySelector("h2");
         if (anchor && anchor.parentNode) anchor.parentNode.insertBefore(blocker, anchor.nextSibling);
 
         return;
-    } else if (uiState.data === "loading") {
+    } else if (uiState.data && uiState.data.status === "loading") {
         const warn = document.createElement("div");
         warn.id = "dataLoadingWarn";
         warn.style.cssText = "margin:16px 0;padding:12px;border:1px solid #d4a017;border-radius:8px;background:#fff8e1;color:#6d4c00;";
-        warn.textContent = uiState.message || "Выполняется загрузка данных с сервера…";
+        warn.textContent = (uiState.data && uiState.data.message) || "Выполняется загрузка данных с сервера…";
         var h2Anchor = document.querySelector("h2");
         if (h2Anchor && h2Anchor.parentNode) h2Anchor.parentNode.insertBefore(warn, h2Anchor.nextSibling);
     }
