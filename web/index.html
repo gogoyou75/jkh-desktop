@@ -171,11 +171,12 @@ Doc: docs/LOGIC_SPEC_v1.5.3.md
     if (!serverEl || !dataEl || !updatedEl) return;
 
     // сервер
-    if (st.auth === 'guest') {
-      serverEl.textContent = 'гость';
-    } else {
-      serverEl.textContent = 'подключён';
-    }
+    // сервер — это не про роль, а про доступность
+if (st.auth === 'guest') {
+  serverEl.textContent = 'нет подключения';
+} else {
+  serverEl.textContent = 'подключён';
+}
 
     // данные
     if (st.data === 'loading') {
