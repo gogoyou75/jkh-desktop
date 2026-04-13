@@ -108,9 +108,15 @@
           gate.done = false;
           gate.failed = true;
           gate.lastResult = false;
+          var typedStatus = String(result && result.status || "");
+          if (!typedStatus) typedStatus = "invalid";
+          var typedServerStatus = String(result && result.serverStatus || "");
+          if (!typedServerStatus) {
+            typedServerStatus = (typedStatus === "offline") ? "offline" : "online";
+          }
           _setUIState({
-            server: { status: String(result && result.serverStatus || "offline"), checkedAt: _nowISO(), message: String(result && result.message || "") },
-            data: { status: "error", source: "server", message: String(result && result.message || "Не удалось автоматически загрузить данные") }
+            server: { status: typedServerStatus, checkedAt: _nowISO(), message: String(result && result.message || "") },
+            data: { status: typedStatus, source: "server", message: String(result && result.message || "Не удалось автоматически загрузить данные") }
           });
           console.warn("[auth] autoload failed but login allowed source=%s userId=%s", tag, uid);
           return false;
@@ -130,9 +136,20 @@
         gate.done = false;
         gate.failed = true;
         gate.lastResult = false;
+        var st = _ensureUIState();
+        var currentDataStatus = String(st && st.data && st.data.status || "");
+        var currentServerStatus = String(st && st.server && st.server.status || "");
+        var nextDataStatus = currentDataStatus;
+        if (!nextDataStatus || nextDataStatus === "loading" || nextDataStatus === "idle") {
+          nextDataStatus = _isNetworkOrTimeoutError(e) ? "offline" : "invalid";
+        }
+        var nextServerStatus = currentServerStatus;
+        if (!nextServerStatus || nextServerStatus === "unknown") {
+          nextServerStatus = _isNetworkOrTimeoutError(e) ? "offline" : "online";
+        }
         _setUIState({
-          server: { status: "offline", checkedAt: _nowISO(), message: String(e && e.message ? e.message : e || "") },
-          data: { status: "error", source: "server", message: String(e && e.message ? e.message : e || "") }
+          server: { status: nextServerStatus, checkedAt: _nowISO(), message: String(e && e.message ? e.message : e || "") },
+          data: { status: nextDataStatus, source: "server", message: String(e && e.message ? e.message : e || "") }
         });
         console.warn("[auth] autoload exception but login allowed source=%s userId=%s:", tag, uid, e);
         return false;
@@ -242,6 +259,17 @@ function _guestAuthState() {
 function _isUnauthorizedError(err) {
   var msg = String(err && err.message ? err.message : err || "");
   return msg === "HTTP_401" || msg === "unauthorized";
+}
+
+function _isNetworkOrTimeoutError(err) {
+  var msg = String(err && err.message ? err.message : err || "").toLowerCase();
+  if (!msg) return false;
+  if (msg.indexOf("autoload_timeout_") === 0) return true;
+  return msg.indexOf("network") >= 0 ||
+    msg.indexOf("timeout") >= 0 ||
+    msg.indexOf("failed to fetch") >= 0 ||
+    msg.indexOf("err_network") >= 0 ||
+    msg.indexOf("offline") >= 0;
 }
 
   function safeJsonStringify(v) {
@@ -826,7 +854,7 @@ function _isUnauthorizedError(err) {
         var st = _ensureUIState();
         _setUIState({
           auth: _userToAuthState(u),
-          server: { status: "online", checkedAt: _nowISO(), message: "" },
+          server: { status: st.server.status || "online", checkedAt: _nowISO(), message: st.server.message || "" },
           data: {
             status: (st.data.status === "empty" ? "empty" : "ready"),
             loadedAt: st.data.loadedAt || "",
@@ -835,10 +863,20 @@ function _isUnauthorizedError(err) {
           }
         });
       } else {
+        var failedState = _ensureUIState();
         _setUIState({
           auth: _userToAuthState(u),
-          server: { status: "online", checkedAt: _nowISO(), message: "" },
-          data: { status: "error", source: "server", message: "Не удалось автоматически загрузить данные" }
+          server: {
+            status: failedState.server.status || "unknown",
+            checkedAt: _nowISO(),
+            message: failedState.server.message || ""
+          },
+          data: {
+            status: failedState.data.status || "invalid",
+            loadedAt: failedState.data.loadedAt || "",
+            source: failedState.data.source || "server",
+            message: failedState.data.message || "Не удалось автоматически загрузить данные"
+          }
         });
       }
 
