@@ -74,8 +74,8 @@
 
   async function runAutoLoadAfterLoginOnce(sourceTag) {
     var tag = String(sourceTag || "unknown");
-    if (!window.JKHRemoteSync || typeof window.JKHRemoteSync.autoLoadAfterLogin !== "function") {
-      console.warn("[auth] autoload adapter missing; continue without blocking login");
+    if (!window.JKHDataLoader || typeof window.JKHDataLoader.loadFromServer !== "function") {
+      console.warn("[auth] JKHDataLoader missing; continue without blocking login");
       return false;
     }
 
@@ -96,33 +96,42 @@
       console.info("[auth] autoload gate start source=%s userId=%s", tag, uid);
       try {
         _setUIState({
+          server: { status: "online", checkedAt: _nowISO(), message: "" },
           data: { status: "loading", source: "server", message: "" }
         });
-        var loaded = await _withTimeout(window.JKHRemoteSync.autoLoadAfterLogin(), 25000);
-        if (!loaded) {
+
+        var result = await _withTimeout(window.JKHDataLoader.loadFromServer({ reason: "auth_autoload", force: true }), 25000);
+        var ok = !!(result && result.ok);
+        var status = String(result && result.status || "");
+
+        if (!ok || (status !== "ready" && status !== "empty")) {
           gate.done = false;
           gate.failed = true;
           gate.lastResult = false;
           _setUIState({
-            data: { status: "error", source: "server", message: "Не удалось автоматически загрузить данные" }
+            server: { status: String(result && result.serverStatus || "offline"), checkedAt: _nowISO(), message: String(result && result.message || "") },
+            data: { status: "error", source: "server", message: String(result && result.message || "Не удалось автоматически загрузить данные") }
           });
           console.warn("[auth] autoload failed but login allowed source=%s userId=%s", tag, uid);
           return false;
         }
+
         gate.done = true;
         gate.failed = false;
         gate.lastResult = true;
         gate.doneForUserId = uid;
         _setUIState({
-          data: { status: "ready", loadedAt: _nowISO(), source: "server", message: "" }
+          server: { status: "online", checkedAt: _nowISO(), message: "" },
+          data: { status: status, loadedAt: String(result && result.loadedAt || _nowISO()), source: "server", message: "" }
         });
-        console.info("[auth] autoload gate done source=%s userId=%s", tag, uid);
+        console.info("[auth] autoload gate done source=%s userId=%s status=%s", tag, uid, status);
         return true;
       } catch (e) {
         gate.done = false;
         gate.failed = true;
         gate.lastResult = false;
         _setUIState({
+          server: { status: "offline", checkedAt: _nowISO(), message: String(e && e.message ? e.message : e || "") },
           data: { status: "error", source: "server", message: String(e && e.message ? e.message : e || "") }
         });
         console.warn("[auth] autoload exception but login allowed source=%s userId=%s:", tag, uid, e);
@@ -134,6 +143,7 @@
 
     return gate.inFlight;
   }
+
 
   function safeJsonParse(s, fallback) {
   try { return JSON.parse(s); } catch (e) { return fallback; }
@@ -181,6 +191,19 @@ function _ensureUIState() {
   return st;
 }
 
+function _emitUIStateChanged(st) {
+  try {
+    if (typeof window.CustomEvent === "function") {
+      window.dispatchEvent(new CustomEvent("JKH_UI_STATE_CHANGED", { detail: st }));
+    } else {
+      var ev = document.createEvent("Event");
+      ev.initEvent("JKH_UI_STATE_CHANGED", false, false);
+      ev.detail = st;
+      window.dispatchEvent(ev);
+    }
+  } catch (e) {}
+}
+
 function _setUIState(patch) {
   patch = patch || {};
   var st = _ensureUIState();
@@ -193,6 +216,7 @@ function _setUIState(patch) {
   if (patch.data && typeof patch.data === "object") {
     st.data = Object.assign({}, st.data, patch.data);
   }
+  _emitUIStateChanged(st);
   return st;
 }
 
@@ -790,10 +814,16 @@ function _isUnauthorizedError(err) {
       var loaded = await runAutoLoadAfterLoginOnce("Auth.init");
 
       if (loaded) {
+        var st = _ensureUIState();
         _setUIState({
           auth: _userToAuthState(u),
           server: { status: "online", checkedAt: _nowISO(), message: "" },
-          data: { status: "ready", loadedAt: _nowISO(), source: "server", message: "" }
+          data: {
+            status: (st.data.status === "empty" ? "empty" : "ready"),
+            loadedAt: st.data.loadedAt || "",
+            source: "server",
+            message: ""
+          }
         });
       } else {
         _setUIState({

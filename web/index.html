@@ -169,6 +169,24 @@ Doc: docs/LOGIC_SPEC_v1.5.3.md
     return dd + '.' + mm + ' ' + hh + ':' + mi;
   }
 
+  function resolveServerText(st){
+    if (st.auth.status === 'guest' || st.server.status === 'unauthorized') return 'требуется вход';
+    if (st.server.status === 'online') return 'подключён';
+    if (st.server.status === 'offline') return 'нет связи';
+    return 'не проверен';
+  }
+
+  function resolveDataText(st){
+    var dataMap = {
+      idle: 'ожидание',
+      loading: 'загрузка…',
+      ready: 'загружены',
+      empty: 'нет данных',
+      error: 'ошибка'
+    };
+    return dataMap[st.data.status] || 'ожидание';
+  }
+
   function renderSystemPanel(){
     var st = readUIState();
 
@@ -179,47 +197,40 @@ Doc: docs/LOGIC_SPEC_v1.5.3.md
 
     if (!serverEl || !dataEl || !updatedEl || !hintEl) return;
 
-    var serverMap = {
-      online: 'подключён',
-      offline: 'нет связи',
-      unauthorized: 'без сессии',
-      unknown: 'не проверен'
-    };
-    serverEl.textContent = serverMap[st.server.status] || 'не проверен';
-
-    var dataMap = {
-      idle: 'ожидание',
-      loading: 'загрузка…',
-      ready: 'загружены',
-      empty: 'нет данных',
-      error: 'ошибка'
-    };
-    dataEl.textContent = dataMap[st.data.status] || 'ожидание';
-
+    serverEl.textContent = resolveServerText(st);
+    dataEl.textContent = resolveDataText(st);
     updatedEl.textContent = formatLoadedAt(st.data.loadedAt);
 
     if (st.auth.status === 'guest' || st.server.status === 'unauthorized') {
-      hintEl.textContent = 'Гостевой режим: данные с сервера не загружаются, доступен только просмотр.';
+      hintEl.textContent = 'Требуется вход для серверной загрузки данных.';
     } else if (st.data.status === 'loading') {
       hintEl.textContent = 'Выполняется загрузка данных с сервера…';
     } else if (st.data.status === 'error') {
       hintEl.textContent = st.data.message || 'Ошибка загрузки данных.';
-    } else if (st.data.status === 'ready' || st.data.status === 'empty') {
-      hintEl.textContent = 'Сервер — главный источник данных. После входа база загружается автоматически.';
     } else {
       hintEl.textContent = 'Сервер — главный источник данных. После входа база загружается автоматически.';
     }
+  }
+
+  function bindStateReactivity(){
+    window.addEventListener('JKH_UI_STATE_CHANGED', function(){
+      renderSystemPanel();
+    });
   }
 
   function init(){
     var btn = byId('btnRefreshData');
 
     if (btn) {
-      btn.onclick = function(){
-        location.reload();
+      btn.onclick = async function(){
+        if (!window.JKHDataLoader || typeof window.JKHDataLoader.loadFromServer !== 'function') {
+          return;
+        }
+        await window.JKHDataLoader.loadFromServer({ reason: 'manual_refresh', force: true });
       };
     }
 
+    bindStateReactivity();
     renderSystemPanel();
   }
 

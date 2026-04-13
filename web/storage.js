@@ -297,12 +297,26 @@
     return st;
   }
 
+  function _emitUIStateChanged(st) {
+    try {
+      if (typeof window.CustomEvent === "function") {
+        window.dispatchEvent(new CustomEvent("JKH_UI_STATE_CHANGED", { detail: st }));
+      } else {
+        var ev = document.createEvent("Event");
+        ev.initEvent("JKH_UI_STATE_CHANGED", false, false);
+        ev.detail = st;
+        window.dispatchEvent(ev);
+      }
+    } catch (e) {}
+  }
+
   function _setUIState(patch) {
     patch = patch || {};
     var st = _ensureUIState();
     if (patch.auth && typeof patch.auth === "object") st.auth = Object.assign({}, st.auth, patch.auth);
     if (patch.server && typeof patch.server === "object") st.server = Object.assign({}, st.server, patch.server);
     if (patch.data && typeof patch.data === "object") st.data = Object.assign({}, st.data, patch.data);
+    _emitUIStateChanged(st);
     return st;
   }
 
@@ -1056,97 +1070,108 @@
   }
 
   async function autoLoadAfterLogin() {
-    if (window.__JKH_AUTOLOAD_IN_PROGRESS === true && window.__JKH_AUTOLOAD_PROMISE) {
-      return window.__JKH_AUTOLOAD_PROMISE;
-    }
-    // 🔒 HARD GUARD: защита от двойного запуска (усиленная)
-    if (window.__JKH_AUTOLOAD_LOCK === true) {
-      if (window.__JKH_AUTOLOAD_PROMISE) {
-        return window.__JKH_AUTOLOAD_PROMISE;
+    if (!window.JKHDataLoader || typeof window.JKHDataLoader.loadFromServer !== "function") return false;
+    var res = await window.JKHDataLoader.loadFromServer({ reason: "legacy_autoload", force: true });
+    return !!(res && res.ok);
+  }
+
+
+  async function _loadFromServerServerFirst(options) {
+    options = options || {};
+    if (window.__JKH_DATA_LOADER_IN_FLIGHT) return window.__JKH_DATA_LOADER_IN_FLIGHT;
+
+    window.__JKH_DATA_LOADER_IN_FLIGHT = (async function () {
+      var ownerId = _ownerId();
+      var checkedAt = _nowISO();
+
+      if (!isOnlineMode()) {
+        _setUIState({
+          server: { status: "offline", checkedAt: checkedAt, message: "OFFLINE mode" },
+          data: { status: "error", source: "server", message: "OFFLINE mode" }
+        });
+        return { ok: false, status: "error", serverStatus: "offline", message: "OFFLINE mode" };
       }
-      // stale lock: сбрасываем и продолжаем, чтобы не блокировать init
-      console.warn("[JKH] autoload stale lock detected, reset");
-      window.__JKH_AUTOLOAD_LOCK = false;
-    }
-    window.__JKH_AUTOLOAD_LOCK = true;
-    window.__JKH_AUTOLOAD_PROMISE = (async function () {
-      window.__JKH_AUTOLOAD_IN_PROGRESS = true;
+
+      if (_isGuestUser() || _isGuestOrAll()) {
+        _setUIState({
+          server: { status: "unauthorized", checkedAt: checkedAt, message: "" },
+          data: { status: "idle", source: "none", message: "" }
+        });
+        return { ok: false, status: "idle", serverStatus: "unauthorized", message: "" };
+      }
+
+      _setUIState({
+        server: { status: "online", checkedAt: checkedAt, message: "" },
+        data: { status: "loading", source: "server", message: "" }
+      });
+
       try {
-        _setUIState({ data: { status: "loading", source: "server", message: "" } });
-        if (!window.Auth || typeof Auth.getCurrentUser !== "function") return false;
-        var user = Auth.getCurrentUser();
-        if (!user || !user.id) return false;
-        if (_isGuestOrAll()) return false;
-        if (!isOnlineMode()) return false;
-
-        var markerKey = "jkh_sync_autoload_done_v1";
-        var expected = user.id + "|ok";
-        var pageGateKey = "__JKH_AUTOLOAD_DONE::" + expected;
-        if (window[pageGateKey] === true || window.__JKH_AUTOLOAD_DONE_FOR_USER === expected) {
-          _setUIState({ data: { status: "ready", loadedAt: _nowISO(), source: "server", message: "" }, server: { status: "online", checkedAt: _nowISO(), message: "" } });
-          _setStatus({ lastAction: "✅ Автозагрузка уже выполнена", lastError: null, ownerId: user.id, loadSource: "server:auto", lastReadAt: _nowISO() });
-          return true;
-        }
-
-        var markerVal = "";
-        try { markerVal = sessionStorage.getItem(markerKey) || ""; } catch (e0) { markerVal = ""; }
-        if (markerVal === expected) {
-          window[pageGateKey] = true;
-          window.__JKH_AUTOLOAD_DONE_FOR_USER = expected;
-          _setUIState({ data: { status: "ready", loadedAt: _nowISO(), source: "server", message: "" }, server: { status: "online", checkedAt: _nowISO(), message: "" } });
-          _setStatus({ lastAction: "✅ Автозагрузка уже выполнена", lastError: null, ownerId: user.id, loadSource: "server:auto", lastReadAt: _nowISO() });
-          return true;
-        }
-
-        console.info("[JKH sync][login] userId=%s email=%s action=auto_load_start", user.id, String(user.email || ""));
         var resDump = await _apiGet("/api/store_dump");
         if (!(resDump.okHttp && resDump.data && resDump.data.ok === true)) {
           var httpErr = (resDump.data && resDump.data.error) ? resDump.data.error : ("HTTP " + resDump.status);
-          _setUIState({ data: { status: "error", source: "server", message: "Автозагрузка данных не выполнена: " + httpErr }, server: { status: (resDump.status === 401 ? "unauthorized" : "offline"), checkedAt: _nowISO(), message: (resDump.status === 401 ? "" : httpErr) } });
-          _setStatus({ lastAction: "Автозагрузка не выполнена", lastError: httpErr });
-          return false;
+          var serverStatus = (resDump.status === 401) ? "unauthorized" : "offline";
+          _setUIState({
+            server: { status: serverStatus, checkedAt: _nowISO(), message: (serverStatus === "offline" ? httpErr : "") },
+            data: { status: "error", source: "server", message: "Ошибка загрузки данных с сервера: " + httpErr }
+          });
+          return { ok: false, status: "error", serverStatus: serverStatus, message: httpErr };
         }
 
         var data = resDump.data.data || {};
-        var keys = _uniq(Object.keys(data).concat(_projectKeysForScope("db", user.id)));
-        for (var i = 0; i < keys.length; i++) {
-          var bk = keys[i];
-          if (!_isProjectDataKeyLocal(bk)) continue;
-          var val = Object.prototype.hasOwnProperty.call(data, bk) ? data[bk] : "";
+        var allKeys = Object.keys(data || {});
+        var applied = 0;
+
+        for (var i = 0; i < allKeys.length; i++) {
+          var baseKey = allKeys[i];
+          if (!_isProjectDataKeyLocal(baseKey)) continue;
+          var val = data[baseKey] || "";
+
           try {
-            _writeLocalCompat(bk, val || "", user.id);
-            console.info("[JKH sync][load] owner=%s key=%s size=%s status=ok", user.id, bk, String(val || "").length);
+            _writeLocalCompat(baseKey, val, ownerId);
+            applied++;
           } catch (eWrite) {
             var code = String((eWrite && eWrite.message) || eWrite || "");
-            if (code === "GLOBAL_ADMIN_ONLY") {
-              console.info("[JKH sync][load] owner=%s key=%s status=skip_global_readonly", user.id, bk);
-              continue;
-            }
+            if (code === "GLOBAL_ADMIN_ONLY") continue;
             throw eWrite;
           }
         }
 
-        try { sessionStorage.setItem(markerKey, expected); } catch (e1) { _lsSet(markerKey, expected); }
-        window[pageGateKey] = true;
-        window.__JKH_AUTOLOAD_DONE_FOR_USER = expected;
-        _setUIState({ data: { status: (keys.length ? "ready" : "empty"), loadedAt: _nowISO(), source: "server", message: "" }, server: { status: "online", checkedAt: _nowISO(), message: "" } });
-        _setStatus({ lastAction: "✅ Автозагрузка после входа завершена", lastError: null, ownerId: user.id, loadSource: "server:auto", lastReadAt: _nowISO() });
-        console.info("[JKH sync][login] userId=%s email=%s action=auto_load_done keys=%s", user.id, String(user.email || ""), keys.length);
-        return true;
+        var status = applied > 0 ? "ready" : "empty";
+        var loadedAt = _nowISO();
+        _setUIState({
+          server: { status: "online", checkedAt: _nowISO(), message: "" },
+          data: { status: status, loadedAt: loadedAt, source: "server", message: "" }
+        });
+
+        _setStatus({
+          lastAction: "✅ Загружено с сервера",
+          lastError: null,
+          ownerId: ownerId,
+          loadSource: "server:first",
+          lastReadAt: loadedAt
+        });
+
+        return { ok: true, status: status, loadedAt: loadedAt, serverStatus: "online", message: "" };
       } catch (e) {
         var msg = String(e && e.message ? e.message : e);
-        _setUIState({ data: { status: "error", source: "server", message: "Ошибка загрузки данных с сервера: " + msg }, server: { status: "offline", checkedAt: _nowISO(), message: msg } });
-        _setStatus({ lastAction: "Автозагрузка не выполнена", lastError: msg });
-        return false;
+        _setUIState({
+          server: { status: "offline", checkedAt: _nowISO(), message: msg },
+          data: { status: "error", source: "server", message: "Ошибка загрузки данных с сервера: " + msg }
+        });
+        _setStatus({ lastAction: "Ошибка загрузки", lastError: msg });
+        return { ok: false, status: "error", serverStatus: "offline", message: msg };
       } finally {
-        window.__JKH_AUTOLOAD_IN_PROGRESS = false;
-        window.__JKH_AUTOLOAD_LOCK = false;
-        window.__JKH_AUTOLOAD_PROMISE = null;
+        window.__JKH_DATA_LOADER_IN_FLIGHT = null;
       }
     })();
 
-    return window.__JKH_AUTOLOAD_PROMISE;
+    return window.__JKH_DATA_LOADER_IN_FLIGHT;
   }
+
+  window.JKHDataLoader = {
+    loadFromServer: _loadFromServerServerFirst
+  };
+
 
   // стартуем таймер при загрузке страницы (если включён)
   try { _setStatus({ ownerId: _ownerId() }); _startTimer(); } catch (e) { }
