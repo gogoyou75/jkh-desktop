@@ -500,6 +500,14 @@
   function _nowISO() {
     try { return new Date().toISOString(); } catch (e) { return ""; }
   }
+  function _isDevMode() {
+    try {
+      if (window && window.__JKH_DEV_MODE) return true;
+      var h = String(window.location && window.location.hostname || "");
+      var p = String(window.location && window.location.protocol || "");
+      return p === "file:" || h === "localhost" || h === "127.0.0.1";
+    } catch (e) { return false; }
+  }
 
   function _ownerId() {
     if (!window.JKHStore) return "guest";
@@ -692,6 +700,84 @@
     if (window.JKHStore) window.JKHStore.setRaw(baseKey, v, ownerId);
   }
 
+  function _projectKeysFromDump(dumpObj) {
+    var out = [];
+    if (!dumpObj || typeof dumpObj !== "object" || Array.isArray(dumpObj)) return out;
+    var all = Object.keys(dumpObj);
+    for (var i = 0; i < all.length; i++) {
+      var baseKey = String(all[i] || "");
+      if (_isProjectDataKeyLocal(baseKey)) out.push(baseKey);
+    }
+    return _uniq(out);
+  }
+
+  function _clearOwnerProjectScope(ownerId) {
+    if (!window.JKHStore) return 0;
+    var pref = window.JKHStore.scopePrefixFor(ownerId) || "";
+    var scoped = window.JKHStore.keysForOwner(ownerId) || [];
+    var removed = 0;
+    for (var i = 0; i < scoped.length; i++) {
+      var sk = String(scoped[i] || "");
+      if (!sk) continue;
+      var baseKey = sk.indexOf(pref) === 0 ? sk.slice(pref.length) : sk;
+      if (!_isProjectDataKeyLocal(baseKey)) continue;
+      try { window.JKHStore.removeRaw(baseKey, ownerId); removed++; } catch (e) {}
+    }
+    return removed;
+  }
+
+  function _clearAllProjectScopes() {
+    var removed = 0;
+    for (var i = localStorage.length - 1; i >= 0; i--) {
+      var full = String(localStorage.key(i) || "");
+      if (full.indexOf("jkhdb::") !== 0) continue;
+      var p = full.indexOf("::", 7);
+      if (p < 0) continue;
+      var baseKey = full.slice(p + 2);
+      if (!_isProjectDataKeyLocal(baseKey)) continue;
+      try { _lsRemoveDirect(full); removed++; } catch (e) {}
+    }
+    return removed;
+  }
+
+  function _replaceOwnerProjectScopeFromDump(ownerId, dumpObj) {
+    if (!window.JKHStore) return { removed: 0, written: 0 };
+    var dumpKeys = _projectKeysFromDump(dumpObj);
+    var keep = {};
+    var i;
+    for (i = 0; i < dumpKeys.length; i++) keep[dumpKeys[i]] = true;
+
+    var pref = window.JKHStore.scopePrefixFor(ownerId) || "";
+    var scoped = window.JKHStore.keysForOwner(ownerId) || [];
+    var removed = 0;
+    for (i = 0; i < scoped.length; i++) {
+      var sk = String(scoped[i] || "");
+      if (!sk) continue;
+      var baseKey = sk.indexOf(pref) === 0 ? sk.slice(pref.length) : sk;
+      if (!_isProjectDataKeyLocal(baseKey)) continue;
+      if (keep[baseKey]) continue;
+      try {
+        window.JKHStore.removeRaw(baseKey, ownerId);
+        removed++;
+      } catch (eRem) {}
+    }
+
+    var written = 0;
+    for (i = 0; i < dumpKeys.length; i++) {
+      var kx = dumpKeys[i];
+      var val = dumpObj[kx];
+      try {
+        _writeLocalCompat(kx, (val === null || val === undefined) ? "" : String(val), ownerId);
+        written++;
+      } catch (eWrite) {
+        var code = String((eWrite && eWrite.message) || eWrite || "");
+        if (code === "GLOBAL_ADMIN_ONLY") continue;
+        throw eWrite;
+      }
+    }
+    return { removed: removed, written: written };
+  }
+
   function _isDbEffectivelyEmpty(rawDb) {
     if (!rawDb || !String(rawDb).trim()) return true;
     try {
@@ -857,139 +943,12 @@
   }
 
   async function download(scope) {
-  if (!isOnlineMode()) {
-    _setStatus({ lastAction: "Загрузка пропущена: OFFLINE режим", lastError: null });
-    _setUIState({ server: { status: "offline", checkedAt: _nowISO(), message: "OFFLINE mode" } });
-    return false;
-  }
-
-    if (_isGuestOrAll()) {
-    if (_isGuestUser()) {
-      _setStatus({
-        lastAction: "Гостевой режим: серверная загрузка не требуется",
-        lastError: null
-      });
-      _setUIState({ data: { status: "idle", source: "none", message: "" } });
-      return true;
+    if (_isDevMode()) {
+      console.warn("[JKH sync][deprecated] JKHRemoteSync.downloadNow/download используют канонический JKHDataLoader.loadFromServer");
     }
-
-    _setStatus({
-      lastAction: "Загрузка запрещена: режим ALL",
-      lastError: "ALLMODE_READONLY"
-    });
-    return false;
+    var res = await _loadFromServerServerFirst({ reason: "legacy_download_wrapper", force: true, scope: scope });
+    return !!(res && res.ok);
   }
-
-  var ownerId = _ownerId();
-  _setUIState({
-    server: { status: "online", checkedAt: _nowISO(), message: "" },
-    data: { status: "loading", source: "server", message: "" }
-  });
-
-  try {
-    // ✅ ЕДИНСТВЕННЫЙ источник — store_dump
-    var resDump = await _apiGet("/api/store_dump");
-
-        if (!(resDump.okHttp && resDump.data && resDump.data.ok === true)) {
-      // ✅ Для гостя 401 не является ошибкой приложения
-      if (resDump.status === 401 && _isGuestUser()) {
-        _setStatus({
-          lastAction: "Гостевой режим: серверная загрузка пропущена",
-          lastError: null
-        });
-        _setUIState({ data: { status: "idle", source: "none", message: "" } });
-        return true;
-      }
-
-      _setStatus({
-        lastAction: "Ошибка загрузки",
-        lastError: (resDump.data && resDump.data.error)
-          ? resDump.data.error
-          : ("HTTP " + resDump.status)
-      });
-      _setUIState({
-        server: {
-          status: (resDump.status === 401 ? "unauthorized" : "offline"),
-          checkedAt: _nowISO(),
-          message: (resDump.status === 401 ? "" : ((resDump.data && resDump.data.error) ? resDump.data.error : ("HTTP " + resDump.status)))
-        },
-        data: {
-          status: "error",
-          source: "server",
-          message: "Ошибка загрузки данных с сервера: " + ((resDump.data && resDump.data.error) ? resDump.data.error : ("HTTP " + resDump.status))
-        }
-      });
-      return false;
-    }
-
-    var data = resDump.data.data || {};
-    var keys = Object.keys(data);
-
-    for (var i = 0; i < keys.length; i++) {
-      var baseKey = keys[i];
-
-      // только проектные ключи
-      if (!_isProjectDataKeyLocal(baseKey)) continue;
-
-      var val = data[baseKey] || "";
-
-      try {
-        _writeLocalCompat(baseKey, val, ownerId);
-
-        console.info(
-          "[JKH sync][load] owner=%s key=%s size=%s status=ok",
-          ownerId,
-          baseKey,
-          String(val || "").length
-        );
-
-      } catch (eWrite) {
-        var code = String((eWrite && eWrite.message) || eWrite || "");
-
-        if (code === "GLOBAL_ADMIN_ONLY") {
-          console.info(
-            "[JKH sync][load] owner=%s key=%s status=skip_global_readonly",
-            ownerId,
-            baseKey
-          );
-          continue;
-        }
-
-        throw eWrite;
-      }
-    }
-
-    // пересчёт сигнатуры
-    var sig = _sigForALL(ownerId);
-    _lsSet(_getLastSigKey("all"), sig);
-
-    _setStatus({
-      lastAction: "✅ Загружено с сервера",
-      lastError: null,
-      ownerId: ownerId,
-      loadSource: "server",
-      lastReadAt: _nowISO()
-    });
-    _setUIState({
-      server: { status: "online", checkedAt: _nowISO(), message: "" },
-      data: { status: (keys.length ? "ready" : "empty"), loadedAt: _nowISO(), source: "server", message: "" }
-    });
-
-    return true;
-
-  } catch (e) {
-    var errMsg = String(e && e.message ? e.message : e);
-    _setStatus({
-      lastAction: "Ошибка загрузки",
-      lastError: errMsg
-    });
-    _setUIState({
-      server: { status: "offline", checkedAt: _nowISO(), message: errMsg },
-      data: { status: "error", source: "server", message: "Ошибка загрузки данных с сервера: " + errMsg }
-    });
-    return false;
-  }
-}
 
   // ---- UI helpers ----
   function getSettings() {
@@ -1062,7 +1021,6 @@
     var s = getSettings();
     var scope = (s.scope === "all") ? "all" : "db";
     await download(scope);
-    try { location.reload(); } catch (e) { }
   }
 
   async function migrateLegacyLocalOnce(ownerId) {
@@ -1070,6 +1028,9 @@
   }
 
   async function autoLoadAfterLogin() {
+    if (_isDevMode()) {
+      console.warn("[JKH sync][deprecated] JKHRemoteSync.autoLoadAfterLogin больше не основной сценарий, используется JKHDataLoader.loadFromServer");
+    }
     if (!window.JKHDataLoader || typeof window.JKHDataLoader.loadFromServer !== "function") return false;
     var res = await window.JKHDataLoader.loadFromServer({ reason: "legacy_autoload", force: true });
     return !!(res && res.ok);
@@ -1087,17 +1048,25 @@
       if (!isOnlineMode()) {
         _setUIState({
           server: { status: "offline", checkedAt: checkedAt, message: "OFFLINE mode" },
-          data: { status: "error", source: "server", message: "OFFLINE mode" }
+          data: { status: "offline", source: "server", message: "OFFLINE mode" }
         });
-        return { ok: false, status: "error", serverStatus: "offline", message: "OFFLINE mode" };
+        return { ok: false, status: "offline", serverStatus: "offline", message: "OFFLINE mode" };
       }
 
-      if (_isGuestUser() || _isGuestOrAll()) {
+      if (_isGuestUser()) {
         _setUIState({
           server: { status: "unauthorized", checkedAt: checkedAt, message: "" },
-          data: { status: "idle", source: "none", message: "" }
+          data: { status: "unauthorized", source: "none", message: "Требуется вход" }
         });
-        return { ok: false, status: "idle", serverStatus: "unauthorized", message: "" };
+        return { ok: false, status: "unauthorized", serverStatus: "unauthorized", message: "Требуется вход" };
+      }
+
+      if (window.JKHStore && window.JKHStore.isAllMode && window.JKHStore.isAllMode()) {
+        _setUIState({
+          server: { status: "forbidden", checkedAt: checkedAt, message: "ALLMODE_READONLY" },
+          data: { status: "forbidden", source: "server", message: "Режим ALL не поддерживает загрузку project-scope" }
+        });
+        return { ok: false, status: "forbidden", serverStatus: "forbidden", message: "ALLMODE_READONLY" };
       }
 
       _setUIState({
@@ -1109,38 +1078,32 @@
         var resDump = await _apiGet("/api/store_dump");
         if (!(resDump.okHttp && resDump.data && resDump.data.ok === true)) {
           var httpErr = (resDump.data && resDump.data.error) ? resDump.data.error : ("HTTP " + resDump.status);
-          var serverStatus = (resDump.status === 401) ? "unauthorized" : "offline";
+          var serverStatus = (resDump.status === 401) ? "unauthorized" : ((resDump.status === 403) ? "forbidden" : "offline");
+          var dataStatus = (resDump.status === 401) ? "unauthorized" : ((resDump.status === 403) ? "forbidden" : "offline");
           _setUIState({
             server: { status: serverStatus, checkedAt: _nowISO(), message: (serverStatus === "offline" ? httpErr : "") },
-            data: { status: "error", source: "server", message: "Ошибка загрузки данных с сервера: " + httpErr }
+            data: { status: dataStatus, source: "server", message: (dataStatus === "unauthorized" ? "Требуется вход" : httpErr) }
           });
-          return { ok: false, status: "error", serverStatus: serverStatus, message: httpErr };
+          return { ok: false, status: dataStatus, serverStatus: serverStatus, message: httpErr };
         }
 
-        var data = resDump.data.data || {};
-        var allKeys = Object.keys(data || {});
-        var applied = 0;
-
-        for (var i = 0; i < allKeys.length; i++) {
-          var baseKey = allKeys[i];
-          if (!_isProjectDataKeyLocal(baseKey)) continue;
-          var val = data[baseKey] || "";
-
-          try {
-            _writeLocalCompat(baseKey, val, ownerId);
-            applied++;
-          } catch (eWrite) {
-            var code = String((eWrite && eWrite.message) || eWrite || "");
-            if (code === "GLOBAL_ADMIN_ONLY") continue;
-            throw eWrite;
-          }
+        var data = (resDump.data && Object.prototype.hasOwnProperty.call(resDump.data, "data")) ? resDump.data.data : null;
+        if (!data || typeof data !== "object" || Array.isArray(data)) {
+          _setUIState({
+            server: { status: "online", checkedAt: _nowISO(), message: "" },
+            data: { status: "invalid", source: "server", message: "Некорректный payload /api/store_dump" }
+          });
+          _setStatus({ lastAction: "Ошибка загрузки", lastError: "INVALID_PAYLOAD_STORE_DUMP" });
+          return { ok: false, status: "invalid", serverStatus: "online", message: "INVALID_PAYLOAD_STORE_DUMP" };
         }
 
+        var replaced = _replaceOwnerProjectScopeFromDump(ownerId, data);
+        var applied = replaced.written;
         var status = applied > 0 ? "ready" : "empty";
         var loadedAt = _nowISO();
         _setUIState({
           server: { status: "online", checkedAt: _nowISO(), message: "" },
-          data: { status: status, loadedAt: loadedAt, source: "server", message: "" }
+          data: { status: status, loadedAt: loadedAt, source: "server", message: (status === "empty" ? "Серверный dump пуст" : "") }
         });
 
         _setStatus({
@@ -1156,10 +1119,10 @@
         var msg = String(e && e.message ? e.message : e);
         _setUIState({
           server: { status: "offline", checkedAt: _nowISO(), message: msg },
-          data: { status: "error", source: "server", message: "Ошибка загрузки данных с сервера: " + msg }
+          data: { status: "offline", source: "server", message: "Ошибка сети: " + msg }
         });
         _setStatus({ lastAction: "Ошибка загрузки", lastError: msg });
-        return { ok: false, status: "error", serverStatus: "offline", message: msg };
+        return { ok: false, status: "offline", serverStatus: "offline", message: msg };
       } finally {
         window.__JKH_DATA_LOADER_IN_FLIGHT = null;
       }
@@ -1169,7 +1132,15 @@
   }
 
   window.JKHDataLoader = {
-    loadFromServer: _loadFromServerServerFirst
+    loadFromServer: _loadFromServerServerFirst,
+    resetLocalProjectScope: function (ownerId) {
+      var targetOwner = String(ownerId || _ownerId());
+      var removed = _clearOwnerProjectScope(targetOwner);
+      return { ok: true, ownerId: targetOwner, removed: removed };
+    },
+    resetAllLocalProjectScopes: function () {
+      return { ok: true, removed: _clearAllProjectScopes() };
+    }
   };
 
 

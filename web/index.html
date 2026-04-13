@@ -171,6 +171,7 @@ Doc: docs/LOGIC_SPEC_v1.5.3.md
 
   function resolveServerText(st){
     if (st.auth.status === 'guest' || st.server.status === 'unauthorized') return 'требуется вход';
+    if (st.server.status === 'forbidden') return 'доступ запрещён';
     if (st.server.status === 'online') return 'подключён';
     if (st.server.status === 'offline') return 'нет связи';
     return 'не проверен';
@@ -182,6 +183,10 @@ Doc: docs/LOGIC_SPEC_v1.5.3.md
       loading: 'загрузка…',
       ready: 'загружены',
       empty: 'нет данных',
+      unauthorized: 'требуется вход',
+      forbidden: 'доступ запрещён',
+      offline: 'нет связи',
+      invalid: 'повреждённый ответ',
       error: 'ошибка'
     };
     return dataMap[st.data.status] || 'ожидание';
@@ -203,9 +208,13 @@ Doc: docs/LOGIC_SPEC_v1.5.3.md
 
     if (st.auth.status === 'guest' || st.server.status === 'unauthorized') {
       hintEl.textContent = 'Требуется вход для серверной загрузки данных.';
+    } else if (st.server.status === 'forbidden' || st.data.status === 'forbidden') {
+      hintEl.textContent = st.data.message || 'Недостаточно прав для загрузки данных.';
     } else if (st.data.status === 'loading') {
       hintEl.textContent = 'Выполняется загрузка данных с сервера…';
-    } else if (st.data.status === 'error') {
+    } else if (st.data.status === 'offline') {
+      hintEl.textContent = st.data.message || 'Сервер недоступен.';
+    } else if (st.data.status === 'invalid' || st.data.status === 'error') {
       hintEl.textContent = st.data.message || 'Ошибка загрузки данных.';
     } else {
       hintEl.textContent = 'Сервер — главный источник данных. После входа база загружается автоматически.';

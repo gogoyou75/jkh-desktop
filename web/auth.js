@@ -468,7 +468,10 @@ function _isUnauthorizedError(err) {
           sel.innerHTML = opts.join("");
           sel.value = scope;
           sel.onchange = function () {
-            if (Auth.setAdminViewScope(this.value)) location.reload();
+            if (Auth.setAdminViewScope(this.value)) {
+              var cur = window.location.pathname.split("/").pop() || "index.html";
+              window.location.href = cur;
+            }
           };
         }).catch(function () {});
       }, 0);
@@ -632,6 +635,12 @@ function _isUnauthorizedError(err) {
     } catch (e) {}
 
     clearSessionCache();
+    try { localStorage.removeItem(ADMIN_VIEW_SCOPE_KEY); } catch (e3) {}
+    try {
+      if (window.JKHDataLoader && typeof window.JKHDataLoader.resetAllLocalProjectScopes === "function") {
+        window.JKHDataLoader.resetAllLocalProjectScopes();
+      }
+    } catch (e4) {}
     _sessionReady = true;
     try {
       var gate = _getAutoLoadGate();
@@ -644,7 +653,7 @@ function _isUnauthorizedError(err) {
     _setUIState({
       auth: _guestAuthState(),
       server: { status: "unauthorized", checkedAt: _nowISO(), message: "" },
-      data: { status: "idle", source: "none", message: "" }
+      data: { status: "idle", loadedAt: "", source: "none", message: "" }
     });
     renderAuthStatus();
   }
@@ -655,7 +664,7 @@ function _isUnauthorizedError(err) {
       if (p.indexOf("admin.html") !== -1 || p.indexOf("user_panel.html") !== -1) {
         window.location.href = "index.html";
       } else {
-        window.location.reload();
+        window.location.href = p.split("/").pop() || "index.html";
       }
     });
   }
