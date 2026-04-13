@@ -1,4 +1,4 @@
-// requisites.js — Реквизиты + подписанты (localStorage вариант А)
+// requisites.js — Реквизиты + подписанты (server-first via JKHStore)
 
 (function () {
   const KEY_REQ = 'organization_requisites_v1';
@@ -28,19 +28,29 @@
     try { return JSON.parse(raw); } catch { return fallback; }
   }
 
+  function storeGet(key) {
+    try { return (window.JKHStore && typeof JKHStore.getRaw === "function") ? JKHStore.getRaw(key) : null; } catch { return null; }
+  }
+  function storeSet(key, value) {
+    try { if (window.JKHStore && typeof JKHStore.setRaw === "function") JKHStore.setRaw(key, value); } catch {}
+  }
+  function storeRemove(key) {
+    try { if (window.JKHStore && typeof JKHStore.removeRaw === "function") JKHStore.removeRaw(key); } catch {}
+  }
+
   function loadReq() {
-    const raw = localStorage.getItem(KEY_REQ);
+    const raw = storeGet(KEY_REQ);
     if (!raw) return { ...reqDefaults };
     const obj = safeJsonParse(raw, null);
     return { ...reqDefaults, ...(obj || {}) };
   }
 
   function saveReq(obj) {
-    localStorage.setItem(KEY_REQ, JSON.stringify(obj));
+    storeSet(KEY_REQ, JSON.stringify(obj));
   }
 
   function loadSigners() {
-    const raw = localStorage.getItem(KEY_SIGNERS);
+    const raw = storeGet(KEY_SIGNERS);
     if (!raw) return JSON.parse(JSON.stringify(signerDefaults));
     const arr = safeJsonParse(raw, null);
     const list = Array.isArray(arr) ? arr : [];
@@ -77,7 +87,7 @@
     });
     if (!found && cleaned[0]) cleaned[0].is_default = true;
 
-    localStorage.setItem(KEY_SIGNERS, JSON.stringify(cleaned));
+    storeSet(KEY_SIGNERS, JSON.stringify(cleaned));
     return cleaned;
   }
 
@@ -221,8 +231,8 @@
 
     btnReset.addEventListener('click', () => {
       if (!confirm('Очистить реквизиты и подписантов?')) return;
-      localStorage.removeItem(KEY_REQ);
-      localStorage.removeItem(KEY_SIGNERS);
+      storeRemove(KEY_REQ);
+      storeRemove(KEY_SIGNERS);
       fillReqForm({ ...reqDefaults });
       renderSigners(JSON.parse(JSON.stringify(signerDefaults)));
       setToast('Данные очищены.', 'ok');

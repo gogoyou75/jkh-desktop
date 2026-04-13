@@ -50,15 +50,10 @@ window.PremisesAdmin = (function () {
         try { return raw ? JSON.parse(raw) : fallback; } catch (e) { return fallback; }
     }
 
-    function listAllOwnersSorted() {
-        // returns [{id,email,role}]
-        // ВАЖНО: Auth.adminListUsers() в auth.js экспортируется как Promise-wrapper,
-        // поэтому здесь читаем список пользователей напрямую из localStorage,
-        // чтобы "ВСЕ БАЗЫ" работали синхронно и без гонок.
-        var raw = null;
-        try { raw = localStorage.getItem("auth_users_v1"); } catch (e) { raw = null; }
-        var users = safeParse(raw, []);
-        if (!Array.isArray(users)) users = [];
+    var ownersCache = [];
+    var ownersLoading = false;
+    function normalizeOwners(users) {
+        users = Array.isArray(users) ? users : [];
 
         // sort: admin(s) first, then users by email
         users.sort(function(a, b){
@@ -74,9 +69,29 @@ window.PremisesAdmin = (function () {
             .map(function(u){ return ({ id: u.id, email: (u.email || ""), role: (u.role || "user") }); })
             .filter(function(u){ return !!u.id; });
     }
+    function refreshOwnersCache() {
+        if (ownersLoading) return;
+        if (!(window.Auth && typeof Auth.adminListUsers === "function")) return;
+        ownersLoading = true;
+        Auth.adminListUsers()
+            .then(function(list){
+                ownersCache = normalizeOwners(list);
+            })
+            .catch(function(){})
+            .finally(function(){
+                ownersLoading = false;
+                try { renderTable(); } catch (e) {}
+            });
+    }
+    function listAllOwnersSorted() {
+        refreshOwnersCache();
+        return ownersCache.slice();
+    }
 
     function loadDbForOwner(ownerId) {
-        const raw = localStorage.getItem(kScoped(KEY_DB, ownerId));
+        const raw = (window.JKHStore && typeof JKHStore.getRaw === "function")
+            ? JKHStore.getRaw(KEY_DB, ownerId)
+            : null;
         const parsed = safeParse(raw, null);
         if (parsed && typeof parsed === "object") return parsed;
         return { premises: {}, links: [], abonents: {} };

@@ -136,21 +136,10 @@ window.runSearch = function () {
     const tbody = document.querySelector("#extendedResults tbody");
     tbody.innerHTML = "";
 
-    // Получаем данные из localStorage
-    let allAbonents = {};
-
-    for (let i = 0; i < localStorage.length; i++) {
-        const key = localStorage.key(i);
-        if (key && key.startsWith('abonent_')) {
-            try {
-                const abonentData = JSON.parse(localStorage.getItem(key));
-                const abonentId = key.replace('abonent_', '');
-                allAbonents[abonentId] = abonentData;
-            } catch (e) {
-                console.error("Ошибка парсинга", key, e);
-            }
-        }
-    }
+    // Получаем данные из runtime cache
+    const allAbonents = (window.AbonentsDB && window.AbonentsDB.abonents && typeof window.AbonentsDB.abonents === "object")
+        ? window.AbonentsDB.abonents
+        : {};
 
     let foundCount = 0;
 

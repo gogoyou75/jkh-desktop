@@ -48,7 +48,7 @@
 /* =========================================================
    exclude_period.html
    - добавление строки работает (пустая строка НЕ удаляется)
-   - хранение: localStorage + AbonentsDB.abonents[id].defaultExcludes
+   - хранение: JKHStore + AbonentsDB.abonents[id].defaultExcludes
    ========================================================= */
 
 function getAbonentId(){
@@ -121,10 +121,17 @@ function normalizeList(list){
     }));
 }
 
-function readFromLocalStorage(){
+function storeGet(key){
+    try { return (window.JKHStore && JKHStore.getRaw) ? JKHStore.getRaw(key) : null; } catch { return null; }
+}
+function storeSet(key, value){
+    try { if (window.JKHStore && JKHStore.setRaw) JKHStore.setRaw(key, value); } catch {}
+}
+
+function readFromStore(){
     const id = getAbonentId();
     try{
-        const raw = localStorage.getItem(periodsKey(id));
+        const raw = storeGet(periodsKey(id));
         if (!raw) return null;
         const arr = JSON.parse(raw);
         return normalizeList(arr);
@@ -138,7 +145,7 @@ function readFromAbonent(){
     return normalizeList(a?.defaultExcludes || []);
 }
 
-function writeToLocalStorage(list, opts){
+function writeToStore(list, opts){
     const id = getAbonentId();
     const keepEmpty = !!(opts && opts.keepEmpty);
 
@@ -147,7 +154,7 @@ function writeToLocalStorage(list, opts){
         ? normalized
         : normalized.filter(p => p.from || p.to || p.reason);
 
-    localStorage.setItem(periodsKey(id), JSON.stringify(cleaned));
+    storeSet(periodsKey(id), JSON.stringify(cleaned));
 }
 
 function writeToAbonent(list, opts){
@@ -164,8 +171,8 @@ function writeToAbonent(list, opts){
 }
 
 function readPeriods(){
-    // приоритет localStorage, если есть (оно переживает перезагрузку)
-    const fromLS = readFromLocalStorage();
+    // приоритет storage cache
+    const fromLS = readFromStore();
     if (fromLS !== null) return fromLS;
 
     // иначе берём из базы (defaultExcludes)
@@ -173,8 +180,8 @@ function readPeriods(){
 }
 
 function writePeriods(list, opts){
-    // сохраняем в оба места
-    writeToLocalStorage(list, opts);
+    // сохраняем в storage + runtime db
+    writeToStore(list, opts);
     writeToAbonent(list, opts);
 }
 

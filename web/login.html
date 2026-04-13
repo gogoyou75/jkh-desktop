@@ -250,6 +250,9 @@
     b.textContent = '';
   }
 
+  var loginSubmitInProgress = false;
+  var registerSubmitInProgress = false;
+
   // email prefill
   document.addEventListener('DOMContentLoaded', function(){
     try{
@@ -267,6 +270,8 @@
   document.getElementById('loginForm').addEventListener('submit', function (e){
     e.preventDefault();
     hideStatus();
+
+    if (loginSubmitInProgress) return;
 
     var emailEl = document.getElementById('loginEmail');
     var passEl  = document.getElementById('loginPass');
@@ -295,6 +300,7 @@
 
       // Используем loginByPassword, который автоматически создаст первого админа при пустой базе
       if (window.Auth && typeof Auth.loginByPassword === 'function') {
+        loginSubmitInProgress = true;
         Auth.loginByPassword(email, pass, days).then(function(user){
           // Успешный вход
           showStatus('Вход выполнен успешно! Перенаправление...', false);
@@ -313,12 +319,15 @@
           }, 500);
         }).catch(function(err){
           showStatus('Не удалось войти: ' + (err && err.message ? err.message : err), true);
+        }).finally(function(){
+          loginSubmitInProgress = false;
         });
       } else {
         showStatus('Ошибка: Auth.loginByPassword не найден', true);
       }
 
     }catch(err){
+      loginSubmitInProgress = false;
       showStatus('Не удалось войти: ' + (err && err.message ? err.message : err), true);
     }
   });
@@ -327,6 +336,8 @@
   document.getElementById('registerForm').addEventListener('submit', function (e){
     e.preventDefault();
     hideStatus();
+
+    if (registerSubmitInProgress) return;
 
     var emailEl = document.getElementById('registerEmail');
     var passEl = document.getElementById('registerPass');
@@ -384,6 +395,7 @@
       }
 
       // Для совместимости: если используется registerFirstAdmin, передаем только нужные параметры
+      registerSubmitInProgress = true;
       if (registerFunc === Auth.registerFirstAdmin) {
         registerFunc(email, pass, name).then(function(result){
           // После регистрации автоматически входим
@@ -404,6 +416,8 @@
           }, 1000);
         }).catch(function(err){
           showStatus('Ошибка регистрации: ' + (err && err.message ? err.message : err), true);
+        }).finally(function(){
+          registerSubmitInProgress = false;
         });
       } else {
         // Используем registerUser
@@ -426,9 +440,12 @@
           }, 1000);
         }).catch(function(err){
           showStatus('Ошибка регистрации: ' + (err && err.message ? err.message : err), true);
+        }).finally(function(){
+          registerSubmitInProgress = false;
         });
       }
     } catch(err) {
+      registerSubmitInProgress = false;
       showStatus('Ошибка регистрации: ' + (err && err.message ? err.message : err), true);
     }
   });

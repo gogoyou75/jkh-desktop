@@ -28,11 +28,8 @@
 // Источник: abonent.calcStartDate (приоритет) → activeLink.dateFrom → fallback.
 // Если выбранный период начинается раньше — period.from режем снизу.
 //
-// ✅ FIX for namespaced storage:
-// В некоторых версиях проекта window.AbonentsDB НЕ создаётся на странице,
-// а база лежит в localStorage по ключам вида:
-//   jkhdb::u_xxx::abonents_db_v1
-// Поэтому здесь есть детектор, который находит базу, содержащую abonentId.
+// ✅ FIX for scoped storage:
+// источник данных: runtime cache/JKHStore (без прямого localStorage).
 //
 // Требует: calc_engine.js (window.JKHCalcEngine)
 
@@ -46,9 +43,18 @@
     try{ return JSON.parse(raw); }catch(e){ return def; }
   }
 
+  function storeGet(key, ownerId){
+    try{
+      if (window.JKHStore && typeof JKHStore.getRaw === "function") {
+        return JKHStore.getRaw(key, ownerId);
+      }
+    }catch(e){}
+    return null;
+  }
+
   function safeJSON(key, def){
     try{
-      const raw = localStorage.getItem(key);
+      const raw = storeGet(key);
       if (!raw) return def;
       return JSON.parse(raw);
     }catch(e){ return def; }
@@ -84,13 +90,13 @@
         return { from:String(o.from), to:String(o.to) };
       }catch(e){ return null; }
     }
-    const rp = localStorage.getItem("report_period_" + ls);
-    const cp = localStorage.getItem("calc_period_" + ls);
+    const rp = storeGet("report_period_" + ls);
+    const cp = storeGet("calc_period_" + ls);
     return parsePeriod(rp) || parsePeriod(cp);
   }
 
   // ------------------------------------------------------------
-  // ✅ DETECTOR: find AbonentsDB in namespaced localStorage
+  // ✅ DETECTOR: find AbonentsDB in runtime/JKHStore scopes
   // ------------------------------------------------------------
 
   // Если в URL передали конкретный ключ базы (db=...), используем его как приоритет.
@@ -103,17 +109,10 @@
       return k || "";
     }catch(e){ return ""; }
   }
-  function loadAbonentsDbCandidateKeys(){
-    const out = [];
-    try{
-      const keys = Object.keys(localStorage);
-      for (const k of keys){
-        const lk = String(k).toLowerCase();
-        // поддержим и старый формат "abonents_db_v1", и namespaced "::abonents_db_v1"
-        if (lk === "abonents_db_v1" || lk.endsWith("::abonents_db_v1")) out.push(k);
-      }
-    }catch(e){}
-    return out;
+  function _extractOwnerFromScopedDbKey(scoped){
+    const s = String(scoped || "");
+    const m = s.match(/^jkhdb::(.+?)::abonents_db_v1$/);
+    return m ? m[1] : "";
   }
 
   function normalizeDbRoot(obj){
@@ -130,7 +129,8 @@
     // 0) явный ключ базы из URL
     const forcedKey = getDbKeyFromURL();
     if (forcedKey){
-      const raw = localStorage.getItem(forcedKey);
+      const forcedOwner = _extractOwnerFromScopedDbKey(forcedKey);
+      const raw = forcedOwner ? storeGet("abonents_db_v1", forcedOwner) : storeGet("abonents_db_v1");
       if (raw){
         const data = safeJSONParse(raw, null);
         const db = normalizeDbRoot(data);
@@ -144,23 +144,13 @@
       if (db && db.abonents && db.abonents[String(abonentId)]) return db;
     }
 
-    // 2) иначе ищем в localStorage по ключам *abonents_db_v1*
-    const keys = loadAbonentsDbCandidateKeys();
-    let firstValid = null;
+    // 2) scoped cache текущего owner
+    const raw = storeGet("abonents_db_v1");
+    const data = safeJSONParse(raw, null);
+    const db = normalizeDbRoot(data);
+    if (db && db.abonents && db.abonents[String(abonentId)]) return db;
 
-    for (const k of keys){
-      const raw = localStorage.getItem(k);
-      if (!raw) continue;
-      const data = safeJSONParse(raw, null);
-      const db = normalizeDbRoot(data);
-      if (!db) continue;
-
-      if (!firstValid) firstValid = db;
-      if (db.abonents && db.abonents[String(abonentId)]) return db; // ✅ нашли нужную базу
-    }
-
-    // 3) fallback: хоть какая-то валидная база
-    return firstValid;
+    return db || null;
   }
 
   // активная связь абонент↔квартира (dateFrom/dateTo)
@@ -430,10 +420,12 @@
     const notesEl = $("notes");
     if (notesEl){
       const keyNotes = "notes_" + ls;
-      const stored = localStorage.getItem(keyNotes);
+      const stored = storeGet(keyNotes);
       if (stored !== null) notesEl.value = stored;
       notesEl.addEventListener("input", function(){
-        localStorage.setItem(keyNotes, notesEl.value);
+        if (window.JKHStore && typeof JKHStore.setRaw === "function") {
+          JKHStore.setRaw(keyNotes, notesEl.value);
+        }
       });
     }
   });
