@@ -127,25 +127,88 @@
   try { return JSON.parse(s); } catch (e) { return fallback; }
 }
 
+function _nowISO() {
+  try { return new Date().toISOString(); } catch (e) { return ""; }
+}
+
+function _defaultUIState() {
+  return {
+    auth: {
+      status: "unknown",   // unknown | guest | user | admin
+      userId: null,
+      email: "",
+      role: "guest"
+    },
+    server: {
+      status: "unknown",   // unknown | online | offline | unauthorized
+      checkedAt: "",
+      message: ""
+    },
+    data: {
+      status: "idle",      // idle | loading | ready | empty | error
+      loadedAt: "",
+      source: "none",      // none | server | cache
+      message: ""
+    }
+  };
+}
+
 function _ensureUIState() {
   if (!window.JKH_UI_STATE || typeof window.JKH_UI_STATE !== "object") {
-    window.JKH_UI_STATE = {
-      auth: "guest",   // guest | user | admin
-      data: "idle",    // idle | loading | ready | error
-      message: ""
-    };
+    window.JKH_UI_STATE = _defaultUIState();
+    return window.JKH_UI_STATE;
   }
-  return window.JKH_UI_STATE;
+
+  var st = window.JKH_UI_STATE;
+
+  if (!st.auth || typeof st.auth !== "object") st.auth = _defaultUIState().auth;
+  if (!st.server || typeof st.server !== "object") st.server = _defaultUIState().server;
+  if (!st.data || typeof st.data !== "object") st.data = _defaultUIState().data;
+
+  return st;
 }
 
 function _setUIState(patch) {
   var st = _ensureUIState();
-  for (var k in patch) {
-    if (Object.prototype.hasOwnProperty.call(patch, k)) {
-      st[k] = patch[k];
+
+  if (patch && patch.auth && typeof patch.auth === "object") {
+    for (var ka in patch.auth) {
+      if (Object.prototype.hasOwnProperty.call(patch.auth, ka)) st.auth[ka] = patch.auth[ka];
     }
   }
+
+  if (patch && patch.server && typeof patch.server === "object") {
+    for (var ks in patch.server) {
+      if (Object.prototype.hasOwnProperty.call(patch.server, ks)) st.server[ks] = patch.server[ks];
+    }
+  }
+
+  if (patch && patch.data && typeof patch.data === "object") {
+    for (var kd in patch.data) {
+      if (Object.prototype.hasOwnProperty.call(patch.data, kd)) st.data[kd] = patch.data[kd];
+    }
+  }
+
+  try {
+    document.dispatchEvent(new CustomEvent("jkh:state_changed", { detail: st }));
+  } catch (e) {}
+
   return st;
+}
+
+function _authStateFromUser(user) {
+  var role = (user && user.role) ? String(user.role) : "guest";
+  return {
+    status: role === "admin" ? "admin" : (role === "user" ? "user" : "guest"),
+    userId: user && user.id ? String(user.id) : null,
+    email: user && user.email ? String(user.email) : "",
+    role: role === "admin" ? "admin" : (role === "user" ? "user" : "guest")
+  };
+}
+
+function _isUnauthorizedError(err) {
+  var msg = String((err && err.message) || err || "").toLowerCase();
+  return msg.indexOf("unauthorized") !== -1 || msg.indexOf("http_401") !== -1 || msg.indexOf("401") !== -1;
 }
 
   function safeJsonStringify(v) {
@@ -506,10 +569,19 @@ function _setUIState(patch) {
     cacheSessionUser(data.user);
     _sessionReady = true;
     _setUIState({
-      auth: (data.user && data.user.role === "admin") ? "admin" : "user",
-      data: "loading",
-      message: ""
-    });
+  auth: _authStateFromUser(data.user),
+  server: {
+    status: "online",
+    checkedAt: _nowISO(),
+    message: ""
+  },
+  data: {
+    status: "loading",
+    loadedAt: "",
+    source: "server",
+    message: ""
+  }
+});
     console.info("[auth] register userId=%s email=%s role=%s", String(data.user && data.user.id || ""), String(data.user && data.user.email || ""), String(data.user && data.user.role || ""));
 
     try {
@@ -738,11 +810,25 @@ function _setUIState(patch) {
     } catch (e) {
       // ✅ 401 для гостя — не ошибка приложения
       clearSessionCache();
-      _setUIState({
-        auth: "guest",
-        data: "idle",
-        message: ""
-      });
+     _setUIState({
+  auth: {
+    status: "guest",
+    userId: null,
+    email: "",
+    role: "guest"
+  },
+  server: {
+    status: "unauthorized",
+    checkedAt: _nowISO(),
+    message: ""
+  },
+  data: {
+    status: "idle",
+    loadedAt: "",
+    source: "none",
+    message: ""
+  }
+});
       renderAuthStatus();
       protectPages();
       return true;
