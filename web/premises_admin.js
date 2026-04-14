@@ -524,13 +524,25 @@ window.PremisesAdmin = (function () {
         return Array.from(set);
     }
 
-    function runExistingRecalcForAbonents(abonentIds) {
+    function cloneDbSnapshot(db) {
+        const source = db || { premises: {}, links: [], abonents: {} };
+        return safeParse(JSON.stringify(source), { premises: {}, links: [], abonents: {} });
+    }
+
+    function restoreDbSnapshot(snapshot) {
+        window.AbonentsDB = cloneDbSnapshot(snapshot);
+    }
+
+    async function runExistingRecalcForAbonents(abonentIds) {
         const ids = Array.from(new Set((abonentIds || []).map(x => String(x || '').trim()).filter(Boolean)));
         if (!ids.length) return { ok: true, total: 0, changed: 0 };
         if (!(window.JKHAutoAccrual && typeof window.JKHAutoAccrual.recalcForMany === 'function')) {
             return { ok: false, reason: 'NO_RECALC_ENGINE', message: 'Не найден JKHAutoAccrual.recalcForMany().' };
         }
-        const rows = window.JKHAutoAccrual.recalcForMany(ids);
+        const rowsOrPromise = window.JKHAutoAccrual.recalcForMany(ids);
+        const rows = (rowsOrPromise && typeof rowsOrPromise.then === 'function')
+            ? await rowsOrPromise
+            : rowsOrPromise;
         const changed = (rows || []).filter(r => r && r.ok && r.changed).length;
         const failed = (rows || []).filter(r => !r || !r.ok);
         if (failed.length) {
@@ -557,6 +569,7 @@ window.PremisesAdmin = (function () {
     async function persistPremiseTransaction(opts) {
         if (state.busy) return;
         setBusyUI(true);
+        const dbSnapshotBeforeMutate = cloneDbSnapshot(window.AbonentsDB);
         try {
             const tx = (opts && typeof opts.mutate === 'function') ? (opts.mutate() || {}) : {};
             if (tx && tx.ok === false) {
@@ -569,7 +582,7 @@ window.PremisesAdmin = (function () {
                 ...((tx && Array.isArray(tx.affectedAbonentIds)) ? tx.affectedAbonentIds : [])
             ].map(x => String(x || '').trim()).filter(Boolean)));
 
-            const recalcRes = runExistingRecalcForAbonents(affectedIds);
+            const recalcRes = await runExistingRecalcForAbonents(affectedIds);
             if (!recalcRes.ok) {
                 throw new Error(recalcRes.message || 'Не удалось выполнить пересчёт начислений.');
             }
@@ -581,8 +594,11 @@ window.PremisesAdmin = (function () {
             refreshAddressDatalists();
             if (opts && typeof opts.onSuccess === 'function') opts.onSuccess(tx);
         } catch (e) {
+            restoreDbSnapshot(dbSnapshotBeforeMutate);
             console.warn('[premises] transaction failed', e);
             setWarn('Ошибка сохранения: ' + (e?.message || e), false);
+            renderTable();
+            refreshAddressDatalists();
         } finally {
             setBusyUI(false);
         }
