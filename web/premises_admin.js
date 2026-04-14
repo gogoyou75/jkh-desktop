@@ -524,13 +524,41 @@ window.PremisesAdmin = (function () {
         return Array.from(set);
     }
 
-    function runExistingRecalcForAbonents(abonentIds) {
+    function deepCloneRuntimeDb(db) {
+        if (typeof structuredClone === 'function') return structuredClone(db);
+        return JSON.parse(JSON.stringify(db || { premises: {}, links: [], abonents: {} }));
+    }
+
+    function makeTxSnapshot() {
+        return {
+            db: deepCloneRuntimeDb(window.AbonentsDB || { premises: {}, links: [], abonents: {} }),
+            editingRegnum: state.editingRegnum
+        };
+    }
+
+    function restoreFromTxSnapshot(snapshot) {
+        if (!snapshot || !snapshot.db) return;
+        window.AbonentsDB = deepCloneRuntimeDb(snapshot.db);
+        state.editingRegnum = snapshot.editingRegnum ?? null;
+        renderTable();
+        refreshAddressDatalists();
+        if (state.editingRegnum && window.AbonentsDB?.premises?.[state.editingRegnum]) {
+            setFormModeEdit(state.editingRegnum);
+        } else {
+            setFormModeAdd();
+        }
+    }
+
+    async function runExistingRecalcForAbonents(abonentIds) {
         const ids = Array.from(new Set((abonentIds || []).map(x => String(x || '').trim()).filter(Boolean)));
         if (!ids.length) return { ok: true, total: 0, changed: 0 };
         if (!(window.JKHAutoAccrual && typeof window.JKHAutoAccrual.recalcForMany === 'function')) {
             return { ok: false, reason: 'NO_RECALC_ENGINE', message: 'Не найден JKHAutoAccrual.recalcForMany().' };
         }
-        const rows = window.JKHAutoAccrual.recalcForMany(ids);
+        const rowsOrPromise = window.JKHAutoAccrual.recalcForMany(ids);
+        const rows = (rowsOrPromise && typeof rowsOrPromise.then === 'function')
+            ? await rowsOrPromise
+            : rowsOrPromise;
         const changed = (rows || []).filter(r => r && r.ok && r.changed).length;
         const failed = (rows || []).filter(r => !r || !r.ok);
         if (failed.length) {
@@ -557,9 +585,11 @@ window.PremisesAdmin = (function () {
     async function persistPremiseTransaction(opts) {
         if (state.busy) return;
         setBusyUI(true);
+        const snapshot = makeTxSnapshot();
         try {
             const tx = (opts && typeof opts.mutate === 'function') ? (opts.mutate() || {}) : {};
             if (tx && tx.ok === false) {
+                restoreFromTxSnapshot(snapshot);
                 setWarn(tx.message || 'Операция отменена.', false);
                 return;
             }
@@ -569,7 +599,7 @@ window.PremisesAdmin = (function () {
                 ...((tx && Array.isArray(tx.affectedAbonentIds)) ? tx.affectedAbonentIds : [])
             ].map(x => String(x || '').trim()).filter(Boolean)));
 
-            const recalcRes = runExistingRecalcForAbonents(affectedIds);
+            const recalcRes = await runExistingRecalcForAbonents(affectedIds);
             if (!recalcRes.ok) {
                 throw new Error(recalcRes.message || 'Не удалось выполнить пересчёт начислений.');
             }
@@ -582,6 +612,7 @@ window.PremisesAdmin = (function () {
             if (opts && typeof opts.onSuccess === 'function') opts.onSuccess(tx);
         } catch (e) {
             console.warn('[premises] transaction failed', e);
+            restoreFromTxSnapshot(snapshot);
             setWarn('Ошибка сохранения: ' + (e?.message || e), false);
         } finally {
             setBusyUI(false);
