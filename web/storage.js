@@ -207,12 +207,6 @@
   }
   return false;
 }
-    var kx = String(baseKey || "");
-    if (!kx || _isScopedKeyName(kx)) return false;
-    for (var i = 0; i < SYNC_CANON_EXACT.length; i++) if (kx === SYNC_CANON_EXACT[i]) return true;
-    for (var j = 0; j < SYNC_CANON_PREFIX.length; j++) if (kx.indexOf(SYNC_CANON_PREFIX[j]) === 0) return true;
-    return false;
-  }
   function _toScopedProjectKeyMaybe(rawKey) {
     var key = String(rawKey || "");
     if (!key || _isScopedKeyName(key)) return key;
@@ -623,11 +617,6 @@
   }
   return false;
 }
-    var kx = String(baseKey || "");
-    for (var i = 0; i < SYNC_CANON.exact.length; i++) if (kx === SYNC_CANON.exact[i]) return true;
-    for (var j = 0; j < SYNC_CANON.prefix.length; j++) if (kx.indexOf(SYNC_CANON.prefix[j]) === 0) return true;
-    return false;
-  }
 
   function _sigForDB(ownerId) {
     var obj = window.JKHStore ? window.JKHStore.getJSON(KEY_DB, null, ownerId) : null;
