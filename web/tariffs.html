@@ -590,7 +590,7 @@
     refreshEditLocks();
   }
 
-  function saveAllFromUI(){
+  async function saveAllFromUI(){
     if (!canEditTariffs()){
       alert("Можно изменять только свои тарифы.");
       return false;
@@ -610,6 +610,11 @@
     }
 
     saveTariffsToCanon(tariffs);
+
+    if (window.JKHRemoteSync && typeof window.JKHRemoteSync.uploadNow === "function"){
+      await window.JKHRemoteSync.uploadNow();
+    }
+
     alert("Тарифы сохранены.");
     return true;
   }
@@ -765,8 +770,8 @@
     try{
       $("btnAddTariff").addEventListener("click", addTariff);
 
-      $("btnSaveAll").addEventListener("click", function(){
-        if (!saveAllFromUI()) return;
+      $("btnSaveAll").addEventListener("click", async function(){
+        if (!(await saveAllFromUI())) return;
         recalcAll();
       });
 
