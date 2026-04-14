@@ -511,6 +511,19 @@
     ensureWriteOrExplain: function () {
       return canWriteOrExplain();
     },
+    // SERVER-FIRST helper for UI-level async flows:
+    // local save -> upload to server. Throws on upload error.
+    flushDbToServer: async function () {
+      if (!this.ensureWriteOrExplain()) return false;
+      var saved = !!(window.saveAbonentsDB && window.saveAbonentsDB());
+      if (!saved) return false;
+      if (window.JKHRemoteSync && typeof window.JKHRemoteSync.uploadNow === "function") {
+        await window.JKHRemoteSync.uploadNow();
+      } else {
+        throw new Error("JKHRemoteSync.uploadNow is not available");
+      }
+      return true;
+    },
     ensurePremise: function (premiseObj) {
       if (!this.ensureWriteOrExplain()) return false;
       if (!window.AbonentsDB) return false;
@@ -572,6 +585,8 @@
       if (before === window.AbonentsDB.links.length) return true;
       return !!window.saveAbonentsDB && window.saveAbonentsDB();
     },
+    // IMPORTANT: local upsert only (does NOT upload to server by itself).
+    // Full server-first transaction must be orchestrated in UI async flow.
     upsertAbonent: function (abonentObj) {
       if (!this.ensureWriteOrExplain()) return false;
       if (!window.AbonentsDB) return false;

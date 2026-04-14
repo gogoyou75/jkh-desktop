@@ -115,6 +115,8 @@
   const PAGE_TITLE = "tariffs.html";
   const CANON_PREFIX = "tariffs_";
   let _pageStarted = false;
+  let _saveBusy = false;
+  let _recalcBusy = false;
 
   function $(id){
     return document.getElementById(id);
@@ -541,6 +543,38 @@
     }
   }
 
+  function setButtonsBusy(mode, flag){
+    const busy = !!flag;
+    if (mode === "save") _saveBusy = busy;
+    if (mode === "recalc") _recalcBusy = busy;
+
+    const lockAll = _saveBusy || _recalcBusy;
+    ["btnAddTariff", "btnSaveAll", "btnRecalcAll"].forEach(id => {
+      const el = $(id);
+      if (!el) return;
+      if (lockAll) {
+        el.disabled = true;
+      } else {
+        el.disabled = !canEditTariffs();
+      }
+    });
+  }
+
+  async function persistAccrualAndUpload(){
+    if (!(window.saveAbonentsDB && window.saveAbonentsDB())) {
+      alert("Перерасчёт выполнен, но не удалось сохранить базу абонентов локально.");
+      return false;
+    }
+
+    if (window.JKHRemoteSync && typeof window.JKHRemoteSync.uploadNow === "function") {
+      await window.JKHRemoteSync.uploadNow();
+      return true;
+    }
+
+    alert("Не найден JKHRemoteSync.uploadNow(). Локальные изменения сохранены, но не выгружены на сервер.");
+    return false;
+  }
+
   function addTariff(){
     if (!canEditTariffs()){
       alert("Можно изменять только свои тарифы.");
@@ -610,12 +644,6 @@
     }
 
     saveTariffsToCanon(tariffs);
-
-    if (window.JKHRemoteSync && typeof window.JKHRemoteSync.uploadNow === "function"){
-      await window.JKHRemoteSync.uploadNow();
-    }
-
-    alert("Тарифы сохранены.");
     return true;
   }
 
@@ -626,13 +654,7 @@
 
         const total = Array.isArray(res) ? res.length : 0;
         const changed = Array.isArray(res) ? res.filter(x => x && x.changed).length : 0;
-
-        alert(
-          "Перерасчёт выполнен.\n" +
-          "Абонентов обработано: " + total + "\n" +
-          "Изменения в начислениях: " + changed
-        );
-        return true;
+        return { ok: true, total: total, changed: changed };
       }
 
       alert(
@@ -640,11 +662,72 @@
         "Причина: не найден JKHAutoAccrual.recalcAll().\n" +
         "Проверь подключение autoaccrual_engine.js и ошибки в Console."
       );
-      return false;
+      return { ok: false, total: 0, changed: 0 };
     }catch(e){
       console.warn("recalcAll failed", e);
       alert("Перерасчёт упал с ошибкой. Открой F12 → Console и пришли текст ошибки.");
-      return false;
+      return { ok: false, total: 0, changed: 0 };
+    }
+  }
+
+  async function runTariffSaveTransaction(){
+    if (_saveBusy || _recalcBusy) return;
+    setButtonsBusy("save", true);
+    try{
+      if (!(await saveAllFromUI())) return;
+
+      const recalc = recalcAll();
+      if (!recalc.ok) return;
+
+      let uploaded = false;
+      try{
+        uploaded = await persistAccrualAndUpload();
+      }catch(e){
+        console.warn("tariff save upload failed", e);
+        alert("Тарифы и перерасчёт сохранены локально, но выгрузка на сервер не выполнена.");
+        return;
+      }
+
+      if (!uploaded) return;
+
+      alert(
+        "Тарифы сохранены и выгружены.\n" +
+        "Перерасчёт выполнен.\n" +
+        "Абонентов обработано: " + recalc.total + "\n" +
+        "Изменения в начислениях: " + recalc.changed
+      );
+    } finally {
+      setButtonsBusy("save", false);
+      refreshEditLocks();
+    }
+  }
+
+  async function runRecalcTransaction(){
+    if (_saveBusy || _recalcBusy) return;
+    setButtonsBusy("recalc", true);
+    try{
+      const recalc = recalcAll();
+      if (!recalc.ok) return;
+
+      let uploaded = false;
+      try{
+        uploaded = await persistAccrualAndUpload();
+      }catch(e){
+        console.warn("manual recalc upload failed", e);
+        alert("Перерасчёт сохранён локально, но выгрузка на сервер не выполнена.");
+        return;
+      }
+
+      if (!uploaded) return;
+
+      alert(
+        "Перерасчёт выполнен и выгружен.\n" +
+        "Абонентов обработано: " + recalc.total + "\n" +
+        "Изменения в начислениях: " + recalc.changed
+      );
+    } finally {
+      setButtonsBusy("recalc", false);
+      refreshEditLocks();
     }
   }
 
@@ -771,17 +854,16 @@
       $("btnAddTariff").addEventListener("click", addTariff);
 
       $("btnSaveAll").addEventListener("click", async function(){
-        if (!(await saveAllFromUI())) return;
-        recalcAll();
+        await runTariffSaveTransaction();
       });
 
-      $("btnRecalcAll").addEventListener("click", function(){
+      $("btnRecalcAll").addEventListener("click", async function(){
         const ok = confirm(
           "Пересчитать начисления всем абонентам по ТЕКУЩИМ СОХРАНЁННЫМ тарифам?\n\n" +
           "(Если ты менял поля, но не нажал «сохранить всё», изменения не попадут в расчёт.)"
         );
         if (!ok) return;
-        recalcAll();
+        await runRecalcTransaction();
       });
 
       if (tryStart()) return;

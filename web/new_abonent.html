@@ -1007,203 +1007,246 @@ function prefillFromQueryParams() {
   refreshDebtTransferBox();
 }
 
+let __createAbonentBusy = false;
+
+function setCreateUiBusy(flag){
+  const busy = !!flag;
+  ["btnCreate", "btnTransferWithDebt", "btnTransferNoDebt", "btnBackToImport"].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.disabled = busy;
+  });
+}
+
 /* =========================
    СОЗДАНИЕ АБОНЕНТА (с поддержкой передачи)
    ========================= */
-function createAbonent() {
+async function createAbonent() {
+  if (__createAbonentBusy) return;
+
   try{
     if (typeof window.canWriteOrExplain === "function" && !window.canWriteOrExplain()) return;
-  }catch(e){}
+  }catch(e){ return; }
 
-  const last = document.getElementById("na_last").value.trim();
-  const first = document.getElementById("na_first").value.trim();
-  const mid = document.getElementById("na_mid").value.trim();
-  const fio = joinFio(last, first, mid);
-  if (!last || !first) { alert("Заполните Фамилию и Имя"); return; }
+  __createAbonentBusy = true;
+  setCreateUiBusy(true);
 
-  const dbRoot = window.AbonentsDB;
-  if (!dbRoot || !dbRoot.abonents) { alert("База AbonentsDB не найдена"); return; }
+  try {
+    const last = document.getElementById("na_last").value.trim();
+    const first = document.getElementById("na_first").value.trim();
+    const mid = document.getElementById("na_mid").value.trim();
+    const fio = joinFio(last, first, mid);
+    if (!last || !first) { alert("Заполните Фамилию и Имя"); return; }
 
-  const regnum = String(document.getElementById("na_regnum").value || "").trim();
-  if (!regnum) { alert("Квартира не выбрана. Выберите квартиру из списка."); return; }
+    const dbRoot = window.AbonentsDB;
+    if (!dbRoot || !dbRoot.abonents) { alert("База AbonentsDB не найдена"); return; }
 
-  const premise = dbRoot.premises?.[regnum] || null;
-  if (!premise) { alert("Квартира (premises) по regnum не найдена. Сначала заведите квартиру, затем создавайте абонента."); return; }
+    const regnum = String(document.getElementById("na_regnum").value || "").trim();
+    if (!regnum) { alert("Квартира не выбрана. Выберите квартиру из списка."); return; }
 
-  const city = String(document.getElementById("na_city").value || "").trim();
-  const street = String(document.getElementById("na_street").value || "").trim();
-  const house = String(document.getElementById("na_house").value || "").trim();
-  const flat = String(document.getElementById("na_flat").value || "").trim();
+    const premise = dbRoot.premises?.[regnum] || null;
+    if (!premise) { alert("Квартира (premises) по regnum не найдена. Сначала заведите квартиру, затем создавайте абонента."); return; }
 
-  const squareRaw = String(document.getElementById("na_square").value || "").trim();
-  const square = squareRaw === "" ? "" : Number(squareRaw);
+    const city = String(document.getElementById("na_city").value || "").trim();
+    const street = String(document.getElementById("na_street").value || "").trim();
+    const house = String(document.getElementById("na_house").value || "").trim();
+    const flat = String(document.getElementById("na_flat").value || "").trim();
 
-  const phone = document.getElementById("na_phone").value.trim();
-  const email = document.getElementById("na_email").value.trim();
-  const note = document.getElementById("na_note").value.trim();
+    const squareRaw = String(document.getElementById("na_square").value || "").trim();
+    const square = squareRaw === "" ? "" : Number(squareRaw);
 
-  const lsInput = document.getElementById("na_ls").value.trim();
-  const ls = getNextLsId(lsInput);
+    const phone = document.getElementById("na_phone").value.trim();
+    const email = document.getElementById("na_email").value.trim();
+    const note = document.getElementById("na_note").value.trim();
 
-  const dfRaw = document.getElementById('na_date_from')?.value || '';
-  const df = String(dfRaw).trim();
-  const dateFrom = df || getDefaultCalcStartDate();
-  const today = getTodayIso();
-  const respStart = String(dateFrom || "").trim() || today;
+    const lsInput = document.getElementById("na_ls").value.trim();
+    const ls = getNextLsId(lsInput);
 
-  if (!Array.isArray(dbRoot.links)) dbRoot.links = [];
-  const prevActive = activeLinkForRegnumLocal(dbRoot, regnum);
+    const dfRaw = document.getElementById('na_date_from')?.value || '';
+    const df = String(dfRaw).trim();
+    const dateFrom = df || getDefaultCalcStartDate();
+    const today = getTodayIso();
+    const respStart = String(dateFrom || "").trim() || today;
 
-  // если квартира занята — требуем явную передачу кнопкой
-  if (prevActive && String(prevActive.abonentId || '').trim() && String(prevActive.abonentId || '').trim() !== String(ls).trim()){
-    if (!__jkhTransferConfirmed){
-      alert('Квартира уже занята. Чтобы правильно закрыть старого владельца и создать нового, используйте одну из кнопок: «ПЕРЕДАТЬ С ДОЛГОМ и СОЗДАТЬ» или «ПЕРЕДАТЬ БЕЗ ДОЛГА и СОЗДАТЬ».');
-      return;
+    if (!Array.isArray(dbRoot.links)) dbRoot.links = [];
+    const prevActive = activeLinkForRegnumLocal(dbRoot, regnum);
+
+    // если квартира занята — требуем явную передачу кнопкой
+    if (prevActive && String(prevActive.abonentId || '').trim() && String(prevActive.abonentId || '').trim() !== String(ls).trim()){
+      if (!__jkhTransferConfirmed){
+        alert('Квартира уже занята. Чтобы правильно закрыть старого владельца и создать нового, используйте одну из кнопок: «ПЕРЕДАТЬ С ДОЛГОМ и СОЗДАТЬ» или «ПЕРЕДАТЬ БЕЗ ДОЛГА и СОЗДАТЬ».');
+        return;
+      }
     }
-  }
 
-  // UID
-  const uidImport = String(document.getElementById("na_uid_import").value || "").trim();
-  const uid = (uidImport && uidImport.startsWith("uid_")) ? uidImport : generateUid();
+    // UID
+    const uidImport = String(document.getElementById("na_uid_import").value || "").trim();
+    const uid = (uidImport && uidImport.startsWith("uid_")) ? uidImport : generateUid();
 
-  // создаём нового с нулевым долгом (как и было)
-  dbRoot.abonents[ls] = {
-    fio,
-    regnum,
-    city, street, house, flat,
-    square,
+    // создаём нового с нулевым долгом (как и было)
+    dbRoot.abonents[ls] = {
+      fio,
+      regnum,
+      city, street, house, flat,
+      square,
 
-    rooms: "",
-    share: "",
+      rooms: "",
+      share: "",
 
-    phone,
-    email,
+      phone,
+      email,
 
-    debts: [],
-    mainDebtTotal: 0,
-    penaltyTotal: 0,
-    totalDebt: 0,
+      debts: [],
+      mainDebtTotal: 0,
+      penaltyTotal: 0,
+      totalDebt: 0,
 
-    defaultNote: note,
-    defaultExcludes: [],
+      defaultNote: note,
+      defaultExcludes: [],
 
-    uid: uid,
+      uid: uid,
 
-    calcStartDate: respStart,
-    calcEndDate: "",
+      calcStartDate: respStart,
+      calcEndDate: "",
 
-    calcDate: "",
-    stateDate: "",
-    docDate: ""
-  };
-
-  // ====== если была передача — закрываем старого и фиксируем его долг ======
-  let transferMeta = null;
-  if (prevActive && __jkhTransferConfirmed && __transferCtx && __transferCtx.oldId){
-    const closeTo = getYesterdayIso(respStart);
-
-    // 1) закрыть link старого
-    prevActive.dateTo = closeTo;
-
-    // 2) “заморозить” старого (чтобы авто-начисления дальше не шли)
-    closeOldResponsibilityAndFreeze(dbRoot, __transferCtx.oldId, closeTo);
-
-    // 3) мета для карточки нового (покажем рядом с “передача долга” в abonent_card.html следующим патчем)
-    transferMeta = {
-      type: "premise_transfer",
-      regnum: regnum,
-      fromAbonentId: String(__transferCtx.oldId),
-      fromFio: String(__transferCtx.oldFio || ''),
-      oldDebtSnapshot: r2(__transferCtx.oldDebtSnapshot || 0),
-      oldPenaltySnapshot: r2(__transferCtx.oldPenaltySnapshot || 0),
-      transferMode: String(__transferMode || 'NO_DEBT'),
-      newRespFrom: String(respStart),
-      oldRespTo: String(closeTo),
-      transferDebtApplied: false,
-      createdAt: String(today)
+      calcDate: "",
+      stateDate: "",
+      docDate: ""
     };
-  }
 
-  // 4) новый link
-  dbRoot.links.push({
-    abonentId: String(ls),
-    regnum,
-    dateFrom: respStart,
-    dateTo: ""
-  });
+    // ====== если была передача — закрываем старого и фиксируем его долг ======
+    let transferMeta = null;
+    if (prevActive && __jkhTransferConfirmed && __transferCtx && __transferCtx.oldId){
+      const closeTo = getYesterdayIso(respStart);
 
-  // 5) Перенос долга/пени (CANON TRANSFER v1.7)
-  // ВАЖНО: перенос делаем через scoped store-ключ "jkh_transfer_balance_v1:<newId>:<regnum>",
-  // чтобы calc_engine.js продолжал начислять пеню после даты передачи на остаток долга.
-  const transferChecked = (String(__transferMode||'NO_DEBT') === 'WITH_DEBT');
+      // 1) закрыть link старого
+      prevActive.dateTo = closeTo;
 
-  // всегда фиксируем "заморозку" старого (чтобы расчёт у него остановился)
-  try{
-    storeSet('jkh_freeze_to_v1:' + String(transferMeta.fromAbonentId), String(transferMeta.oldRespTo || ''));
-    // сохраняем снимок долга/пени на дату заморозки (для справок/отладки)
-    const frozenKey = 'jkh_frozen_debt_v1:' + String(transferMeta.fromAbonentId) + ':' + String(transferMeta.oldRespTo || '');
-    storeSet(frozenKey, JSON.stringify({
-      principal: r2(transferMeta.oldDebtSnapshot || 0),
-      penalty: r2(transferMeta.oldPenaltySnapshot || 0),
-      calculatedAt: String(transferMeta.oldRespTo || ''),
-      regnum: String(transferMeta.regnum || regnum || ''),
-      mode: String(__transferMode || 'NO_DEBT')
-    }));
-  }catch(e){}
+      // 2) “заморозить” старого (чтобы авто-начисления дальше не шли)
+      closeOldResponsibilityAndFreeze(dbRoot, __transferCtx.oldId, closeTo);
 
-  if (transferMeta && transferChecked){
-    const p0 = r2(transferMeta.oldDebtSnapshot || 0);
-    const pen0 = r2(transferMeta.oldPenaltySnapshot || 0);
-    const key = 'jkh_transfer_balance_v1:' + String(ls) + ':' + String(regnum);
-    try{
-      storeSet(key, JSON.stringify({
-        startDate: String(respStart),
-        principal: p0,
-        penalty: pen0,
-        regnum: String(regnum),
-        fromAbonentId: String(transferMeta.fromAbonentId || ''),
-        mode: 'WITH_DEBT'
-      }));
-      transferMeta.transferDebtApplied = ((p0 + pen0) > 0);
-    }catch(e){
+      // 3) мета для карточки нового (покажем рядом с “передача долга” в abonent_card.html следующим патчем)
+      transferMeta = {
+        type: "premise_transfer",
+        regnum: regnum,
+        fromAbonentId: String(__transferCtx.oldId),
+        fromFio: String(__transferCtx.oldFio || ''),
+        oldDebtSnapshot: r2(__transferCtx.oldDebtSnapshot || 0),
+        oldPenaltySnapshot: r2(__transferCtx.oldPenaltySnapshot || 0),
+        transferMode: String(__transferMode || 'NO_DEBT'),
+        newRespFrom: String(respStart),
+        oldRespTo: String(closeTo),
+        transferDebtApplied: false,
+        createdAt: String(today)
+      };
+    }
+
+    // 4) новый link
+    dbRoot.links.push({
+      abonentId: String(ls),
+      regnum,
+      dateFrom: respStart,
+      dateTo: ""
+    });
+
+    // 5) Перенос долга/пени (CANON TRANSFER v1.7)
+    // ВАЖНО: перенос делаем через scoped store-ключ "jkh_transfer_balance_v1:<newId>:<regnum>",
+    // чтобы calc_engine.js продолжал начислять пеню после даты передачи на остаток долга.
+    const transferChecked = (String(__transferMode||'NO_DEBT') === 'WITH_DEBT');
+
+    // всегда фиксируем "заморозку" старого (чтобы расчёт у него остановился)
+    if (transferMeta){
+      try{
+        storeSet('jkh_freeze_to_v1:' + String(transferMeta.fromAbonentId), String(transferMeta.oldRespTo || ''));
+        // сохраняем снимок долга/пени на дату заморозки (для справок/отладки)
+        const frozenKey = 'jkh_frozen_debt_v1:' + String(transferMeta.fromAbonentId) + ':' + String(transferMeta.oldRespTo || '');
+        storeSet(frozenKey, JSON.stringify({
+          principal: r2(transferMeta.oldDebtSnapshot || 0),
+          penalty: r2(transferMeta.oldPenaltySnapshot || 0),
+          calculatedAt: String(transferMeta.oldRespTo || ''),
+          regnum: String(transferMeta.regnum || regnum || ''),
+          mode: String(__transferMode || 'NO_DEBT')
+        }));
+      }catch(e){}
+    }
+
+    if (transferMeta && transferChecked){
+      const p0 = r2(transferMeta.oldDebtSnapshot || 0);
+      const pen0 = r2(transferMeta.oldPenaltySnapshot || 0);
+      const key = 'jkh_transfer_balance_v1:' + String(ls) + ':' + String(regnum);
+      try{
+        storeSet(key, JSON.stringify({
+          startDate: String(respStart),
+          principal: p0,
+          penalty: pen0,
+          regnum: String(regnum),
+          fromAbonentId: String(transferMeta.fromAbonentId || ''),
+          mode: 'WITH_DEBT'
+        }));
+        transferMeta.transferDebtApplied = ((p0 + pen0) > 0);
+      }catch(e){
+        transferMeta.transferDebtApplied = false;
+      }
+    } else if (transferMeta){
+      // режим БЕЗ ДОЛГА
       transferMeta.transferDebtApplied = false;
     }
-  } else if (transferMeta){
-    // режим БЕЗ ДОЛГА
-    transferMeta.transferDebtApplied = false;
-  }
 
 
-  // сохраняем мету передачи в нового абонента (для карточки)
-  if (transferMeta){
-    dbRoot.abonents[ls].transferMeta = transferMeta;
-  }
-
-  // ✅ если из импорта — переносим оплаты
-  const src = String(document.getElementById("na_src").value || "").trim();
-  if (src === 'import_xls') {
-    try { importPaymentsFromDraftForNewAbonent(String(ls), dbRoot.abonents[ls]); } catch (e) {}
-  }
-
-  if (window.saveAbonentsDB) window.saveAbonentsDB();
-
-  // ✅ пересчёт начислений только для нового
-  try {
-    if (window.JKHAutoAccrual && typeof window.JKHAutoAccrual.recalcForAbonent === 'function') {
-      window.JKHAutoAccrual.recalcForAbonent(String(ls));
+    // сохраняем мету передачи в нового абонента (для карточки)
+    if (transferMeta){
+      dbRoot.abonents[ls].transferMeta = transferMeta;
     }
-  } catch (e) {}
 
-  const ret = safeReturnUrl(String(document.getElementById("na_return").value || "").trim());
-  if (src === "import_xls" || ret) {
-    clearDraftNewAbonent();
-    alert("Абонент создан. Возвращаюсь к импорту.");
-    goBackToImport();
-    return;
+    // ✅ если из импорта — переносим оплаты
+    const src = String(document.getElementById("na_src").value || "").trim();
+    if (src === 'import_xls') {
+      try { importPaymentsFromDraftForNewAbonent(String(ls), dbRoot.abonents[ls]); } catch (e) {}
+    }
+
+    if (!(window.saveAbonentsDB && window.saveAbonentsDB())) {
+      alert("Не удалось сохранить абонента локально. Проверьте хранилище и попробуйте ещё раз.");
+      return;
+    }
+
+    try {
+      if (window.JKHAutoAccrual && typeof window.JKHAutoAccrual.recalcForAbonent === 'function') {
+        window.JKHAutoAccrual.recalcForAbonent(String(ls));
+      }
+    } catch (e) {
+      console.warn('[new_abonent] recalcForAbonent failed', e);
+    }
+
+    if (!(window.saveAbonentsDB && window.saveAbonentsDB())) {
+      alert("Не удалось сохранить результаты перерасчёта. Данные не потеряны, повторите попытку.");
+      return;
+    }
+
+    try {
+      if (window.JKHRemoteSync && typeof window.JKHRemoteSync.uploadNow === "function") {
+        await window.JKHRemoteSync.uploadNow();
+      } else {
+        throw new Error("JKHRemoteSync.uploadNow is not available");
+      }
+    } catch (e) {
+      console.warn('[new_abonent] upload failed', e);
+      alert("Абонент сохранён локально, но выгрузка на сервер не выполнена.\nПовторите позже, данные не потеряны.");
+      return;
+    }
+
+    const ret = safeReturnUrl(String(document.getElementById("na_return").value || "").trim());
+    if (src === "import_xls" || ret) {
+      clearDraftNewAbonent();
+      alert("Абонент создан и выгружен. Возвращаюсь к импорту.");
+      goBackToImport();
+      return;
+    }
+
+    alert("Абонент создан и выгружен.");
+    location.href = "abonent_card.html?abonent=" + encodeURIComponent(ls);
+  } finally {
+    __createAbonentBusy = false;
+    setCreateUiBusy(false);
   }
-
-  alert("Абонент создан.");
-  location.href = "abonent_card.html?abonent=" + encodeURIComponent(ls);
 }
 
 /* =========================================================
@@ -1348,20 +1391,20 @@ document.addEventListener("DOMContentLoaded", () => {
     e.target.value = normalizeLs4(e.target.value);
   });
 
-  document.getElementById("btnCreate").addEventListener("click", createAbonent);
+  document.getElementById("btnCreate").addEventListener("click", () => { createAbonent(); });
 
-  document.getElementById('btnTransferWithDebt')?.addEventListener('click', () => {
+  document.getElementById('btnTransferWithDebt')?.addEventListener('click', async () => {
     __transferMode = 'WITH_DEBT';
     __jkhTransferConfirmed = true;
     try{ __updateNewDebtStartPreview(); }catch(e){}
-    createAbonent();
+    await createAbonent();
   });
 
-  document.getElementById('btnTransferNoDebt')?.addEventListener('click', () => {
+  document.getElementById('btnTransferNoDebt')?.addEventListener('click', async () => {
     __transferMode = 'NO_DEBT';
     __jkhTransferConfirmed = true;
     try{ __updateNewDebtStartPreview(); }catch(e){}
-    createAbonent();
+    await createAbonent();
   });
 
   initAbonentsList();
