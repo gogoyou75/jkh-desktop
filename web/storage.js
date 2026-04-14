@@ -193,6 +193,20 @@
     return String(x || "").indexOf("jkhdb::") === 0;
   }
   function _isProjectDataKey(baseKey) {
+  var kx = String(baseKey || "");
+  if (!kx || _isScopedKeyName(kx)) return false;
+
+  if (kx.indexOf("tariffs_") === 0) return true;
+  if (kx.indexOf("ref_rates_") === 0) return true;
+
+  for (var i = 0; i < SYNC_CANON_EXACT.length; i++) {
+    if (kx === SYNC_CANON_EXACT[i]) return true;
+  }
+  for (var j = 0; j < SYNC_CANON_PREFIX.length; j++) {
+    if (kx.indexOf(SYNC_CANON_PREFIX[j]) === 0) return true;
+  }
+  return false;
+}
     var kx = String(baseKey || "");
     if (!kx || _isScopedKeyName(kx)) return false;
     for (var i = 0; i < SYNC_CANON_EXACT.length; i++) if (kx === SYNC_CANON_EXACT[i]) return true;
@@ -596,6 +610,19 @@
   }
 
   function _isProjectDataKeyLocal(baseKey) {
+  var kx = String(baseKey || "");
+
+  if (kx.indexOf("tariffs_") === 0) return true;
+  if (kx.indexOf("ref_rates_") === 0) return true;
+
+  for (var i = 0; i < SYNC_CANON.exact.length; i++) {
+    if (kx === SYNC_CANON.exact[i]) return true;
+  }
+  for (var j = 0; j < SYNC_CANON.prefix.length; j++) {
+    if (kx.indexOf(SYNC_CANON.prefix[j]) === 0) return true;
+  }
+  return false;
+}
     var kx = String(baseKey || "");
     for (var i = 0; i < SYNC_CANON.exact.length; i++) if (kx === SYNC_CANON.exact[i]) return true;
     for (var j = 0; j < SYNC_CANON.prefix.length; j++) if (kx.indexOf(SYNC_CANON.prefix[j]) === 0) return true;
