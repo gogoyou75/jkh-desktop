@@ -70,7 +70,8 @@
     ✅ Можно создавать любое количество тарифов.<br>
     ✅ Для каждого тарифа: <b>название</b>, <b>тип</b> (руб/м² или фикс/мес), <b>история ставок</b> и <b>галочка “участвует в расчётах”</b>.<br><br>
     <b>Хранение (канон):</b><br>
-    • owner-bound ключ: <span class="mono">tariffs_{owner}</span>
+    • owner-bound ключ: <span class="mono">tariffs_{owner}</span><br>
+    • менять можно только <b>свои</b> тарифы в своей базе; чужие тарифы доступны только на просмотр
   </div>
   <div class="hint">
     ⚠️ Дата начала тарифа — <b>только 1-е число месяца</b>. Выбор даты сделан календарём “месяц/год”.
@@ -99,11 +100,54 @@
   function cacheKey(){ return "tariffs_" + getOwnerId(); }
   function storeGet(key){ return (window.JKHStore && JKHStore.getRaw) ? JKHStore.getRaw(key) : null; }
   function storeSet(key, value){ if (window.JKHStore && JKHStore.setRaw) JKHStore.setRaw(key, value); }
-  function isAdminUser(){
+  function getCurrentUser(){
     try{
-      const u = window.Auth && typeof Auth.getCurrentUser === "function" ? Auth.getCurrentUser() : null;
-      return !!(u && String(u.role || "").toLowerCase() === "admin");
-    }catch(e){ return false; }
+      return (window.Auth && typeof Auth.getCurrentUser === "function")
+        ? (Auth.getCurrentUser() || null)
+        : null;
+    }catch(e){
+      return null;
+    }
+  }
+
+  function getCurrentUserId(){
+    try{
+      const u = getCurrentUser();
+      const raw = u && (
+        u.userId ??
+        u.id ??
+        u.ownerId ??
+        u.uid ??
+        u.email ??
+        null
+      );
+      return String(raw || "").trim();
+    }catch(e){
+      return "";
+    }
+  }
+
+  function isGuestRole(role){
+    return String(role || "").trim().toLowerCase() === "guest";
+  }
+
+  function canEditTariffs(){
+    try{
+      const u = getCurrentUser();
+      if (!u) return false;
+
+      const role = String(u.role || "").trim().toLowerCase();
+      if (!role || isGuestRole(role)) return false;
+
+      const currentUserId = getCurrentUserId();
+      const activeOwnerId = getOwnerId();
+
+      if (!currentUserId || !activeOwnerId) return false;
+
+      return String(currentUserId) === String(activeOwnerId);
+    }catch(e){
+      return false;
+    }
   }
 
   function safeJsonParse(raw, fallback){
@@ -391,7 +435,10 @@
   }
 
   function addTariff(){
-    if (!isAdminUser()) return;
+    if (!canEditTariffs()){
+      alert("Можно изменять только свои тарифы.");
+      return;
+    }
     const tariffs = loadNew();
     tariffs.push({
       id: uid(),
@@ -417,7 +464,10 @@
   }
 
   function deleteTariff(card){
-    if (!isAdminUser()) return;
+    if (!canEditTariffs()){
+      alert("Можно изменять только свои тарифы.");
+      return;
+    }
     const id = String(card.getAttribute("data-tariff-id") || "");
     if (!id) return;
     if (!confirm("Удалить тариф?")) return;
@@ -428,8 +478,8 @@
   }
 
   function saveAllFromUI(){
-    if (!isAdminUser()){
-      alert("Тарифы может изменять только admin.");
+    if (!canEditTariffs()){
+      alert("Можно изменять только свои тарифы.");
       return false;
     }
     const tariffs = readFromUI();
@@ -514,12 +564,26 @@
   document.addEventListener("DOMContentLoaded", () => {
     migrateIfNeeded();
     render();
-    if (!isAdminUser()){
-      ["btnAddTariff","btnSaveAll","btnRecalcAll"].forEach(id => {
-        const el = document.getElementById(id);
-        if (el) el.disabled = true;
-      });
-      document.querySelectorAll("#tariffsHost input, #tariffsHost select, #tariffsHost button").forEach(el => { el.disabled = true; });
+
+    const canEdit = canEditTariffs();
+
+    ["btnAddTariff","btnSaveAll","btnRecalcAll"].forEach(id => {
+      const el = document.getElementById(id);
+      if (el) el.disabled = !canEdit;
+    });
+
+    document.querySelectorAll("#tariffsHost input, #tariffsHost select, #tariffsHost button").forEach(el => {
+      el.disabled = !canEdit;
+    });
+
+    if (!canEdit){
+      const host = document.getElementById("tariffsHost");
+      if (host){
+        const notice = document.createElement("div");
+        notice.className = "panel";
+        notice.innerHTML = "Режим просмотра: можно редактировать только свои тарифы в своей базе.";
+        host.parentNode.insertBefore(notice, host);
+      }
     }
   });
 
