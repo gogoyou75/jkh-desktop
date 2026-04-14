@@ -590,34 +590,7 @@
     refreshEditLocks();
   }
 
-  async function saveAllFromUI(){
-  if (!canEditTariffs()){
-    alert("Можно изменять только свои тарифы.");
-    return false;
-  }
-
-  const tariffs = readFromUI();
-  const errs = validateTariffs(tariffs);
-
-  if (errs.length){
-    alert("Ошибки:\n" + errs.join("\n"));
-    return false;
-  }
-
-  if (!tariffs.length){
-    const ok = confirm("Ты удалил ВСЕ тарифы.\n\nЭто приведёт к начислениям = 0.\nПродолжить?");
-    if (!ok) return false;
-  }
-
-  saveTariffsToCanon(tariffs);
-
-  if (window.JKHRemoteSync && typeof window.JKHRemoteSync.uploadNow === "function"){
-    await window.JKHRemoteSync.uploadNow();
-  }
-
-  alert("Тарифы сохранены.");
-  return true;
-}
+  function saveAllFromUI(){
     if (!canEditTariffs()){
       alert("Можно изменять только свои тарифы.");
       return false;
@@ -792,10 +765,10 @@
     try{
       $("btnAddTariff").addEventListener("click", addTariff);
 
-      $("btnSaveAll").addEventListener("click", async function(){
-  if (!(await saveAllFromUI())) return;
-  recalcAll();
-});
+      $("btnSaveAll").addEventListener("click", function(){
+        if (!saveAllFromUI()) return;
+        recalcAll();
+      });
 
       $("btnRecalcAll").addEventListener("click", function(){
         const ok = confirm(
