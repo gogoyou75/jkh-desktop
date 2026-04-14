@@ -12,13 +12,7 @@
           var sess = jkhSafeParse(localStorage.getItem("auth_session_v1") || "null");
           if(!sess || !sess.userId) return false;
           if(sess.expiresAt && Date.now() > sess.expiresAt) return false;
-          var users = jkhSafeParse(localStorage.getItem("auth_users_v1") || "[]");
-          if(!Array.isArray(users)) return false;
-          for(var i=0;i<users.length;i++){
-            var u = users[i] || {};
-            if(u.id === sess.userId) return true;
-          }
-          return false;
+          return true;
         }catch(e){ return false; }
       }
       if(!jkhHasValidSession()) return;
@@ -228,6 +222,8 @@ function getAbonentIdFromURL() {
 
 function calcPeriodKey(id){ return "calc_period_" + id; }
 function reportPeriodKey(id){ return "report_period_" + id; }
+function storeGet(key){ try { return (window.JKHStore && JKHStore.getRaw) ? JKHStore.getRaw(key) : null; } catch { return null; } }
+function storeSet(key, value){ try { if (window.JKHStore && JKHStore.setRaw) JKHStore.setRaw(key, value); } catch {} }
 
 function fillAbonentCardHeader() {
     const id = getAbonentIdFromURL();
@@ -275,7 +271,7 @@ function loadAutoPeriod() {
 
     // 1) если уже выбирали период на странице справок — берём его
     try {
-        const rawR = localStorage.getItem(reportPeriodKey(id));
+        const rawR = storeGet(reportPeriodKey(id));
         if (rawR) {
             const p = JSON.parse(rawR);
             fromEl.value = p.from || "";
@@ -286,7 +282,7 @@ function loadAutoPeriod() {
 
     // 2) иначе — берем период из карточки абонента (если он выбран)
     try {
-        const raw = localStorage.getItem(calcPeriodKey(id));
+        const raw = storeGet(calcPeriodKey(id));
         if (!raw) { fromEl.value = ""; toEl.value = ""; return; }
         const p = JSON.parse(raw);
         fromEl.value = p.from || "";
@@ -305,7 +301,7 @@ function isValidPeriod(from, to){
 
 function saveReportPeriod(from, to){
     const id = getAbonentIdFromURL();
-    localStorage.setItem(reportPeriodKey(id), JSON.stringify({from: from || "", to: to || ""}));
+    storeSet(reportPeriodKey(id), JSON.stringify({from: from || "", to: to || ""}));
 }
 
 document.addEventListener("DOMContentLoaded", () => {

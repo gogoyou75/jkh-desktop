@@ -12,13 +12,7 @@
           var sess = jkhSafeParse(localStorage.getItem("auth_session_v1") || "null");
           if(!sess || !sess.userId) return false;
           if(sess.expiresAt && Date.now() > sess.expiresAt) return false;
-          var users = jkhSafeParse(localStorage.getItem("auth_users_v1") || "[]");
-          if(!Array.isArray(users)) return false;
-          for(var i=0;i<users.length;i++){
-            var u = users[i] || {};
-            if(u.id === sess.userId) return true;
-          }
-          return false;
+          return true;
         }catch(e){ return false; }
       }
       if(!jkhHasValidSession()) return;
@@ -805,9 +799,11 @@ function clearDraftNewAbonent(){
 function paymentsKeyForLs(ls){
   return 'payments_' + String(ls || '').trim();
 }
+function storeGet(key){ try { return (window.JKHStore && JKHStore.getRaw) ? JKHStore.getRaw(key) : null; } catch { return null; } }
+function storeSet(key, value){ try { if (window.JKHStore && JKHStore.setRaw) JKHStore.setRaw(key, value); } catch {} }
 function loadPaymentsForLs(ls){
   try {
-    const raw = localStorage.getItem(paymentsKeyForLs(ls));
+    const raw = storeGet(paymentsKeyForLs(ls));
     if (!raw) return [];
     const arr = JSON.parse(raw);
     return Array.isArray(arr) ? arr : [];
@@ -817,7 +813,7 @@ function loadPaymentsForLs(ls){
 }
 function savePaymentsForLs(ls, arr){
   try {
-    localStorage.setItem(paymentsKeyForLs(ls), JSON.stringify(Array.isArray(arr) ? arr : []));
+    storeSet(paymentsKeyForLs(ls), JSON.stringify(Array.isArray(arr) ? arr : []));
   } catch (e){
     console.warn('[new_abonent] savePaymentsForLs error', e);
   }
@@ -842,7 +838,7 @@ function debtsHasDuplicate(debtsArr, dmy, amount){
 }
 function loadImportDraft(){
   try {
-    const raw = localStorage.getItem('import_preview_v1');
+    const raw = storeGet('import_preview_v1');
     if (!raw) return null;
     return JSON.parse(raw);
   } catch {
@@ -1137,16 +1133,16 @@ function createAbonent() {
   });
 
   // 5) Перенос долга/пени (CANON TRANSFER v1.7)
-  // ВАЖНО: перенос делаем через localStorage-ключ "jkh_transfer_balance_v1:<newId>:<regnum>",
+  // ВАЖНО: перенос делаем через scoped store-ключ "jkh_transfer_balance_v1:<newId>:<regnum>",
   // чтобы calc_engine.js продолжал начислять пеню после даты передачи на остаток долга.
   const transferChecked = (String(__transferMode||'NO_DEBT') === 'WITH_DEBT');
 
   // всегда фиксируем "заморозку" старого (чтобы расчёт у него остановился)
   try{
-    localStorage.setItem('jkh_freeze_to_v1:' + String(transferMeta.fromAbonentId), String(transferMeta.oldRespTo || ''));
+    storeSet('jkh_freeze_to_v1:' + String(transferMeta.fromAbonentId), String(transferMeta.oldRespTo || ''));
     // сохраняем снимок долга/пени на дату заморозки (для справок/отладки)
     const frozenKey = 'jkh_frozen_debt_v1:' + String(transferMeta.fromAbonentId) + ':' + String(transferMeta.oldRespTo || '');
-    localStorage.setItem(frozenKey, JSON.stringify({
+    storeSet(frozenKey, JSON.stringify({
       principal: r2(transferMeta.oldDebtSnapshot || 0),
       penalty: r2(transferMeta.oldPenaltySnapshot || 0),
       calculatedAt: String(transferMeta.oldRespTo || ''),
@@ -1160,7 +1156,7 @@ function createAbonent() {
     const pen0 = r2(transferMeta.oldPenaltySnapshot || 0);
     const key = 'jkh_transfer_balance_v1:' + String(ls) + ':' + String(regnum);
     try{
-      localStorage.setItem(key, JSON.stringify({
+      storeSet(key, JSON.stringify({
         startDate: String(respStart),
         principal: p0,
         penalty: pen0,

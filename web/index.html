@@ -126,49 +126,18 @@ Doc: docs/LOGIC_SPEC_v1.5.3.md
 
 <h2>ОБЩАЯ ИНФОРМАЦИЯ ПО КАЖДОМУ АБОНЕНТУ</h2>
 
-<div id="jkhSyncPanel" style="margin:10px 0 14px 0; padding:10px 12px; border:1px solid #ddd; border-radius:8px; background:#fafafa;">
-  <div style="display:flex; flex-wrap:wrap; gap:8px; align-items:center;">
-    <button id="btnSyncDownload" type="button" title="Download from server = Загрузить с сервера">Ручная загрузка с сервера (override)</button>
-    <button id="btnSyncUpload" type="button" title="Upload to server = Сохранить на сервер">Сохранить на сервер (MySQL)</button>
+<div id="jkhSystemPanel" style="margin:10px 0 14px 0; padding:10px 12px; border:1px solid #ddd; border-radius:8px; background:#fafafa;">
+  <div style="font-weight:600; margin-bottom:8px;">Состояние системы</div>
 
-    <span style="margin-left:10px; font-weight:600;">Авто-сохранение</span>
-    <label style="display:inline-flex; align-items:center; gap:6px;">
-      <input id="autosaveEnabled" type="checkbox">
-      <span>включено</span>
-    </label>
-
-    <label style="display:inline-flex; align-items:center; gap:6px;">
-      <span>каждые</span>
-      <input id="autosaveMinutes" type="number" min="1" max="120" value="5" style="width:70px;">
-      <span>мин.</span>
-    </label>
-
-    <label style="display:inline-flex; align-items:center; gap:6px;">
-      <span>режим</span>
-      <select id="autosaveScope">
-        <option value="db">Только база (быстро)</option>
-        <option value="all">Вся база (включая платежи)</option>
-      </select>
-    </label>
-
-    <label style="display:inline-flex; align-items:center; gap:6px;">
-      <input id="autosaveOnlyChanged" type="checkbox">
-      <span>только если были изменения</span>
-    </label>
-
-    <button id="btnAutosaveApply" type="button" title="Apply = применить настройки">применить</button>
+  <div style="display:flex; flex-wrap:wrap; gap:14px; align-items:center; font-size:13px; line-height:1.35;">
+    <div>🛰️ Сервер: <span id="sysServerState">…</span></div>
+    <div>📦 Данные: <span id="sysDataState">…</span></div>
+    <div>🕒 Обновлено: <span id="sysUpdatedAt">—</span></div>
+    <button id="btnRefreshData" type="button">Обновить данные</button>
   </div>
 
-  <div id="syncStatusLine" style="margin-top:10px; font-size:13px; line-height:1.35;">
-    <div>🛰️ Сервер: <span id="syncServerState">…</span></div>
-    <div>💾 Последнее сохранение: <span id="syncLastSave">—</span></div>
-    <div>🔄 Авто-сохранение: <span id="syncAutosaveState">—</span></div>
-    <div>ℹ️ Последнее действие: <span id="syncLastAction">—</span></div>
-    <div style="color:#b00020;">❗ Ошибка: <span id="syncLastError">—</span></div>
-  </div>
-
-  <div style="margin-top:8px; font-size:12px; color:#555;">
-    Подсказка: <b>MySQL (сервер)</b> — общая база через интернет. <b>Локально (браузер)</b> — копия (кэш).
+  <div id="sysHint" style="margin-top:8px; font-size:12px; color:#555;">
+    Сервер — главный источник данных. После входа база загружается автоматически.
   </div>
 </div>
 
@@ -176,38 +145,108 @@ Doc: docs/LOGIC_SPEC_v1.5.3.md
 (function(){
   function byId(id){ return document.getElementById(id); }
 
-  function initSyncPanel(){
-    if (!window.JKHRemoteSync) {
-      byId('syncServerState').textContent = 'модуль синхронизации не загружен';
-      return;
+  function readUIState(){
+    var def = {
+      auth: { status: 'unknown', userId: null, email: '', role: 'guest' },
+      server: { status: 'unknown', checkedAt: '', message: '' },
+      data: { status: 'idle', loadedAt: '', source: 'none', message: '' }
+    };
+    var st = (window.JKH_UI_STATE && typeof window.JKH_UI_STATE === 'object') ? window.JKH_UI_STATE : {};
+    st.auth = Object.assign({}, def.auth, (st.auth && typeof st.auth === 'object') ? st.auth : {});
+    st.server = Object.assign({}, def.server, (st.server && typeof st.server === 'object') ? st.server : {});
+    st.data = Object.assign({}, def.data, (st.data && typeof st.data === 'object') ? st.data : {});
+    return st;
+  }
+
+  function formatLoadedAt(iso){
+    if (!iso) return '—';
+    var dt = new Date(iso);
+    if (!dt || isNaN(dt.getTime())) return '—';
+    var dd = String(dt.getDate()).padStart(2, '0');
+    var mm = String(dt.getMonth() + 1).padStart(2, '0');
+    var hh = String(dt.getHours()).padStart(2, '0');
+    var mi = String(dt.getMinutes()).padStart(2, '0');
+    return dd + '.' + mm + ' ' + hh + ':' + mi;
+  }
+
+  function resolveServerText(st){
+    if (st.auth.status === 'guest' || st.server.status === 'unauthorized') return 'требуется вход';
+    if (st.server.status === 'forbidden') return 'доступ запрещён';
+    if (st.server.status === 'online') return 'подключён';
+    if (st.server.status === 'offline') return 'нет связи';
+    return 'не проверен';
+  }
+
+  function resolveDataText(st){
+    var dataMap = {
+      idle: 'ожидание',
+      loading: 'загрузка…',
+      ready: 'загружены',
+      empty: 'нет данных',
+      unauthorized: 'требуется вход',
+      forbidden: 'доступ запрещён',
+      offline: 'нет связи',
+      invalid: 'повреждённый ответ',
+      error: 'ошибка'
+    };
+    return dataMap[st.data.status] || 'ожидание';
+  }
+
+  function renderSystemPanel(){
+    var st = readUIState();
+
+    var serverEl = byId('sysServerState');
+    var dataEl = byId('sysDataState');
+    var updatedEl = byId('sysUpdatedAt');
+    var hintEl = byId('sysHint');
+
+    if (!serverEl || !dataEl || !updatedEl || !hintEl) return;
+
+    serverEl.textContent = resolveServerText(st);
+    dataEl.textContent = resolveDataText(st);
+    updatedEl.textContent = formatLoadedAt(st.data.loadedAt);
+
+    if (st.auth.status === 'guest' || st.server.status === 'unauthorized') {
+      hintEl.textContent = 'Требуется вход для серверной загрузки данных.';
+    } else if (st.server.status === 'forbidden' || st.data.status === 'forbidden') {
+      hintEl.textContent = st.data.message || 'Недостаточно прав для загрузки данных.';
+    } else if (st.data.status === 'loading') {
+      hintEl.textContent = 'Выполняется загрузка данных с сервера…';
+    } else if (st.data.status === 'offline') {
+      hintEl.textContent = st.data.message || 'Сервер недоступен.';
+    } else if (st.data.status === 'invalid' || st.data.status === 'error') {
+      hintEl.textContent = st.data.message || 'Ошибка загрузки данных.';
+    } else {
+      hintEl.textContent = 'Сервер — главный источник данных. После входа база загружается автоматически.';
+    }
+  }
+
+  function bindStateReactivity(){
+    window.addEventListener('JKH_UI_STATE_CHANGED', function(){
+      renderSystemPanel();
+    });
+  }
+
+  function init(){
+    var btn = byId('btnRefreshData');
+
+    if (btn) {
+      btn.onclick = async function(){
+        if (!window.JKHDataLoader || typeof window.JKHDataLoader.loadFromServer !== 'function') {
+          return;
+        }
+        await window.JKHDataLoader.loadFromServer({ reason: 'manual_refresh', force: true });
+      };
     }
 
-    // hydrate UI from settings
-    var s = window.JKHRemoteSync.getSettings();
-    byId('autosaveEnabled').checked = !!s.enabled;
-    byId('autosaveMinutes').value = String(s.minutes || 5);
-    byId('autosaveScope').value = s.scope || 'db';
-    byId('autosaveOnlyChanged').checked = !!s.onlyIfChanged;
-
-    byId('btnSyncDownload').onclick = function(){ window.JKHRemoteSync.downloadNow(); };
-    byId('btnSyncUpload').onclick = function(){ window.JKHRemoteSync.uploadNow(); };
-    byId('btnAutosaveApply').onclick = function(){
-      window.JKHRemoteSync.applySettingsFromUI({
-        enabled: byId('autosaveEnabled').checked,
-        minutes: parseInt(byId('autosaveMinutes').value, 10) || 5,
-        scope: byId('autosaveScope').value,
-        onlyIfChanged: byId('autosaveOnlyChanged').checked
-      });
-    };
-
-    window.JKHRemoteSync.refreshStatusUI();
-    window.JKHRemoteSync.pingServer(); // обновит "Сервер: ..."
+    bindStateReactivity();
+    renderSystemPanel();
   }
 
   if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', initSyncPanel);
+    document.addEventListener('DOMContentLoaded', init);
   } else {
-    initSyncPanel();
+    init();
   }
 })();
 </script>
@@ -448,13 +487,16 @@ function toNum(v){
 }
 
 function getAbonentNote(id, a){
+    const storeGet = (key) => {
+        try { return (window.JKHStore && JKHStore.getRaw) ? JKHStore.getRaw(key) : null; } catch { return null; }
+    };
     // 1) из AbonentsDB полей
     const fromA = (a && (a.defaultNote || a.note || a.comment || a.prim || a.primNote || a.noteText)) ? (a.defaultNote || a.note || a.comment || a.prim || a.primNote || a.noteText) : "";
     if (String(fromA || "").trim()) return String(fromA);
 
     // 2) запасной вариант: отдельный ключ (если карточка так сохраняла)
     try{
-        const raw = localStorage.getItem("note_" + String(id));
+        const raw = storeGet("note_" + String(id));
         if (raw !== null && raw !== undefined) return String(raw);
     }catch(e){}
 
@@ -624,16 +666,39 @@ function calcTotalsFromPayments(id, abonentObj){
 ============================================================ */
 document.addEventListener("DOMContentLoaded", () => {
 
-    if (window.JKH_DATA_READY !== true) {
+        var uiState = (window.JKH_UI_STATE && typeof window.JKH_UI_STATE === "object")
+        ? window.JKH_UI_STATE
+        : { auth: { status: "unknown", userId: null, email: "", role: "guest" }, server: { status: "unknown", checkedAt: "", message: "" }, data: { status: "idle", loadedAt: "", source: "none", message: "" } };
+
+    var user = (window.Auth && typeof Auth.getCurrentUser === "function")
+        ? Auth.getCurrentUser()
+        : null;
+
+    // ✅ Гость никогда не получает блокировку главной страницы
+    if (!user || (uiState.auth && uiState.auth.status === "guest")) {
+        console.warn("[JKH] guest mode — UI not blocked");
+    }
+    // ✅ Для вошедшего пользователя показываем блокировку только при data=error
+    else if (uiState.data && uiState.data.status === "error") {
         const table = document.getElementById("abonentsTable");
         if (table) table.style.display = "none";
+
         const blocker = document.createElement("div");
         blocker.id = "dataNotReadyBlock";
         blocker.style.cssText = "margin:16px 0;padding:12px;border:1px solid #b00020;border-radius:8px;background:#fff4f4;color:#7a0016;";
-        blocker.textContent = "Данные не загружены с сервера. Интерфейс заблокирован до успешной автозагрузки.";
+        blocker.textContent = (uiState.data && uiState.data.message) || "Данные не загружены с сервера. Интерфейс заблокирован до успешной автозагрузки.";
+
         var anchor = document.querySelector("h2");
         if (anchor && anchor.parentNode) anchor.parentNode.insertBefore(blocker, anchor.nextSibling);
+
         return;
+    } else if (uiState.data && uiState.data.status === "loading") {
+        const warn = document.createElement("div");
+        warn.id = "dataLoadingWarn";
+        warn.style.cssText = "margin:16px 0;padding:12px;border:1px solid #d4a017;border-radius:8px;background:#fff8e1;color:#6d4c00;";
+        warn.textContent = (uiState.data && uiState.data.message) || "Выполняется загрузка данных с сервера…";
+        var h2Anchor = document.querySelector("h2");
+        if (h2Anchor && h2Anchor.parentNode) h2Anchor.parentNode.insertBefore(warn, h2Anchor.nextSibling);
     }
 
     const db = window.AbonentsDB?.abonents || {};
@@ -821,7 +886,7 @@ function render() {
             }catch(e){}
 
             // запасной вариант: локально сохраняем под отдельным ключом
-            try{ localStorage.setItem("note_" + id, val); }catch(e){}
+            try{ if (window.JKHStore && JKHStore.setRaw) JKHStore.setRaw("note_" + id, val); }catch(e){}
 
             // если в data.js есть сохранение базы — используем его
             try{

@@ -10,6 +10,9 @@ function highlight(text, q) {
 
 // Основная функция
 function runSearch() {
+    const storeGet = (key) => {
+        try { return (window.JKHStore && JKHStore.getRaw) ? JKHStore.getRaw(key) : null; } catch { return null; }
+    };
     const q = document.getElementById("search-input").value.trim().toLowerCase();
 
     const fioDiv = document.getElementById("result-fio");
@@ -37,7 +40,8 @@ function runSearch() {
         const flat = (a.flat || "").toLowerCase();
 
         // Примечания храним отдельно в localStorage
-        const note = (localStorage.getItem("note_" + id) || "").toLowerCase();
+        const noteRaw = storeGet("note_" + id) || "";
+        const note = noteRaw.toLowerCase();
 
         // -----------------------------
         // 1. ФИО
@@ -80,7 +84,7 @@ function runSearch() {
         if (note && note.includes(q)) {
             perDiv.innerHTML += `
                 <div class="record" onclick="openAbonent('${id}')">
-                    Примечание совпало: ${highlight(localStorage.getItem("note_" + id), q)}<br>
+                    Примечание совпало: ${highlight(noteRaw, q)}<br>
                     Абонент: ${a.fio}
                 </div>`;
         }

@@ -19,10 +19,258 @@
 
   var _sessionReady = false;
   var _syncPromise = null;
+  var _initStarted = false;
+  var _initPromise = null;
+
+  function _getAutoLoadGate() {
+    if (!window.__JKH_LOGIN_AUTOLOAD_GATE) {
+      window.__JKH_LOGIN_AUTOLOAD_GATE = {
+        inFlight: null,
+        doneForUserId: "",
+        done: false,
+        failed: false,
+        lastResult: null
+      };
+    }
+    return window.__JKH_LOGIN_AUTOLOAD_GATE;
+  }
+
+  function _resetAutoLoadGate(userId) {
+    var gate = _getAutoLoadGate();
+    var uid = String(userId || "");
+    if (uid && gate.doneForUserId && gate.doneForUserId !== uid) {
+      gate.done = false;
+      gate.failed = false;
+      gate.lastResult = null;
+      gate.inFlight = null;
+      gate.doneForUserId = uid;
+      return;
+    }
+    if (!gate.doneForUserId && uid) gate.doneForUserId = uid;
+  }
+
+  function _withTimeout(promise, ms) {
+    var t = Math.max(1000, parseInt(ms, 10) || 20000);
+    return new Promise(function (resolve, reject) {
+      var done = false;
+      var timer = setTimeout(function () {
+        if (done) return;
+        done = true;
+        reject(new Error("AUTOLOAD_TIMEOUT_" + t));
+      }, t);
+      Promise.resolve(promise).then(function (v) {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        resolve(v);
+      }).catch(function (e) {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        reject(e);
+      });
+    });
+  }
+
+  async function runAutoLoadAfterLoginOnce(sourceTag) {
+    var tag = String(sourceTag || "unknown");
+    if (!window.JKHDataLoader || typeof window.JKHDataLoader.loadFromServer !== "function") {
+      console.warn("[auth] JKHDataLoader missing; continue without blocking login");
+      return false;
+    }
+
+    var user = getCurrentUser();
+    var uid = String(user && user.id || "");
+    var gate = _getAutoLoadGate();
+    _resetAutoLoadGate(uid);
+
+    if (gate.done && gate.doneForUserId === uid) {
+      return true;
+    }
+
+    if (gate.inFlight) {
+      return gate.inFlight;
+    }
+
+    gate.inFlight = (async function () {
+      console.info("[auth] autoload gate start source=%s userId=%s", tag, uid);
+      try {
+        _setUIState({
+          server: { status: "online", checkedAt: _nowISO(), message: "" },
+          data: { status: "loading", source: "server", message: "" }
+        });
+
+        var result = await _withTimeout(window.JKHDataLoader.loadFromServer({ reason: "auth_autoload", force: true }), 25000);
+        var ok = !!(result && result.ok);
+        var status = String(result && result.status || "");
+
+        if (!ok || (status !== "ready" && status !== "empty")) {
+          gate.done = false;
+          gate.failed = true;
+          gate.lastResult = false;
+          var typedStatus = String(result && result.status || "");
+          if (!typedStatus) typedStatus = "invalid";
+          var typedServerStatus = String(result && result.serverStatus || "");
+          if (!typedServerStatus) {
+            typedServerStatus = (typedStatus === "offline") ? "offline" : "online";
+          }
+          _setUIState({
+            server: { status: typedServerStatus, checkedAt: _nowISO(), message: String(result && result.message || "") },
+            data: { status: typedStatus, source: "server", message: String(result && result.message || "Не удалось автоматически загрузить данные") }
+          });
+          console.warn("[auth] autoload failed but login allowed source=%s userId=%s", tag, uid);
+          return false;
+        }
+
+        gate.done = true;
+        gate.failed = false;
+        gate.lastResult = true;
+        gate.doneForUserId = uid;
+        _setUIState({
+          server: { status: "online", checkedAt: _nowISO(), message: "" },
+          data: { status: status, loadedAt: String(result && result.loadedAt || _nowISO()), source: "server", message: "" }
+        });
+        console.info("[auth] autoload gate done source=%s userId=%s status=%s", tag, uid, status);
+        return true;
+      } catch (e) {
+        gate.done = false;
+        gate.failed = true;
+        gate.lastResult = false;
+        var st = _ensureUIState();
+        var currentDataStatus = String(st && st.data && st.data.status || "");
+        var currentServerStatus = String(st && st.server && st.server.status || "");
+        var nextDataStatus = currentDataStatus;
+        if (!nextDataStatus || nextDataStatus === "loading" || nextDataStatus === "idle") {
+          nextDataStatus = _isNetworkOrTimeoutError(e) ? "offline" : "invalid";
+        }
+        var nextServerStatus = currentServerStatus;
+        if (!nextServerStatus || nextServerStatus === "unknown") {
+          nextServerStatus = _isNetworkOrTimeoutError(e) ? "offline" : "online";
+        }
+        _setUIState({
+          server: { status: nextServerStatus, checkedAt: _nowISO(), message: String(e && e.message ? e.message : e || "") },
+          data: { status: nextDataStatus, source: "server", message: String(e && e.message ? e.message : e || "") }
+        });
+        console.warn("[auth] autoload exception but login allowed source=%s userId=%s:", tag, uid, e);
+        return false;
+      } finally {
+        gate.inFlight = null;
+      }
+    })();
+
+    return gate.inFlight;
+  }
+
 
   function safeJsonParse(s, fallback) {
-    try { return JSON.parse(s); } catch (e) { return fallback; }
+  try { return JSON.parse(s); } catch (e) { return fallback; }
+}
+
+function _nowISO() {
+  return new Date().toISOString();
+}
+
+function _defaultUIState() {
+  return {
+    auth: {
+      status: "unknown",
+      userId: null,
+      email: "",
+      role: "guest"
+    },
+    server: {
+      status: "unknown",
+      checkedAt: "",
+      message: ""
+    },
+    data: {
+      status: "idle",
+      loadedAt: "",
+      source: "none",
+      message: ""
+    }
+  };
+}
+
+function _ensureUIState() {
+  var def = _defaultUIState();
+  var st = window.JKH_UI_STATE;
+  if (!st || typeof st !== "object") {
+    window.JKH_UI_STATE = def;
+    return window.JKH_UI_STATE;
   }
+
+  st.auth = Object.assign({}, def.auth, (st.auth && typeof st.auth === "object") ? st.auth : {});
+  st.server = Object.assign({}, def.server, (st.server && typeof st.server === "object") ? st.server : {});
+  st.data = Object.assign({}, def.data, (st.data && typeof st.data === "object") ? st.data : {});
+
+  window.JKH_UI_STATE = st;
+  return st;
+}
+
+function _emitUIStateChanged(st) {
+  try {
+    if (typeof window.CustomEvent === "function") {
+      window.dispatchEvent(new CustomEvent("JKH_UI_STATE_CHANGED", { detail: st }));
+    } else {
+      var ev = document.createEvent("Event");
+      ev.initEvent("JKH_UI_STATE_CHANGED", false, false);
+      ev.detail = st;
+      window.dispatchEvent(ev);
+    }
+  } catch (e) {}
+}
+
+function _setUIState(patch) {
+  patch = patch || {};
+  var st = _ensureUIState();
+  if (patch.auth && typeof patch.auth === "object") {
+    st.auth = Object.assign({}, st.auth, patch.auth);
+  }
+  if (patch.server && typeof patch.server === "object") {
+    st.server = Object.assign({}, st.server, patch.server);
+  }
+  if (patch.data && typeof patch.data === "object") {
+    st.data = Object.assign({}, st.data, patch.data);
+  }
+  _emitUIStateChanged(st);
+  return st;
+}
+
+function _userToAuthState(user) {
+  var role = (user && user.role === "admin") ? "admin" : "user";
+  return {
+    status: role,
+    userId: (user && user.id) ? user.id : null,
+    email: (user && user.email) ? String(user.email) : "",
+    role: role
+  };
+}
+
+function _guestAuthState() {
+  return {
+    status: "guest",
+    userId: null,
+    email: "",
+    role: "guest"
+  };
+}
+
+function _isUnauthorizedError(err) {
+  var msg = String(err && err.message ? err.message : err || "");
+  return msg === "HTTP_401" || msg === "unauthorized";
+}
+
+function _isNetworkOrTimeoutError(err) {
+  var msg = String(err && err.message ? err.message : err || "").toLowerCase();
+  if (!msg) return false;
+  if (msg.indexOf("autoload_timeout_") === 0) return true;
+  return msg.indexOf("network") >= 0 ||
+    msg.indexOf("timeout") >= 0 ||
+    msg.indexOf("failed to fetch") >= 0 ||
+    msg.indexOf("err_network") >= 0 ||
+    msg.indexOf("offline") >= 0;
+}
 
   function safeJsonStringify(v) {
     try { return JSON.stringify(v); } catch (e) { return ""; }
@@ -248,7 +496,10 @@
           sel.innerHTML = opts.join("");
           sel.value = scope;
           sel.onchange = function () {
-            if (Auth.setAdminViewScope(this.value)) location.reload();
+            if (Auth.setAdminViewScope(this.value)) {
+              var cur = window.location.pathname.split("/").pop() || "index.html";
+              window.location.href = cur;
+            }
           };
         }).catch(function () {});
       }, 0);
@@ -348,16 +599,17 @@
 
     cacheSessionUser(data.user);
     _sessionReady = true;
+    _setUIState({
+      auth: _userToAuthState(data.user),
+      server: { status: "online", checkedAt: _nowISO(), message: "" },
+      data: { status: "loading", source: "server", message: "" }
+    });
     console.info("[auth] login userId=%s email=%s", String(data.user && data.user.id || ""), String(data.user && data.user.email || ""));
 
-    if (!window.JKHRemoteSync || typeof window.JKHRemoteSync.autoLoadAfterLogin !== "function") {
-      window.JKH_DATA_READY = false;
-      throw new Error("AUTOLOAD_REQUIRED");
-    }
-    var loaded = await window.JKHRemoteSync.autoLoadAfterLogin();
-    if (!loaded) {
-      window.JKH_DATA_READY = false;
-      throw new Error("AUTOLOAD_REQUIRED");
+    try {
+      await runAutoLoadAfterLoginOnce("loginByPassword");
+    } catch (e) {
+      console.warn("[auth] login autoload ignored:", e);
     }
 
     renderAuthStatus();
@@ -380,16 +632,17 @@
 
     cacheSessionUser(data.user);
     _sessionReady = true;
+    _setUIState({
+      auth: _userToAuthState(data.user),
+      server: { status: "online", checkedAt: _nowISO(), message: "" },
+      data: { status: "loading", source: "server", message: "" }
+    });
     console.info("[auth] register userId=%s email=%s role=%s", String(data.user && data.user.id || ""), String(data.user && data.user.email || ""), String(data.user && data.user.role || ""));
 
-    if (!window.JKHRemoteSync || typeof window.JKHRemoteSync.autoLoadAfterLogin !== "function") {
-      window.JKH_DATA_READY = false;
-      throw new Error("AUTOLOAD_REQUIRED");
-    }
-    var loaded = await window.JKHRemoteSync.autoLoadAfterLogin();
-    if (!loaded) {
-      window.JKH_DATA_READY = false;
-      throw new Error("AUTOLOAD_REQUIRED");
+    try {
+      await runAutoLoadAfterLoginOnce("registerUser");
+    } catch (e) {
+      console.warn("[auth] register autoload ignored:", e);
     }
 
     renderAuthStatus();
@@ -410,7 +663,26 @@
     } catch (e) {}
 
     clearSessionCache();
+    try { localStorage.removeItem(ADMIN_VIEW_SCOPE_KEY); } catch (e3) {}
+    try {
+      if (window.JKHDataLoader && typeof window.JKHDataLoader.resetAllLocalProjectScopes === "function") {
+        window.JKHDataLoader.resetAllLocalProjectScopes();
+      }
+    } catch (e4) {}
     _sessionReady = true;
+    try {
+      var gate = _getAutoLoadGate();
+      gate.inFlight = null;
+      gate.done = false;
+      gate.failed = false;
+      gate.lastResult = null;
+      gate.doneForUserId = "";
+    } catch (e2) {}
+    _setUIState({
+      auth: _guestAuthState(),
+      server: { status: "unauthorized", checkedAt: _nowISO(), message: "" },
+      data: { status: "idle", loadedAt: "", source: "none", message: "" }
+    });
     renderAuthStatus();
   }
 
@@ -420,7 +692,7 @@
       if (p.indexOf("admin.html") !== -1 || p.indexOf("user_panel.html") !== -1) {
         window.location.href = "index.html";
       } else {
-        window.location.reload();
+        window.location.href = p.split("/").pop() || "index.html";
       }
     });
   }
@@ -545,27 +817,97 @@
   }
 
   function init() {
+  if (_initStarted) return _initPromise;
+  _initStarted = true;
+
+  _initPromise = (async function () {
     patchGuestDialogsForLoggedIn();
     renderAuthStatus();
     protectPages();
 
-    syncSessionFromServer(false).then(function () {
+    try {
+      await syncSessionFromServer(false);
       var u = getCurrentUser();
-      if (u) console.info("[auth] init session userId=%s email=%s", String(u.id || ""), String(u.email || ""));
+
+      // ✅ Гость: это нормальное состояние, не ошибка
+      if (!u) {
+        _setUIState({
+          auth: _guestAuthState(),
+          server: { status: "unauthorized", checkedAt: _nowISO(), message: "" },
+          data: { status: "idle", source: "none", message: "" }
+        });
+        renderAuthStatus();
+        protectPages();
+        return true;
+      }
+
+      _setUIState({
+        auth: _userToAuthState(u),
+        server: { status: "online", checkedAt: _nowISO(), message: "" },
+        data: { status: "loading", source: "server", message: "" }
+      });
+
+      console.info("[auth] init session userId=%s email=%s", String(u.id || ""), String(u.email || ""));
+      var loaded = await runAutoLoadAfterLoginOnce("Auth.init");
+
+      if (loaded) {
+        var st = _ensureUIState();
+        _setUIState({
+          auth: _userToAuthState(u),
+          server: { status: st.server.status || "online", checkedAt: _nowISO(), message: st.server.message || "" },
+          data: {
+            status: (st.data.status === "empty" ? "empty" : "ready"),
+            loadedAt: st.data.loadedAt || "",
+            source: "server",
+            message: ""
+          }
+        });
+      } else {
+        var failedState = _ensureUIState();
+        _setUIState({
+          auth: _userToAuthState(u),
+          server: {
+            status: failedState.server.status || "unknown",
+            checkedAt: _nowISO(),
+            message: failedState.server.message || ""
+          },
+          data: {
+            status: failedState.data.status || "invalid",
+            loadedAt: failedState.data.loadedAt || "",
+            source: failedState.data.source || "server",
+            message: failedState.data.message || "Не удалось автоматически загрузить данные"
+          }
+        });
+      }
+
       renderAuthStatus();
       protectPages();
-      try {
-        if (window.JKHRemoteSync && typeof window.JKHRemoteSync.autoLoadAfterLogin === "function") {
-          window.JKHRemoteSync.autoLoadAfterLogin().then(function(ok){ if (!ok) window.JKH_DATA_READY = false; }).catch(function () { window.JKH_DATA_READY = false; });
-        } else {
-          window.JKH_DATA_READY = false;
-        }
-      } catch (e) {}
-    }).catch(function () {
+      return true;
+
+    } catch (e) {
+      // ✅ 401 для гостя — не ошибка приложения
       clearSessionCache();
+      if (_isUnauthorizedError(e)) {
+        _setUIState({
+          auth: _guestAuthState(),
+          server: { status: "unauthorized", checkedAt: _nowISO(), message: "" },
+          data: { status: "idle", source: "none", message: "" }
+        });
+      } else {
+        _setUIState({
+          auth: _guestAuthState(),
+          server: { status: "offline", checkedAt: _nowISO(), message: String(e && e.message ? e.message : e || "") },
+          data: { status: "idle", source: "none", message: "" }
+        });
+      }
       renderAuthStatus();
-    });
-  }
+      protectPages();
+      return true;
+    }
+  })();
+
+  return _initPromise;
+}
 
   window.Auth = {
     isAuthEnabled: authEnabled,
@@ -609,7 +951,8 @@
     setLastEmail: setLastEmail,
     getLastEmail: getLastEmail,
 
-    syncSessionFromServer: syncSessionFromServer
+    syncSessionFromServer: syncSessionFromServer,
+    runAutoLoadAfterLoginOnce: runAutoLoadAfterLoginOnce
   };
 
   // Автозапуск

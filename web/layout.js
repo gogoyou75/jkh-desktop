@@ -341,13 +341,16 @@ function renderSearchResults(data, q) {
 function globalSearch(q) {
   q = (q || "").toLowerCase();
   const db = window.AbonentsDB?.abonents || {};
+  const storeGet = (key) => {
+    try { return (window.JKHStore && JKHStore.getRaw) ? JKHStore.getRaw(key) : null; } catch { return null; }
+  };
   const result = { fio: [], address: [], id: [], notes: [], count: 0 };
 
   for (const id in db) {
     const a = db[id];
     const fio = a.fio?.toLowerCase() || "";
     const adr = `${a.city || ""} ${a.street || ""} ${a.house || ""} ${a.flat || ""}`.toLowerCase();
-    const noteRaw = localStorage.getItem("note_" + id) || "";
+    const noteRaw = storeGet("note_" + id) || "";
     const note = noteRaw.toLowerCase();
 
     if (fio.includes(q)) {
