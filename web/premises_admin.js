@@ -498,7 +498,95 @@ window.PremisesAdmin = (function () {
         return norm(p?.city) === norm(city) && norm(p?.street) === norm(street) && norm(p?.house) === norm(house) && norm(p?.flat) === norm(flat);
     }
 
-    let state = { editingRegnum: null };
+    let state = { editingRegnum: null, busy: false };
+
+    function setBusyUI(isBusy) {
+        state.busy = !!isBusy;
+        ['btnPremSave','btnPremReset','btnCreateAbonentFromPremise'].forEach(id => {
+            const el = q(id);
+            if (el) el.disabled = !!isBusy;
+        });
+        q('premSearch') && (q('premSearch').disabled = !!isBusy);
+        const rowBtns = document.querySelectorAll('#premisesTable button[data-act]');
+        rowBtns.forEach(btn => { btn.disabled = !!isBusy; });
+    }
+
+    function collectAffectedAbonentIdsByRegnums(db, regnums) {
+        const set = new Set();
+        const links = Array.isArray(db?.links) ? db.links : [];
+        const regSet = new Set((regnums || []).map(r => String(r || '').trim()).filter(Boolean));
+        links.forEach(l => {
+            const r = String(l?.regnum || '').trim();
+            const a = String(l?.abonentId || '').trim();
+            if (!a) return;
+            if (regSet.has(r)) set.add(a);
+        });
+        return Array.from(set);
+    }
+
+    function runExistingRecalcForAbonents(abonentIds) {
+        const ids = Array.from(new Set((abonentIds || []).map(x => String(x || '').trim()).filter(Boolean)));
+        if (!ids.length) return { ok: true, total: 0, changed: 0 };
+        if (!(window.JKHAutoAccrual && typeof window.JKHAutoAccrual.recalcForMany === 'function')) {
+            return { ok: false, reason: 'NO_RECALC_ENGINE', message: 'Не найден JKHAutoAccrual.recalcForMany().' };
+        }
+        const rows = window.JKHAutoAccrual.recalcForMany(ids);
+        const changed = (rows || []).filter(r => r && r.ok && r.changed).length;
+        const failed = (rows || []).filter(r => !r || !r.ok);
+        if (failed.length) {
+            return { ok: false, reason: 'RECALC_FAILED', message: 'Ошибка пересчёта для части абонентов.' };
+        }
+        return { ok: true, total: ids.length, changed: changed };
+    }
+
+    async function flushDbToServerStrict() {
+        if (window.Data && typeof window.Data.flushDbToServer === 'function') {
+            const ok = await window.Data.flushDbToServer();
+            if (!ok) throw new Error('Не удалось сохранить базу перед upload.');
+            return true;
+        }
+        const saved = !!(window.saveAbonentsDB && window.saveAbonentsDB());
+        if (!saved) throw new Error('Не удалось сохранить базу.');
+        if (window.JKHRemoteSync && typeof window.JKHRemoteSync.uploadNow === 'function') {
+            await window.JKHRemoteSync.uploadNow();
+            return true;
+        }
+        throw new Error('JKHRemoteSync.uploadNow недоступен.');
+    }
+
+    async function persistPremiseTransaction(opts) {
+        if (state.busy) return;
+        setBusyUI(true);
+        try {
+            const tx = (opts && typeof opts.mutate === 'function') ? (opts.mutate() || {}) : {};
+            if (tx && tx.ok === false) {
+                setWarn(tx.message || 'Операция отменена.', false);
+                return;
+            }
+
+            const affectedIds = Array.from(new Set([
+                ...((opts && Array.isArray(opts.affectedAbonentIds)) ? opts.affectedAbonentIds : []),
+                ...((tx && Array.isArray(tx.affectedAbonentIds)) ? tx.affectedAbonentIds : [])
+            ].map(x => String(x || '').trim()).filter(Boolean)));
+
+            const recalcRes = runExistingRecalcForAbonents(affectedIds);
+            if (!recalcRes.ok) {
+                throw new Error(recalcRes.message || 'Не удалось выполнить пересчёт начислений.');
+            }
+
+            await flushDbToServerStrict();
+
+            setWarn((opts && opts.successMessage) || 'Сохранено.', true);
+            renderTable();
+            refreshAddressDatalists();
+            if (opts && typeof opts.onSuccess === 'function') opts.onSuccess(tx);
+        } catch (e) {
+            console.warn('[premises] transaction failed', e);
+            setWarn('Ошибка сохранения: ' + (e?.message || e), false);
+        } finally {
+            setBusyUI(false);
+        }
+    }
 
     function renderDupHints() {
         const box = q('premDupBox');
@@ -795,6 +883,7 @@ window.PremisesAdmin = (function () {
 function onSave() {
         // 🔒 запрет записи для гостя и для режима "ВСЕ БАЗЫ"
         if (!canWriteOrExplainLocal()) return;
+        if (state.busy) return;
 
         const db = window.AbonentsDB;
         const f = readForm();
@@ -823,7 +912,6 @@ function onSave() {
             return;
         }
 
-
         const isEdit = !!state.editingRegnum;
         if (isEdit) {
             const reg = state.editingRegnum;
@@ -832,43 +920,54 @@ function onSave() {
 
             const allowRegEdit = isTempRegnum(existing?.regnum) && !existing?.regnumLocked;
 
-            // 🔒 Шаг 1: если это TEMP-* и пользователь ввёл настоящий regnum -> ПЕРЕИМЕНОВЫВАЕМ ключ один раз
+            // 🔒 TEMP-* -> настоящий regnum (одноразовая фиксация)
             if (allowRegEdit && !isUnknown && f.regnum && String(f.regnum) !== String(reg)) {
-                const res = renamePremiseRegnumOnce(db, reg, f.regnum);
-                if (!res.ok) { setWarn(res.message || 'Ошибка фиксации regnum.', false); return; }
-                // после переименования продолжаем сохранять адрес в новом ключе
-                const newKey = res.newRegnum;
-                const p2 = db.premises?.[newKey];
-                if (p2) {
-                    db.premises[newKey] = {
-                        ...p2,
-                        city: f.city, street: f.street, house: f.house, flat: f.flat,
-                        square: f.square, createdAt: f.createdAt
-                    };
-                }
+                const affectedBefore = collectAffectedAbonentIdsByRegnums(db, [reg]);
+                persistPremiseTransaction({
+                    successMessage: 'regnum зафиксирован и сохранён.',
+                    affectedAbonentIds: affectedBefore,
+                    mutate: function () {
+                        const res = renamePremiseRegnumOnce(db, reg, f.regnum);
+                        if (!res.ok) return { ok: false, message: res.message || 'Ошибка фиксации regnum.' };
 
-                window.saveAbonentsDB();
-                setWarn('regnum зафиксирован и сохранён.', true);
-                renderTable();
-                refreshAddressDatalists();
-                // перерисуем форму в режиме edit уже по новому regnum
-                setFormModeEdit(newKey);
+                        const newKey = res.newRegnum;
+                        const p2 = db.premises?.[newKey];
+                        if (p2) {
+                            db.premises[newKey] = {
+                                ...p2,
+                                city: f.city, street: f.street, house: f.house, flat: f.flat,
+                                square: f.square, createdAt: f.createdAt
+                            };
+                        }
+                        syncLegacyFieldsForRegnum(db, newKey);
+
+                        return {
+                            ok: true,
+                            newRegnum: newKey,
+                            affectedAbonentIds: collectAffectedAbonentIdsByRegnums(db, [newKey])
+                        };
+                    },
+                    onSuccess: function (tx) {
+                        const newKey = tx?.newRegnum || f.regnum;
+                        setFormModeEdit(newKey);
+                    }
+                });
                 return;
             }
 
-            // обычное сохранение адреса (regnum не меняется)
-            db.premises[reg] = {
-                ...existing,
-                city: f.city, street: f.street, house: f.house, flat: f.flat,
-                square: f.square, createdAt: f.createdAt
-            };
-
-            syncLegacyFieldsForRegnum(db, reg);
-
-            window.saveAbonentsDB();
-            setWarn('Сохранено.', true);
-            renderTable();
-            refreshAddressDatalists(); // ✅
+            persistPremiseTransaction({
+                successMessage: 'Сохранено.',
+                affectedAbonentIds: collectAffectedAbonentIdsByRegnums(db, [reg]),
+                mutate: function () {
+                    db.premises[reg] = {
+                        ...existing,
+                        city: f.city, street: f.street, house: f.house, flat: f.flat,
+                        square: f.square, createdAt: f.createdAt
+                    };
+                    syncLegacyFieldsForRegnum(db, reg);
+                    return { ok: true, affectedAbonentIds: collectAffectedAbonentIdsByRegnums(db, [reg]) };
+                }
+            });
             return;
         }
 
@@ -885,27 +984,33 @@ function onSave() {
             return;
         }
 
-        db.premises[regKey] = {
-            regnum: regKey,
-            city: f.city,
-            street: f.street,
-            house: f.house,
-            flat: f.flat,
-            square: f.square,
-            createdAt: f.createdAt,
-            regnumTemp: isUnknown ? true : false,
-            regnumLocked: isUnknown ? false : true
-        };
-
-        window.saveAbonentsDB();
-        setWarn('Объект добавлен.', true);
-        clearForm();
-        renderTable();
-        refreshAddressDatalists(); // ✅
+        persistPremiseTransaction({
+            successMessage: 'Объект добавлен.',
+            mutate: function () {
+                db.premises[regKey] = {
+                    regnum: regKey,
+                    city: f.city,
+                    street: f.street,
+                    house: f.house,
+                    flat: f.flat,
+                    square: f.square,
+                    createdAt: f.createdAt,
+                    regnumTemp: isUnknown ? true : false,
+                    regnumLocked: isUnknown ? false : true
+                };
+                syncLegacyFieldsForRegnum(db, regKey);
+                return { ok: true, affectedAbonentIds: collectAffectedAbonentIdsByRegnums(db, [regKey]) };
+            },
+            onSuccess: function () {
+                clearForm();
+            }
+        });
     }
 
     function onDelete(regnum) {
         if (!canWriteOrExplainLocal()) return;
+        if (state.busy) return;
+
         const db = window.AbonentsDB;
         const reg = String(regnum);
         if (!db?.premises?.[reg]) return;
@@ -918,13 +1023,16 @@ function onSave() {
         const ok = confirm('Удалить объект (квартиру)\nregnum: ' + reg + '\n\nДействие необратимо.');
         if (!ok) return;
 
-        delete db.premises[reg];
-        window.saveAbonentsDB();
-
-        if (state.editingRegnum === reg) clearForm();
-
-        renderTable();
-        refreshAddressDatalists(); // ✅
+        persistPremiseTransaction({
+            successMessage: 'Объект удалён.',
+            mutate: function () {
+                delete db.premises[reg];
+                return { ok: true };
+            },
+            onSuccess: function () {
+                if (state.editingRegnum === reg) clearForm();
+            }
+        });
     }
 
     function syncLegacyFieldsForRegnum(db, regnum) {
