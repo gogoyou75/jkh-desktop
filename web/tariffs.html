@@ -114,6 +114,7 @@
 
   const PAGE_TITLE = "tariffs.html";
   const CANON_PREFIX = "tariffs_";
+  let _pageStarted = false;
 
   function $(id){
     return document.getElementById(id);
@@ -259,7 +260,7 @@
   function getDataState(){
     try{
       const st = getUiState();
-      return st?.data || null;
+      return st && st.data ? st.data : null;
     }catch(e){
       return null;
     }
@@ -288,6 +289,7 @@
 
   function setPageStatus(text, cssClass){
     const box = $("pageStatus");
+    if (!box) return;
     box.className = "page-status " + (cssClass || "warn");
     box.textContent = String(text || "");
   }
@@ -318,16 +320,16 @@
     if (!Array.isArray(parsed)) return [];
 
     return parsed.map(t => ({
-      id: String(t?.id || uid()),
-      code: String(t?.code || ""),
-      title: String(t?.title || ""),
-      type: t?.type === "fixed_month" ? "fixed_month" : "per_m2",
-      active: !!t?.active,
-      rates: Array.isArray(t?.rates)
+      id: String(t && t.id || uid()),
+      code: String(t && t.code || ""),
+      title: String(t && t.title || ""),
+      type: (t && t.type) === "fixed_month" ? "fixed_month" : "per_m2",
+      active: !!(t && t.active),
+      rates: Array.isArray(t && t.rates)
         ? t.rates
             .map(r => ({
-              from: normalizeISOToFirst(r?.from),
-              value: r2(toNum(r?.value))
+              from: normalizeISOToFirst(r && r.from),
+              value: r2(toNum(r && r.value))
             }))
             .filter(r => r.from)
         : []
@@ -460,6 +462,8 @@
 
   function renderTariffs(){
     const host = $("tariffsHost");
+    if (!host) return;
+
     const tariffs = loadTariffsFromCanon();
 
     if (!Array.isArray(tariffs) || !tariffs.length){
@@ -478,16 +482,16 @@
       const id = String(card.getAttribute("data-tariff-id") || uid());
       const prev = currentTariffs.find(x => String(x.id) === id) || null;
 
-      const title = String(card.querySelector('[data-field="title"]')?.value || "").trim();
-      const type = String(card.querySelector('[data-field="type"]')?.value || "per_m2");
-      const active = !!card.querySelector('[data-field="active"]')?.checked;
+      const title = String(card.querySelector('[data-field="title"]') && card.querySelector('[data-field="title"]').value || "").trim();
+      const type = String(card.querySelector('[data-field="type"]') && card.querySelector('[data-field="type"]').value || "per_m2");
+      const active = !!(card.querySelector('[data-field="active"]') && card.querySelector('[data-field="active"]').checked);
 
       const rows = Array.from(card.querySelectorAll('tr[data-rate-row="1"]'));
       const rates = [];
 
       rows.forEach(tr => {
-        const monthRaw = tr.querySelector('input[data-field="rate_month"]')?.value || "";
-        const valueRaw = tr.querySelector('input[data-field="rate_value"]')?.value || "";
+        const monthRaw = tr.querySelector('input[data-field="rate_month"]') && tr.querySelector('input[data-field="rate_month"]').value || "";
+        const valueRaw = tr.querySelector('input[data-field="rate_value"]') && tr.querySelector('input[data-field="rate_value"]').value || "";
         const from = yyyymmToISOFirst(monthRaw);
         const value = toNum(valueRaw);
 
@@ -504,7 +508,7 @@
 
       return {
         id,
-        code: String(prev?.code || ""),
+        code: String(prev && prev.code || ""),
         title,
         type: type === "fixed_month" ? "fixed_month" : "per_m2",
         active,
@@ -560,6 +564,7 @@
 
   function addRateRow(card){
     const tbody = card.querySelector("table tbody");
+    if (!tbody) return;
     tbody.insertAdjacentHTML("beforeend", `
       <tr data-rate-row="1">
         <td><input data-field="rate_month" type="month" value=""></td>
@@ -577,7 +582,6 @@
 
     const id = String(card.getAttribute("data-tariff-id") || "");
     if (!id) return;
-
     if (!confirm("Удалить тариф?")) return;
 
     const tariffs = loadTariffsFromCanon().filter(t => String(t.id) !== id);
@@ -651,51 +655,86 @@
   }
 
   function bootstrap(){
+    if (_pageStarted) return true;
+
+    const ownerId = getOwnerId();
+    const currentUserId = getCurrentUserId();
+    const role = getCurrentRole();
+
+    if (!ownerId){
+      throw new Error("ACTIVE_OWNER_ID is empty");
+    }
+
+    if (!isServerDataReady()){
+      return false;
+    }
+
+    const key = cacheKey();
+
+    setPageStatus(
+      "Серверные данные подтверждены.\n" +
+      "Страница: " + PAGE_TITLE + "\n" +
+      "owner: " + ownerId + "\n" +
+      "user: " + (currentUserId || "unknown") + "\n" +
+      "role: " + (role || "unknown") + "\n" +
+      "ключ: " + key,
+      "ok"
+    );
+
+    showMain(true);
+
+    const raw = storeGetRaw(key);
+    if (raw == null || raw === ""){
+      saveTariffsToCanon([]);
+    }
+
+    renderTariffs();
+    refreshEditLocks();
+    _pageStarted = true;
+    return true;
+  }
+
+  function tryStart(){
     try{
-      const ownerId = getOwnerId();
-      const currentUserId = getCurrentUserId();
-      const role = getCurrentRole();
-
-      if (!ownerId){
-        throw new Error("ACTIVE_OWNER_ID is empty");
+      const ds = getDataState();
+      if (!ds){
+        setPageStatus("Ожидание инициализации JKH_UI_STATE...", "warn");
+        return false;
       }
 
-      if (!isServerDataReady()){
-        throw new Error(
-          "SERVER DATA NOT LOADED. " +
-          "Страница тарифов не должна работать до завершения автозагрузки серверных данных.\n\n" +
-          getServerStatusText()
-        );
+      const status = String(ds.status || "");
+      if (status === "ready"){
+        return bootstrap();
       }
 
-      const key = cacheKey();
-
-      setPageStatus(
-        "Серверные данные подтверждены.\n" +
-        "Страница: " + PAGE_TITLE + "\n" +
-        "owner: " + ownerId + "\n" +
-        "user: " + (currentUserId || "unknown") + "\n" +
-        "role: " + (role || "unknown") + "\n" +
-        "ключ: " + key,
-        "ok"
-      );
-
-      showMain(true);
-
-      const raw = storeGetRaw(key);
-      if (raw == null || raw === ""){
-        saveTariffsToCanon([]);
+      if (status === "loading" || status === "idle"){
+        setPageStatus("Ожидание загрузки серверных данных...\n\n" + getServerStatusText(), "warn");
+        return false;
       }
 
-      renderTariffs();
-      refreshEditLocks();
-    }catch(e){
+      if (status === "empty"){
+        setPageStatus("Серверный dump пуст, но состояние подтверждено.\n\nСтраница может быть открыта в пустом режиме.", "ok");
+        showMain(true);
+        const key = cacheKey();
+        const raw = storeGetRaw(key);
+        if (raw == null || raw === ""){
+          saveTariffsToCanon([]);
+        }
+        renderTariffs();
+        refreshEditLocks();
+        _pageStarted = true;
+        return true;
+      }
+
       hardFail(
         "Не подтверждена server-first загрузка для страницы тарифов.\n\n" +
         "Это и есть причина, почему на одном компьютере может работать, а на другом нет.\n\n" +
-        getServerStatusText(),
-        e
+        getServerStatusText()
       );
+      return false;
+    }catch(e){
+      hardFail("Ошибка запуска страницы тарифов.", e);
+      return false;
     }
   }
 
@@ -723,33 +762,6 @@
   });
 
   document.addEventListener("DOMContentLoaded", function(){
-
-  function tryStart(){
-    try{
-      if (window.JKH_UI_STATE && window.JKH_UI_STATE.data && window.JKH_UI_STATE.data.status === "ready") {
-        bootstrap();
-        return true;
-      }
-      return false;
-    }catch(e){
-      return false;
-    }
-  }
-
-  // 1. Попытка сразу
-  if (tryStart()) return;
-
-  // 2. Подписка на событие
-  window.addEventListener("JKH_UI_STATE_CHANGED", function(){
-    tryStart();
-  });
-
-  // 3. Страховка (если событие не прилетит)
-  setTimeout(function(){
-    tryStart();
-  }, 1000);
-
-});
     try{
       $("btnAddTariff").addEventListener("click", addTariff);
 
@@ -767,7 +779,23 @@
         recalcAll();
       });
 
-      bootstrap();
+      if (tryStart()) return;
+
+      window.addEventListener("JKH_UI_STATE_CHANGED", function(){
+        if (_pageStarted) return;
+        tryStart();
+      });
+
+      setTimeout(function(){
+        if (_pageStarted) return;
+        tryStart();
+      }, 1000);
+
+      setTimeout(function(){
+        if (_pageStarted) return;
+        tryStart();
+      }, 3000);
+
     }catch(e){
       hardFail("Ошибка инициализации страницы тарифов.", e);
     }
