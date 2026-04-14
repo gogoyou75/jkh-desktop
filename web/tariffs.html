@@ -3,17 +3,14 @@
 <head>
   <meta charset="UTF-8" />
   <script src="critical_guard.js" defer></script>
-  <title>Тарифы (динамические)</title>
+  <title>Тарифы (server-first)</title>
 
   <link rel="stylesheet" href="style.css" />
 
-  <!-- ОБЯЗАТЕЛЬНО: подключаем данные и layout -->
   <script src="auth.js"></script>
   <script src="storage.js"></script>
   <script src="data.js"></script>
   <script src="layout.js"></script>
-
-  <!-- ЛОГИКА автоначислений (Variant A). -->
   <script src="autoaccrual_engine.js"></script>
 
   <style>
@@ -27,14 +24,29 @@
     .tariff-card{ border:2px solid #000; background:#fff; padding:10px; margin-bottom:12px; }
     .tariff-head{ display:flex; gap:10px; align-items:flex-end; flex-wrap:wrap; }
     .tariff-head .grow{ flex:1; min-width:240px; }
+
     label{ display:block; font-size:12px; opacity:.85; margin-bottom:4px; }
     input, select{
-      width:100%; box-sizing:border-box; border:2px solid #000;
-      height:28px; padding:4px 6px; font-family:inherit; font-size:13px;
+      width:100%;
+      box-sizing:border-box;
+      border:2px solid #000;
+      height:28px;
+      padding:4px 6px;
+      font-family:inherit;
+      font-size:13px;
       background:#fff;
     }
     input[type="month"]{ height:28px; }
-    .chk{ display:flex; gap:6px; align-items:center; height:28px; padding:0 6px; border:2px solid #000; background:#fff; }
+
+    .chk{
+      display:flex;
+      gap:6px;
+      align-items:center;
+      height:28px;
+      padding:0 6px;
+      border:2px solid #000;
+      background:#fff;
+    }
     .chk input{ width:auto; height:auto; border:0; }
 
     table{ width:100%; border-collapse:collapse; table-layout:fixed; margin-top:10px; }
@@ -45,69 +57,127 @@
     .col-actions{ width:120px; }
     .right{ text-align:right; }
 
-    .mono{ font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+    .mono{
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+    }
+
     .danger{ background:#ffecec; }
+    .warn{ background:#fff7d6; }
+    .ok{ background:#eef9ee; }
+
+    .page-status{
+      border:2px solid #000;
+      background:#fff;
+      padding:12px;
+      margin-bottom:14px;
+      white-space:pre-wrap;
+    }
+
+    .hidden{ display:none !important; }
   </style>
-
-<script>
-  // scoped key helper for this page
-  function _k(key){
-    try{ if(window.JKHStorage&&typeof JKHStorage.k==='function') return JKHStorage.k(key); }catch(e){}
-    try{ if(window.Auth&&typeof Auth.getActiveDbOwnerId==='function') return 'jkhdb::'+Auth.getActiveDbOwnerId()+'::'+key; }catch(e){}
-    return key;
-  }
-</script>
-
 </head>
 
 <body>
 <script>renderLayout();</script>
 
-<h2>Тарифы (динамические)</h2>
+<h2>Тарифы (server-first)</h2>
 
 <div class="panel">
   <div class="small">
     ✅ Можно создавать любое количество тарифов.<br>
-    ✅ Для каждого тарифа: <b>название</b>, <b>тип</b> (руб/м² или фикс/мес), <b>история ставок</b> и <b>галочка “участвует в расчётах”</b>.<br><br>
-    <b>Хранение (канон):</b><br>
+    ✅ Для каждого тарифа: <b>название</b>, <b>тип</b> (<b>руб/м²</b> или <b>фикс/мес</b>), <b>история ставок</b>, <b>галочка “участвует в расчётах”</b>.<br><br>
+    <b>Канон хранения:</b><br>
     • owner-bound ключ: <span class="mono">tariffs_{owner}</span><br>
-    • менять можно только <b>свои</b> тарифы в своей базе; чужие тарифы доступны только на просмотр
+    • страница не должна жить на legacy-ключах<br>
+    • если серверные данные не загружены, страница не должна притворяться рабочей
   </div>
   <div class="hint">
     ⚠️ Дата начала тарифа — <b>только 1-е число месяца</b>. Выбор даты сделан календарём “месяц/год”.
   </div>
 </div>
 
-<div class="btnrow">
-  <button class="btn" type="button" id="btnAddTariff">+ добавить тариф</button>
-  <button class="btn" type="button" id="btnSaveAll">сохранить всё</button>
-  <button class="btn" type="button" id="btnRecalcAll">пересчитать всем</button>
-</div>
+<div id="pageStatus" class="page-status warn">Проверка состояния загрузки данных...</div>
 
-<div id="tariffsHost" style="margin-top:14px;"></div>
+<div id="pageMain" class="hidden">
+  <div class="btnrow">
+    <button class="btn" type="button" id="btnAddTariff">+ добавить тариф</button>
+    <button class="btn" type="button" id="btnSaveAll">сохранить всё</button>
+    <button class="btn" type="button" id="btnRecalcAll">пересчитать всем</button>
+  </div>
+
+  <div id="tariffsHost" style="margin-top:14px;"></div>
+</div>
 
 <script>
 (function(){
   "use strict";
 
-  const KEY_NEW = "tariffs_dynamic_v1";
-  const KEY_LEGACY = "tariffs_content_repair_v1";
-  function getOwnerId(){
-    try{ if(window.JKHStorage && typeof JKHStorage.getActiveOwnerId === "function") return String(JKHStorage.getActiveOwnerId() || "guest"); }catch(e){}
-    try{ if(window.Auth && typeof Auth.getActiveDbOwnerId === "function") return String(Auth.getActiveDbOwnerId() || "guest"); }catch(e){}
-    return "guest";
+  const PAGE_TITLE = "tariffs.html";
+  const CANON_PREFIX = "tariffs_";
+
+  function $(id){
+    return document.getElementById(id);
   }
-  function cacheKey(){ return "tariffs_" + getOwnerId(); }
-  function storeGet(key){ return (window.JKHStore && JKHStore.getRaw) ? JKHStore.getRaw(key) : null; }
-  function storeSet(key, value){ if (window.JKHStore && JKHStore.setRaw) JKHStore.setRaw(key, value); }
+
+  function escapeHtml(s){
+    return String(s ?? "")
+      .replaceAll("&", "&amp;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;")
+      .replaceAll('"', "&quot;")
+      .replaceAll("'", "&#039;");
+  }
+
+  function uid(){
+    return "t_" + Math.random().toString(16).slice(2) + "_" + Date.now().toString(16);
+  }
+
+  function r2(x){
+    return Math.round((Number(x) || 0) * 100) / 100;
+  }
+
+  function toNum(v){
+    if (typeof v === "number") return v;
+    const s = String(v ?? "").replace(/\s+/g, "").replace(",", ".");
+    const n = Number(s);
+    return Number.isFinite(n) ? n : NaN;
+  }
+
+  function safeJsonParse(raw, fallback){
+    try{
+      if (!raw) return fallback;
+      const v = JSON.parse(raw);
+      return v === undefined ? fallback : v;
+    }catch(e){
+      return fallback;
+    }
+  }
+
+  function isoToYYYYMM(iso){
+    const m = String(iso || "").match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (!m) return "";
+    return m[1] + "-" + m[2];
+  }
+
+  function yyyymmToISOFirst(yyyymm){
+    const m = String(yyyymm || "").trim().match(/^(\d{4})-(\d{2})$/);
+    if (!m) return "";
+    return m[1] + "-" + m[2] + "-01";
+  }
+
+  function normalizeISOToFirst(iso){
+    const m = String(iso || "").trim().match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (!m) return "";
+    return m[1] + "-" + m[2] + "-01";
+  }
+
   function getCurrentUser(){
     try{
-      return (window.Auth && typeof Auth.getCurrentUser === "function")
-        ? (Auth.getCurrentUser() || null)
-        : null;
-    }catch(e){
-      return null;
-    }
+      if (window.Auth && typeof Auth.getCurrentUser === "function"){
+        return Auth.getCurrentUser() || null;
+      }
+    }catch(e){}
+    return null;
   }
 
   function getCurrentUserId(){
@@ -127,16 +197,44 @@
     }
   }
 
+  function getCurrentRole(){
+    try{
+      const u = getCurrentUser();
+      return String(u?.role || "").trim().toLowerCase();
+    }catch(e){
+      return "";
+    }
+  }
+
   function isGuestRole(role){
     return String(role || "").trim().toLowerCase() === "guest";
   }
 
+  function getOwnerId(){
+    try{
+      if (window.JKHStorage && typeof JKHStorage.getActiveOwnerId === "function"){
+        return String(JKHStorage.getActiveOwnerId() || "").trim();
+      }
+    }catch(e){}
+
+    try{
+      if (window.Auth && typeof Auth.getActiveDbOwnerId === "function"){
+        return String(Auth.getActiveDbOwnerId() || "").trim();
+      }
+    }catch(e){}
+
+    return "";
+  }
+
+  function cacheKey(){
+    const owner = getOwnerId();
+    if (!owner) throw new Error("NO_ACTIVE_OWNER_ID");
+    return CANON_PREFIX + owner;
+  }
+
   function canEditTariffs(){
     try{
-      const u = getCurrentUser();
-      if (!u) return false;
-
-      const role = String(u.role || "").trim().toLowerCase();
+      const role = getCurrentRole();
       if (!role || isGuestRole(role)) return false;
 
       const currentUserId = getCurrentUserId();
@@ -150,118 +248,95 @@
     }
   }
 
-  function safeJsonParse(raw, fallback){
+  function getUiState(){
     try{
-      if (!raw) return fallback;
-      const v = JSON.parse(raw);
-      return (v === undefined) ? fallback : v;
-    }catch{ return fallback; }
-  }
-
-  function uid(){
-    return "t_" + Math.random().toString(16).slice(2) + "_" + Date.now().toString(16);
-  }
-
-  function r2(x){ return Math.round((Number(x)||0) * 100) / 100; }
-  function toNum(v){
-    if (typeof v === "number") return v;
-    const s = String(v ?? "").replace(/\s+/g,"").replace(",",".");
-    const n = Number(s);
-    return Number.isFinite(n) ? n : NaN;
-  }
-
-  function isoToYYYYMM(iso){
-    const m = String(iso||"").match(/^(\d{4})-(\d{2})-(\d{2})$/);
-    if (!m) return "";
-    return `${m[1]}-${m[2]}`;
-  }
-
-  function yyyymmToISOFirst(yyyymm){
-    const m = String(yyyymm||"").trim().match(/^(\d{4})-(\d{2})$/);
-    if (!m) return "";
-    return `${m[1]}-${m[2]}-01`;
-  }
-
-  function normalizeISOToFirst(iso){
-    const m = String(iso||"").match(/^(\d{4})-(\d{2})-(\d{2})$/);
-    if (!m) return "";
-    return `${m[1]}-${m[2]}-01`;
-  }
-
-  function loadLegacy(){
-    const raw = storeGet(KEY_LEGACY);
-    if (!raw) return null;
-    const parsed = safeJsonParse(raw, null);
-    if (!parsed || typeof parsed !== "object") return null;
-    const out = { content: [], repair: [] };
-    out.content = Array.isArray(parsed.content) ? parsed.content : [];
-    out.repair  = Array.isArray(parsed.repair) ? parsed.repair : [];
-    out.content = out.content.map(x => ({ date: normalizeISOToFirst(x.date), rate: r2(toNum(x.rate)) }));
-    out.repair  = out.repair.map(x => ({ date: normalizeISOToFirst(x.date), rate: r2(toNum(x.rate)) }));
-    return out;
-  }
-
-  function migrateIfNeeded(){
-    const existing = safeJsonParse(storeGet(cacheKey()), null);
-    if (Array.isArray(existing)){
-      return existing;
+      return window.JKH_UI_STATE || null;
+    }catch(e){
+      return null;
     }
-    const existingLegacyNew = safeJsonParse(storeGet(KEY_NEW), null);
-    if (Array.isArray(existingLegacyNew)){
-      storeSet(cacheKey(), JSON.stringify(existingLegacyNew));
-      return existingLegacyNew;
+  }
+
+  function getDataState(){
+    try{
+      const st = getUiState();
+      return st?.data || null;
+    }catch(e){
+      return null;
+    }
+  }
+
+  function isServerDataReady(){
+    const ds = getDataState();
+    return !!(ds && String(ds.status || "") === "ready");
+  }
+
+  function getServerStatusText(){
+    const ds = getDataState();
+    if (!ds){
+      return "JKH_UI_STATE.data отсутствует. Страница не может доказать, что данные загружены с сервера.";
     }
 
-    const legacy = loadLegacy();
-    if (!legacy){
-      storeSet(cacheKey(), JSON.stringify([]));
-      return [];
-    }
-    const tariffs = [
-      {
-        id: uid(),
-        code: "content",
-        title: "Содержание",
-        type: "per_m2",
-        active: true,
-        rates: (legacy.content || []).map(x => ({ from: normalizeISOToFirst(x.date), value: r2(toNum(x.rate)) }))
-      },
-      {
-        id: uid(),
-        code: "repair",
-        title: "Ремонт общего имущества",
-        type: "per_m2",
-        active: true,
-        rates: (legacy.repair || []).map(x => ({ from: normalizeISOToFirst(x.date), value: r2(toNum(x.rate)) }))
-      }
-    ];
+    const lines = [];
+    lines.push("Статус данных: " + String(ds.status || "unknown"));
 
-    storeSet(cacheKey(), JSON.stringify(tariffs));
-    return tariffs;
+    if (ds.source) lines.push("Источник: " + String(ds.source));
+    if (ds.loadedAt) lines.push("Загружено: " + String(ds.loadedAt));
+    if (ds.message) lines.push("Сообщение: " + String(ds.message));
+
+    return lines.join("\n");
   }
 
-  function loadNew(){
-    const tariffs = migrateIfNeeded();
-    return (tariffs || []).map(t => ({
+  function setPageStatus(text, cssClass){
+    const box = $("pageStatus");
+    box.className = "page-status " + (cssClass || "warn");
+    box.textContent = String(text || "");
+  }
+
+  function showMain(flag){
+    const el = $("pageMain");
+    if (!el) return;
+    el.classList.toggle("hidden", !flag);
+  }
+
+  function storeGetRaw(key){
+    if (!window.JKHStore || typeof JKHStore.getRaw !== "function"){
+      throw new Error("JKHStore.getRaw is not available");
+    }
+    return JKHStore.getRaw(key);
+  }
+
+  function storeSetRaw(key, value){
+    if (!window.JKHStore || typeof JKHStore.setRaw !== "function"){
+      throw new Error("JKHStore.setRaw is not available");
+    }
+    return JKHStore.setRaw(key, value);
+  }
+
+  function loadTariffsFromCanon(){
+    const key = cacheKey();
+    const parsed = safeJsonParse(storeGetRaw(key), []);
+    if (!Array.isArray(parsed)) return [];
+
+    return parsed.map(t => ({
       id: String(t?.id || uid()),
       code: String(t?.code || ""),
       title: String(t?.title || ""),
-      type: (t?.type === "fixed_month") ? "fixed_month" : "per_m2",
+      type: t?.type === "fixed_month" ? "fixed_month" : "per_m2",
       active: !!t?.active,
-      rates: Array.isArray(t?.rates) ? t.rates.map(r => ({
-        from: normalizeISOToFirst(r?.from),
-        value: r2(toNum(r?.value))
-      })).filter(r => r.from) : []
+      rates: Array.isArray(t?.rates)
+        ? t.rates
+            .map(r => ({
+              from: normalizeISOToFirst(r?.from),
+              value: r2(toNum(r?.value))
+            }))
+            .filter(r => r.from)
+        : []
     }));
   }
 
-  function valueAsOf(rates, monthStartISO){
-    const target = String(monthStartISO||"");
-    let chosen = null;
-    (rates || []).slice().sort((a,b)=>String(a.from).localeCompare(String(b.from))).forEach(r => {
-      if (String(r.from) <= target) chosen = r;
-    });
-    return chosen ? r2(toNum(chosen.value)) : 0;
+  function saveTariffsToCanon(tariffs){
+    const key = cacheKey();
+    storeSetRaw(key, JSON.stringify(tariffs));
   }
 
   function validateTariffs(tariffs){
@@ -269,72 +344,77 @@
 
     (tariffs || []).forEach((t, ti) => {
       const n = ti + 1;
-      if (!String(t.title||"").trim()) errors.push(`Тариф #${n}: название пустое`);
+
+      if (!String(t.title || "").trim()){
+        errors.push("Тариф #" + n + ": название пустое");
+      }
 
       const rates = Array.isArray(t.rates) ? t.rates : [];
       const seen = new Set();
+
       rates.forEach((r, ri) => {
         const month = isoToYYYYMM(r.from);
+
         if (!r.from){
-          errors.push(`Тариф «${t.title || ("#"+n)}»: строка ${ri+1} — не выбран месяц`);
+          errors.push("Тариф «" + (t.title || ("#" + n)) + "»: строка " + (ri + 1) + " — не выбран месяц");
           return;
         }
+
         if (seen.has(r.from)){
-          errors.push(`Тариф «${t.title || ("#"+n)}»: дубль месяца ${month}`);
+          errors.push("Тариф «" + (t.title || ("#" + n)) + "»: дубль месяца " + month);
           return;
         }
         seen.add(r.from);
+
         const v = toNum(r.value);
-        if (!Number.isFinite(v)) errors.push(`Тариф «${t.title || ("#"+n)}»: строка ${ri+1} — неверная ставка`);
+        if (!Number.isFinite(v)){
+          errors.push("Тариф «" + (t.title || ("#" + n)) + "»: строка " + (ri + 1) + " — неверная ставка");
+        }
       });
     });
 
     return errors;
   }
 
-  function saveAll(tariffs){
-    storeSet(cacheKey(), JSON.stringify(tariffs));
-  }
-
-  function escapeHtml(s){
-    return String(s ?? "")
-      .replaceAll("&", "&amp;")
-      .replaceAll("<", "&lt;")
-      .replaceAll(">", "&gt;")
-      .replaceAll('"', "&quot;")
-      .replaceAll("'", "&#039;");
-  }
-
   function cardHtml(t){
     const activeChecked = t.active ? "checked" : "";
-    const typeVal = (t.type === "fixed_month") ? "fixed_month" : "per_m2";
-    const typeLabel = (typeVal === "per_m2") ? "руб/м²" : "фикс/мес";
+    const typeVal = t.type === "fixed_month" ? "fixed_month" : "per_m2";
+    const typeLabel = typeVal === "per_m2" ? "руб/м²" : "фикс/мес";
 
-    const rows = (t.rates || []).slice().sort((a,b)=>String(a.from).localeCompare(String(b.from))).map((r) => {
-      const mm = r.from ? isoToYYYYMM(r.from) : "";
-      const vv = (r.value === 0 || r.value) ? String(r.value) : "";
-      return `
-        <tr data-rate-row="1">
-          <td><input data-field="rate_month" type="month" value="${escapeHtml(mm)}"></td>
-          <td><input data-field="rate_value" placeholder="0.00" value="${escapeHtml(vv)}"></td>
-          <td class="right"><button class="btn" type="button" data-rate-del="1">удалить</button></td>
-        </tr>
-      `;
-    }).join("");
+    const rows = (t.rates || [])
+      .slice()
+      .sort((a, b) => String(a.from).localeCompare(String(b.from)))
+      .map((r) => {
+        const mm = r.from ? isoToYYYYMM(r.from) : "";
+        const vv = (r.value === 0 || r.value) ? String(r.value) : "";
+
+        return `
+          <tr data-rate-row="1">
+            <td><input data-field="rate_month" type="month" value="${escapeHtml(mm)}"></td>
+            <td><input data-field="rate_value" placeholder="0.00" value="${escapeHtml(vv)}"></td>
+            <td class="right"><button class="btn" type="button" data-rate-del="1">удалить</button></td>
+          </tr>
+        `;
+      })
+      .join("");
 
     return `
       <div class="tariff-card" data-tariff-id="${escapeHtml(t.id)}">
         <div class="tariff-head">
           <div class="grow">
             <label>Название тарифа</label>
-            <input data-field="title" value="${escapeHtml(t.title)}" placeholder="Например: Домофон / Лифт / Охрана / ..." />
+            <input
+              data-field="title"
+              value="${escapeHtml(t.title)}"
+              placeholder="Например: Домофон / Лифт / Охрана / ..."
+            />
           </div>
 
           <div style="width:220px;">
             <label>Тип тарифа</label>
             <select data-field="type">
-              <option value="per_m2" ${typeVal==="per_m2" ? "selected":""}>руб/м²</option>
-              <option value="fixed_month" ${typeVal==="fixed_month" ? "selected":""}>фикс/мес</option>
+              <option value="per_m2" ${typeVal === "per_m2" ? "selected" : ""}>руб/м²</option>
+              <option value="fixed_month" ${typeVal === "fixed_month" ? "selected" : ""}>фикс/мес</option>
             </select>
           </div>
 
@@ -352,7 +432,7 @@
         </div>
 
         <div class="hint" style="margin-top:10px;">
-          История ставок (<b>${typeLabel}</b>): одна строка = один месяц начала действия. Дальше ставка действует “сквозь время”.
+          История ставок (<b>${typeLabel}</b>): одна строка = один месяц начала действия. Дальше ставка действует сквозным образом до следующего изменения.
         </div>
 
         <table>
@@ -367,7 +447,7 @@
             </tr>
           </thead>
           <tbody>
-            ${rows || ""}
+            ${rows}
           </tbody>
         </table>
 
@@ -378,60 +458,83 @@
     `;
   }
 
-  function render(){
-    const host = document.getElementById("tariffsHost");
-    const tariffs = loadNew();
+  function renderTariffs(){
+    const host = $("tariffsHost");
+    const tariffs = loadTariffsFromCanon();
+
+    if (!Array.isArray(tariffs) || !tariffs.length){
+      host.innerHTML = `<div class="panel">Тарифов пока нет. Нажми <b>+ добавить тариф</b>.</div>`;
+      return;
+    }
+
     host.innerHTML = tariffs.map(cardHtml).join("");
-    if (!tariffs.length) host.innerHTML = `<div class="panel">Тарифов пока нет. Нажми <b>+ добавить тариф</b>.</div>`;
   }
 
   function readFromUI(){
     const cards = Array.from(document.querySelectorAll(".tariff-card"));
-    const out = [];
+    const currentTariffs = loadTariffsFromCanon();
 
-    for (const card of cards){
+    return cards.map(card => {
       const id = String(card.getAttribute("data-tariff-id") || uid());
-      const title = String(card.querySelector('[data-field="title"]')?.value || "");
+      const prev = currentTariffs.find(x => String(x.id) === id) || null;
+
+      const title = String(card.querySelector('[data-field="title"]')?.value || "").trim();
       const type = String(card.querySelector('[data-field="type"]')?.value || "per_m2");
       const active = !!card.querySelector('[data-field="active"]')?.checked;
 
-      const rates = [];
       const rows = Array.from(card.querySelectorAll('tr[data-rate-row="1"]'));
+      const rates = [];
+
       rows.forEach(tr => {
         const monthRaw = tr.querySelector('input[data-field="rate_month"]')?.value || "";
-        const valRaw   = tr.querySelector('input[data-field="rate_value"]')?.value || "";
+        const valueRaw = tr.querySelector('input[data-field="rate_value"]')?.value || "";
         const from = yyyymmToISOFirst(monthRaw);
-        const v = toNum(valRaw);
-        const anyTyped = String(monthRaw||"").trim() || String(valRaw||"").trim();
+        const value = toNum(valueRaw);
+
+        const anyTyped = String(monthRaw).trim() || String(valueRaw).trim();
         if (!from && !anyTyped) return;
-        rates.push({ from: from, value: r2(v) });
+
+        rates.push({
+          from: normalizeISOToFirst(from),
+          value: r2(value)
+        });
       });
 
-      let code = "";
-      try{
-        const cur = safeJsonParse(storeGet(cacheKey()), []);
-        const old = Array.isArray(cur) ? cur.find(x => String(x?.id) === id) : null;
-        code = String(old?.code || "");
-      }catch{}
+      rates.sort((a, b) => String(a.from).localeCompare(String(b.from)));
 
-      out.push({
-        id, code,
+      return {
+        id,
+        code: String(prev?.code || ""),
         title,
-        type: (type === "fixed_month") ? "fixed_month" : "per_m2",
+        type: type === "fixed_month" ? "fixed_month" : "per_m2",
         active,
         rates
-      });
-    }
+      };
+    });
+  }
 
-    out.forEach(t => {
-      t.title = String(t.title||"");
-      t.rates = (t.rates || [])
-        .map(r => ({ from: normalizeISOToFirst(r.from), value: r2(toNum(r.value)) }))
-        .filter(r => r.from);
-      t.rates.sort((a,b)=>String(a.from).localeCompare(String(b.from)));
+  function refreshEditLocks(){
+    const editable = canEditTariffs();
+
+    ["btnAddTariff", "btnSaveAll", "btnRecalcAll"].forEach(id => {
+      const el = $(id);
+      if (el) el.disabled = !editable;
     });
 
-    return out;
+    document.querySelectorAll("#tariffsHost input, #tariffsHost select, #tariffsHost button").forEach(el => {
+      el.disabled = !editable;
+    });
+
+    const oldNotice = document.getElementById("readOnlyNotice");
+    if (oldNotice) oldNotice.remove();
+
+    if (!editable){
+      const notice = document.createElement("div");
+      notice.id = "readOnlyNotice";
+      notice.className = "panel warn";
+      notice.textContent = "Режим просмотра: можно редактировать только свои тарифы в своей базе.";
+      $("pageMain").insertBefore(notice, $("tariffsHost"));
+    }
   }
 
   function addTariff(){
@@ -439,7 +542,8 @@
       alert("Можно изменять только свои тарифы.");
       return;
     }
-    const tariffs = loadNew();
+
+    const tariffs = loadTariffsFromCanon();
     tariffs.push({
       id: uid(),
       code: "",
@@ -448,8 +552,10 @@
       active: true,
       rates: []
     });
-    storeSet(cacheKey(), JSON.stringify(tariffs));
-    render();
+
+    saveTariffsToCanon(tariffs);
+    renderTariffs();
+    refreshEditLocks();
   }
 
   function addRateRow(card){
@@ -468,13 +574,16 @@
       alert("Можно изменять только свои тарифы.");
       return;
     }
+
     const id = String(card.getAttribute("data-tariff-id") || "");
     if (!id) return;
+
     if (!confirm("Удалить тариф?")) return;
 
-    const tariffs = loadNew().filter(t => String(t.id) !== id);
-    storeSet(cacheKey(), JSON.stringify(tariffs));
-    render();
+    const tariffs = loadTariffsFromCanon().filter(t => String(t.id) !== id);
+    saveTariffsToCanon(tariffs);
+    renderTariffs();
+    refreshEditLocks();
   }
 
   function saveAllFromUI(){
@@ -482,8 +591,10 @@
       alert("Можно изменять только свои тарифы.");
       return false;
     }
+
     const tariffs = readFromUI();
     const errs = validateTariffs(tariffs);
+
     if (errs.length){
       alert("Ошибки:\n" + errs.join("\n"));
       return false;
@@ -494,22 +605,24 @@
       if (!ok) return false;
     }
 
-    saveAll(tariffs);
+    saveTariffsToCanon(tariffs);
     alert("Тарифы сохранены.");
     return true;
   }
 
   function recalcAll(){
     try{
-      if (window.JKHAutoAccrual && typeof window.JKHAutoAccrual.recalcAll === "function") {
+      if (window.JKHAutoAccrual && typeof window.JKHAutoAccrual.recalcAll === "function"){
         const res = window.JKHAutoAccrual.recalcAll();
 
         const total = Array.isArray(res) ? res.length : 0;
         const changed = Array.isArray(res) ? res.filter(x => x && x.changed).length : 0;
 
-        alert(`Перерасчёт выполнен.
-Абонентов обработано: ${total}
-Изменения в начислениях: ${changed}`);
+        alert(
+          "Перерасчёт выполнен.\n" +
+          "Абонентов обработано: " + total + "\n" +
+          "Изменения в начислениях: " + changed
+        );
         return true;
       }
 
@@ -519,26 +632,74 @@
         "Проверь подключение autoaccrual_engine.js и ошибки в Console."
       );
       return false;
-
     }catch(e){
       console.warn("recalcAll failed", e);
-      alert("Перерасчёт упал с ошибкой. Открой F12 → Console и пришли ошибку.");
+      alert("Перерасчёт упал с ошибкой. Открой F12 → Console и пришли текст ошибки.");
       return false;
     }
   }
 
-  document.getElementById("btnAddTariff").addEventListener("click", addTariff);
-  document.getElementById("btnSaveAll").addEventListener("click", () => {
-    if (!saveAllFromUI()) return;
-    recalcAll();
-  });
-  document.getElementById("btnRecalcAll").addEventListener("click", () => {
-    const ok = confirm("Пересчитать начисления всем абонентам по ТЕКУЩИМ СОХРАНЁННЫМ тарифам?\n\n(Если ты менял поля, но не нажал «сохранить всё», изменения не попадут в расчёт.)");
-    if (!ok) return;
-    recalcAll();
-  });
+  function hardFail(msg, err){
+    console.error("[tariffs] hard fail:", msg, err || "");
+    setPageStatus(
+      "Страница заблокирована.\n\n" +
+      String(msg || "Неизвестная ошибка") +
+      (err && err.message ? ("\n\nТехническая деталь: " + err.message) : ""),
+      "danger"
+    );
+    showMain(false);
+  }
 
-  document.addEventListener("click", (e) => {
+  function bootstrap(){
+    try{
+      const ownerId = getOwnerId();
+      const currentUserId = getCurrentUserId();
+      const role = getCurrentRole();
+
+      if (!ownerId){
+        throw new Error("ACTIVE_OWNER_ID is empty");
+      }
+
+      if (!isServerDataReady()){
+        throw new Error(
+          "SERVER DATA NOT LOADED. " +
+          "Страница тарифов не должна работать до завершения автозагрузки серверных данных.\n\n" +
+          getServerStatusText()
+        );
+      }
+
+      const key = cacheKey();
+
+      setPageStatus(
+        "Серверные данные подтверждены.\n" +
+        "Страница: " + PAGE_TITLE + "\n" +
+        "owner: " + ownerId + "\n" +
+        "user: " + (currentUserId || "unknown") + "\n" +
+        "role: " + (role || "unknown") + "\n" +
+        "ключ: " + key,
+        "ok"
+      );
+
+      showMain(true);
+
+      const raw = storeGetRaw(key);
+      if (raw == null || raw === ""){
+        saveTariffsToCanon([]);
+      }
+
+      renderTariffs();
+      refreshEditLocks();
+    }catch(e){
+      hardFail(
+        "Не подтверждена server-first загрузка для страницы тарифов.\n\n" +
+        "Это и есть причина, почему на одном компьютере может работать, а на другом нет.\n\n" +
+        getServerStatusText(),
+        e
+      );
+    }
+  }
+
+  document.addEventListener("click", function(e){
     const delTariffBtn = e.target && e.target.closest && e.target.closest('button[data-tariff-del="1"]');
     if (delTariffBtn){
       const card = delTariffBtn.closest(".tariff-card");
@@ -561,32 +722,29 @@
     }
   });
 
-  document.addEventListener("DOMContentLoaded", () => {
-    migrateIfNeeded();
-    render();
+  document.addEventListener("DOMContentLoaded", function(){
+    try{
+      $("btnAddTariff").addEventListener("click", addTariff);
 
-    const canEdit = canEditTariffs();
+      $("btnSaveAll").addEventListener("click", function(){
+        if (!saveAllFromUI()) return;
+        recalcAll();
+      });
 
-    ["btnAddTariff","btnSaveAll","btnRecalcAll"].forEach(id => {
-      const el = document.getElementById(id);
-      if (el) el.disabled = !canEdit;
-    });
+      $("btnRecalcAll").addEventListener("click", function(){
+        const ok = confirm(
+          "Пересчитать начисления всем абонентам по ТЕКУЩИМ СОХРАНЁННЫМ тарифам?\n\n" +
+          "(Если ты менял поля, но не нажал «сохранить всё», изменения не попадут в расчёт.)"
+        );
+        if (!ok) return;
+        recalcAll();
+      });
 
-    document.querySelectorAll("#tariffsHost input, #tariffsHost select, #tariffsHost button").forEach(el => {
-      el.disabled = !canEdit;
-    });
-
-    if (!canEdit){
-      const host = document.getElementById("tariffsHost");
-      if (host){
-        const notice = document.createElement("div");
-        notice.className = "panel";
-        notice.innerHTML = "Режим просмотра: можно редактировать только свои тарифы в своей базе.";
-        host.parentNode.insertBefore(notice, host);
-      }
+      bootstrap();
+    }catch(e){
+      hardFail("Ошибка инициализации страницы тарифов.", e);
     }
   });
-
 })();
 </script>
 
