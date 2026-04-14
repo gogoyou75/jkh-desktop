@@ -723,6 +723,33 @@
   });
 
   document.addEventListener("DOMContentLoaded", function(){
+
+  function tryStart(){
+    try{
+      if (window.JKH_UI_STATE && window.JKH_UI_STATE.data && window.JKH_UI_STATE.data.status === "ready") {
+        bootstrap();
+        return true;
+      }
+      return false;
+    }catch(e){
+      return false;
+    }
+  }
+
+  // 1. Попытка сразу
+  if (tryStart()) return;
+
+  // 2. Подписка на событие
+  window.addEventListener("JKH_UI_STATE_CHANGED", function(){
+    tryStart();
+  });
+
+  // 3. Страховка (если событие не прилетит)
+  setTimeout(function(){
+    tryStart();
+  }, 1000);
+
+});
     try{
       $("btnAddTariff").addEventListener("click", addTariff);
 
