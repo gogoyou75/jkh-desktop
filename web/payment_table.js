@@ -608,7 +608,7 @@ function getOwnershipHistoryForPremise() {
         if (Array.isArray(data?.data)) return data.data;
         // иногда хранят как { table: [] }
         if (Array.isArray(data?.table)) return data.table;
-      }catch(e){ console.error(e); throw e; }
+      }catch(e){ console.warn("[autoaccrual] tariff parse failed", e); return null; }
       return null;
     };
 
@@ -850,13 +850,13 @@ for (const p of parts) {
 
   function lastAddedPaymentKey() { return "last_added_payment_" + getAbonentId(); }
   function setLastAddedPaymentId(id) {
-    try { sessionStorage.setItem(lastAddedPaymentKey(), String(id)); } catch(e) { console.error(e); throw e; }
+    try { sessionStorage.setItem(lastAddedPaymentKey(), String(id)); } catch(e) { console.warn("setLastAddedPaymentId failed", e); }
   }
   function getLastAddedPaymentId() {
     try { return sessionStorage.getItem(lastAddedPaymentKey()); } catch { return null; }
   }
   function clearLastAddedPaymentId() {
-    try { sessionStorage.removeItem(lastAddedPaymentKey()); } catch(e) { console.error(e); throw e; }
+    try { sessionStorage.removeItem(lastAddedPaymentKey()); } catch(e) { console.warn("clearLastAddedPaymentId failed", e); }
   }
 
   function getCalcPeriod() {
@@ -1661,10 +1661,8 @@ function applyRunningTotals(viewRows) {
         arr = getPayments();
       } else {
         if (ensureAutoAccruals(arr)) {
-          await savePaymentsAndFlush(arr);
-
-    // ✅ Итог карточки (Всего задолженность = Долг + Пени)
-    JKH_RecalcAbonentTotalDebtCard();
+          // на рендере НЕ flush-им: только локальный пересчёт для отображения
+          JKH_RecalcAbonentTotalDebtCard();
         }
       }
     } catch(e) { console.error("autoaccrual failed", e); }
@@ -1691,8 +1689,7 @@ function applyRunningTotals(viewRows) {
       if (row) updateComputedCells(tr, row);
     });
 
-    // сохраняем нормализованные данные (без перерисовки)
-    await savePaymentsAndFlush(arr);
+    // на рендере НЕ сохраняем и НЕ flush-им
   }
 
   async function loadPaymentTable() {
@@ -1739,7 +1736,7 @@ function applyRunningTotals(viewRows) {
         arr = getPayments();
       } else {
         if (ensureAutoAccruals(arr)) {
-          await savePaymentsAndFlush(arr);
+          // на загрузке/рендере НЕ flush-им: только локальный пересчёт
         }
       }
     } catch (e) {
@@ -1800,7 +1797,6 @@ tbody.innerHTML = "";
     });
 
     clearLastAddedPaymentId();
-    await savePaymentsAndFlush(arr);
   }
 
 
