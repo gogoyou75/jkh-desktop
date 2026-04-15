@@ -498,7 +498,9 @@ window.PremisesAdmin = (function () {
         return norm(p?.city) === norm(city) && norm(p?.street) === norm(street) && norm(p?.house) === norm(house) && norm(p?.flat) === norm(flat);
     }
 
+    const BUSY_NAVIGATION_MESSAGE = 'Сохранение на сервер… не переходите на другую страницу.';
     let state = { editingRegnum: null, busy: false };
+    let navigationGuardsBound = false;
 
     function setBusyUI(isBusy) {
         state.busy = !!isBusy;
@@ -509,6 +511,62 @@ window.PremisesAdmin = (function () {
         q('premSearch') && (q('premSearch').disabled = !!isBusy);
         const rowBtns = document.querySelectorAll('#premisesTable button[data-act]');
         rowBtns.forEach(btn => { btn.disabled = !!isBusy; });
+        if (state.busy) setWarn(BUSY_NAVIGATION_MESSAGE, false);
+    }
+
+    function beforeUnloadGuard(e) {
+        if (!state.busy) return;
+        e.preventDefault();
+        e.returnValue = BUSY_NAVIGATION_MESSAGE;
+        return BUSY_NAVIGATION_MESSAGE;
+    }
+
+    function isModifiedOrNonPrimaryClick(e) {
+        return e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey;
+    }
+
+    function resolveAnchorUrl(anchor) {
+        const rawHref = String(anchor?.getAttribute('href') || '').trim();
+        if (!rawHref || rawHref === '#' || rawHref.toLowerCase().startsWith('javascript:')) return null;
+        try {
+            return new URL(rawHref, window.location.href);
+        } catch (e) {
+            return null;
+        }
+    }
+
+    function isSameDocumentUrl(url) {
+        if (!url) return true;
+        return (
+            url.origin === window.location.origin &&
+            url.pathname === window.location.pathname &&
+            url.search === window.location.search
+        );
+    }
+
+    function anchorNavigationGuard(e) {
+        if (!state.busy) return;
+        if (e.defaultPrevented || isModifiedOrNonPrimaryClick(e)) return;
+
+        const anchor = e.target && e.target.closest ? e.target.closest('a[href]') : null;
+        if (!anchor) return;
+
+        const target = String(anchor.getAttribute('target') || '').toLowerCase();
+        if (target && target !== '_self') return;
+
+        const url = resolveAnchorUrl(anchor);
+        if (!url || isSameDocumentUrl(url)) return;
+
+        e.preventDefault();
+        e.stopPropagation();
+        setWarn(BUSY_NAVIGATION_MESSAGE, false);
+    }
+
+    function bindNavigationGuards() {
+        if (navigationGuardsBound) return;
+        navigationGuardsBound = true;
+        window.addEventListener('beforeunload', beforeUnloadGuard);
+        document.addEventListener('click', anchorNavigationGuard, true);
     }
 
     function collectAffectedAbonentIdsByRegnums(db, regnums) {
@@ -1084,6 +1142,7 @@ function onSave() {
     }
 
     function bind() {
+        bindNavigationGuards();
         q('btnPremSave')?.addEventListener('click', (e) => { e.preventDefault(); onSave(); });
         q('btnPremReset')?.addEventListener('click', (e) => { e.preventDefault(); clearForm(); });
         q('premSearch')?.addEventListener('input', () => renderTable());
