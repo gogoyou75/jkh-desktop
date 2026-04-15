@@ -37,11 +37,11 @@
   }
   function storeSetRaw(key, value){
     if (!(window.JKHStore && typeof window.JKHStore.setRaw === "function")) return;
-    try { JKHStore.setRaw(String(key), value); } catch {}
+    try { JKHStore.setRaw(String(key), value); } catch(e) { console.error(e); throw e; }
   }
   function storeRemoveRaw(key){
     if (!(window.JKHStore && typeof window.JKHStore.removeRaw === "function")) return;
-    try { JKHStore.removeRaw(String(key)); } catch {}
+    try { JKHStore.removeRaw(String(key)); } catch(e) { console.error(e); throw e; }
   }
   // ===========================
   // UI: сворачиваемые блоки месяца (ledger)
@@ -129,7 +129,7 @@
     }
     try {
       if (!storeGetRaw(PAYMENT_SOURCES_KEY)) savePaymentSources(cur);
-    } catch {}
+    } catch(e) { console.error(e); throw e; }
     return cur;
   }
 
@@ -608,7 +608,7 @@ function getOwnershipHistoryForPremise() {
         if (Array.isArray(data?.data)) return data.data;
         // иногда хранят как { table: [] }
         if (Array.isArray(data?.table)) return data.table;
-      }catch{}
+      }catch(e){ console.error(e); throw e; }
       return null;
     };
 
@@ -640,7 +640,7 @@ function getOwnershipHistoryForPremise() {
     try{
       storeSetRaw("tariffs_content_repair_v1", JSON.stringify(defaults));
       console.warn("[autoaccrual] тарифы не найдены — создал tariffs_content_repair_v1 (defaults)");
-    }catch{}
+    }catch(e){ console.error(e); throw e; }
     return defaults;
   }
 
@@ -850,13 +850,13 @@ for (const p of parts) {
 
   function lastAddedPaymentKey() { return "last_added_payment_" + getAbonentId(); }
   function setLastAddedPaymentId(id) {
-    try { sessionStorage.setItem(lastAddedPaymentKey(), String(id)); } catch {}
+    try { sessionStorage.setItem(lastAddedPaymentKey(), String(id)); } catch(e) { console.error(e); throw e; }
   }
   function getLastAddedPaymentId() {
     try { return sessionStorage.getItem(lastAddedPaymentKey()); } catch { return null; }
   }
   function clearLastAddedPaymentId() {
-    try { sessionStorage.removeItem(lastAddedPaymentKey()); } catch {}
+    try { sessionStorage.removeItem(lastAddedPaymentKey()); } catch(e) { console.error(e); throw e; }
   }
 
   function getCalcPeriod() {
@@ -954,7 +954,7 @@ for (const p of parts) {
       }
 
       if (changed) {
-        try { normalizePaymentRows(arr); } catch {}
+        try { normalizePaymentRows(arr); } catch(e) { console.error(e); throw e; }
         storeSetRaw(key, JSON.stringify(arr));
       }
 
@@ -1020,9 +1020,25 @@ for (const p of parts) {
     return arr;
   }
 
-  function savePayments(arr) {
-    try { normalizePaymentRows(arr); } catch {}
-    storeSetRaw(paymentsKey(), JSON.stringify(arr));
+  async function savePaymentsAndFlush(arr){
+    try {
+      normalizePaymentRows(arr);
+
+      // локальная запись
+      storeSetRaw(paymentsKey(), JSON.stringify(arr));
+
+      // ОБЯЗАТЕЛЬНО: сервер
+      if (window.Data && typeof Data.flushDbToServer === "function"){
+        await Data.flushDbToServer();
+      } else {
+        throw new Error("Data.flushDbToServer not available");
+      }
+
+    } catch(e){
+      console.error("SAVE PAYMENTS FAILED", e);
+      alert("Ошибка сохранения оплат. Данные НЕ записаны на сервер.");
+      throw e;
+    }
   }
 
   // =========================================================
@@ -1232,7 +1248,7 @@ function calcTotalsAsOf(rows, asOfDate){
       const ms = monthIter(range.from, range.to);
       allowedYm = new Set(ms.map(m => `${m.year}-${m.month}`));
     }
-  } catch {}
+  } catch(e) { console.error(e); throw e; }
 
   // ---------------------------------------------------------
   // 🔐 CRITICAL (Нулевой старт + помесячная история):
@@ -1604,7 +1620,7 @@ function applyRunningTotals(viewRows) {
 }
 
   // ✅ Главное: обновляем нарастающий итог в DOM БЕЗ перерисовки таблицы (фокус не теряется)
-  function refreshRunningTotalsInDOM() {
+  async function refreshRunningTotalsInDOM() {
     const tbody = qs("#paymentTableBody");
     if (!tbody) return;
 
@@ -1645,7 +1661,7 @@ function applyRunningTotals(viewRows) {
         arr = getPayments();
       } else {
         if (ensureAutoAccruals(arr)) {
-          savePayments(arr);
+          await savePaymentsAndFlush(arr);
 
     // ✅ Итог карточки (Всего задолженность = Долг + Пени)
     JKH_RecalcAbonentTotalDebtCard();
@@ -1676,10 +1692,10 @@ function applyRunningTotals(viewRows) {
     });
 
     // сохраняем нормализованные данные (без перерисовки)
-    savePayments(arr);
+    await savePaymentsAndFlush(arr);
   }
 
-  function loadPaymentTable() {
+  async function loadPaymentTable() {
     const tbody = qs("#paymentTableBody");
 
     // UI: группировка ledger внутри месяца (начисление сверху, оплаты ниже)
@@ -1723,7 +1739,7 @@ function applyRunningTotals(viewRows) {
         arr = getPayments();
       } else {
         if (ensureAutoAccruals(arr)) {
-          savePayments(arr);
+          await savePaymentsAndFlush(arr);
         }
       }
     } catch (e) {
@@ -1784,7 +1800,7 @@ tbody.innerHTML = "";
     });
 
     clearLastAddedPaymentId();
-    savePayments(arr);
+    await savePaymentsAndFlush(arr);
   }
 
 
@@ -1877,12 +1893,12 @@ tbody.innerHTML = "";
   const noteTimers = new Map();
   function saveNoteDebounced(rowId, value) {
     if (noteTimers.has(rowId)) clearTimeout(noteTimers.get(rowId));
-    const t = setTimeout(() => {
+    const t = setTimeout(async () => {
       const arr = getPayments();
       const row = arr.find(x => String(x.id) === String(rowId));
       if (!row) return;
       row.note = value || "";
-      savePayments(arr);
+      await savePaymentsAndFlush(arr);
     }, 250);
     noteTimers.set(rowId, t);
   }
@@ -1896,11 +1912,11 @@ tbody.innerHTML = "";
       if (isPaymentLocked(row0) || isAccrualRowGlobal(row0)) {
         return;
       }
-    } catch {}
+    } catch(e) { console.error(e); throw e; }
 
     const toggle = qs(".toggle-period", tr);
     if (toggle) {
-      toggle.addEventListener("click", () => {
+      toggle.addEventListener("click", async () => {
         const arr = getPayments();
         const row = arr.find(x => String(x.id) === String(rowId));
         if (!row) return;
@@ -1910,7 +1926,7 @@ tbody.innerHTML = "";
           // default period = month/year строки (но НЕ блокируем редактирование)
           enforcePeriodSameAsYm(row);
           normalizePeriod(row);
-          savePayments(arr);
+          await savePaymentsAndFlush(arr);
           loadPaymentTable();
           return;
         }
@@ -1922,7 +1938,7 @@ tbody.innerHTML = "";
             enforcePeriodSameAsYm(row);
             normalizePeriod(row);
           }
-          savePayments(arr);
+          await savePaymentsAndFlush(arr);
           loadPaymentTable();
         }
       });
@@ -1933,7 +1949,7 @@ tbody.innerHTML = "";
       const needFullRerender = (field.startsWith("period_"));
 
       if (needFullRerender) {
-        el.addEventListener("change", () => {
+        el.addEventListener("change", async () => {
           const arr = getPayments();
           const row = arr.find(x => String(x.id) === String(rowId));
           if (!row) return;
@@ -1943,7 +1959,7 @@ tbody.innerHTML = "";
           // period strings (period_from/period_to) должны обновиться
           normalizePeriod(row);
 
-          savePayments(arr);
+          await savePaymentsAndFlush(arr);
           loadPaymentTable();
         });
         return;
@@ -1952,14 +1968,14 @@ tbody.innerHTML = "";
 
       // CRITICAL: type=date — никаких перерисовок на input (иначе календарь сбивается).
       if (field === "paid_date") {
-        el.addEventListener("change", () => {
+        el.addEventListener("change", async () => {
           const arr = getPayments();
           const row = arr.find(x => String(x.id) === String(rowId));
           if (!row) return;
 
           row[field] = el.value;
           syncYearMonthFromPaidDate(row);
-          savePayments(arr);
+          await savePaymentsAndFlush(arr);
 
           // Перерисовываем ТОЛЬКО после выбора даты
           loadPaymentTable();
@@ -1967,7 +1983,7 @@ tbody.innerHTML = "";
         return;
       }
 
-      el.addEventListener("input", () => {
+      el.addEventListener("input", async () => {
         const arr = getPayments();
         const row = arr.find(x => String(x.id) === String(rowId));
         if (!row) return;
@@ -1988,12 +2004,12 @@ tbody.innerHTML = "";
   // НЕ форматируем до 0.00 на каждый символ (только на blur)
 }
 // ✅ ВОТ ТУТ ИСПРАВЛЕНИЕ: больше НЕ loadPaymentTable() на каждый символ
-          savePayments(arr);
+          await savePaymentsAndFlush(arr);
           refreshRunningTotalsInDOM();
           return;
         }
 
-        savePayments(arr);
+        await savePaymentsAndFlush(arr);
       });
     });
 
@@ -2008,12 +2024,12 @@ tbody.innerHTML = "";
     paidEl.addEventListener("focus", () => {
       try { paidEl.select(); } catch(e) {}
     });
-    paidEl.addEventListener("blur", () => {
+    paidEl.addEventListener("blur", async () => {
       const arr = getPayments();
       const row = arr.find(x => String(x.id) === String(rowId));
       if (!row) return;
       paidEl.value = fmtMoneyHuman(row.paid);
-      savePayments(arr);
+      await savePaymentsAndFlush(arr);
       refreshRunningTotalsInDOM();
     });
 
@@ -2028,7 +2044,7 @@ tbody.innerHTML = "";
 
   // source select
   if (srcSel) {
-    srcSel.addEventListener('change', () => {
+    srcSel.addEventListener('change', async () => {
       let val = String(srcSel.value || '').trim();
       const arr = getPayments();
       const row = arr.find(x => String(x.id) === String(rowId));
@@ -2048,13 +2064,13 @@ tbody.innerHTML = "";
           savePaymentSources(sources);
         }
         row.source = n;
-        savePayments(arr);
+        await savePaymentsAndFlush(arr);
         loadPaymentTable();
         return;
       }
 
       row.source = val || (ensurePaymentSources()[0] || '');
-      savePayments(arr);
+      await savePaymentsAndFlush(arr);
     });
   }
 
@@ -2063,22 +2079,22 @@ tbody.innerHTML = "";
     const noteArea = qs(".note-inline", tr);
     if (noteArea) {
       noteArea.addEventListener("input", () => saveNoteDebounced(rowId, noteArea.value));
-      noteArea.addEventListener("blur", () => {
+      noteArea.addEventListener("blur", async () => {
         const arr = getPayments();
         const row = arr.find(x => String(x.id) === String(rowId));
         if (!row) return;
         row.note = noteArea.value || "";
-        savePayments(arr);
+        await savePaymentsAndFlush(arr);
       });
     }
 
     const delBtn = qs(".row-del", tr);
     if (delBtn) {
-      delBtn.addEventListener("click", () => {
+      delBtn.addEventListener("click", async () => {
         if (!confirm("Удалить оплату?")) return;
         let arr = getPayments();
         arr = arr.filter(x => String(x.id) !== String(rowId));
-        savePayments(arr);
+        await savePaymentsAndFlush(arr);
         loadPaymentTable();
       });
     }
@@ -2155,7 +2171,7 @@ tbody.innerHTML = "";
 
   window.__loadPaymentTable = loadPaymentTable;
 
-  window.addPaymentRow = function addPaymentRow() {
+  window.addPaymentRow = async function addPaymentRow() {
     const arr = getPayments();
     const nextId = arr.length ? Math.max(...arr.map(x => Number(x.id) || 0)) + 1 : 1;
 
@@ -2189,7 +2205,7 @@ tbody.innerHTML = "";
     };
 
     arr.push(row);
-    savePayments(arr);
+    await savePaymentsAndFlush(arr);
 
     // ✅ Итог карточки (Всего задолженность = Долг + Пени)
     JKH_RecalcAbonentTotalDebtCard();
@@ -2199,7 +2215,7 @@ tbody.innerHTML = "";
     loadPaymentTable();
   };
 
-  document.addEventListener("DOMContentLoaded", () => {
+  document.addEventListener("DOMContentLoaded", async () => {
     loadPaymentTable();
         JKH_RenameDebtPenaltyHeaders();
     JKH_RecalcAbonentTotalDebtCard();
@@ -2238,7 +2254,7 @@ tbody.innerHTML = "";
       const btnDel = document.createElement('button');
       btnDel.textContent = 'Удалить';
 
-      btnSave.onclick = () => {
+      btnSave.onclick = async () => {
         const v = String(inp.value||'').trim();
         if (!v) return alert('Название не может быть пустым');
         const arr = ensurePaymentSources();
@@ -2254,21 +2270,21 @@ tbody.innerHTML = "";
 
         // синхронизируем платежи текущего абонента
         try {
-          if (oldName && oldName !== v && typeof getPayments === 'function' && typeof savePayments === 'function') {
+          if (oldName && oldName !== v && typeof getPayments === 'function' && typeof savePaymentsAndFlush === 'function') {
             const pays = getPayments() || [];
             let ch = false;
             for (const p of pays) {
               if (String(p?.source || '').trim() === oldName) { p.source = v; ch = true; }
             }
-            if (ch) savePayments(pays);
+            if (ch) await savePaymentsAndFlush(pays);
           }
-        } catch {}
+        } catch(e) { console.error(e); throw e; }
 
         renderSourcesModalList();
-        try { loadPaymentTable(); } catch {}
+        try { loadPaymentTable(); } catch(e) { console.error(e); throw e; }
       };
 
-      btnDel.onclick = () => {
+      btnDel.onclick = async () => {
         const sourcesNow = ensurePaymentSources();
         const oldName = String(sourcesNow[idx]||'').trim();
         if (!oldName) return;
@@ -2303,7 +2319,7 @@ tbody.innerHTML = "";
               changed = true;
             }
           }
-          if (changed && typeof savePayments === 'function') savePayments(payments);
+          if (changed && typeof savePaymentsAndFlush === 'function') await savePaymentsAndFlush(payments);
 
           const next = sourcesNow.filter((_,i)=>i!==idx);
           if (!next.length){
@@ -2313,7 +2329,7 @@ tbody.innerHTML = "";
           savePaymentSources(next);
 
           renderSourcesModalList();
-          try { loadPaymentTable(); } catch {}
+          try { loadPaymentTable(); } catch(e) { console.error(e); throw e; }
           return;
         }
 
@@ -2326,7 +2342,7 @@ tbody.innerHTML = "";
         }
         savePaymentSources(next);
         renderSourcesModalList();
-        try { loadPaymentTable(); } catch {}
+        try { loadPaymentTable(); } catch(e) { console.error(e); throw e; }
       };
 
       row.appendChild(inp);
@@ -2349,7 +2365,7 @@ tbody.innerHTML = "";
     modal.style.display = 'none';
   };
 
-  window.addPaymentSourceFromModal = function(){
+  window.addPaymentSourceFromModal = async function(){
     const modal = document.getElementById('sourcesModal');
     if (!modal) return;
     const inp = modal.querySelector('#sourceNewInput');
@@ -2362,7 +2378,7 @@ tbody.innerHTML = "";
     }
     if (inp) inp.value = '';
     renderSourcesModalList();
-    try { loadPaymentTable(); } catch {}
+    try { loadPaymentTable(); } catch(e) { console.error(e); throw e; }
   };
 
 
