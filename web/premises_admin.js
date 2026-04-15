@@ -626,17 +626,28 @@ window.PremisesAdmin = (function () {
     }
 
     async function flushDbToServerStrict() {
+        if (window.JKHStore && window.AbonentsDB) {
+            try {
+                window.JKHStore.setJSON('abonents_db_v1', window.AbonentsDB);
+            } catch (e) {
+                throw new Error('Не удалось записать DB в storage: ' + (e?.message || e));
+            }
+        }
+
         if (window.Data && typeof window.Data.flushDbToServer === 'function') {
             const ok = await window.Data.flushDbToServer();
             if (!ok) throw new Error('Не удалось сохранить базу перед upload.');
             return true;
         }
+
         const saved = !!(window.saveAbonentsDB && window.saveAbonentsDB());
         if (!saved) throw new Error('Не удалось сохранить базу.');
+
         if (window.JKHRemoteSync && typeof window.JKHRemoteSync.uploadNow === 'function') {
             await window.JKHRemoteSync.uploadNow();
             return true;
         }
+
         throw new Error('JKHRemoteSync.uploadNow недоступен.');
     }
 
