@@ -550,6 +550,11 @@ function safeReturnUrl(u){
 function goBackToImport(){
   location.href = 'import_xls.html#resume=1';
 }
+function isImportReturnScenario(){
+  const src = String(document.getElementById("na_src")?.value || "").trim();
+  const qFrom = String(new URLSearchParams(window.location.search || '').get('from') || '').trim();
+  return src === 'import_xls' || qFrom === 'import';
+}
 
 /* =========================
    LINKS HELPERS + ДОЛГ
@@ -1234,10 +1239,15 @@ async function createAbonent() {
     }
 
     const ret = safeReturnUrl(String(document.getElementById("na_return").value || "").trim());
-    if (src === "import_xls" || ret) {
+    if (isImportReturnScenario()) {
       clearDraftNewAbonent();
       alert("Абонент создан и выгружен. Возвращаюсь к импорту.");
       goBackToImport();
+      return;
+    }
+    if (ret) {
+      clearDraftNewAbonent();
+      location.href = ret;
       return;
     }
 
