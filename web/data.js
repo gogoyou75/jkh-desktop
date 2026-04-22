@@ -516,12 +516,12 @@
     flushDbToServer: async function () {
       if (!this.ensureWriteOrExplain()) return false;
       var saved = !!(window.saveAbonentsDB && window.saveAbonentsDB());
-      if (!saved) return false;
-      if (window.JKHRemoteSync && typeof window.JKHRemoteSync.uploadNow === "function") {
-        await window.JKHRemoteSync.uploadNow();
-      } else {
+      if (!saved) throw new Error("LOCAL_SAVE_FAILED");
+      if (!(window.JKHRemoteSync && typeof window.JKHRemoteSync.uploadNow === "function")) {
         throw new Error("JKHRemoteSync.uploadNow is not available");
       }
+      var ok = await window.JKHRemoteSync.uploadNow();
+      if (ok !== true) throw new Error("SERVER_UPLOAD_FAILED");
       return true;
     },
     ensurePremise: function (premiseObj) {

@@ -132,6 +132,7 @@ function toFio(fam,name,otch){ return [fam,name,otch].map(normStr).filter(Boolea
 function asSquare(v){ return Number.isFinite(v) ? v : ''; }
 function genUID(){ return 'UID_' + String(Date.now()) + '_' + String(Math.floor(Math.random()*10000)).padStart(4,'0'); }
 function genTempRegnum(){ return 'TEMP-' + String(Date.now()) + '-' + String(Math.floor(Math.random()*10000)).padStart(4,'0'); }
+function pad2(v){ return String(v).padStart(2, '0'); }
 
 function normalizePeriod(v){
   const s = normStr(v);
@@ -178,6 +179,68 @@ function getPaymentsByLS(ls){
   catch(e){ return []; }
 }
 function setPaymentsByLS(ls, arr){ if (!window.JKHStore || !JKHStore.setJSON) throw new Error('Нет JKHStore.setJSON'); return JKHStore.setJSON(payKey(ls), arr, null); }
+
+function parseYearMonthFromAny(v){
+  const s = normStr(v);
+  if (!s) return null;
+  let m = s.match(/^(\d{4})-(\d{2})(?:-\d{2})?$/);
+  if (m) return { year: m[1], month: m[2] };
+  m = s.match(/^(\d{2})\.(\d{2})\.(\d{4})$/);
+  if (m) return { year: m[3], month: m[2] };
+  return null;
+}
+
+function getLedgerYearMonth(row){
+  if (!row || typeof row !== 'object') return null;
+  const y = normStr(row.year);
+  const m = normStr(row.month);
+  if (/^\d{4}$/.test(y) && /^\d{1,2}$/.test(m)){
+    const mn = Number(m);
+    if (mn >= 1 && mn <= 12) return { year: y, month: pad2(mn) };
+  }
+  return parseYearMonthFromAny(row.date || row.paid_date || '');
+}
+
+function getLedgerPaidDate(row){
+  if (!row || typeof row !== 'object') return '';
+  return normStr(row.paid_date || row.date || '');
+}
+
+function getLedgerPaidAmount(row){
+  if (!row || typeof row !== 'object') return NaN;
+  const p = normNum(row.paid);
+  if (Number.isFinite(p)) return p;
+  return normNum(row.amount);
+}
+
+function buildImportedPaymentLedgerRow(list, per, amount){
+  let maxId = 0;
+  for (let i=0;i<list.length;i++){
+    const idNum = Number(list[i] && list[i].id);
+    if (Number.isFinite(idNum) && idNum > maxId) maxId = idNum;
+  }
+  return {
+    id: maxId + 1,
+    year: per.period.slice(0, 4),
+    month: per.period.slice(5, 7),
+    accrued: 0,
+    paid: amount,
+    paid_date: '01.' + per.period.slice(5, 7) + '.' + per.period.slice(0, 4),
+    source: 'Импорт Excel',
+    payment_period: ''
+  };
+}
+
+function sortLedgerRows(list){
+  list.sort(function(a,b){
+    const aYM = getLedgerYearMonth(a);
+    const bYM = getLedgerYearMonth(b);
+    const aKey = aYM ? (aYM.year + '-' + aYM.month) : '0000-00';
+    const bKey = bYM ? (bYM.year + '-' + bYM.month) : '0000-00';
+    if (aKey !== bKey) return aKey.localeCompare(bKey);
+    return Number(a && a.id || 0) - Number(b && b.id || 0);
+  });
+}
 
 
 
@@ -362,13 +425,94 @@ function findHeaderRow(aoa){
   return -1;
 }
 function findPaymentPairs(hdrRow){
+  function isAmountHeader(v){
+    const k = lowKey(v);
+    if (!k) return false;
+    if (k === 'сумма') return true;
+    if (k === 'оплата') return true;
+    if (k === 'сумма оплаты') return true;
+    if (k === 'п п сумма') return true;
+    if (k.includes('сумма оплаты')) return true;
+    if (k.includes('п п сумма')) return true;
+    if (k.includes('оплата')) return true;
+    if (k.includes('сумма')) return true;
+    return false;
+  }
+  function isDateHeader(v){
+    const k = lowKey(v);
+    if (!k) return false;
+    if (k === 'дата') return true;
+    if (k === 'дата оплаты') return true;
+    if (k.includes('дата оплаты')) return true;
+    if (k.includes('дата')) return true;
+    if (k === 'период' || k.includes('период')) return true;
+    if (k === 'месяц' || k.includes('месяц')) return true;
+    return false;
+  }
+  function isSkippableBetween(v){
+    const k = lowKey(v);
+    if (!k) return true;
+    if (k === '№' || k === 'no' || k === 'n') return true;
+    if (k === 'примечание' || k === 'комментарий') return true;
+    return false;
+  }
+  function pushPairUnique(pairs, sumCol, periodCol){
+    for (let i=0;i<pairs.length;i++){
+      if (pairs[i].sumCol===sumCol && pairs[i].periodCol===periodCol) return;
+    }
+    pairs.push({ sumCol:sumCol, periodCol:periodCol });
+  }
+
   const pairs = [];
+  const usedSum = {};
+  const usedPeriod = {};
+
+  // 1) Приоритет — соседние пары (без изменений текущих шаблонов).
   for (let c=0;c<hdrRow.length-1;c++){
-    const a = lowKey(hdrRow[c]);
-    const b = lowKey(hdrRow[c+1]);
-    const isSum = (a === 'сумма' || a.includes('сумма') || a.includes('п п сумма'));
-    const isDateOrPeriod = (b === 'период' || b.includes('период') || b === 'дата' || b.includes('дата'));
-    if (isSum && isDateOrPeriod){ pairs.push({ sumCol:c, periodCol:c+1 }); c++; }
+    const left = hdrRow[c];
+    const right = hdrRow[c+1];
+    if (isAmountHeader(left) && isDateHeader(right) && !usedSum[c] && !usedPeriod[c+1]){
+      pushPairUnique(pairs, c, c+1);
+      usedSum[c] = true;
+      usedPeriod[c+1] = true;
+      continue;
+    }
+    if (isDateHeader(left) && isAmountHeader(right) && !usedSum[c+1] && !usedPeriod[c]){
+      pushPairUnique(pairs, c+1, c);
+      usedSum[c+1] = true;
+      usedPeriod[c] = true;
+    }
+  }
+
+  // 2) Fallback — окно 2-3 колонок, только через один пустой/служебный столбец.
+  for (let c=0;c<hdrRow.length;c++){
+    if (usedSum[c] || !isAmountHeader(hdrRow[c])) continue;
+
+    for (let d=1;d<=2;d++){
+      const p = c + d;
+      if (p >= hdrRow.length) break;
+      if (usedPeriod[p]) continue;
+      if (!isDateHeader(hdrRow[p])) continue;
+      if (d === 1 || isSkippableBetween(hdrRow[c+1])){
+        pushPairUnique(pairs, c, p);
+        usedSum[c] = true;
+        usedPeriod[p] = true;
+        break;
+      }
+    }
+    if (usedSum[c]) continue;
+    for (let d2=1;d2<=2;d2++){
+      const p2 = c - d2;
+      if (p2 < 0) break;
+      if (usedPeriod[p2]) continue;
+      if (!isDateHeader(hdrRow[p2])) continue;
+      if (d2 === 1 || isSkippableBetween(hdrRow[c-1])){
+        pushPairUnique(pairs, c, p2);
+        usedSum[c] = true;
+        usedPeriod[p2] = true;
+        break;
+      }
+    }
   }
   return pairs;
 }
@@ -554,13 +698,27 @@ function evaluatePaymentsRow(db, row){
       continue;
     }
 
-    const dup = existing.some(x => String(x.date||'')===per.date && Number(x.amount||0)===amount);
+    const dup = existing.some(function(x){
+      const ym = getLedgerYearMonth(x);
+      const paid = getLedgerPaidAmount(x);
+      const paidDate = getLedgerPaidDate(x);
+      if (!ym || !Number.isFinite(paid)) return false;
+      return ym.year === per.period.slice(0,4) &&
+        ym.month === per.period.slice(5,7) &&
+        paidDate === ('01.' + per.period.slice(5,7) + '.' + per.period.slice(0,4)) &&
+        paid === amount;
+    });
     if (dup){ dups++; continue; }
 
-    const sameDate = existing.find(x => String(x.date||'')===per.date);
-    if (sameDate){
+    const sameMonthPayment = existing.find(function(x){
+      const ym = getLedgerYearMonth(x);
+      const paid = getLedgerPaidAmount(x);
+      if (!ym || !Number.isFinite(paid) || paid <= 0) return false;
+      return ym.year === per.period.slice(0,4) && ym.month === per.period.slice(5,7);
+    });
+    if (sameMonthPayment){
       conflicts++;
-      const key = ls + '::' + per.date;
+      const key = ls + '::' + per.period;
       if (!conflictDecision[key]) unresolved++;
       continue;
     }
@@ -650,11 +808,18 @@ function renderPreview(){
           const per = normalizePeriod(p.periodRaw);
           const amount = normNum(p.amount);
           if (!per || !Number.isFinite(amount) || amount<=0) return;
-          const ex = getPaymentsByLS(ls).find(x => String(x.date||'')===per.date && Number(x.amount||0)!==amount);
+          const ex = getPaymentsByLS(ls).find(function(x){
+            const ym = getLedgerYearMonth(x);
+            const paid = getLedgerPaidAmount(x);
+            if (!ym || !Number.isFinite(paid) || paid <= 0) return false;
+            return ym.year === per.period.slice(0,4) &&
+              ym.month === per.period.slice(5,7) &&
+              !(getLedgerPaidDate(x) === ('01.' + per.period.slice(5,7) + '.' + per.period.slice(0,4)) && paid === amount);
+          });
           if (!ex) return;
-          const key = ls + '::' + per.date;
+          const key = ls + '::' + per.period;
           const dec = conflictDecision[key] || '';
-          actionsHTML += '<div class="small" style="margin-bottom:6px">' + per.display + ': было ' + ex.amount + ', новое ' + amount + '</div>' +
+          actionsHTML += '<div class="small" style="margin-bottom:6px">' + per.display + ': было ' + getLedgerPaidAmount(ex) + ', новое ' + amount + '</div>' +
             '<button class="action-btn" data-act="conf_over" data-key="' + key + '">Принять новый (заменить)</button>' +
             '<button class="action-btn" data-act="conf_keep" data-key="' + key + '">Оставить старый</button>' +
             (dec ? '<div class="small ok">Решение: ' + (dec==='overwrite'?'заменить':'оставить старый') + '</div>' : '');
@@ -677,8 +842,13 @@ function renderPreview(){
   $('summaryLine').textContent = 'Режим: ' + (mode==='primary'?'Шаг 1 — Первичка':'Шаг 2 — Платежи') +
     ' | ОК=' + ok + ' | ПРЕДУПРЕЖДЕНИЕ=' + warn + ' | ОШИБКА=' + err + ' | ДУБЛИКАТ=' + dup + ' | КОНФЛИКТ=' + conf + ' | Всего=' + preview.length;
 
-  if (err){ $('errorsBox').innerHTML = '<span class="danger">Есть ошибки, проверь строки со статусом ОШИБКА.</span>'; }
-  else { $('errorsBox').innerHTML = '<span class="ok">Критических ошибок в текущем шаге нет.</span>'; }
+  let diag = '';
+  if (err){ diag = '<span class="danger">Есть ошибки, проверь строки со статусом ОШИБКА.</span>'; }
+  else { diag = '<span class="ok">Критических ошибок в текущем шаге нет.</span>'; }
+  if (mode==='payments' && (!Array.isArray(payPairs) || payPairs.length===0)){
+    diag += '<br><span class="danger">Платёжные колонки не распознаны по заголовкам Excel.</span>';
+  }
+  $('errorsBox').innerHTML = diag;
 
   updateRestoredFileInfo();
   updateStateLine();
@@ -700,8 +870,15 @@ function hasUnresolvedConflicts(){
       const per = normalizePeriod(r.payments[p].periodRaw);
       const amount = normNum(r.payments[p].amount);
       if (!per || !Number.isFinite(amount) || amount<=0) continue;
-      const hasConflict = list.some(x => String(x.date||'')===per.date && Number(x.amount||0)!==amount);
-      if (hasConflict && !conflictDecision[ls + '::' + per.date]) return true;
+      const hasConflict = list.some(function(x){
+        const ym = getLedgerYearMonth(x);
+        const paid = getLedgerPaidAmount(x);
+        if (!ym || !Number.isFinite(paid) || paid <= 0) return false;
+        return ym.year === per.period.slice(0,4) &&
+          ym.month === per.period.slice(5,7) &&
+          !(getLedgerPaidDate(x) === ('01.' + per.period.slice(5,7) + '.' + per.period.slice(0,4)) && paid === amount);
+      });
+      if (hasConflict && !conflictDecision[ls + '::' + per.period]) return true;
     }
   }
   return false;
@@ -889,15 +1066,30 @@ async function applyPayments(){
       const per = normalizePeriod(pay.periodRaw);
       if (!per || !Number.isFinite(amount) || amount<=0){ skipped++; continue; }
 
-      const dup = list.some(x => String(x.date||'')===per.date && Number(x.amount||0)===amount);
+      const importedRow = buildImportedPaymentLedgerRow(list, per, amount);
+      const dup = list.some(function(x){
+        const ym = getLedgerYearMonth(x);
+        const paid = getLedgerPaidAmount(x);
+        const paidDate = getLedgerPaidDate(x);
+        if (!ym || !Number.isFinite(paid)) return false;
+        return ym.year === importedRow.year &&
+          ym.month === importedRow.month &&
+          paidDate === importedRow.paid_date &&
+          paid === importedRow.paid;
+      });
       if (dup){ skipped++; continue; }
 
-      const idx = list.findIndex(x => String(x.date||'')===per.date);
+      const idx = list.findIndex(function(x){
+        const ym = getLedgerYearMonth(x);
+        const paid = getLedgerPaidAmount(x);
+        if (!ym || !Number.isFinite(paid) || paid <= 0) return false;
+        return ym.year === importedRow.year && ym.month === importedRow.month;
+      });
       if (idx >= 0){
         conflicts++;
-        const decision = conflictDecision[ls + '::' + per.date];
+        const decision = conflictDecision[ls + '::' + per.period];
         if (decision === 'overwrite'){
-          list[idx] = { date: per.date, amount: amount };
+          list[idx] = importedRow;
           replaced++;
         } else {
           skipped++;
@@ -905,11 +1097,11 @@ async function applyPayments(){
         continue;
       }
 
-      list.push({ date: per.date, amount: amount });
+      list.push(importedRow);
       added++;
     }
 
-    list.sort(function(a,b){ return String(a.date||'').localeCompare(String(b.date||'')); });
+    sortLedgerRows(list);
     setPaymentsByLS(ls, list);
   }
 
