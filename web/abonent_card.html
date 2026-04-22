@@ -1160,7 +1160,7 @@ function __saveTransferBalance(newId, regnum, startISO, principal, penalty, from
   }catch(e){}
 }
 
-function applyChangeResponsible(mode) {
+async function applyChangeResponsible(mode) {
     if (!canWriteOrExplainLocal()) return;
     const { id, a } = getCurrentAbonent();
     if (!a) { alert('Абонент не найден'); return; }
@@ -1175,6 +1175,7 @@ function applyChangeResponsible(mode) {
     if (!dateFrom) { alert('Укажите дату передачи'); return; }
     if (String(newId) === String(id)) { alert('Новый ответственный совпадает с текущим'); return; }
 
+    try {
     const db = getDb();
     if (!db[String(newId)]) { alert('Абонент не найден: ' + newId); return; }
 
@@ -1285,6 +1286,8 @@ function applyChangeResponsible(mode) {
         }
     }
 
+    await Data.flushDbToServer();
+
     // сообщение по режиму
     if (String(mode) === 'NO_DEBT') {
         alert("Передача БЕЗ ДОЛГА сохранена.\nСледующий шаг: в расчёте учитываем обнуление долга с даты передачи.");
@@ -1293,6 +1296,10 @@ function applyChangeResponsible(mode) {
     }
 
     window.location.href = 'abonent_card.html?abonent=' + encodeURIComponent(String(newId));
+    } catch (e) {
+        console.error(e);
+        alert('Ошибка сохранения на сервер. Изменения не подтверждены сервером.');
+    }
 }
 
 /* ===== Редактирование абонента (оставил как у тебя) ===== */
@@ -1351,7 +1358,7 @@ function migrateLocalKeys(oldId, newId) {
     });
 }
 
-function saveAbonentEdit() {
+async function saveAbonentEdit() {
     if (!canWriteOrExplainLocal()) return;
     const { id: oldId, a } = getCurrentAbonent();
     if (!a) { alert("Абонент не найден"); return; }
@@ -1387,6 +1394,7 @@ function saveAbonentEdit() {
     updated.share = document.getElementById("ae_share").value.trim();
     updated.phone = document.getElementById("ae_phone").value.trim();
 
+    try {
     if (window.Data && typeof window.Data.upsertAbonent === 'function') {
         window.Data.upsertAbonent(updated);
     }
@@ -1414,6 +1422,8 @@ function saveAbonentEdit() {
         window.history.replaceState({}, "", url.toString());
     }
 
+    await Data.flushDbToServer();
+
     closeAbonentEdit();
     fillAbonentCard();
 
@@ -1424,6 +1434,10 @@ function saveAbonentEdit() {
     alert("Изменения сохранены");
     const activeRegnum = String(updated.premiseRegnum || updated.regnum || '').trim();
     if (activeRegnum) renderResponsibilityHistory(activeRegnum);
+    } catch (e) {
+        console.error(e);
+        alert('Ошибка сохранения на сервер. Изменения не подтверждены сервером.');
+    }
 }
 
 function moratoriumKey(id){ return "moratorium_" + id; }
@@ -1434,6 +1448,7 @@ function loadMoratoriumUI(){
     if (!el) return;
     el.checked = storeGet(moratoriumKey(id)) === "1";
 }
+// intentionally local-only: флаг моратория хранится локально по текущему ЛС
 function bindMoratoriumUI(){
     const id = getAbonentIdFromURL();
     const el = document.getElementById("moratoriumToggle");
@@ -1461,6 +1476,7 @@ function openNotesModal() {
 function closeNotesModal() {
     document.getElementById("notesModal").style.display = "none";
 }
+// intentionally local-only: заметки не входят в server-first сценарий этой задачи
 function saveNotes() {
     if (!canWriteOrExplainLocal()) return;
     const id = getAbonentIdFromURL();
@@ -1495,6 +1511,7 @@ function loadCalcPeriodUI(){
     }
 }
 
+// intentionally local-only: период расчёта это UI-параметр и не отправляется на сервер
 function saveCalcPeriod(from, to){
     const id = getAbonentIdFromURL();
     storeSet(calcPeriodKey(id), JSON.stringify({from: from || "", to: to || ""}));

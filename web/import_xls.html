@@ -739,7 +739,7 @@ async function onParse(){
   saveImportDraftState();
 }
 
-function applyPrimary(){
+async function applyPrimary(){
   if (!canWriteOrExplain()) return setButtons();
 
   const db = getDB();
@@ -749,6 +749,7 @@ function applyPrimary(){
   buildPreview();
   if (primaryBlocked) return alert('Шаг 1 заблокирован: есть критические ошибки первички.');
 
+  try {
   let updated=0, uidAssigned=0;
 
   for (let i=0;i<dataRows.length;i++){
@@ -782,14 +783,19 @@ function applyPrimary(){
   }
 
   saveDB();
+  await Data.flushDbToServer();
   primaryApplied = true;
   mode='payments';
   buildPreview();
   saveImportDraftState();
   alert('Шаг 1 применён успешно.\nОбновлено строк первички: ' + updated + '\nПрисвоено UID: ' + uidAssigned);
+  } catch (e) {
+    console.error(e);
+    alert('Ошибка сохранения первички на сервер. Шаг 1 не завершён.');
+  }
 }
 
-function applyPayments(){
+async function applyPayments(){
   if (!canWriteOrExplain()) return setButtons();
   if (!primaryApplied) return alert('Шаг 2 заблокирован до успешной первички.');
 
@@ -801,6 +807,7 @@ function applyPayments(){
   if (hasPaymentsCritical()) return alert('Шаг 2 заблокирован: есть ошибки платежей.');
   if (hasUnresolvedConflicts()) return alert('Шаг 2 заблокирован: есть нерешённые конфликты платежей.');
 
+  try {
   let added=0, replaced=0, skipped=0, conflicts=0;
 
   for (let i=0;i<dataRows.length;i++){
@@ -844,6 +851,8 @@ function applyPayments(){
     setPaymentsByLS(ls, list);
   }
 
+  await Data.flushDbToServer();
+
   alert('Платежи применены.\nДобавлено: ' + added + '\nЗаменено: ' + replaced + '\nПропущено: ' + skipped + '\nКонфликтов обработано: ' + conflicts);
   clearRuntimeState();
   clearImportResumeState();
@@ -855,6 +864,10 @@ function applyPayments(){
   updateRestoredFileInfo();
   updateStateLine();
   setButtons();
+  } catch (e) {
+    console.error(e);
+    alert('Ошибка сохранения платежей на сервер. Импорт не завершён.');
+  }
 }
 
 $('previewBody').addEventListener('click', function(ev){
