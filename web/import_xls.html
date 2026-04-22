@@ -89,6 +89,7 @@
         <span class="pill"><b>Итоги предпросмотра</b></span>
         <span class="small mono" id="summaryLine">Файл не выбран</span>
       </div>
+      <div class="hint small mono" id="restoredFileLine"></div>
       <div class="hint" id="uidHint"></div>
       <div class="hint" id="errorsBox"></div>
     </div>
@@ -221,6 +222,7 @@ function saveImportDraftState(){
       primaryApplied: !!primaryApplied,
       primaryBlocked: !!primaryBlocked,
       conflictDecision: conflictDecision || {},
+      ownerId: getCurrentOwnerId(),
       fileName: normStr(currentFileName),
       savedAt: new Date().toISOString()
     }, null);
@@ -233,6 +235,10 @@ function loadImportDraftState(){
 function clearImportDraftState(){
   if (!window.JKHStore || !JKHStore.setJSON) return;
   try{ JKHStore.setJSON('import_xls_draft_v1', null, null); }catch(e){}
+}
+function getCurrentOwnerId(){
+  try{ return (window.JKHStore && typeof JKHStore.getOwnerId === 'function') ? normStr(JKHStore.getOwnerId()) : ''; }
+  catch(e){ return ''; }
 }
 function saveDraftNewAbonent(row){
   if (!window.JKHStore || !JKHStore.setJSON) return false;
@@ -383,9 +389,13 @@ let primaryBlocked=false;
 let conflictDecision={};
 let preview=[];
 let currentFileName='';
+let restoredFromDraft=false;
 
 function paymentPairsCount(row){
-  return Array.isArray(row && row.payments) ? row.payments.length : 0;
+  if (!Array.isArray(row && row.payments)) return 0;
+  return row.payments.filter(function(x){
+    return !!(normStr(x && x.amount) || normStr(x && x.periodRaw));
+  }).length;
 }
 
 function parseSheetToRows(sheet){
@@ -558,7 +568,7 @@ function statusClass(s){ return ({OK:'status-ok', ERROR:'status-err', UPDATED:'s
 function renderPreview(){
   const body = $('previewBody');
   body.innerHTML = '';
-  if (!preview.length){ body.innerHTML = '<tr><td colspan="7" class="small">Нет предпросмотра</td></tr>'; updateStateLine(); setButtons(); return; }
+  if (!preview.length){ body.innerHTML = '<tr><td colspan="7" class="small">Нет предпросмотра</td></tr>'; updateRestoredFileInfo(); updateStateLine(); setButtons(); return; }
 
   let ok=0, err=0, warn=0, dup=0, conf=0;
   for (let i=0;i<preview.length;i++){
@@ -616,6 +626,7 @@ function renderPreview(){
   if (err){ $('errorsBox').innerHTML = '<span class="danger">Есть ошибки, проверь строки со статусом ОШИБКА.</span>'; }
   else { $('errorsBox').innerHTML = '<span class="ok">Критических ошибок в текущем шаге нет.</span>'; }
 
+  updateRestoredFileInfo();
   updateStateLine();
   setButtons();
 }
@@ -665,14 +676,29 @@ function setButtons(){
   $('btnApplyPayments').disabled = !(mode==='payments' && parsed && canWrite && primaryApplied && !hasPaymentsCritical() && !hasUnresolvedConflicts());
 }
 
+function updateRestoredFileInfo(){
+  const file = normStr(currentFileName);
+  $('restoredFileLine').textContent = (restoredFromDraft && file) ? ('Восстановлен предпросмотр из файла: ' + file) : '';
+}
+function clearRuntimeState(){
+  preview=[];
+  dataRows=[];
+  conflictDecision={};
+  primaryApplied=false;
+  primaryBlocked=false;
+  mode='primary';
+  currentFileName='';
+  restoredFromDraft=false;
+}
 function resetPreview(){
-  preview=[]; dataRows=[]; conflictDecision={}; primaryApplied=false; primaryBlocked=false; mode='primary'; currentFileName='';
+  clearRuntimeState();
   clearImportResumeState();
   clearImportDraftState();
   $('summaryLine').textContent = 'Предпросмотр сброшен';
   $('errorsBox').innerHTML='';
   $('uidHint').innerHTML='';
   $('previewBody').innerHTML = '<tr><td colspan="7" class="small">Нет предпросмотра</td></tr>';
+  updateRestoredFileInfo();
   updateStateLine();
   setButtons();
 }
@@ -683,7 +709,7 @@ async function onParse(){
 
   const file = $('fileInput').files[0];
   if (!file) return;
-  currentFileName = normStr(file.name);
+  const parsedFileName = normStr(file.name);
 
   const buf = await new Promise(function(resolve, reject){
     const fr = new FileReader();
@@ -698,9 +724,7 @@ async function onParse(){
 
   const res = parseSheetToRows(WB.Sheets[WB.SheetNames[0]]);
   if (!res.ok){
-    preview=[{ excelRow:'—', uid:'', ls:'', fio:'', square:'', paymentsBrief:'—', status:'ERROR', critical:true, details:[res.msg] }];
-    dataRows=[];
-    renderPreview();
+    alert('Не удалось построить предпросмотр: ' + res.msg);
     return;
   }
 
@@ -709,6 +733,8 @@ async function onParse(){
   primaryBlocked = false;
   mode='primary';
   conflictDecision={};
+  currentFileName = parsedFileName;
+  restoredFromDraft = false;
   buildPreview();
   saveImportDraftState();
 }
@@ -731,7 +757,6 @@ function applyPrimary(){
     if (found.type==='UID_MISSING' || found.type==='NO_ID' || found.type==='AMBIG' || found.type==='NOT_FOUND') continue;
     if (!Number.isFinite(row.square) || row.square<=0) continue;
 
-    let key = found.key;
     let a = found.abonent;
 
     // Канон: ключуем по ЛС, UID — поле внутри записи.
@@ -820,9 +845,16 @@ function applyPayments(){
   }
 
   alert('Платежи применены.\nДобавлено: ' + added + '\nЗаменено: ' + replaced + '\nПропущено: ' + skipped + '\nКонфликтов обработано: ' + conflicts);
+  clearRuntimeState();
   clearImportResumeState();
   clearImportDraftState();
-  buildPreview();
+  $('summaryLine').textContent = 'Импорт завершён. Предпросмотр очищен';
+  $('errorsBox').innerHTML='';
+  $('uidHint').innerHTML='';
+  $('previewBody').innerHTML = '<tr><td colspan="7" class="small">Нет предпросмотра</td></tr>';
+  updateRestoredFileInfo();
+  updateStateLine();
+  setButtons();
 }
 
 $('previewBody').addEventListener('click', function(ev){
@@ -872,18 +904,23 @@ $('previewBody').addEventListener('click', function(ev){
 
   const draft = loadImportDraftState();
   if (draft && Array.isArray(draft.dataRows) && draft.dataRows.length){
-    dataRows = draft.dataRows;
-    mode = draft.mode === 'payments' ? 'payments' : 'primary';
-    primaryApplied = !!draft.primaryApplied;
-    primaryBlocked = !!draft.primaryBlocked;
-    conflictDecision = draft.conflictDecision || {};
-    currentFileName = normStr(draft.fileName);
-    buildPreview();
+    const draftOwner = normStr(draft.ownerId);
+    const currentOwner = getCurrentOwnerId();
+    if (!draftOwner || draftOwner === currentOwner){
+      dataRows = draft.dataRows;
+      mode = draft.mode === 'payments' ? 'payments' : 'primary';
+      primaryApplied = !!draft.primaryApplied;
+      primaryBlocked = !!draft.primaryBlocked;
+      conflictDecision = draft.conflictDecision || {};
+      currentFileName = normStr(draft.fileName);
+      restoredFromDraft = true;
+      buildPreview();
+    }
   }
 
   tryResumeFromHash();
 
-  $('fileInput').addEventListener('change', function(){ resetPreview(); setButtons(); });
+  $('fileInput').addEventListener('change', function(){ setButtons(); });
   $('optAllowCreate').addEventListener('change', function(){ renderPreview(); });
 
   $('btnModePrimary').addEventListener('click', function(){ mode='primary'; buildPreview(); });
