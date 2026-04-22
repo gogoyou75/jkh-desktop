@@ -233,22 +233,116 @@ function getLedgerPaidAmount(row){
   if (Number.isFinite(p)) return p;
   return normNum(row.amount);
 }
+function getLedgerSource(row){
+  if (!row || typeof row !== 'object') return '';
+  return normStr(row.source);
+}
+function defaultPaymentSources(){ return ['Платёж 1','Платёж 2','Платёж 3']; }
+function loadProgramPaymentSources(){
+  try{
+    if (window.JKHStore && typeof JKHStore.getRaw === 'function'){
+      const raw = JKHStore.getRaw('payment_sources_v1', null);
+      if (raw){
+        const arr = JSON.parse(raw);
+        if (Array.isArray(arr)){
+          const cleaned = arr.map(function(x){ return normStr(x); }).filter(Boolean);
+          if (cleaned.length) return cleaned;
+        }
+      }
+    }
+  }catch(e){}
+  return defaultPaymentSources();
+}
+function sourceNameByIndex(sourceIndex){
+  const idx = Number(sourceIndex);
+  const list = loadProgramPaymentSources();
+  if (idx>=1 && idx<=list.length && normStr(list[idx-1])) return normStr(list[idx-1]);
+  const d = defaultPaymentSources();
+  return d[idx-1] || d[0];
+}
+function extractYearFromAny(v){
+  const s = normStr(v);
+  if (!s) return '';
+  let m = s.match(/(^|[^0-9])((?:19|20)\d{2})([^0-9]|$)/);
+  if (m) return m[2];
+  m = s.match(/^(\d{2})\.(\d{2})\.(\d{4})$/);
+  if (m) return m[3];
+  m = s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (m) return m[1];
+  if (/^\d+(\.\d+)?$/.test(s)){
+    try{
+      const dc = XLSX.SSF.parse_date_code(Number(s));
+      if (dc && dc.y) return String(dc.y);
+    }catch(e){}
+  }
+  return '';
+}
+function detectWorkbookYear(aoa, fileName, sheetName){
+  const byName = extractYearFromAny(fileName) || extractYearFromAny(sheetName);
+  if (byName) return byName;
+  const scanRows = Math.min(120, Array.isArray(aoa) ? aoa.length : 0);
+  for (let r=0;r<scanRows;r++){
+    const row = aoa[r] || [];
+    const scanCols = Math.min(40, row.length);
+    for (let c=0;c<scanCols;c++){
+      const y = extractYearFromAny(row[c]);
+      if (y) return y;
+    }
+  }
+  return '';
+}
+function extractMonthlyPaymentGroups(fieldMap){
+  const groups = [];
+  if (!fieldMap || typeof fieldMap !== 'object') return groups;
+  const monthNames = ['Январь','Февраль','Март','Апрель','Май','Июнь','Июль','Август','Сентябрь','Октябрь','Ноябрь','Декабрь'];
+  let formulaOk = true;
+  for (let month=1; month<=12; month++){
+    const base = 6 + ((month-1) * 6);
+    const src = [];
+    for (let s=0;s<3;s++){
+      const amountField = base + (s*2);
+      const dateField = amountField + 1;
+      if (!Number.isInteger(fieldMap[amountField])) formulaOk = false;
+      src.push({ sourceIndex:s+1, amountField:amountField, dateField:dateField });
+    }
+    groups.push({ month:month, monthName:monthNames[month-1], sources:src });
+  }
+  if (formulaOk) return groups;
 
-function buildImportedPaymentLedgerRow(list, per, amount){
+  const fallback = [];
+  for (let month=1; month<=12; month++){
+    const base = 6 + ((month-1) * 6);
+    const src = [];
+    for (let s=0;s<3;s++){
+      const amountField = base + (s*2);
+      const dateField = amountField + 1;
+      if (Number.isInteger(fieldMap[amountField]) || Number.isInteger(fieldMap[dateField])){
+        src.push({ sourceIndex:s+1, amountField:amountField, dateField:dateField });
+      }
+    }
+    if (src.length) fallback.push({ month:month, monthName:monthNames[month-1], sources:src });
+  }
+  return fallback;
+}
+
+function buildImportedPaymentLedgerRow(list, paymentEntry){
   let maxId = 0;
   for (let i=0;i<list.length;i++){
     const idNum = Number(list[i] && list[i].id);
     if (Number.isFinite(idNum) && idNum > maxId) maxId = idNum;
   }
+  const year = normStr(paymentEntry && paymentEntry.year) || String(new Date().getFullYear());
+  const month = pad2(paymentEntry && paymentEntry.month ? paymentEntry.month : '');
+  const paidDate = normalizePaidDate(paymentEntry && paymentEntry.paidDateRaw);
   return {
     id: maxId + 1,
-    year: per.period.slice(0, 4),
-    month: per.period.slice(5, 7),
+    year: year,
+    month: month,
     accrued: 0,
-    paid: amount,
-    paid_date: '01.' + per.period.slice(5, 7) + '.' + per.period.slice(0, 4),
-    source: 'Импорт Excel',
-    payment_period: ''
+    paid: normNum(paymentEntry && paymentEntry.amount),
+    paid_date: paidDate || ('01.' + month + '.' + year),
+    source: sourceNameByIndex(paymentEntry && paymentEntry.sourceIndex),
+    payment_period: year + '-' + month
   };
 }
 
@@ -599,10 +693,11 @@ function firstNonEmptyField(line, fieldMap, fieldNos){
   }
   return '';
 }
-function parseSheetToRowsByFieldMap(aoa, fieldMap, indexRowIndex){
+function parseSheetToRowsByFieldMap(aoa, fieldMap, indexRowIndex, workbookYear){
   if (!Array.isArray(aoa) || !fieldMap || !Number.isInteger(indexRowIndex)) return { ok:false, msg:'Некорректные параметры field-map парсинга.' };
-  const hasRequired = Number.isInteger(fieldMap[10]) && (Number.isInteger(fieldMap[11]) || Number.isInteger(fieldMap[12]));
-  if (!hasRequired) return { ok:false, msg:'В служебной строке не найдены обязательные поля оплаты (10 и 11/12).' };
+
+  const paymentGroups = extractMonthlyPaymentGroups(fieldMap);
+  if (!paymentGroups.length) return { ok:false, msg:'В служебной строке не найдены месячные блоки оплат (поля 1..77).' };
 
   const rows = [];
   for (let r=indexRowIndex+1; r<aoa.length; r++){
@@ -616,13 +711,36 @@ function parseSheetToRowsByFieldMap(aoa, fieldMap, indexRowIndex){
     const otchVal = firstNonEmptyField(line, fieldMap, [20,21,22]);
     const sqVal = firstNonEmptyField(line, fieldMap, [23,24,25,26,27]);
 
-    const pAmount = getCellByFieldNo(line, fieldMap, 10);
-    const pDate = getCellByFieldNo(line, fieldMap, 11);
-    const pPeriod = getCellByFieldNo(line, fieldMap, 12);
-    const payments = [{ amount: pAmount, periodRaw: normStr(pPeriod) || pDate, paidDateRaw: pDate }];
+    const rowYear = extractYearFromAny(firstNonEmptyField(line, fieldMap, [28,29,30,31,32,33,34,35])) || workbookYear || '';
+    const payments = [];
+
+    for (let g=0; g<paymentGroups.length; g++){
+      const grp = paymentGroups[g];
+      for (let si=0; si<grp.sources.length; si++){
+        const src = grp.sources[si];
+        const amountRaw = getCellByFieldNo(line, fieldMap, src.amountField);
+        const paidDateRaw = getCellByFieldNo(line, fieldMap, src.dateField);
+        const amount = normNum(amountRaw);
+        if (!Number.isFinite(amount) || amount <= 0) continue;
+
+        const y = extractYearFromAny(paidDateRaw) || rowYear || workbookYear || String(new Date().getFullYear());
+        const month = pad2(grp.month);
+        payments.push({
+          amount: amountRaw,
+          paidDateRaw: paidDateRaw,
+          periodRaw: y + '-' + month,
+          sourceIndex: src.sourceIndex,
+          sourceName: sourceNameByIndex(src.sourceIndex),
+          month: month,
+          year: y,
+          amountField: src.amountField,
+          dateField: src.dateField
+        });
+      }
+    }
 
     if (!normStr(uidVal) && !normStr(lsVal) && !normStr(famVal) && !normStr(nameVal) && !normStr(otchVal) &&
-        !Number.isFinite(normNum(sqVal)) && !normStr(pAmount) && !normStr(pDate) && !normStr(pPeriod)){
+        !Number.isFinite(normNum(sqVal)) && payments.length===0){
       continue;
     }
 
@@ -635,10 +753,11 @@ function parseSheetToRowsByFieldMap(aoa, fieldMap, indexRowIndex){
       otch:normStr(otchVal),
       square:normNum(sqVal),
       squareRaw:sqVal,
-      payments
+      rowYear: rowYear,
+      payments: payments
     });
   }
-  return { ok:true, rows };
+  return { ok:true, rows: rows, paymentGroups: paymentGroups };
 }
 
 function createAbonentMinimal(db, desiredUid, ls, fam, name, otch, square){
@@ -705,7 +824,7 @@ function migrateKeyToUID(db, oldKey, newUid){
 }
 
 let WB=null, aoa=null, headerRowIndex=-1, payPairs=[], dataRows=[];
-let parseMeta={ mode:'none', indexRowIndex:-1, fieldMapStatus:null };
+let parseMeta={ mode:'none', indexRowIndex:-1, fieldMapStatus:null, paymentGroups:[], workbookYear:'' };
 let mode='primary';
 let primaryApplied=false;
 let primaryBlocked=false;
@@ -717,25 +836,29 @@ let restoredFromDraft=false;
 function paymentPairsCount(row){
   if (!Array.isArray(row && row.payments)) return 0;
   return row.payments.filter(function(x){
-    return !!(normStr(x && x.amount) || normStr(x && x.periodRaw));
+    const a = normNum(x && x.amount);
+    return Number.isFinite(a) && a > 0;
   }).length;
 }
 
-function parseSheetToRows(sheet){
+function parseSheetToRows(sheet, fileName, sheetName){
   aoa = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '' });
-  parseMeta = { mode:'none', indexRowIndex:-1, fieldMapStatus:null };
+  parseMeta = { mode:'none', indexRowIndex:-1, fieldMapStatus:null, paymentGroups:[], workbookYear:'' };
 
+  const workbookYear = detectWorkbookYear(aoa, fileName, sheetName);
   const indexRowIndex = findIndexMapRow(aoa);
   if (indexRowIndex >= 0){
     const indexRow = aoa[indexRowIndex] || [];
     const fieldMap = buildColumnIndexMap(indexRow);
-    const mapped = parseSheetToRowsByFieldMap(aoa, fieldMap, indexRowIndex);
+    const mapped = parseSheetToRowsByFieldMap(aoa, fieldMap, indexRowIndex, workbookYear);
     if (mapped && mapped.ok){
       headerRowIndex = indexRowIndex;
-      payPairs = Number.isInteger(fieldMap[10]) ? [{ sumCol: fieldMap[10], periodCol: Number.isInteger(fieldMap[12]) ? fieldMap[12] : fieldMap[11] }] : [];
+      payPairs = [];
       parseMeta = {
         mode:'field-map',
         indexRowIndex:indexRowIndex,
+        workbookYear: workbookYear,
+        paymentGroups: mapped.paymentGroups || [],
         fieldMapStatus:{
           10:Number.isInteger(fieldMap[10]),
           11:Number.isInteger(fieldMap[11]),
@@ -769,7 +892,7 @@ function parseSheetToRows(sheet){
     if (line.every(c => normStr(c)==='')) continue;
 
     const payments = [];
-    for (let i=0;i<payPairs.length;i++) payments.push({ amount: line[payPairs[i].sumCol], periodRaw: line[payPairs[i].periodCol] });
+    for (let i=0;i<payPairs.length;i++) payments.push({ amount: line[payPairs[i].sumCol], periodRaw: line[payPairs[i].periodCol], paidDateRaw: line[payPairs[i].periodCol], sourceIndex:1, sourceName:sourceNameByIndex(1) });
 
     rows.push({
       excelRow:r+1,
@@ -783,7 +906,7 @@ function parseSheetToRows(sheet){
       payments
     });
   }
-  parseMeta = { mode:'headers', indexRowIndex:-1, fieldMapStatus:null };
+  parseMeta = { mode:'headers', indexRowIndex:-1, fieldMapStatus:null, paymentGroups:[], workbookYear:workbookYear };
   return { ok:true, rows };
 }
 
@@ -836,26 +959,24 @@ function evaluatePaymentsRow(db, row){
 
   for (let i=0;i<row.payments.length;i++){
     const p = row.payments[i];
-    const amountRaw = normStr(p.amount), periodRaw = normStr(p.periodRaw);
-    if (!amountRaw && !periodRaw) continue;
-
     const amount = normNum(p.amount);
+    if (!Number.isFinite(amount) || amount <= 0) continue;
     const per = normalizePeriod(p.periodRaw);
-
-    if (!per || !Number.isFinite(amount) || amount <= 0){
-      errs++;
-      continue;
-    }
+    const year = normStr(p.year) || extractYearFromAny(p.periodRaw) || extractYearFromAny(p.paidDateRaw) || normStr(row.rowYear) || parseMeta.workbookYear || (per ? per.period.slice(0,4) : '') || String(new Date().getFullYear());
+    const month = pad2(p.month || (per ? per.period.slice(5,7) : ''));
+    if (!/^\d{4}$/.test(year) || !/^\d{2}$/.test(month)){ errs++; continue; }
+    const paidDate = normalizePaidDate(p.paidDateRaw) || ('01.' + month + '.' + year);
+    const source = sourceNameByIndex(p.sourceIndex || 1);
 
     const dup = existing.some(function(x){
       const ym = getLedgerYearMonth(x);
       const paid = getLedgerPaidAmount(x);
-      const paidDate = getLedgerPaidDate(x);
       if (!ym || !Number.isFinite(paid)) return false;
-      return ym.year === per.period.slice(0,4) &&
-        ym.month === per.period.slice(5,7) &&
-        paidDate === ('01.' + per.period.slice(5,7) + '.' + per.period.slice(0,4)) &&
-        paid === amount;
+      return ym.year === year &&
+        ym.month === month &&
+        getLedgerPaidDate(x) === paidDate &&
+        paid === amount &&
+        getLedgerSource(x) === source;
     });
     if (dup){ dups++; continue; }
 
@@ -863,20 +984,20 @@ function evaluatePaymentsRow(db, row){
       const ym = getLedgerYearMonth(x);
       const paid = getLedgerPaidAmount(x);
       if (!ym || !Number.isFinite(paid) || paid <= 0) return false;
-      return ym.year === per.period.slice(0,4) && ym.month === per.period.slice(5,7);
+      return ym.year === year && ym.month === month && getLedgerSource(x) === source;
     });
     if (sameMonthPayment){
       conflicts++;
-      const key = ls + '::' + per.period;
+      const key = ls + '::' + year + '-' + month + '::' + source;
       if (!conflictDecision[key]) unresolved++;
       continue;
     }
     adds++;
   }
 
-  if (errs>0){ status='ERROR'; critical=true; details.push('Есть ошибки платежей: нужна корректная дата/период и сумма > 0.'); }
-  if (conflicts>0){ status = (status==='ERROR' ? status : 'CONFLICT'); details.push('КОНФЛИКТ: есть существующие платежи за тот же период. Выбери действие.'); }
-  if (!errs && !conflicts && adds===0 && dups>0){ status='SKIP_DUPLICATE'; details.push('Найдены только дубликаты — будут пропущены.'); }
+  if (errs>0){ status='ERROR'; critical=true; details.push('Есть ошибки платежей: нужен корректный год/месяц и сумма > 0.'); }
+  if (conflicts>0){ status = (status==='ERROR' ? status : 'CONFLICT'); details.push('КОНФЛИКТ: в этом месяце уже есть платёж по тому же источнику.'); }
+  if (!errs && !conflicts && adds===0 && dups>0){ status='SKIP_DUPLICATE'; details.push('Найдены только точные дубликаты — будут пропущены.'); }
   if (!errs && !conflicts && adds>0){ status='OK'; details.push('Строка платежей готова к применению.'); }
   if (!errs && !conflicts && adds===0 && dups===0){ details.push('Платежей в строке нет.'); }
 
@@ -911,6 +1032,7 @@ function buildPreview(){
       });
     } else {
       const p2 = evaluatePaymentsRow(db, r);
+      p2.details.push('По строке LS ' + (normStr(r.ls) || '—') + ' найдено ' + paymentPairsCount(r) + ' платежей.');
       preview.push({
         excelRow:r.excelRow, uid:normStr(r.uid), ls:normStr(r.ls), fio:toFio(r.fam,r.name,r.otch),
         square:asSquare(r.square), paymentsBrief: paymentPairsCount(r) ? (paymentPairsCount(r) + ' пар') : '—',
@@ -954,21 +1076,27 @@ function renderPreview(){
       const ls = foundU && foundU.abonent ? normStr(foundU.abonent.id) : '';
       if (ls){
         rr.payments.forEach(function(p){
-          const per = normalizePeriod(p.periodRaw);
           const amount = normNum(p.amount);
-          if (!per || !Number.isFinite(amount) || amount<=0) return;
+          if (!Number.isFinite(amount) || amount<=0) return;
+          const per = normalizePeriod(p.periodRaw);
+          const year = normStr(p.year) || extractYearFromAny(p.periodRaw) || extractYearFromAny(p.paidDateRaw) || normStr(rr.rowYear) || parseMeta.workbookYear || (per ? per.period.slice(0,4) : '') || String(new Date().getFullYear());
+          const month = pad2(p.month || (per ? per.period.slice(5,7) : ''));
+          if (!/^\d{4}$/.test(year) || !/^\d{2}$/.test(month)) return;
+          const paidDate = normalizePaidDate(p.paidDateRaw) || ('01.' + month + '.' + year);
+          const source = sourceNameByIndex(p.sourceIndex || 1);
           const ex = getPaymentsByLS(ls).find(function(x){
             const ym = getLedgerYearMonth(x);
             const paid = getLedgerPaidAmount(x);
             if (!ym || !Number.isFinite(paid) || paid <= 0) return false;
-            return ym.year === per.period.slice(0,4) &&
-              ym.month === per.period.slice(5,7) &&
-              !(getLedgerPaidDate(x) === ('01.' + per.period.slice(5,7) + '.' + per.period.slice(0,4)) && paid === amount);
+            return ym.year === year &&
+              ym.month === month &&
+              getLedgerSource(x) === source &&
+              !(getLedgerPaidDate(x) === paidDate && paid === amount);
           });
           if (!ex) return;
-          const key = ls + '::' + per.period;
+          const key = ls + '::' + year + '-' + month + '::' + source;
           const dec = conflictDecision[key] || '';
-          actionsHTML += '<div class="small" style="margin-bottom:6px">' + per.display + ': было ' + getLedgerPaidAmount(ex) + ', новое ' + amount + '</div>' +
+          actionsHTML += '<div class="small" style="margin-bottom:6px">' + month + '.' + year + ' / ' + source + ': было ' + getLedgerPaidAmount(ex) + ', новое ' + amount + '</div>' +
             '<button class="action-btn" data-act="conf_over" data-key="' + key + '">Принять новый (заменить)</button>' +
             '<button class="action-btn" data-act="conf_keep" data-key="' + key + '">Оставить старый</button>' +
             (dec ? '<div class="small ok">Решение: ' + (dec==='overwrite'?'заменить':'оставить старый') + '</div>' : '');
@@ -996,6 +1124,17 @@ function renderPreview(){
   else { diag = '<span class="ok">Критических ошибок в текущем шаге нет.</span>'; }
   if (parseMeta.mode === 'field-map' && Number.isInteger(parseMeta.indexRowIndex) && parseMeta.indexRowIndex >= 0){
     diag += '<br><span class="ok">Платёжные колонки определены по служебной строке №' + (parseMeta.indexRowIndex + 1) + '.</span>';
+    const groups = Array.isArray(parseMeta.paymentGroups) ? parseMeta.paymentGroups : [];
+    diag += '<br><span class="mono">Field-map row: ' + (parseMeta.indexRowIndex + 1) + '</span>';
+    diag += '<br><span class="mono">Monthly payment groups found: ' + groups.length + '</span>';
+    for (let gi=0; gi<groups.length; gi++){
+      const g = groups[gi];
+      const chunks = [];
+      for (let sj=0; sj<g.sources.length; sj++){
+        chunks.push('[' + g.sources[sj].amountField + '/' + g.sources[sj].dateField + ']');
+      }
+      diag += '<br><span class="mono">' + g.monthName + ': ' + chunks.join(', ') + '</span>';
+    }
     const fm = parseMeta.fieldMapStatus || {};
     const fmLine = 'Field-map: 10=' + (fm[10] ? 'OK' : 'missing') + ', 11=' + (fm[11] ? 'OK' : 'missing') + ', 12=' + (fm[12] ? 'OK' : 'missing');
     diag += '<br><span class="mono">' + fmLine + '</span>';
@@ -1022,18 +1161,25 @@ function hasUnresolvedConflicts(){
     const ls = normStr(foundU.abonent.id);
     const list = getPaymentsByLS(ls);
     for (let p=0;p<r.payments.length;p++){
-      const per = normalizePeriod(r.payments[p].periodRaw);
-      const amount = normNum(r.payments[p].amount);
-      if (!per || !Number.isFinite(amount) || amount<=0) continue;
+      const pay = r.payments[p];
+      const amount = normNum(pay.amount);
+      if (!Number.isFinite(amount) || amount<=0) continue;
+      const per = normalizePeriod(pay.periodRaw);
+      const year = normStr(pay.year) || extractYearFromAny(pay.periodRaw) || extractYearFromAny(pay.paidDateRaw) || normStr(r.rowYear) || parseMeta.workbookYear || (per ? per.period.slice(0,4) : '') || String(new Date().getFullYear());
+      const month = pad2(pay.month || (per ? per.period.slice(5,7) : ''));
+      if (!/^\d{4}$/.test(year) || !/^\d{2}$/.test(month)) continue;
+      const paidDate = normalizePaidDate(pay.paidDateRaw) || ('01.' + month + '.' + year);
+      const source = sourceNameByIndex(pay.sourceIndex || 1);
       const hasConflict = list.some(function(x){
         const ym = getLedgerYearMonth(x);
         const paid = getLedgerPaidAmount(x);
         if (!ym || !Number.isFinite(paid) || paid <= 0) return false;
-        return ym.year === per.period.slice(0,4) &&
-          ym.month === per.period.slice(5,7) &&
-          !(getLedgerPaidDate(x) === ('01.' + per.period.slice(5,7) + '.' + per.period.slice(0,4)) && paid === amount);
+        return ym.year === year &&
+          ym.month === month &&
+          getLedgerSource(x) === source &&
+          !(getLedgerPaidDate(x) === paidDate && paid === amount);
       });
-      if (hasConflict && !conflictDecision[ls + '::' + per.period]) return true;
+      if (hasConflict && !conflictDecision[ls + '::' + year + '-' + month + '::' + source]) return true;
     }
   }
   return false;
@@ -1075,7 +1221,7 @@ function clearRuntimeState(){
   mode='primary';
   currentFileName='';
   restoredFromDraft=false;
-  parseMeta={ mode:'none', indexRowIndex:-1, fieldMapStatus:null };
+  parseMeta={ mode:'none', indexRowIndex:-1, fieldMapStatus:null, paymentGroups:[], workbookYear:'' };
 }
 function resetPreview(){
   clearRuntimeState();
@@ -1109,7 +1255,8 @@ async function onParse(){
   try{ WB = XLSX.read(buf, { type:'array' }); }catch(e){ alert('Не удалось распарсить XLSX: ' + (e.message || e)); return; }
   if (!WB.SheetNames || !WB.SheetNames.length){ alert('В книге нет листов.'); return; }
 
-  const res = parseSheetToRows(WB.Sheets[WB.SheetNames[0]]);
+  const firstSheetName = WB.SheetNames[0];
+  const res = parseSheetToRows(WB.Sheets[firstSheetName], parsedFileName, firstSheetName);
   if (!res.ok){
     alert('Не удалось построить предпросмотр: ' + res.msg);
     return;
@@ -1217,14 +1364,21 @@ async function applyPayments(){
 
     for (let p=0;p<row.payments.length;p++){
       const pay = row.payments[p];
-      if (!normStr(pay.amount) && !normStr(pay.periodRaw)) continue;
       const amount = normNum(pay.amount);
+      if (!Number.isFinite(amount) || amount<=0){ skipped++; continue; }
       const per = normalizePeriod(pay.periodRaw);
-      if (!per || !Number.isFinite(amount) || amount<=0){ skipped++; continue; }
+      const year = normStr(pay.year) || extractYearFromAny(pay.periodRaw) || extractYearFromAny(pay.paidDateRaw) || normStr(row.rowYear) || parseMeta.workbookYear || (per ? per.period.slice(0,4) : '') || String(new Date().getFullYear());
+      const month = pad2(pay.month || (per ? per.period.slice(5,7) : ''));
+      if (!/^\d{4}$/.test(year) || !/^\d{2}$/.test(month)){ skipped++; continue; }
+      const importedRow = buildImportedPaymentLedgerRow(list, {
+        amount: amount,
+        paidDateRaw: pay.paidDateRaw || pay.periodRaw,
+        sourceIndex: pay.sourceIndex || 1,
+        year: year,
+        month: month
+      });
+      importedRow.payment_period = year + '-' + month;
 
-      const importedRow = buildImportedPaymentLedgerRow(list, per, amount);
-      importedRow.paid_date = normalizePaidDate(pay.paidDateRaw || pay.periodRaw) || importedRow.paid_date;
-      importedRow.payment_period = per.period;
       const dup = list.some(function(x){
         const ym = getLedgerYearMonth(x);
         const paid = getLedgerPaidAmount(x);
@@ -1233,7 +1387,8 @@ async function applyPayments(){
         return ym.year === importedRow.year &&
           ym.month === importedRow.month &&
           paidDate === importedRow.paid_date &&
-          paid === importedRow.paid;
+          paid === importedRow.paid &&
+          getLedgerSource(x) === importedRow.source;
       });
       if (dup){ skipped++; continue; }
 
@@ -1241,11 +1396,11 @@ async function applyPayments(){
         const ym = getLedgerYearMonth(x);
         const paid = getLedgerPaidAmount(x);
         if (!ym || !Number.isFinite(paid) || paid <= 0) return false;
-        return ym.year === importedRow.year && ym.month === importedRow.month;
+        return ym.year === importedRow.year && ym.month === importedRow.month && getLedgerSource(x) === importedRow.source;
       });
       if (idx >= 0){
         conflicts++;
-        const decision = conflictDecision[ls + '::' + per.period];
+        const decision = conflictDecision[ls + '::' + importedRow.year + '-' + importedRow.month + '::' + importedRow.source];
         if (decision === 'overwrite'){
           list[idx] = importedRow;
           replaced++;
