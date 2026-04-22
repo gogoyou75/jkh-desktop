@@ -601,9 +601,8 @@ function firstNonEmptyField(line, fieldMap, fieldNos){
 }
 function parseSheetToRowsByFieldMap(aoa, fieldMap, indexRowIndex){
   if (!Array.isArray(aoa) || !fieldMap || !Number.isInteger(indexRowIndex)) return { ok:false, msg:'Некорректные параметры field-map парсинга.' };
-  const required = [10,11,12];
-  const hasRequired = required.some(function(no){ return Number.isInteger(fieldMap[no]); });
-  if (!hasRequired) return { ok:false, msg:'В служебной строке не найдены поля оплаты (10/11/12).' };
+  const hasRequired = Number.isInteger(fieldMap[10]) && (Number.isInteger(fieldMap[11]) || Number.isInteger(fieldMap[12]));
+  if (!hasRequired) return { ok:false, msg:'В служебной строке не найдены обязательные поля оплаты (10 и 11/12).' };
 
   const rows = [];
   for (let r=indexRowIndex+1; r<aoa.length; r++){
@@ -706,7 +705,7 @@ function migrateKeyToUID(db, oldKey, newUid){
 }
 
 let WB=null, aoa=null, headerRowIndex=-1, payPairs=[], dataRows=[];
-let parseMeta={ mode:'none', indexRowIndex:-1 };
+let parseMeta={ mode:'none', indexRowIndex:-1, fieldMapStatus:null };
 let mode='primary';
 let primaryApplied=false;
 let primaryBlocked=false;
@@ -724,7 +723,7 @@ function paymentPairsCount(row){
 
 function parseSheetToRows(sheet){
   aoa = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '' });
-  parseMeta = { mode:'none', indexRowIndex:-1 };
+  parseMeta = { mode:'none', indexRowIndex:-1, fieldMapStatus:null };
 
   const indexRowIndex = findIndexMapRow(aoa);
   if (indexRowIndex >= 0){
@@ -734,7 +733,15 @@ function parseSheetToRows(sheet){
     if (mapped && mapped.ok){
       headerRowIndex = indexRowIndex;
       payPairs = Number.isInteger(fieldMap[10]) ? [{ sumCol: fieldMap[10], periodCol: Number.isInteger(fieldMap[12]) ? fieldMap[12] : fieldMap[11] }] : [];
-      parseMeta = { mode:'field-map', indexRowIndex:indexRowIndex };
+      parseMeta = {
+        mode:'field-map',
+        indexRowIndex:indexRowIndex,
+        fieldMapStatus:{
+          10:Number.isInteger(fieldMap[10]),
+          11:Number.isInteger(fieldMap[11]),
+          12:Number.isInteger(fieldMap[12])
+        }
+      };
       return mapped;
     }
   }
@@ -776,7 +783,7 @@ function parseSheetToRows(sheet){
       payments
     });
   }
-  parseMeta = { mode:'headers', indexRowIndex:-1 };
+  parseMeta = { mode:'headers', indexRowIndex:-1, fieldMapStatus:null };
   return { ok:true, rows };
 }
 
@@ -989,6 +996,9 @@ function renderPreview(){
   else { diag = '<span class="ok">Критических ошибок в текущем шаге нет.</span>'; }
   if (parseMeta.mode === 'field-map' && Number.isInteger(parseMeta.indexRowIndex) && parseMeta.indexRowIndex >= 0){
     diag += '<br><span class="ok">Платёжные колонки определены по служебной строке №' + (parseMeta.indexRowIndex + 1) + '.</span>';
+    const fm = parseMeta.fieldMapStatus || {};
+    const fmLine = 'Field-map: 10=' + (fm[10] ? 'OK' : 'missing') + ', 11=' + (fm[11] ? 'OK' : 'missing') + ', 12=' + (fm[12] ? 'OK' : 'missing');
+    diag += '<br><span class="mono">' + fmLine + '</span>';
   } else if (parseMeta.mode === 'headers'){
     diag += '<br><span class="' + ((Array.isArray(payPairs) && payPairs.length>0) ? 'ok' : 'danger') + '">' +
       ((Array.isArray(payPairs) && payPairs.length>0) ? 'Платёжные колонки определены по заголовкам.' : 'Платёжные колонки не распознаны.') + '</span>';
@@ -1065,7 +1075,7 @@ function clearRuntimeState(){
   mode='primary';
   currentFileName='';
   restoredFromDraft=false;
-  parseMeta={ mode:'none', indexRowIndex:-1 };
+  parseMeta={ mode:'none', indexRowIndex:-1, fieldMapStatus:null };
 }
 function resetPreview(){
   clearRuntimeState();
