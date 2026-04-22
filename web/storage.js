@@ -1020,23 +1020,23 @@
   async function uploadNow() {
     if (_isGuestOrAll()) {
       alert("Сохранение запрещено: режим 'Гость' или 'ALL'.\n\nПояснение:\n- Гость (Guest) = только просмотр\n- ALL = сводный просмотр админом");
-      return;
+      return false;
     }
     var s = getSettings();
     var scope = (s.scope === "all") ? "all" : "db";
-    await upload(scope);
+    return await upload(scope);
   }
 
   async function downloadNow() {
     if (_isGuestOrAll()) {
       alert("Загрузка запрещена: режим 'Гость' или 'ALL'.");
-      return;
+      return false;
     }
     var ok = confirm("Загрузить данные с сервера (MySQL) и заменить локальные?\n\nВНИМАНИЕ: локальные несохранённые изменения будут перезаписаны.");
-    if (!ok) return;
+    if (!ok) return false;
     var s = getSettings();
     var scope = (s.scope === "all") ? "all" : "db";
-    await download(scope);
+    return await download(scope);
   }
 
   async function migrateLegacyLocalOnce(ownerId) {
