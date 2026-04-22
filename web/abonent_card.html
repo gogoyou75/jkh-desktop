@@ -1427,10 +1427,34 @@ async function saveAbonentEdit() {
     updated.rooms = document.getElementById("ae_rooms").value.trim();
     updated.share = document.getElementById("ae_share").value.trim();
     updated.phone = document.getElementById("ae_phone").value.trim();
+    const activeRegnum = String(updated.premiseRegnum || updated.regnum || '').trim();
+    if (activeRegnum) {
+        updated.premiseRegnum = activeRegnum;
+        updated.regnum = activeRegnum;
+    }
 
     const __localSnapshot = { db: __deepCloneJSONSafe(getDb()) };
 
     try {
+    if (activeRegnum) {
+        const premisesDb = getPremisesDb();
+        const currentPremise = (premisesDb && premisesDb[activeRegnum]) ? premisesDb[activeRegnum] : {};
+        const syncedPremise = Object.assign({}, currentPremise, {
+            regnum: activeRegnum,
+            square: updated.square
+        });
+        if (window.Data && typeof window.Data.ensurePremise === 'function') {
+            window.Data.ensurePremise(syncedPremise);
+        } else {
+            if (!window.AbonentsDB) window.AbonentsDB = {};
+            if (!window.AbonentsDB.premises || typeof window.AbonentsDB.premises !== 'object') window.AbonentsDB.premises = {};
+            window.AbonentsDB.premises[activeRegnum] = syncedPremise;
+            if (typeof window.saveAbonentsDB === 'function') window.saveAbonentsDB();
+        }
+    } else {
+        console.warn('saveAbonentEdit: premiseRegnum/regnum not found, updated only abonent.square for LS', String(newId));
+    }
+
     if (window.Data && typeof window.Data.upsertAbonent === 'function') {
         window.Data.upsertAbonent(updated);
     }
@@ -1468,7 +1492,6 @@ async function saveAbonentEdit() {
     if (window.__loadPaymentTable) window.__loadPaymentTable();
 
     alert("Изменения сохранены");
-    const activeRegnum = String(updated.premiseRegnum || updated.regnum || '').trim();
     if (activeRegnum) renderResponsibilityHistory(activeRegnum);
     } catch (e) {
         console.error(e);
