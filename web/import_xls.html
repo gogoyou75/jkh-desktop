@@ -212,6 +212,28 @@ function clearImportResumeState(){
   if (!window.JKHStore || !JKHStore.setJSON) return;
   try{ JKHStore.setJSON('import_xls_resume_v1', null, null); }catch(e){}
 }
+function saveImportDraftState(){
+  if (!window.JKHStore || !JKHStore.setJSON) return;
+  try{
+    JKHStore.setJSON('import_xls_draft_v1', {
+      dataRows: Array.isArray(dataRows) ? dataRows : [],
+      mode: mode === 'payments' ? 'payments' : 'primary',
+      primaryApplied: !!primaryApplied,
+      primaryBlocked: !!primaryBlocked,
+      conflictDecision: conflictDecision || {},
+      fileName: normStr(currentFileName),
+      savedAt: new Date().toISOString()
+    }, null);
+  }catch(e){}
+}
+function loadImportDraftState(){
+  if (!window.JKHStore || !JKHStore.getJSON) return null;
+  try{ return JKHStore.getJSON('import_xls_draft_v1', null, null); }catch(e){ return null; }
+}
+function clearImportDraftState(){
+  if (!window.JKHStore || !JKHStore.setJSON) return;
+  try{ JKHStore.setJSON('import_xls_draft_v1', null, null); }catch(e){}
+}
 function saveDraftNewAbonent(row){
   if (!window.JKHStore || !JKHStore.setJSON) return false;
   const draft = {
@@ -228,13 +250,15 @@ function saveDraftNewAbonent(row){
 function tryResumeFromHash(){
   if (location.hash !== '#resume=1') return false;
   const resume = loadImportResumeState();
-  if (!resume || !Array.isArray(resume.dataRows) || !resume.dataRows.length) return false;
+  if (!resume) return false;
 
-  dataRows = resume.dataRows;
-  primaryApplied = !!resume.primaryApplied;
-  primaryBlocked = false;
-  mode = resume.mode === 'payments' ? 'payments' : 'primary';
-  conflictDecision = resume.conflictDecision || {};
+  if ((!Array.isArray(dataRows) || !dataRows.length) && Array.isArray(resume.dataRows) && resume.dataRows.length){
+    dataRows = resume.dataRows;
+    primaryApplied = !!resume.primaryApplied;
+    primaryBlocked = !!resume.primaryBlocked;
+    mode = resume.mode === 'payments' ? 'payments' : 'primary';
+    conflictDecision = resume.conflictDecision || {};
+  }
 
   const db = getDB();
   const target = Number(resume.targetExcelRow) || 0;
@@ -248,7 +272,10 @@ function tryResumeFromHash(){
     }
   }
 
-  buildPreview();
+  if (Array.isArray(dataRows) && dataRows.length){
+    buildPreview();
+    saveImportDraftState();
+  }
   if (target){
     alert('Возврат из создания абонента: строка Excel #' + target + ' восстановлена. Можно продолжить импорт.');
   }
@@ -280,8 +307,8 @@ function findPaymentPairs(hdrRow){
     const a = lowKey(hdrRow[c]);
     const b = lowKey(hdrRow[c+1]);
     const isSum = (a === 'сумма' || a.includes('сумма') || a.includes('п п сумма'));
-    const isPeriod = (b === 'период' || b.includes('период'));
-    if (isSum && isPeriod){ pairs.push({ sumCol:c, periodCol:c+1 }); c++; }
+    const isDateOrPeriod = (b === 'период' || b.includes('период') || b === 'дата' || b.includes('дата'));
+    if (isSum && isDateOrPeriod){ pairs.push({ sumCol:c, periodCol:c+1 }); c++; }
   }
   return pairs;
 }
@@ -355,6 +382,11 @@ let primaryApplied=false;
 let primaryBlocked=false;
 let conflictDecision={};
 let preview=[];
+let currentFileName='';
+
+function paymentPairsCount(row){
+  return Array.isArray(row && row.payments) ? row.payments.length : 0;
+}
 
 function parseSheetToRows(sheet){
   aoa = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '' });
@@ -471,7 +503,7 @@ function evaluatePaymentsRow(db, row){
     adds++;
   }
 
-  if (errs>0){ status='ERROR'; critical=true; details.push('Есть ошибки платежей: нужен Период ММ.ГГГГ и сумма > 0.'); }
+  if (errs>0){ status='ERROR'; critical=true; details.push('Есть ошибки платежей: нужна корректная дата/период и сумма > 0.'); }
   if (conflicts>0){ status = (status==='ERROR' ? status : 'CONFLICT'); details.push('КОНФЛИКТ: есть существующие платежи за тот же период. Выбери действие.'); }
   if (!errs && !conflicts && adds===0 && dups>0){ status='SKIP_DUPLICATE'; details.push('Найдены только дубликаты — будут пропущены.'); }
   if (!errs && !conflicts && adds>0){ status='OK'; details.push('Строка платежей готова к применению.'); }
@@ -503,14 +535,14 @@ function buildPreview(){
     if (mode === 'primary'){
       preview.push({
         excelRow:r.excelRow, uid:normStr(r.uid), ls:normStr(r.ls), fio:toFio(r.fam,r.name,r.otch),
-        square:asSquare(r.square), paymentsBrief:(r.payments.filter(x => normStr(x.amount)||normStr(x.periodRaw)).length || '—') + (r.payments.filter(x => normStr(x.amount)||normStr(x.periodRaw)).length ? ' шт.' : ''),
+        square:asSquare(r.square), paymentsBrief: paymentPairsCount(r) ? (paymentPairsCount(r) + ' пар') : '—',
         status:p1.status, critical:p1.critical, action:p1.action, details:p1.details
       });
     } else {
       const p2 = evaluatePaymentsRow(db, r);
       preview.push({
         excelRow:r.excelRow, uid:normStr(r.uid), ls:normStr(r.ls), fio:toFio(r.fam,r.name,r.otch),
-        square:asSquare(r.square), paymentsBrief:(r.payments.filter(x => normStr(x.amount)||normStr(x.periodRaw)).length || '—') + (r.payments.filter(x => normStr(x.amount)||normStr(x.periodRaw)).length ? ' шт.' : ''),
+        square:asSquare(r.square), paymentsBrief: paymentPairsCount(r) ? (paymentPairsCount(r) + ' пар') : '—',
         status:p2.status, critical:p2.critical, details:p2.details
       });
     }
@@ -634,7 +666,9 @@ function setButtons(){
 }
 
 function resetPreview(){
-  preview=[]; dataRows=[]; conflictDecision={}; primaryApplied=false; primaryBlocked=false; mode='primary';
+  preview=[]; dataRows=[]; conflictDecision={}; primaryApplied=false; primaryBlocked=false; mode='primary'; currentFileName='';
+  clearImportResumeState();
+  clearImportDraftState();
   $('summaryLine').textContent = 'Предпросмотр сброшен';
   $('errorsBox').innerHTML='';
   $('uidHint').innerHTML='';
@@ -649,6 +683,7 @@ async function onParse(){
 
   const file = $('fileInput').files[0];
   if (!file) return;
+  currentFileName = normStr(file.name);
 
   const buf = await new Promise(function(resolve, reject){
     const fr = new FileReader();
@@ -671,9 +706,11 @@ async function onParse(){
 
   dataRows = res.rows;
   primaryApplied = false;
+  primaryBlocked = false;
   mode='primary';
   conflictDecision={};
   buildPreview();
+  saveImportDraftState();
 }
 
 function applyPrimary(){
@@ -723,6 +760,7 @@ function applyPrimary(){
   primaryApplied = true;
   mode='payments';
   buildPreview();
+  saveImportDraftState();
   alert('Шаг 1 применён успешно.\nОбновлено строк первички: ' + updated + '\nПрисвоено UID: ' + uidAssigned);
 }
 
@@ -782,6 +820,8 @@ function applyPayments(){
   }
 
   alert('Платежи применены.\nДобавлено: ' + added + '\nЗаменено: ' + replaced + '\nПропущено: ' + skipped + '\nКонфликтов обработано: ' + conflicts);
+  clearImportResumeState();
+  clearImportDraftState();
   buildPreview();
 }
 
@@ -807,10 +847,12 @@ $('previewBody').addEventListener('click', function(ev){
     saveImportResumeState({
       dataRows: dataRows,
       primaryApplied: primaryApplied,
+      primaryBlocked: primaryBlocked,
       mode: mode,
       conflictDecision: conflictDecision,
       targetExcelRow: excelRow
     });
+    saveImportDraftState();
 
     location.href = 'new_abonent.html?from=import';
     return;
@@ -821,11 +863,24 @@ $('previewBody').addEventListener('click', function(ev){
     if (!key) return;
     conflictDecision[key] = act==='conf_over' ? 'overwrite' : 'keep';
     buildPreview();
+    saveImportDraftState();
   }
 });
 
 (function init(){
   refreshWho();
+
+  const draft = loadImportDraftState();
+  if (draft && Array.isArray(draft.dataRows) && draft.dataRows.length){
+    dataRows = draft.dataRows;
+    mode = draft.mode === 'payments' ? 'payments' : 'primary';
+    primaryApplied = !!draft.primaryApplied;
+    primaryBlocked = !!draft.primaryBlocked;
+    conflictDecision = draft.conflictDecision || {};
+    currentFileName = normStr(draft.fileName);
+    buildPreview();
+  }
+
   tryResumeFromHash();
 
   $('fileInput').addEventListener('change', function(){ resetPreview(); setButtons(); });
