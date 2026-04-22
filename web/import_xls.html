@@ -156,6 +156,27 @@ function normalizePeriod(v){
   return { period: yy + '-' + mm, date: yy + '-' + mm + '-01', display: mm + '.' + yy };
 }
 
+function normalizePaidDate(v){
+  if (v==null) return '';
+  const s = normStr(v);
+  if (!s) return '';
+  if (/^\d+(\.\d+)?$/.test(s)){
+    try{
+      const dc = XLSX.SSF.parse_date_code(Number(s));
+      if (dc && dc.y && dc.m && dc.d){
+        return String(dc.d).padStart(2,'0') + '.' + String(dc.m).padStart(2,'0') + '.' + String(dc.y);
+      }
+    }catch(e){}
+  }
+  let m = s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (m) return m[3] + '.' + m[2] + '.' + m[1];
+  m = s.match(/^(\d{2})\.(\d{2})\.(\d{4})$/);
+  if (m) return m[1] + '.' + m[2] + '.' + m[3];
+  const per = normalizePeriod(s);
+  if (per) return '01.' + per.period.slice(5,7) + '.' + per.period.slice(0,4);
+  return s;
+}
+
 function canWriteOrExplain(){
   try{ if (window.Data && typeof Data.ensureWriteOrExplain === 'function') return Data.ensureWriteOrExplain(); }catch(e){}
   try{
@@ -517,6 +538,110 @@ function findPaymentPairs(hdrRow){
   return pairs;
 }
 
+
+function toFieldNo(v){
+  if (v==null) return NaN;
+  if (typeof v === 'number') return Number.isFinite(v) ? Math.round(v) : NaN;
+  const s = normStr(v).replace(',', '.');
+  if (!s) return NaN;
+  if (!/^\d+(\.0+)?$/.test(s)) return NaN;
+  return Math.round(Number(s));
+}
+function findIndexMapRow(aoa){
+  if (!Array.isArray(aoa) || !aoa.length) return -1;
+  const maxScan = Math.min(40, aoa.length);
+  let bestIndex = -1, bestScore = -1;
+  for (let r=0; r<maxScan; r++){
+    const row = aoa[r] || [];
+    if (!row.length) continue;
+    const seen = {};
+    let inRange = 0, seqHits = 0;
+    for (let c=0;c<row.length;c++){
+      const n = toFieldNo(row[c]);
+      if (!Number.isFinite(n)) continue;
+      if (n < 1 || n > 120) continue;
+      inRange++;
+      seen[n] = true;
+    }
+    const uniq = Object.keys(seen).length;
+    if (!uniq) continue;
+    for (let n=1;n<=15;n++) if (seen[n]) seqHits++;
+    const score = (inRange * 2) + uniq + (seqHits * 3);
+    if (inRange >= 10 && uniq >= 10 && score > bestScore){
+      bestScore = score;
+      bestIndex = r;
+    }
+  }
+  return bestIndex;
+}
+function buildColumnIndexMap(indexRow){
+  const map = {};
+  const row = Array.isArray(indexRow) ? indexRow : [];
+  for (let c=0;c<row.length;c++){
+    const n = toFieldNo(row[c]);
+    if (!Number.isFinite(n)) continue;
+    if (n < 1 || n > 120) continue;
+    if (!Object.prototype.hasOwnProperty.call(map, n)) map[n] = c;
+  }
+  return map;
+}
+function getCellByFieldNo(line, fieldMap, fieldNo){
+  if (!line || !fieldMap) return '';
+  const col = fieldMap[fieldNo];
+  if (!Number.isInteger(col) || col < 0) return '';
+  return line[col];
+}
+function firstNonEmptyField(line, fieldMap, fieldNos){
+  const list = Array.isArray(fieldNos) ? fieldNos : [];
+  for (let i=0;i<list.length;i++){
+    const v = getCellByFieldNo(line, fieldMap, list[i]);
+    if (normStr(v)!=='') return v;
+  }
+  return '';
+}
+function parseSheetToRowsByFieldMap(aoa, fieldMap, indexRowIndex){
+  if (!Array.isArray(aoa) || !fieldMap || !Number.isInteger(indexRowIndex)) return { ok:false, msg:'Некорректные параметры field-map парсинга.' };
+  const required = [10,11,12];
+  const hasRequired = required.some(function(no){ return Number.isInteger(fieldMap[no]); });
+  if (!hasRequired) return { ok:false, msg:'В служебной строке не найдены поля оплаты (10/11/12).' };
+
+  const rows = [];
+  for (let r=indexRowIndex+1; r<aoa.length; r++){
+    const line = aoa[r] || [];
+    if (line.every(c => normStr(c)==='')) continue;
+
+    const uidVal = firstNonEmptyField(line, fieldMap, [1,6,7,8,9]);
+    const lsVal = firstNonEmptyField(line, fieldMap, [2,3,4,5]);
+    const famVal = firstNonEmptyField(line, fieldMap, [13,14,15,16]);
+    const nameVal = firstNonEmptyField(line, fieldMap, [17,18,19]);
+    const otchVal = firstNonEmptyField(line, fieldMap, [20,21,22]);
+    const sqVal = firstNonEmptyField(line, fieldMap, [23,24,25,26,27]);
+
+    const pAmount = getCellByFieldNo(line, fieldMap, 10);
+    const pDate = getCellByFieldNo(line, fieldMap, 11);
+    const pPeriod = getCellByFieldNo(line, fieldMap, 12);
+    const payments = [{ amount: pAmount, periodRaw: normStr(pPeriod) || pDate, paidDateRaw: pDate }];
+
+    if (!normStr(uidVal) && !normStr(lsVal) && !normStr(famVal) && !normStr(nameVal) && !normStr(otchVal) &&
+        !Number.isFinite(normNum(sqVal)) && !normStr(pAmount) && !normStr(pDate) && !normStr(pPeriod)){
+      continue;
+    }
+
+    rows.push({
+      excelRow:r+1,
+      uid:normStr(uidVal),
+      ls:normStr(lsVal),
+      fam:normStr(famVal),
+      name:normStr(nameVal),
+      otch:normStr(otchVal),
+      square:normNum(sqVal),
+      squareRaw:sqVal,
+      payments
+    });
+  }
+  return { ok:true, rows };
+}
+
 function createAbonentMinimal(db, desiredUid, ls, fam, name, otch, square){
   const lsKey = normStr(ls);
   if (!lsKey) return { ok:false, msg:'Пустой ЛС — нельзя создать абонента.' };
@@ -581,6 +706,7 @@ function migrateKeyToUID(db, oldKey, newUid){
 }
 
 let WB=null, aoa=null, headerRowIndex=-1, payPairs=[], dataRows=[];
+let parseMeta={ mode:'none', indexRowIndex:-1 };
 let mode='primary';
 let primaryApplied=false;
 let primaryBlocked=false;
@@ -598,6 +724,21 @@ function paymentPairsCount(row){
 
 function parseSheetToRows(sheet){
   aoa = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '' });
+  parseMeta = { mode:'none', indexRowIndex:-1 };
+
+  const indexRowIndex = findIndexMapRow(aoa);
+  if (indexRowIndex >= 0){
+    const indexRow = aoa[indexRowIndex] || [];
+    const fieldMap = buildColumnIndexMap(indexRow);
+    const mapped = parseSheetToRowsByFieldMap(aoa, fieldMap, indexRowIndex);
+    if (mapped && mapped.ok){
+      headerRowIndex = indexRowIndex;
+      payPairs = Number.isInteger(fieldMap[10]) ? [{ sumCol: fieldMap[10], periodCol: Number.isInteger(fieldMap[12]) ? fieldMap[12] : fieldMap[11] }] : [];
+      parseMeta = { mode:'field-map', indexRowIndex:indexRowIndex };
+      return mapped;
+    }
+  }
+
   headerRowIndex = findHeaderRow(aoa);
   if (headerRowIndex < 0) return { ok:false, msg:'Не нашёл строку заголовков (UID/ЛС/Фамилия/Площадь).' };
 
@@ -635,6 +776,7 @@ function parseSheetToRows(sheet){
       payments
     });
   }
+  parseMeta = { mode:'headers', indexRowIndex:-1 };
   return { ok:true, rows };
 }
 
@@ -845,8 +987,11 @@ function renderPreview(){
   let diag = '';
   if (err){ diag = '<span class="danger">Есть ошибки, проверь строки со статусом ОШИБКА.</span>'; }
   else { diag = '<span class="ok">Критических ошибок в текущем шаге нет.</span>'; }
-  if (mode==='payments' && (!Array.isArray(payPairs) || payPairs.length===0)){
-    diag += '<br><span class="danger">Платёжные колонки не распознаны по заголовкам Excel.</span>';
+  if (parseMeta.mode === 'field-map' && Number.isInteger(parseMeta.indexRowIndex) && parseMeta.indexRowIndex >= 0){
+    diag += '<br><span class="ok">Платёжные колонки определены по служебной строке №' + (parseMeta.indexRowIndex + 1) + '.</span>';
+  } else if (parseMeta.mode === 'headers'){
+    diag += '<br><span class="' + ((Array.isArray(payPairs) && payPairs.length>0) ? 'ok' : 'danger') + '">' +
+      ((Array.isArray(payPairs) && payPairs.length>0) ? 'Платёжные колонки определены по заголовкам.' : 'Платёжные колонки не распознаны.') + '</span>';
   }
   $('errorsBox').innerHTML = diag;
 
@@ -920,6 +1065,7 @@ function clearRuntimeState(){
   mode='primary';
   currentFileName='';
   restoredFromDraft=false;
+  parseMeta={ mode:'none', indexRowIndex:-1 };
 }
 function resetPreview(){
   clearRuntimeState();
@@ -1067,6 +1213,8 @@ async function applyPayments(){
       if (!per || !Number.isFinite(amount) || amount<=0){ skipped++; continue; }
 
       const importedRow = buildImportedPaymentLedgerRow(list, per, amount);
+      importedRow.paid_date = normalizePaidDate(pay.paidDateRaw || pay.periodRaw) || importedRow.paid_date;
+      importedRow.payment_period = per.period;
       const dup = list.some(function(x){
         const ym = getLedgerYearMonth(x);
         const paid = getLedgerPaidAmount(x);
