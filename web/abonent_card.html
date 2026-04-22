@@ -1160,7 +1160,38 @@ function __saveTransferBalance(newId, regnum, startISO, principal, penalty, from
   }catch(e){}
 }
 
-function applyChangeResponsible(mode) {
+function __deepCloneJSONSafe(obj){
+  try{ return JSON.parse(JSON.stringify(obj)); }catch(e){ return null; }
+}
+
+async function __rollbackAfterFlushError(snapshot, options){
+  let restored = false;
+  try{
+    if (snapshot && snapshot.db && typeof window.AbonentsDB === 'object'){
+      window.AbonentsDB = __deepCloneJSONSafe(snapshot.db) || snapshot.db;
+      if (typeof window.saveAbonentsDB === 'function') window.saveAbonentsDB();
+      restored = true;
+    }
+  }catch(e){
+    console.warn('Local snapshot restore failed', e);
+  }
+
+  if (!restored){
+    try{
+      if (window.JKHDataLoader && typeof window.JKHDataLoader.loadFromServer === 'function'){
+        await window.JKHDataLoader.loadFromServer({ force: true, reason: (options && options.reason) || 'flush_error_rollback' });
+      }
+    }catch(e){
+      console.warn('Forced reload from server failed', e);
+    }
+  }
+
+  if (options && options.reload){
+    try{ window.location.reload(); }catch(e){}
+  }
+}
+
+async function applyChangeResponsible(mode) {
     if (!canWriteOrExplainLocal()) return;
     const { id, a } = getCurrentAbonent();
     if (!a) { alert('Абонент не найден'); return; }
@@ -1175,6 +1206,9 @@ function applyChangeResponsible(mode) {
     if (!dateFrom) { alert('Укажите дату передачи'); return; }
     if (String(newId) === String(id)) { alert('Новый ответственный совпадает с текущим'); return; }
 
+    const __localSnapshot = { db: __deepCloneJSONSafe(getDb()) };
+
+    try {
     const db = getDb();
     if (!db[String(newId)]) { alert('Абонент не найден: ' + newId); return; }
 
@@ -1285,6 +1319,8 @@ function applyChangeResponsible(mode) {
         }
     }
 
+    await Data.flushDbToServer();
+
     // сообщение по режиму
     if (String(mode) === 'NO_DEBT') {
         alert("Передача БЕЗ ДОЛГА сохранена.\nСледующий шаг: в расчёте учитываем обнуление долга с даты передачи.");
@@ -1293,6 +1329,11 @@ function applyChangeResponsible(mode) {
     }
 
     window.location.href = 'abonent_card.html?abonent=' + encodeURIComponent(String(newId));
+    } catch (e) {
+        console.error(e);
+        alert('Ошибка сохранения на сервер. Локальные изменения будут откатаны.');
+        await __rollbackAfterFlushError(__localSnapshot, { reason: 'apply_change_responsible_flush_error', reload: true });
+    }
 }
 
 /* ===== Редактирование абонента (оставил как у тебя) ===== */
@@ -1351,7 +1392,7 @@ function migrateLocalKeys(oldId, newId) {
     });
 }
 
-function saveAbonentEdit() {
+async function saveAbonentEdit() {
     if (!canWriteOrExplainLocal()) return;
     const { id: oldId, a } = getCurrentAbonent();
     if (!a) { alert("Абонент не найден"); return; }
@@ -1387,6 +1428,9 @@ function saveAbonentEdit() {
     updated.share = document.getElementById("ae_share").value.trim();
     updated.phone = document.getElementById("ae_phone").value.trim();
 
+    const __localSnapshot = { db: __deepCloneJSONSafe(getDb()) };
+
+    try {
     if (window.Data && typeof window.Data.upsertAbonent === 'function') {
         window.Data.upsertAbonent(updated);
     }
@@ -1414,6 +1458,8 @@ function saveAbonentEdit() {
         window.history.replaceState({}, "", url.toString());
     }
 
+    await Data.flushDbToServer();
+
     closeAbonentEdit();
     fillAbonentCard();
 
@@ -1424,6 +1470,11 @@ function saveAbonentEdit() {
     alert("Изменения сохранены");
     const activeRegnum = String(updated.premiseRegnum || updated.regnum || '').trim();
     if (activeRegnum) renderResponsibilityHistory(activeRegnum);
+    } catch (e) {
+        console.error(e);
+        alert('Ошибка сохранения на сервер. Локальные изменения будут откатаны.');
+        await __rollbackAfterFlushError(__localSnapshot, { reason: 'save_abonent_edit_flush_error', reload: true });
+    }
 }
 
 function moratoriumKey(id){ return "moratorium_" + id; }
@@ -1434,6 +1485,7 @@ function loadMoratoriumUI(){
     if (!el) return;
     el.checked = storeGet(moratoriumKey(id)) === "1";
 }
+// intentionally local-only: флаг моратория хранится локально по текущему ЛС
 function bindMoratoriumUI(){
     const id = getAbonentIdFromURL();
     const el = document.getElementById("moratoriumToggle");
@@ -1461,6 +1513,7 @@ function openNotesModal() {
 function closeNotesModal() {
     document.getElementById("notesModal").style.display = "none";
 }
+// intentionally local-only: заметки не входят в server-first сценарий этой задачи
 function saveNotes() {
     if (!canWriteOrExplainLocal()) return;
     const id = getAbonentIdFromURL();
@@ -1495,6 +1548,7 @@ function loadCalcPeriodUI(){
     }
 }
 
+// intentionally local-only: период расчёта это UI-параметр и не отправляется на сервер
 function saveCalcPeriod(from, to){
     const id = getAbonentIdFromURL();
     storeSet(calcPeriodKey(id), JSON.stringify({from: from || "", to: to || ""}));
