@@ -815,7 +815,19 @@ function parseSheetToRowsByFieldMap(aoa, fieldMap, indexRowIndex, workbookYear){
     const line = aoa[r] || [];
     if (line.every(c => normStr(c)==='')) continue;
 
-    const uidVal = firstNonEmptyField(line, fieldMap, [0]);
+    let uidVal = '';
+
+const rawUidCell = firstNonEmptyField(line, fieldMap, [0]);
+
+if (rawUidCell){
+  const txt = String(rawUidCell);
+
+  // ищем uid внутри строки
+  const match = txt.match(/uid_[a-z0-9]+/i);
+  if (match){
+    uidVal = match[0];
+  }
+}
 const lsVal = firstNonEmptyField(line, fieldMap, [1]);
 const famVal = firstNonEmptyField(line, fieldMap, [2]);
 const nameVal = firstNonEmptyField(line, fieldMap, [3]);
@@ -1034,7 +1046,7 @@ function parseSheetToRows(sheet, fileName, sheetName){
           payments.push({
             amount: line[payPairs[i].sumCol],
             periodRaw: line[payPairs[i].periodCol],
-            paidDateRaw: line[payPairs[i].periodCol],
+            paidDateRaw: line[payPairs[i].dateCol],
             sourceIndex: 1,
             sourceName: sourceNameByIndex(1)
           });
