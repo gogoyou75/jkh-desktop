@@ -31,6 +31,8 @@ app.config["SECRET_KEY"] = os.getenv("SECRET_KEY", "change-me-please")
 app.config["SESSION_COOKIE_HTTPONLY"] = True
 app.config["SESSION_COOKIE_SAMESITE"] = os.getenv("SESSION_COOKIE_SAMESITE", "Lax")
 app.config["SESSION_COOKIE_SECURE"] = os.getenv("SESSION_COOKIE_SECURE", "0") == "1"
+app.config["IMPORT_MAX_UPLOAD_BYTES"] = int(os.getenv("IMPORT_MAX_UPLOAD_BYTES", str(10 * 1024 * 1024)))
+app.config["IMPORT_UPLOAD_BLOB_TTL_DAYS"] = int(os.getenv("IMPORT_UPLOAD_BLOB_TTL_DAYS", "14"))
 
 db = SQLAlchemy(app)
 
@@ -246,6 +248,24 @@ ROW_STATUSES = {
     "failed",
 }
 
+IMPORT_ALLOWED_TRANSITIONS = {
+    "parse": {"uploaded", "failed"},
+    "validate": {"parsed", "validated"},
+    "apply": {"ready_to_apply"},
+}
+
+IMPORT_REQUIRED_COLUMNS = {"account_uid", "payment_date", "payment_period", "amount", "source_index"}
+
+HEADER_ALIASES = {
+    "account_uid": {"account_uid", "uid", "уид", "лс uid", "лицевой uid"},
+    "abonent_id": {"abonent_id", "абонент", "abonent"},
+    "account_number": {"account_number", "лицевой счет", "лицевой счёт", "лс", "лицевой_счет"},
+    "payment_date": {"payment_date", "paid_date", "дата", "дата платежа", "дата оплаты"},
+    "payment_period": {"payment_period", "period", "период", "расчетный период", "месяц"},
+    "amount": {"amount", "sum", "сумма", "сумма оплаты", "оплата"},
+    "source_index": {"source_index", "source", "источник", "источник платежа", "индекс источника"},
+}
+
 
 def _is_protected_owner_level_key(base_key: str) -> bool:
     k = str(base_key or "").strip()
@@ -405,9 +425,93 @@ def _parse_header_map(values):
     out = {}
     for i, v in enumerate(values):
         key = _norm_text(v).lower()
-        if key:
-            out[key] = i
+        if not key:
+            continue
+        normalized = re.sub(r"[^\wа-яА-ЯёЁ]+", " ", key, flags=re.UNICODE)
+        normalized = re.sub(r"\s+", " ", normalized).strip()
+        for canonical, aliases in HEADER_ALIASES.items():
+            if normalized in aliases:
+                out[canonical] = i
+                break
+        if normalized not in out:
+            out[normalized] = i
     return out
+
+
+def _ensure_batch_transition(batch: ImportBatch, operation: str):
+    allowed = IMPORT_ALLOWED_TRANSITIONS.get(operation, set())
+    if batch.status not in allowed:
+        return jsonify(
+            ok=False,
+            error="state_transition_forbidden",
+            details={
+                "operation": operation,
+                "from_status": batch.status,
+                "allowed_from": sorted(allowed),
+            },
+        ), 409
+    return None
+
+
+def _load_owner_sources(owner_id: str):
+    row = KVStore.query.filter_by(owner=owner_id, k="payment_sources_v1").first()
+    if not row or not row.v:
+        return {}
+    try:
+        arr = json.loads(row.v)
+    except Exception:
+        return {}
+    if not isinstance(arr, list):
+        return {}
+    out = {}
+    for i, label in enumerate(arr, start=1):
+        clean = _norm_text(label)
+        if clean:
+            out[i] = clean
+    return out
+
+
+def _find_owner_accounts(owner_id: str, account_uid: str, account_number: str):
+    row = KVStore.query.filter_by(owner=owner_id, k="abonents_v1").first()
+    if not row or not row.v:
+        return []
+    try:
+        obj = json.loads(row.v)
+    except Exception:
+        return []
+    if not isinstance(obj, dict):
+        return []
+    uid_norm = _norm_text(account_uid).lower()
+    ls_norm = _norm_text(account_number).lower()
+    hits = []
+    for abonent in obj.values():
+        if not isinstance(abonent, dict):
+            continue
+        candidate_uid = _norm_text(abonent.get("uid")).lower()
+        candidate_ls = _norm_text(abonent.get("id")).lower()
+        if uid_norm and candidate_uid != uid_norm:
+            continue
+        if ls_norm and candidate_ls and candidate_ls != ls_norm:
+            continue
+        hits.append(abonent)
+    return hits
+
+
+def _row_human_error_payload(r: ImportBatchRow):
+    return {
+        "excel_row_ref": r.excel_row_ref,
+        "excel_sheet_name": r.excel_sheet_name,
+        "account_uid": r.account_uid,
+        "account_number": r.account_number,
+        "payment_date": r.payment_date,
+        "payment_period": r.payment_period,
+        "amount": r.amount,
+        "source_index": r.source_index,
+        "source_label": r.source_label,
+        "reason_code": r.reason_code,
+        "reason_text": r.reason_text,
+        "recommendation": json.loads(r.error_details_json or "{}").get("recommendation", ""),
+    }
 
 
 @app.get("/health")
@@ -428,8 +532,6 @@ def initdb():
 
 @app.post("/api/auth/register")
 def auth_register():
-    db.create_all()
-
     data = request.get_json(silent=True) or {}
     email = _normalize_email(data.get("email"))
     password = str(data.get("password") or "")
@@ -618,7 +720,6 @@ def import_payments_upload():
     if err:
         return err
 
-    db.create_all()
     owner, owner_err = _resolve_owner(request.form.get("owner"), allow_admin_override=True)
     if owner_err:
         return owner_err
@@ -630,6 +731,12 @@ def import_payments_upload():
     file_bytes = upload.read()
     if not file_bytes:
         return _json_error("file_empty", 400)
+    if len(file_bytes) > app.config["IMPORT_MAX_UPLOAD_BYTES"]:
+        return jsonify(
+            ok=False,
+            error="file_too_large",
+            details={"max_bytes": app.config["IMPORT_MAX_UPLOAD_BYTES"]},
+        ), 400
 
     file_sha = hashlib.sha256(file_bytes).hexdigest()
     accounting_year = _norm_text(request.form.get("accounting_year"))
@@ -649,7 +756,6 @@ def import_payments_upload():
         display_name=display_name,
         accounting_year=accounting_year,
         version_label=_norm_text(request.form.get("version_label")),
-        notes=_norm_text(request.form.get("notes")),
         duplicate_of_batch_id=existing_exact.id if existing_exact else None,
         supersedes_batch_id=int(request.form.get("supersedes_batch_id")) if _norm_text(request.form.get("supersedes_batch_id")) else None,
         overlaps_with_batch_id=existing_year.id if existing_year else None,
@@ -657,6 +763,9 @@ def import_payments_upload():
         has_period_overlap=bool(existing_year),
         status="uploaded",
         uploaded_at=datetime.utcnow(),
+        notes=(
+            (_norm_text(request.form.get("notes")) + "\n") if _norm_text(request.form.get("notes")) else ""
+        ) + f"upload_blob_policy: ttl_days={app.config['IMPORT_UPLOAD_BLOB_TTL_DAYS']}, max_bytes={app.config['IMPORT_MAX_UPLOAD_BYTES']}",
     )
     db.session.add(batch)
     db.session.commit()
@@ -674,6 +783,9 @@ def import_payments_parse(batch_id):
         return _json_error("batch_not_found", 404)
     if user.role != "admin" and batch.owner_id != user.id:
         return _json_error("forbidden", 403)
+    transition_err = _ensure_batch_transition(batch, "parse")
+    if transition_err:
+        return transition_err
 
     try:
         wb = load_workbook(io.BytesIO(batch.upload_blob), data_only=True)
@@ -687,11 +799,16 @@ def import_payments_parse(batch_id):
     row_no = 0
     parsed_rows = []
 
+    missing_columns = set()
     for ws in wb.worksheets:
         values = list(ws.iter_rows(values_only=True))
         if not values:
             continue
         header_map = _parse_header_map(values[0])
+        missing = sorted(IMPORT_REQUIRED_COLUMNS.difference(set(header_map.keys())))
+        if missing:
+            missing_columns.update(missing)
+            continue
         for idx in range(2, len(values) + 1):
             line = values[idx - 1]
             if all(_norm_text(v) == "" for v in line if v is not None):
@@ -743,12 +860,22 @@ def import_payments_parse(batch_id):
                 error_details_json="{}",
             ))
 
+    if missing_columns:
+        batch.status = "failed"
+        batch.finished_at = datetime.utcnow()
+        db.session.commit()
+        return jsonify(
+            ok=False,
+            error="template_header_mismatch",
+            details={"missing_required_columns": sorted(missing_columns)},
+        ), 400
+
     db.session.bulk_save_objects(parsed_rows)
     batch.rows_total = row_no
     batch.status = "parsed"
     batch.started_at = datetime.utcnow()
     db.session.commit()
-    return jsonify(ok=True, batch=_batch_payload(batch), parsed_rows=row_no)
+    return jsonify(ok=True, batch=_batch_payload(batch), parsed_rows=row_no, summary={"missing_required_columns": []})
 
 
 @app.post("/api/import/<int:batch_id>/validate")
@@ -762,12 +889,16 @@ def import_payments_validate(batch_id):
         return _json_error("batch_not_found", 404)
     if user.role != "admin" and batch.owner_id != user.id:
         return _json_error("forbidden", 403)
+    transition_err = _ensure_batch_transition(batch, "validate")
+    if transition_err:
+        return transition_err
 
     rows = ImportBatchRow.query.filter_by(batch_id=batch.id).order_by(ImportBatchRow.row_no.asc()).all()
     if not rows:
         return _json_error("rows_not_found", 400)
 
     seen = set()
+    sources_map = _load_owner_sources(batch.owner_id)
     valid = invalid = duplicate = 0
 
     for r in rows:
@@ -777,51 +908,80 @@ def import_payments_validate(batch_id):
             r.reason_code = "account_uid_required"
             r.reason_text = "Не заполнен account_uid"
             details["field"] = "account_uid"
+            details["recommendation"] = "Заполните account_uid существующим UID абонента."
             invalid += 1
         elif not r.payment_date:
             r.status = "invalid"
             r.reason_code = "payment_date_invalid"
             r.reason_text = "Некорректная дата платежа"
             details["field"] = "payment_date"
+            details["recommendation"] = "Проверьте дату платежа, ожидается YYYY-MM-DD."
             invalid += 1
         elif not r.payment_period:
             r.status = "invalid"
             r.reason_code = "payment_period_invalid"
             r.reason_text = "Некорректный период платежа"
             details["field"] = "payment_period"
+            details["recommendation"] = "Проверьте период платежа, ожидается YYYY-MM."
             invalid += 1
         elif not r.amount:
             r.status = "invalid"
             r.reason_code = "amount_invalid"
             r.reason_text = "Некорректная сумма"
             details["field"] = "amount"
+            details["recommendation"] = "Проверьте сумму, ожидается число > 0."
             invalid += 1
         elif r.source_index is None:
             r.status = "invalid"
             r.reason_code = "source_index_required"
             r.reason_text = "source_index обязателен"
             details["field"] = "source_index"
+            details["recommendation"] = "Укажите индекс источника платежа."
+            invalid += 1
+        elif r.source_index not in sources_map:
+            r.status = "invalid"
+            r.reason_code = "INVALID_SOURCE_INDEX"
+            r.reason_text = "source_index отсутствует в справочнике payment_sources"
+            details["field"] = "source_index"
+            details["recommendation"] = "Используйте source_index из справочника источников оплаты."
             invalid += 1
         else:
-            r.fingerprint = _fp(batch.owner_id, r.account_uid, r.payment_date, r.amount, r.payment_period, r.source_index)
-            if r.fingerprint in seen:
-                r.status = "duplicate"
-                r.reason_code = "duplicate_in_batch"
-                r.reason_text = "Дубликат в текущем батче"
-                duplicate += 1
+            matches = _find_owner_accounts(batch.owner_id, r.account_uid, r.account_number)
+            if not matches:
+                r.status = "invalid"
+                r.reason_code = "ACCOUNT_NOT_FOUND"
+                r.reason_text = "account_uid не найден у текущего owner"
+                details["field"] = "account_uid"
+                details["recommendation"] = "Проверьте UID/ЛС и загрузите корректные данные абонента."
+                invalid += 1
+            elif len(matches) > 1:
+                r.status = "invalid"
+                r.reason_code = "AMBIGUOUS_ACCOUNT_MATCH"
+                r.reason_text = "Найдено несколько совпадений account_uid/account_number"
+                details["field"] = "account_uid"
+                details["recommendation"] = "Уточните ЛС/UID для однозначного сопоставления."
+                invalid += 1
             else:
-                seen.add(r.fingerprint)
-                already = ImportAppliedFingerprint.query.filter_by(fingerprint=r.fingerprint).first()
-                if already:
+                r.source_label = sources_map.get(r.source_index, r.source_label)
+                r.fingerprint = _fp(batch.owner_id, r.account_uid, r.payment_date, r.amount, r.payment_period, r.source_index)
+                if r.fingerprint in seen:
                     r.status = "duplicate"
-                    r.reason_code = "duplicate_previously_applied"
-                    r.reason_text = "Дубликат ранее загруженного платежа"
+                    r.reason_code = "duplicate_in_batch"
+                    r.reason_text = "Дубликат в текущем батче"
                     duplicate += 1
                 else:
-                    r.status = "ready"
-                    r.reason_code = ""
-                    r.reason_text = ""
-                    valid += 1
+                    seen.add(r.fingerprint)
+                    already = ImportAppliedFingerprint.query.filter_by(fingerprint=r.fingerprint).first()
+                    if already:
+                        r.status = "duplicate"
+                        r.reason_code = "duplicate_previously_applied"
+                        r.reason_text = "Дубликат ранее загруженного платежа"
+                        duplicate += 1
+                    else:
+                        r.status = "ready"
+                        r.reason_code = ""
+                        r.reason_text = ""
+                        valid += 1
         r.error_details_json = json.dumps(details, ensure_ascii=False)
 
     batch.rows_valid = valid
@@ -861,15 +1021,16 @@ def import_payments_apply(batch_id):
         return _json_error("batch_not_found", 404)
     if user.role != "admin" and batch.owner_id != user.id:
         return _json_error("forbidden", 403)
-
-    if batch.status not in {"ready_to_apply", "validated"}:
-        return _json_error("batch_not_ready", 400)
+    transition_err = _ensure_batch_transition(batch, "apply")
+    if transition_err:
+        return transition_err
 
     rows = ImportBatchRow.query.filter_by(batch_id=batch.id).order_by(ImportBatchRow.row_no.asc()).all()
     if any(r.status == "invalid" for r in rows):
         return _json_error("batch_has_invalid_rows", 400)
 
-    applied_count = 0
+    applied_count = skipped_count = duplicate_count = failed_count = 0
+    sources_map = _load_owner_sources(batch.owner_id)
     try:
         batch.status = "applying"
         db.session.flush()
@@ -878,6 +1039,9 @@ def import_payments_apply(batch_id):
             if r.status != "ready":
                 if r.status == "duplicate":
                     r.status = "skipped"
+                    duplicate_count += 1
+                else:
+                    skipped_count += 1
                 continue
 
             fp_existing = ImportAppliedFingerprint.query.filter_by(fingerprint=r.fingerprint).with_for_update().first()
@@ -885,6 +1049,7 @@ def import_payments_apply(batch_id):
                 r.status = "duplicate"
                 r.reason_code = "duplicate_recheck"
                 r.reason_text = "Дубликат обнаружен при apply"
+                duplicate_count += 1
                 continue
 
             key = f"payments_{r.account_uid}"
@@ -913,7 +1078,7 @@ def import_payments_apply(batch_id):
                 "accrued": 0,
                 "paid": float(r.amount),
                 "paid_date": r.payment_date,
-                "source": r.source_label or f"Платёж {r.source_index}",
+                "source": sources_map.get(r.source_index) or r.source_label or f"Платёж {r.source_index}",
                 "payment_period": r.payment_period,
             }
             ledger.append(ledger_item)
@@ -936,6 +1101,8 @@ def import_payments_apply(batch_id):
         batch.rows_applied = applied_count
         batch.status = "applied"
         batch.finished_at = datetime.utcnow()
+        if batch.uploaded_at and app.config["IMPORT_UPLOAD_BLOB_TTL_DAYS"] <= 0:
+            batch.upload_blob = b""
         db.session.commit()
     except Exception as ex:
         db.session.rollback()
@@ -943,9 +1110,16 @@ def import_payments_apply(batch_id):
         batch.status = "failed"
         batch.finished_at = datetime.utcnow()
         db.session.commit()
+        failed_count += 1
         return jsonify(ok=False, error="apply_failed", details=str(ex)), 500
 
-    return jsonify(ok=True, batch=_batch_payload(batch), applied=applied_count)
+    summary = {
+        "applied_count": applied_count,
+        "skipped_count": skipped_count,
+        "duplicate_count": duplicate_count,
+        "failed_count": failed_count,
+    }
+    return jsonify(ok=True, batch=_batch_payload(batch), summary=summary)
 
 
 @app.get("/api/import/payments/batches")
@@ -976,7 +1150,14 @@ def import_payments_errors(batch_id):
         ImportBatchRow.batch_id == batch.id,
         ImportBatchRow.status.in_(["invalid", "failed", "duplicate"]),
     ).order_by(ImportBatchRow.row_no.asc()).all()
-    return jsonify(ok=True, errors=[_row_payload(r) for r in bad])
+    by_reason = {}
+    for r in bad:
+        by_reason[r.reason_code or "unknown"] = by_reason.get(r.reason_code or "unknown", 0) + 1
+    return jsonify(
+        ok=True,
+        errors=[_row_human_error_payload(r) for r in bad],
+        summary={"total": len(bad), "by_reason": by_reason},
+    )
 
 
 @app.get("/api/import/<int:batch_id>/errors/export")
@@ -999,10 +1180,16 @@ def import_payments_errors_export(batch_id):
     headers = [
         "excel_row_ref",
         "excel_sheet_name",
-        "raw_payload_json",
-        "normalized_payload_json",
+        "account_uid",
+        "account_number",
+        "payment_date",
+        "payment_period",
+        "amount",
+        "source_index",
+        "source_label",
         "reason_code",
         "reason_text",
+        "recommendation",
     ]
 
     if fmt == "xlsx":
@@ -1014,10 +1201,16 @@ def import_payments_errors_export(batch_id):
             ws.append([
                 r.excel_row_ref,
                 r.excel_sheet_name,
-                r.raw_payload_json,
-                r.normalized_payload_json,
+                r.account_uid,
+                r.account_number,
+                r.payment_date,
+                r.payment_period,
+                r.amount,
+                r.source_index,
+                r.source_label,
                 r.reason_code,
                 r.reason_text,
+                json.loads(r.error_details_json or "{}").get("recommendation", ""),
             ])
         bio = io.BytesIO()
         wb.save(bio)
@@ -1035,10 +1228,16 @@ def import_payments_errors_export(batch_id):
         writer.writerow([
             r.excel_row_ref,
             r.excel_sheet_name,
-            r.raw_payload_json,
-            r.normalized_payload_json,
+            r.account_uid,
+            r.account_number,
+            r.payment_date,
+            r.payment_period,
+            r.amount,
+            r.source_index,
+            r.source_label,
             r.reason_code,
             r.reason_text,
+            json.loads(r.error_details_json or "{}").get("recommendation", ""),
         ])
     return Response(
         sio.getvalue().encode("utf-8-sig"),

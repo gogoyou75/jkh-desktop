@@ -832,6 +832,17 @@ let conflictDecision={};
 let preview=[];
 let currentFileName='';
 let restoredFromDraft=false;
+let serverPaymentBatchId = 0;
+let serverPaymentRows = [];
+
+async function apiJson(url, options){
+  const res = await fetch(url, Object.assign({ credentials:'include' }, options || {}));
+  const data = await res.json().catch(function(){ return {}; });
+  if (!res.ok || !data || data.ok===false){
+    throw new Error((data && (data.error || data.message)) || ('HTTP ' + res.status));
+  }
+  return data;
+}
 
 function paymentPairsCount(row){
   if (!Array.isArray(row && row.payments)) return 0;
@@ -1031,13 +1042,30 @@ function buildPreview(){
         status:p1.status, critical:p1.critical, action:p1.action, details:p1.details
       });
     } else {
-      const p2 = evaluatePaymentsRow(db, r);
-      p2.details.push('По строке LS ' + (normStr(r.ls) || '—') + ' найдено ' + paymentPairsCount(r) + ' платежей.');
-      preview.push({
-        excelRow:r.excelRow, uid:normStr(r.uid), ls:normStr(r.ls), fio:toFio(r.fam,r.name,r.otch),
-        square:asSquare(r.square), paymentsBrief: paymentPairsCount(r) ? (paymentPairsCount(r) + ' пар') : '—',
-        status:p2.status, critical:p2.critical, details:p2.details
-      });
+      if (serverPaymentRows.length){
+        const rr = serverPaymentRows[i] || {};
+        const rowStatusMap = { ready:'OK', applied:'OK', duplicate:'SKIP_DUPLICATE', invalid:'ERROR', failed:'ERROR', skipped:'SKIP_DUPLICATE' };
+        const st = rowStatusMap[normStr(rr.status)] || 'UPDATED';
+        preview.push({
+          excelRow: rr.excel_row_ref || r.excelRow,
+          uid:normStr(rr.account_uid || r.uid),
+          ls:normStr(rr.account_number || r.ls),
+          fio:toFio(r.fam,r.name,r.otch),
+          square:asSquare(r.square),
+          paymentsBrief: rr.payment_period ? rr.payment_period : '—',
+          status:st,
+          critical: st === 'ERROR',
+          details:[normStr(rr.reason_text) || ('Статус: ' + normStr(rr.status))]
+        });
+      } else {
+        const p2 = evaluatePaymentsRow(db, r);
+        p2.details.push('По строке LS ' + (normStr(r.ls) || '—') + ' найдено ' + paymentPairsCount(r) + ' платежей.');
+        preview.push({
+          excelRow:r.excelRow, uid:normStr(r.uid), ls:normStr(r.ls), fio:toFio(r.fam,r.name,r.otch),
+          square:asSquare(r.square), paymentsBrief: paymentPairsCount(r) ? (paymentPairsCount(r) + ' пар') : '—',
+          status:p2.status, critical:p2.critical, details:p2.details
+        });
+      }
     }
   }
 
@@ -1242,6 +1270,41 @@ async function onParse(){
 
   const file = $('fileInput').files[0];
   if (!file) return;
+  if (mode === 'payments'){
+    try{
+      const fd = new FormData();
+      fd.append('file', file);
+      const uploaded = await apiJson('/api/import/payments/upload', { method:'POST', body: fd });
+      serverPaymentBatchId = Number(uploaded.batch && uploaded.batch.id) || 0;
+      await apiJson('/api/import/' + serverPaymentBatchId + '/parse', { method:'POST' });
+      await apiJson('/api/import/' + serverPaymentBatchId + '/validate', { method:'POST' });
+      const rowsResp = await apiJson('/api/import/' + serverPaymentBatchId + '/rows');
+      serverPaymentRows = Array.isArray(rowsResp.rows) ? rowsResp.rows : [];
+      preview = [];
+      for (let i=0;i<serverPaymentRows.length;i++){
+        const sr = serverPaymentRows[i];
+        const rowStatusMap = { ready:'OK', applied:'OK', duplicate:'SKIP_DUPLICATE', invalid:'ERROR', failed:'ERROR', skipped:'SKIP_DUPLICATE' };
+        preview.push({
+          excelRow: sr.excel_row_ref || (i+1),
+          uid:normStr(sr.account_uid),
+          ls:normStr(sr.account_number),
+          fio:'',
+          square:'',
+          paymentsBrief: sr.payment_period || '—',
+          status: rowStatusMap[normStr(sr.status)] || 'UPDATED',
+          critical: normStr(sr.status)==='invalid' || normStr(sr.status)==='failed',
+          details:[normStr(sr.reason_text) || ('Статус: ' + normStr(sr.status))]
+        });
+      }
+      currentFileName = normStr(file.name);
+      restoredFromDraft = false;
+      renderPreview();
+      return;
+    }catch(e){
+      alert('Ошибка серверного импорта платежей: ' + (e.message || e));
+      return;
+    }
+  }
   const parsedFileName = normStr(file.name);
 
   const buf = await new Promise(function(resolve, reject){
@@ -1333,95 +1396,18 @@ async function applyPrimary(){
 }
 
 async function applyPayments(){
-  if (!canWriteOrExplain()) return setButtons();
-  if (!primaryApplied) return alert('Шаг 2 заблокирован до успешной первички.');
-
-  const db = getDB();
-  if (!db || !db.abonents) return alert('База абонентов не загружена.');
-
-  mode='payments';
-  buildPreview();
-  if (hasPaymentsCritical()) return alert('Шаг 2 заблокирован: есть ошибки платежей.');
-  if (hasUnresolvedConflicts()) return alert('Шаг 2 заблокирован: есть нерешённые конфликты платежей.');
-
-  const localSnapshot = {
-    db: deepCloneJSONSafe(getDB()),
-    payments: capturePaymentsSnapshot(db, dataRows)
-  };
-
-  try {
-  let added=0, replaced=0, skipped=0, conflicts=0;
-
-  for (let i=0;i<dataRows.length;i++){
-    const row = dataRows[i];
-    const uid = normStr(row.uid);
-    const foundU = uid ? findAbonentByUid(db, uid) : null;
-  const ab = foundU ? foundU.abonent : null;
-    if (!ab) { skipped++; continue; }
-
-    const ls = normStr(ab.id);
-    let list = getPaymentsByLS(ls);
-
-    for (let p=0;p<row.payments.length;p++){
-      const pay = row.payments[p];
-      const amount = normNum(pay.amount);
-      if (!Number.isFinite(amount) || amount<=0){ skipped++; continue; }
-      const per = normalizePeriod(pay.periodRaw);
-      const year = normStr(pay.year) || extractYearFromAny(pay.periodRaw) || extractYearFromAny(pay.paidDateRaw) || normStr(row.rowYear) || parseMeta.workbookYear || (per ? per.period.slice(0,4) : '') || String(new Date().getFullYear());
-      const month = pad2(pay.month || (per ? per.period.slice(5,7) : ''));
-      if (!/^\d{4}$/.test(year) || !/^\d{2}$/.test(month)){ skipped++; continue; }
-      const importedRow = buildImportedPaymentLedgerRow(list, {
-        amount: amount,
-        paidDateRaw: pay.paidDateRaw || pay.periodRaw,
-        sourceIndex: pay.sourceIndex || 1,
-        year: year,
-        month: month
-      });
-      importedRow.payment_period = year + '-' + month;
-
-      const dup = list.some(function(x){
-        const ym = getLedgerYearMonth(x);
-        const paid = getLedgerPaidAmount(x);
-        const paidDate = getLedgerPaidDate(x);
-        if (!ym || !Number.isFinite(paid)) return false;
-        return ym.year === importedRow.year &&
-          ym.month === importedRow.month &&
-          paidDate === importedRow.paid_date &&
-          paid === importedRow.paid &&
-          getLedgerSource(x) === importedRow.source;
-      });
-      if (dup){ skipped++; continue; }
-
-      const idx = list.findIndex(function(x){
-        const ym = getLedgerYearMonth(x);
-        const paid = getLedgerPaidAmount(x);
-        if (!ym || !Number.isFinite(paid) || paid <= 0) return false;
-        return ym.year === importedRow.year && ym.month === importedRow.month && getLedgerSource(x) === importedRow.source;
-      });
-      if (idx >= 0){
-        conflicts++;
-        const decision = conflictDecision[ls + '::' + importedRow.year + '-' + importedRow.month + '::' + importedRow.source];
-        if (decision === 'overwrite'){
-          list[idx] = importedRow;
-          replaced++;
-        } else {
-          skipped++;
-        }
-        continue;
-      }
-
-      list.push(importedRow);
-      added++;
-    }
-
-    sortLedgerRows(list);
-    setPaymentsByLS(ls, list);
+  if (!serverPaymentBatchId) return alert('Сначала выполните серверный парсинг платежей.');
+  try{
+    const applied = await apiJson('/api/import/' + serverPaymentBatchId + '/apply', { method:'POST' });
+    const s = applied.summary || {};
+    alert('Платежи применены на сервере.\nПроведено: ' + (s.applied_count || 0) + '\nПропущено: ' + (s.skipped_count || 0) + '\nДубликаты: ' + (s.duplicate_count || 0) + '\nОшибки: ' + (s.failed_count || 0));
+  } catch (e) {
+    alert('Ошибка применения на сервере: ' + (e.message || e));
+    return;
   }
-
-  await Data.flushDbToServer();
-
-  alert('Платежи применены.\nДобавлено: ' + added + '\nЗаменено: ' + replaced + '\nПропущено: ' + skipped + '\nКонфликтов обработано: ' + conflicts);
   clearRuntimeState();
+  serverPaymentBatchId = 0;
+  serverPaymentRows = [];
   clearImportResumeState();
   clearImportDraftState();
   $('summaryLine').textContent = 'Импорт завершён. Предпросмотр очищен';
@@ -1431,11 +1417,6 @@ async function applyPayments(){
   updateRestoredFileInfo();
   updateStateLine();
   setButtons();
-  } catch (e) {
-    console.error(e);
-    alert('Ошибка сохранения платежей на сервер. Локальные изменения будут откатаны.');
-    await rollbackAfterFlushError(localSnapshot, { reason: 'import_apply_payments_flush_error', reload: true });
-  }
 }
 
 $('previewBody').addEventListener('click', function(ev){
