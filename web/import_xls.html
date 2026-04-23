@@ -968,11 +968,128 @@ function parseSheetToRows(sheet, fileName, sheetName){
   parseMeta = { mode:'none', indexRowIndex:-1, fieldMapStatus:null, paymentGroups:[], workbookYear:'', headerDetect:null };
 
   const workbookYear = detectWorkbookYear(aoa, fileName, sheetName);
+
+  // =========================================================
+  // 1) СНАЧАЛА ПЫТАЕМСЯ РАЗОБРАТЬ ФАЙЛ НОВЫМ AUTO-DETECT
+  // =========================================================
+  const headerInfo = detectPrimaryHeaderStructure(aoa);
+  const autoDetectDebugText = (headerInfo && Array.isArray(headerInfo.debug)) ? headerInfo.debug.join(' | ') : '';
+
+  let autoDetectCanUse = false;
+  let autoDetectFailReason = '';
+
+  if (!headerInfo || headerInfo.headerRow < 0){
+    autoDetectFailReason = 'Header auto-detect не нашёл строку заголовков.';
+  } else if (headerInfo.confidence < 0.55){
+    autoDetectFailReason = 'Header auto-detect дал низкую уверенность (confidence=' + headerInfo.confidence + ').';
+  } else {
+    const hdrRow = aoa[headerInfo.headerRow] || [];
+    const subHdrRow = headerInfo.subHeaderRow >= 0 ? (aoa[headerInfo.subHeaderRow] || []) : [];
+    const colMap = buildPrimaryColumnMap(hdrRow, subHdrRow);
+
+    const requiredKeys = ['uid','ls','surname','area_total'];
+    const missingRequired = requiredKeys.filter(function(k){
+      return !Number.isInteger(colMap[k]);
+    });
+
+    headerInfo.detectedColumns = colMap;
+    headerInfo.missingRequired = missingRequired;
+
+    if (missingRequired.length){
+      autoDetectFailReason = 'Header auto-detect не нашёл обязательные колонки: ' + missingRequired.join(', ');
+    } else {
+      autoDetectCanUse = true;
+
+      headerRowIndex = headerInfo.headerRow;
+
+      payPairs = findPaymentPairs(hdrRow.map(function(v, i){
+        const top = normStr(v);
+        const sub = normStr(subHdrRow[i]);
+        return (top + ' ' + sub).trim();
+      }));
+
+      const dataStart = Number.isInteger(headerInfo.dataStartRow) && headerInfo.dataStartRow >= 0
+        ? headerInfo.dataStartRow
+        : (headerInfo.headerRow + 1);
+
+      const rows = [];
+      for (let r=dataStart; r<aoa.length; r++){
+        const line = aoa[r] || [];
+        if (line.every(function(c){ return normStr(c)===''; })) continue;
+
+        const rowSemanticHits = ['uid','ls','surname','name','patronymic','area_total','phone'].reduce(function(acc, key){
+          const colIndex = colMap[key];
+          const val = Number.isInteger(colIndex) ? line[colIndex] : '';
+          return acc + (headerSemanticFromText(val) ? 1 : 0);
+        }, 0);
+
+        // защита от ложного чтения header-подобной строки как данных
+        if (rowSemanticHits >= 4) continue;
+
+        const payments = [];
+        for (let i=0;i<payPairs.length;i++){
+          payments.push({
+            amount: line[payPairs[i].sumCol],
+            periodRaw: line[payPairs[i].periodCol],
+            paidDateRaw: line[payPairs[i].periodCol],
+            sourceIndex: 1,
+            sourceName: sourceNameByIndex(1)
+          });
+        }
+
+        const uidVal  = Number.isInteger(colMap.uid)         ? line[colMap.uid] : '';
+        const lsVal   = Number.isInteger(colMap.ls)          ? line[colMap.ls] : '';
+        const famVal  = Number.isInteger(colMap.surname)     ? line[colMap.surname] : '';
+        const nameVal = Number.isInteger(colMap.name)        ? line[colMap.name] : '';
+        const otchVal = Number.isInteger(colMap.patronymic)  ? line[colMap.patronymic] : '';
+        const sqRaw   = Number.isInteger(colMap.area_total)  ? line[colMap.area_total] : '';
+
+        if (
+          !normStr(uidVal) &&
+          !normStr(lsVal) &&
+          !normStr(famVal) &&
+          !normStr(nameVal) &&
+          !normStr(otchVal) &&
+          !Number.isFinite(normNum(sqRaw))
+        ){
+          continue;
+        }
+
+        rows.push({
+          excelRow: r + 1,
+          uid: normStr(uidVal),
+          ls: normStr(lsVal),
+          fam: normStr(famVal),
+          name: normStr(nameVal),
+          otch: normStr(otchVal),
+          square: normNum(sqRaw),
+          squareRaw: sqRaw,
+          payments
+        });
+      }
+
+      parseMeta = {
+        mode:'headers-auto',
+        indexRowIndex:-1,
+        fieldMapStatus:null,
+        paymentGroups:[],
+        workbookYear:workbookYear,
+        headerDetect:headerInfo
+      };
+
+      return { ok:true, rows };
+    }
+  }
+
+  // =========================================================
+  // 2) ЕСЛИ AUTO-DETECT НЕ СПРАВИЛСЯ — ПАДАЕМ В СТАРЫЙ FIELD-MAP
+  // =========================================================
   const indexRowIndex = findIndexMapRow(aoa);
   if (indexRowIndex >= 0){
     const indexRow = aoa[indexRowIndex] || [];
     const fieldMap = buildColumnIndexMap(indexRow);
     const mapped = parseSheetToRowsByFieldMap(aoa, fieldMap, indexRowIndex, workbookYear);
+
     if (mapped && mapped.ok){
       headerRowIndex = indexRowIndex;
       payPairs = [];
@@ -981,7 +1098,18 @@ function parseSheetToRows(sheet, fileName, sheetName){
         indexRowIndex:indexRowIndex,
         workbookYear: workbookYear,
         paymentGroups: mapped.paymentGroups || [],
-        headerDetect:null,
+        headerDetect:{
+          headerRow:-1,
+          subHeaderRow:-1,
+          dataStartRow:-1,
+          detectedColumns:{},
+          confidence:0,
+          debug:[
+            'Auto-detect не использован: ' + (autoDetectFailReason || 'неизвестная причина'),
+            autoDetectDebugText ? ('Auto-detect debug: ' + autoDetectDebugText) : '',
+            'Включён fallback на field-map.'
+          ].filter(Boolean)
+        },
         fieldMapStatus:{
           10:Number.isInteger(fieldMap[10]),
           11:Number.isInteger(fieldMap[11]),
@@ -992,76 +1120,23 @@ function parseSheetToRows(sheet, fileName, sheetName){
     }
   }
 
-  const headerInfo = detectPrimaryHeaderStructure(aoa);
-  if (headerInfo.headerRow < 0){
-    const debugText = (headerInfo.debug || []).join(' | ');
-    return { ok:false, msg:'Не удалось определить структуру файла: строка заголовков не распознана. ' + debugText };
+  // =========================================================
+  // 3) ЕСЛИ НЕ СРАБОТАЛО НИЧЕГО — ЯВНАЯ ОШИБКА
+  // =========================================================
+  let msg = 'Не удалось определить структуру файла.';
+  if (autoDetectFailReason){
+    msg += ' Auto-detect: ' + autoDetectFailReason;
   }
-  if (headerInfo.confidence < 0.55){
-    return { ok:false, msg:'Не удалось определить структуру файла: низкая уверенность распознавания (confidence=' + headerInfo.confidence + ').' };
+  if (autoDetectDebugText){
+    msg += ' ' + autoDetectDebugText;
   }
-
-  headerRowIndex = headerInfo.headerRow;
-  const hdrRow = aoa[headerInfo.headerRow] || [];
-  const subHdrRow = headerInfo.subHeaderRow >= 0 ? (aoa[headerInfo.subHeaderRow] || []) : [];
-  const colMap = buildPrimaryColumnMap(hdrRow, subHdrRow);
-
-  const requiredKeys = ['uid','ls','surname','area_total'];
-  const missingRequired = requiredKeys.filter(function(k){ return !Number.isInteger(colMap[k]); });
-  if (missingRequired.length){
-    const ruMap = { uid:'UID', ls:'ЛС', surname:'Фамилия', area_total:'Общая площадь' };
-    const miss = missingRequired.map(function(k){ return ruMap[k] || k; }).join(' / ');
-    return { ok:false, msg:'Не удалось определить структуру файла: не найдены обязательные колонки ' + miss + '.' };
+  if (indexRowIndex < 0){
+    msg += ' Field-map строка тоже не найдена.';
+  } else {
+    msg += ' Field-map найден, но разобрать файл по нему не удалось.';
   }
 
-  payPairs = findPaymentPairs(hdrRow.map(function(v, i){
-    const top = normStr(v);
-    const sub = normStr(subHdrRow[i]);
-    return (top + ' ' + sub).trim();
-  }));
-
-  const rows = [];
-  const dataStart = Number.isInteger(headerInfo.dataStartRow) && headerInfo.dataStartRow >= 0 ? headerInfo.dataStartRow : (headerInfo.headerRow + 1);
-  for (let r=dataStart; r<aoa.length; r++){
-    const line = aoa[r] || [];
-    if (line.every(c => normStr(c)==='')) continue;
-
-    const rowSemanticHits = ['uid','ls','surname','name','patronymic','area_total','phone'].reduce(function(acc, key){
-      const val = line[colMap[key]];
-      return acc + (headerSemanticFromText(val) ? 1 : 0);
-    }, 0);
-    if (rowSemanticHits >= 4) continue;
-
-    const payments = [];
-    for (let i=0;i<payPairs.length;i++) payments.push({ amount: line[payPairs[i].sumCol], periodRaw: line[payPairs[i].periodCol], paidDateRaw: line[payPairs[i].periodCol], sourceIndex:1, sourceName:sourceNameByIndex(1) });
-
-    const uidVal = Number.isInteger(colMap.uid) ? line[colMap.uid] : '';
-    const lsVal = Number.isInteger(colMap.ls) ? line[colMap.ls] : '';
-    const famVal = Number.isInteger(colMap.surname) ? line[colMap.surname] : '';
-    const nameVal = Number.isInteger(colMap.name) ? line[colMap.name] : '';
-    const otchVal = Number.isInteger(colMap.patronymic) ? line[colMap.patronymic] : '';
-    const sqRaw = Number.isInteger(colMap.area_total) ? line[colMap.area_total] : '';
-
-    if (!normStr(uidVal) && !normStr(lsVal) && !normStr(famVal) && !normStr(nameVal) && !normStr(otchVal) && !Number.isFinite(normNum(sqRaw))){
-      continue;
-    }
-
-    rows.push({
-      excelRow:r+1,
-      uid:normStr(uidVal),
-      ls:normStr(lsVal),
-      fam:normStr(famVal),
-      name:normStr(nameVal),
-      otch:normStr(otchVal),
-      square:normNum(sqRaw),
-      squareRaw:sqRaw,
-      payments
-    });
-  }
-  headerInfo.detectedColumns = colMap;
-  headerInfo.missingRequired = missingRequired;
-  parseMeta = { mode:'headers-auto', indexRowIndex:-1, fieldMapStatus:null, paymentGroups:[], workbookYear:workbookYear, headerDetect:headerInfo };
-  return { ok:true, rows };
+  return { ok:false, msg: msg };
 }
 
 function evaluatePrimaryRow(db, row){
