@@ -815,14 +815,17 @@ function parseSheetToRowsByFieldMap(aoa, fieldMap, indexRowIndex, workbookYear){
     const line = aoa[r] || [];
     if (line.every(c => normStr(c)==='')) continue;
 
-    const uidVal = firstNonEmptyField(line, fieldMap, [1,6,7,8,9]);
-    const lsVal = firstNonEmptyField(line, fieldMap, [2,3,4,5]);
-    const famVal = firstNonEmptyField(line, fieldMap, [13,14,15,16]);
-    const nameVal = firstNonEmptyField(line, fieldMap, [17,18,19]);
-    const otchVal = firstNonEmptyField(line, fieldMap, [20,21,22]);
-    const sqVal = firstNonEmptyField(line, fieldMap, [23,24,25,26,27]);
+    const uidVal = firstNonEmptyField(line, fieldMap, [0]);
+const lsVal = firstNonEmptyField(line, fieldMap, [1]);
+const famVal = firstNonEmptyField(line, fieldMap, [2]);
+const nameVal = firstNonEmptyField(line, fieldMap, [3]);
+const otchVal = firstNonEmptyField(line, fieldMap, [4]);
+const sqVal = firstNonEmptyField(line, fieldMap, [5]);
 
-    const rowYear = extractYearFromAny(firstNonEmptyField(line, fieldMap, [28,29,30,31,32,33,34,35])) || workbookYear || '';
+const rowYear =
+  extractYearFromAny(firstNonEmptyField(line, fieldMap, [6,7,8,9,10,11,12,13,14,15,16,17])) ||
+  workbookYear ||
+  '';
     const payments = [];
 
     for (let g=0; g<paymentGroups.length; g++){
