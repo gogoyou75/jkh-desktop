@@ -266,7 +266,7 @@ ROW_STATUSES = {
 IMPORT_ALLOWED_TRANSITIONS = {
     "parse": {"uploaded", "failed"},
     "validate": {"parsed", "validated"},
-    "apply": {"ready_to_apply"},
+    "apply": {"ready_to_apply", "validated"},
 }
 
 IMPORT_REQUIRED_COLUMNS = {"account_uid", "account_number", "payment_date", "payment_period", "amount", "source_index"}
@@ -849,6 +849,122 @@ def import_payments_upload():
     return jsonify(ok=True, batch=_batch_payload(batch))
 
 
+@app.post("/api/import/payments/upload_rows")
+def import_payments_upload_rows():
+    user, err = _require_user()
+    if err:
+        return err
+
+    data = request.get_json(silent=True) or {}
+    rows = data.get("rows")
+    if not isinstance(rows, list) or not rows:
+        return _json_error("rows_required", 400)
+
+    owner, owner_err = _resolve_owner(data.get("owner"), allow_admin_override=True)
+    if owner_err:
+        return owner_err
+
+    payload_dump = json.dumps(rows, ensure_ascii=False, sort_keys=True)
+    payload_bytes = payload_dump.encode("utf-8")
+    if len(payload_bytes) > app.config["IMPORT_MAX_UPLOAD_BYTES"]:
+        return jsonify(
+            ok=False,
+            error="file_too_large",
+            details={"max_bytes": app.config["IMPORT_MAX_UPLOAD_BYTES"]},
+        ), 400
+
+    file_sha = hashlib.sha256(payload_bytes).hexdigest()
+    accounting_year = _norm_text(data.get("accounting_year"))
+    display_name = _norm_text(data.get("display_name")) or "payments_rows.json"
+
+    existing_exact = ImportBatch.query.filter_by(owner_id=owner, file_sha256=file_sha).order_by(ImportBatch.id.asc()).first()
+    existing_year = None
+    if accounting_year:
+        existing_year = ImportBatch.query.filter_by(owner_id=owner, accounting_year=accounting_year).order_by(ImportBatch.id.desc()).first()
+
+    batch = ImportBatch(
+        owner_id=owner,
+        created_by_user_id=user.id,
+        original_filename="payments_rows.json",
+        file_sha256=file_sha,
+        upload_blob=b"",
+        display_name=display_name,
+        accounting_year=accounting_year,
+        version_label=_norm_text(data.get("version_label")),
+        duplicate_of_batch_id=existing_exact.id if existing_exact else None,
+        supersedes_batch_id=int(data.get("supersedes_batch_id")) if _norm_text(data.get("supersedes_batch_id")) else None,
+        overlaps_with_batch_id=existing_year.id if existing_year else None,
+        is_exact_duplicate=bool(existing_exact),
+        has_period_overlap=bool(existing_year),
+        status="parsed",
+        uploaded_at=datetime.utcnow(),
+        started_at=datetime.utcnow(),
+        notes=(
+            (_norm_text(data.get("notes")) + "\n") if _norm_text(data.get("notes")) else ""
+        ) + "source=upload_rows",
+    )
+    db.session.add(batch)
+    db.session.flush()
+
+    parsed_rows = []
+    row_no = 0
+    for idx, raw_row in enumerate(rows, start=1):
+        row_no += 1
+        src = raw_row if isinstance(raw_row, dict) else {}
+        account_uid = _norm_text(src.get("account_uid"))
+        abonent_id = _norm_text(src.get("abonent_id"))
+        account_number = _norm_text(src.get("account_number"))
+        payment_date = _norm_date(src.get("payment_date"))
+        payment_period = _norm_period(src.get("payment_period"))
+        amount = _norm_amount(src.get("amount"))
+        src_index_raw = src.get("source_index")
+        try:
+            source_index = int(src_index_raw) if src_index_raw is not None and _norm_text(src_index_raw) != "" else None
+        except Exception:
+            source_index = None
+
+        charge_year, charge_month = _extract_year_month(payment_period)
+        normalized_payload = {
+            "account_uid": account_uid,
+            "abonent_id": abonent_id,
+            "account_number": account_number,
+            "payment_date": payment_date,
+            "payment_period": payment_period,
+            "amount": amount,
+            "source_index": source_index,
+        }
+
+        parsed_rows.append(ImportBatchRow(
+            batch_id=batch.id,
+            row_no=row_no,
+            excel_sheet_name="upload_rows",
+            excel_row_ref=f"row:{idx}",
+            raw_payload_json=json.dumps(src, ensure_ascii=False),
+            normalized_payload_json=json.dumps(normalized_payload, ensure_ascii=False),
+            account_uid=account_uid,
+            abonent_id=abonent_id,
+            account_number=account_number,
+            payment_date=payment_date or "",
+            paid_date=payment_date or "",
+            payment_period=payment_period or "",
+            charge_year=charge_year,
+            charge_month=charge_month,
+            amount=amount or "",
+            source_index=source_index,
+            source_label=f"Платёж {source_index}" if source_index else "",
+            fingerprint="",
+            status="parsed",
+            reason_code="",
+            reason_text="",
+            error_details_json="{}",
+        ))
+
+    db.session.bulk_save_objects(parsed_rows)
+    batch.rows_total = row_no
+    db.session.commit()
+    return jsonify(ok=True, batch=_batch_payload(batch), parsed_rows=row_no)
+
+
 @app.post("/api/import/<int:batch_id>/parse")
 def import_payments_parse(batch_id):
     user, err = _require_user()
@@ -1148,9 +1264,6 @@ def import_payments_apply(batch_id):
         return transition_err
 
     rows = ImportBatchRow.query.filter_by(batch_id=batch.id).order_by(ImportBatchRow.row_no.asc()).all()
-    if any(r.status == "invalid" for r in rows):
-        return _json_error("batch_has_invalid_rows", 400)
-
     applied_count = skipped_count = duplicate_count = failed_count = 0
     sources_map = _load_owner_sources(batch.owner_id)
     try:

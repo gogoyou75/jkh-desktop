@@ -34,6 +34,11 @@ class ImportHelpersTest(unittest.TestCase):
             payload, code = res
             self.assertEqual(code, 409)
 
+    def test_state_machine_allows_apply_on_validated_for_partial_apply(self):
+        with app_module.app.app_context():
+            res = app_module._ensure_batch_transition(DummyBatch("validated"), "apply")
+            self.assertIsNone(res)
+
     def test_header_normalization_maps_aliases(self):
         header = ["UID", "Дата оплаты", "Период", "Сумма оплаты", "Источник платежа"]
         mapped = app_module._parse_header_map(header)
