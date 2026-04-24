@@ -41,6 +41,7 @@ CREATE TABLE IF NOT EXISTS import_batch_rows (
   abonent_id VARCHAR(128) NOT NULL DEFAULT '',
   account_number VARCHAR(128) NOT NULL DEFAULT '',
   payment_date VARCHAR(10) NOT NULL DEFAULT '',
+  paid_date VARCHAR(10) NOT NULL DEFAULT '',
   payment_period VARCHAR(7) NOT NULL DEFAULT '',
   charge_year VARCHAR(4) NOT NULL DEFAULT '',
   charge_month VARCHAR(2) NOT NULL DEFAULT '',
@@ -49,6 +50,7 @@ CREATE TABLE IF NOT EXISTS import_batch_rows (
   source_label VARCHAR(255) NOT NULL DEFAULT '',
   fingerprint VARCHAR(64) NOT NULL DEFAULT '',
   matched_payment_id VARCHAR(64) NOT NULL DEFAULT '',
+  applied_at DATETIME NULL,
   status VARCHAR(32) NOT NULL DEFAULT 'parsed',
   reason_code VARCHAR(64) NOT NULL DEFAULT '',
   reason_text VARCHAR(1024) NOT NULL DEFAULT '',
@@ -61,12 +63,21 @@ CREATE TABLE IF NOT EXISTS import_batch_rows (
 );
 
 CREATE TABLE IF NOT EXISTS import_applied_fingerprints (
-  id INT AUTO_INCREMENT PRIMARY KEY,
-  owner_id VARCHAR(128) NOT NULL,
-  fingerprint VARCHAR(64) NOT NULL,
-  payment_id VARCHAR(64) NOT NULL,
-  batch_id INT NOT NULL,
-  UNIQUE KEY uq_import_applied_fingerprint (fingerprint),
-  KEY ix_import_applied_owner_id (owner_id),
-  KEY ix_import_applied_batch_id (batch_id)
+  id BIGINT NOT NULL AUTO_INCREMENT,
+  owner_id VARCHAR(191) NOT NULL,
+  import_type VARCHAR(32) NOT NULL DEFAULT 'payments',
+  fingerprint VARCHAR(255) NOT NULL,
+  account_uid VARCHAR(191) DEFAULT NULL,
+  account_number VARCHAR(191) DEFAULT NULL,
+  payment_period CHAR(7) DEFAULT NULL,
+  paid_date DATE DEFAULT NULL,
+  amount DECIMAL(12,2) NOT NULL,
+  source_index INT NOT NULL DEFAULT 1,
+  payment_id VARCHAR(64) NOT NULL DEFAULT '',
+  batch_id BIGINT DEFAULT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  UNIQUE KEY uq_owner_import_fp (owner_id, import_type, fingerprint),
+  KEY idx_owner_batch (owner_id, batch_id),
+  KEY idx_owner_account (owner_id, account_number)
 );

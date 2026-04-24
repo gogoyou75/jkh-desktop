@@ -12,6 +12,7 @@ from datetime import datetime, date
 from flask import Flask, jsonify, request, session, Response
 from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 from werkzeug.security import generate_password_hash, check_password_hash
 from openpyxl import load_workbook, Workbook
 
@@ -123,12 +124,14 @@ class ImportBatchRow(db.Model):
     charge_year = db.Column(db.String(4), nullable=False, default="")
     charge_month = db.Column(db.String(2), nullable=False, default="")
     amount = db.Column(db.String(32), nullable=False, default="")
+    paid_date = db.Column(db.String(10), nullable=False, default="")
 
     source_index = db.Column(db.Integer, nullable=True)
     source_label = db.Column(db.String(255), nullable=False, default="")
 
     fingerprint = db.Column(db.String(64), nullable=False, default="", index=True)
     matched_payment_id = db.Column(db.String(64), nullable=False, default="")
+    applied_at = db.Column(db.DateTime, nullable=True)
 
     status = db.Column(db.String(32), nullable=False, default="parsed", index=True)
     reason_code = db.Column(db.String(64), nullable=False, default="")
@@ -139,11 +142,23 @@ class ImportBatchRow(db.Model):
 class ImportAppliedFingerprint(db.Model):
     __tablename__ = "import_applied_fingerprints"
 
-    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
-    owner_id = db.Column(db.String(128), nullable=False, index=True)
-    fingerprint = db.Column(db.String(64), nullable=False, unique=True)
-    payment_id = db.Column(db.String(64), nullable=False)
-    batch_id = db.Column(db.Integer, nullable=False, index=True)
+    id = db.Column(db.BigInteger, primary_key=True, autoincrement=True)
+    owner_id = db.Column(db.String(191), nullable=False, index=True)
+    import_type = db.Column(db.String(32), nullable=False, default="payments")
+    fingerprint = db.Column(db.String(255), nullable=False)
+    account_uid = db.Column(db.String(191), nullable=True)
+    account_number = db.Column(db.String(191), nullable=True)
+    payment_period = db.Column(db.String(7), nullable=True)
+    paid_date = db.Column(db.Date, nullable=True)
+    amount = db.Column(db.Numeric(12, 2), nullable=False)
+    source_index = db.Column(db.Integer, nullable=False, default=1)
+    payment_id = db.Column(db.String(64), nullable=False, default="")
+    batch_id = db.Column(db.BigInteger, nullable=True, index=True)
+    created_at = db.Column(db.DateTime, nullable=False, server_default=text("CURRENT_TIMESTAMP"))
+
+    __table_args__ = (
+        db.UniqueConstraint("owner_id", "import_type", "fingerprint", name="uq_owner_import_fp"),
+    )
 
 
 def _json_error(error: str, code: int):
@@ -345,23 +360,78 @@ def _norm_period(v):
     return None
 
 
+def normalize_paid_date(v):
+    value = _norm_date(v)
+    if not value:
+        raise ValueError("paid_date_invalid")
+    return value
+
+
+def normalize_payment_period(v):
+    value = _norm_period(v)
+    if not value:
+        raise ValueError("payment_period_invalid")
+    return value
+
+
+def normalize_amount(v):
+    value = _norm_amount(v)
+    if not value:
+        raise ValueError("amount_invalid")
+    return value
+
+
+def normalize_source_index(v):
+    if v is None or _norm_text(v) == "":
+        raise ValueError("source_index_required")
+    try:
+        idx = int(v)
+    except Exception as ex:
+        raise ValueError("source_index_invalid") from ex
+    if idx < 1:
+        raise ValueError("source_index_invalid")
+    return idx
+
+
+def normalize_account_number(v):
+    value = _norm_text(v)
+    if not value:
+        raise ValueError("account_number_required")
+    return value
+
+
+def normalize_uid(v):
+    value = _norm_text(v)
+    if not value:
+        raise ValueError("account_uid_required")
+    return value
+
+
+def build_payment_fingerprint(owner_id, account_uid, account_number, paid_date, amount, source_index, payment_period):
+    owner_norm = _norm_text(owner_id)
+    uid_norm = normalize_uid(account_uid)
+    account_norm = normalize_account_number(account_number)
+    paid_date_norm = normalize_paid_date(paid_date)
+    amount_norm = normalize_amount(amount)
+    source_index_norm = normalize_source_index(source_index)
+    period_norm = normalize_payment_period(payment_period)
+    raw = "|".join([
+        owner_norm,
+        uid_norm,
+        account_norm,
+        paid_date_norm,
+        amount_norm,
+        str(source_index_norm),
+        period_norm,
+    ])
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
 def _extract_year_month(period):
     if not period:
         return "", ""
     yy, mm = period.split("-", 1)
     return yy, mm
-
-
-def _fp(owner_id, account_uid, payment_date, amount, payment_period, source_index):
-    raw = "|".join([
-        _norm_text(owner_id),
-        _norm_text(account_uid),
-        _norm_text(payment_date),
-        _norm_text(amount),
-        _norm_text(payment_period),
-        str(int(source_index or 0)),
-    ])
-    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
 def _batch_payload(batch: ImportBatch):
@@ -399,6 +469,7 @@ def _row_payload(r: ImportBatchRow):
         "abonent_id": r.abonent_id,
         "account_number": r.account_number,
         "payment_date": r.payment_date,
+        "paid_date": r.paid_date,
         "payment_period": r.payment_period,
         "charge_year": r.charge_year,
         "charge_month": r.charge_month,
@@ -407,6 +478,7 @@ def _row_payload(r: ImportBatchRow):
         "source_label": r.source_label,
         "fingerprint": r.fingerprint,
         "matched_payment_id": r.matched_payment_id,
+        "applied_at": int(r.applied_at.timestamp() * 1000) if r.applied_at else 0,
         "status": r.status,
         "reason_code": r.reason_code,
         "reason_text": r.reason_text,
@@ -847,6 +919,7 @@ def import_payments_parse(batch_id):
                 abonent_id=abonent_id,
                 account_number=account_number,
                 payment_date=payment_date or "",
+                paid_date=payment_date or "",
                 payment_period=payment_period or "",
                 charge_year=charge_year,
                 charge_month=charge_month,
@@ -963,7 +1036,41 @@ def import_payments_validate(batch_id):
                 invalid += 1
             else:
                 r.source_label = sources_map.get(r.source_index, r.source_label)
-                r.fingerprint = _fp(batch.owner_id, r.account_uid, r.payment_date, r.amount, r.payment_period, r.source_index)
+                try:
+                    normalized_uid = normalize_uid(r.account_uid)
+                    normalized_account_number = normalize_account_number(r.account_number or r.account_uid)
+                    normalized_paid_date = normalize_paid_date(r.payment_date)
+                    normalized_period = normalize_payment_period(r.payment_period)
+                    normalized_amount = normalize_amount(r.amount)
+                    normalized_source_index = normalize_source_index(r.source_index)
+                except ValueError as ex:
+                    r.status = "invalid"
+                    r.reason_code = str(ex)
+                    r.reason_text = "Некорректные данные строки для fingerprint"
+                    details["field"] = "fingerprint"
+                    details["recommendation"] = "Исправьте обязательные поля и повторите валидацию."
+                    invalid += 1
+                    r.error_details_json = json.dumps(details, ensure_ascii=False)
+                    continue
+
+                r.account_uid = normalized_uid
+                if not r.account_number:
+                    r.account_number = normalized_account_number
+                r.payment_date = normalized_paid_date
+                r.paid_date = normalized_paid_date
+                r.payment_period = normalized_period
+                r.amount = normalized_amount
+                r.source_index = normalized_source_index
+                r.fingerprint = build_payment_fingerprint(
+                    batch.owner_id,
+                    r.account_uid,
+                    r.account_number,
+                    r.paid_date,
+                    r.amount,
+                    r.source_index,
+                    r.payment_period,
+                )
+
                 if r.fingerprint in seen:
                     r.status = "duplicate"
                     r.reason_code = "duplicate_in_batch"
@@ -971,11 +1078,15 @@ def import_payments_validate(batch_id):
                     duplicate += 1
                 else:
                     seen.add(r.fingerprint)
-                    already = ImportAppliedFingerprint.query.filter_by(fingerprint=r.fingerprint).first()
+                    already = ImportAppliedFingerprint.query.filter_by(
+                        owner_id=batch.owner_id,
+                        import_type="payments",
+                        fingerprint=r.fingerprint,
+                    ).first()
                     if already:
                         r.status = "duplicate"
-                        r.reason_code = "duplicate_previously_applied"
-                        r.reason_text = "Дубликат ранее загруженного платежа"
+                        r.reason_code = "DUPLICATE_FINGERPRINT"
+                        r.reason_text = "Платёж уже был импортирован ранее"
                         duplicate += 1
                     else:
                         r.status = "ready"
@@ -1038,68 +1149,109 @@ def import_payments_apply(batch_id):
         for r in rows:
             if r.status != "ready":
                 if r.status == "duplicate":
-                    r.status = "skipped"
                     duplicate_count += 1
                 else:
                     skipped_count += 1
                 continue
 
-            fp_existing = ImportAppliedFingerprint.query.filter_by(fingerprint=r.fingerprint).with_for_update().first()
-            if fp_existing:
-                r.status = "duplicate"
-                r.reason_code = "duplicate_recheck"
-                r.reason_text = "Дубликат обнаружен при apply"
-                duplicate_count += 1
-                continue
+            try:
+                normalized_uid = normalize_uid(r.account_uid)
+                normalized_account_number = normalize_account_number(r.account_number or r.account_uid)
+                normalized_paid_date = normalize_paid_date(r.paid_date or r.payment_date)
+                normalized_period = normalize_payment_period(r.payment_period)
+                normalized_amount = normalize_amount(r.amount)
+                normalized_source_index = normalize_source_index(r.source_index)
+                fingerprint = build_payment_fingerprint(
+                    batch.owner_id,
+                    normalized_uid,
+                    normalized_account_number,
+                    normalized_paid_date,
+                    normalized_amount,
+                    normalized_source_index,
+                    normalized_period,
+                )
 
-            key = f"payments_{r.account_uid}"
-            kv = KVStore.query.filter_by(owner=batch.owner_id, k=key).with_for_update().first()
-            ledger = []
-            if kv and kv.v:
-                try:
-                    ledger = json.loads(kv.v)
-                    if not isinstance(ledger, list):
-                        ledger = []
-                except Exception:
+                key = f"payments_{normalized_uid}"
+                with db.session.begin_nested():
+                    fingerprint_row = ImportAppliedFingerprint(
+                        owner_id=batch.owner_id,
+                        import_type="payments",
+                        fingerprint=fingerprint,
+                        account_uid=normalized_uid,
+                        account_number=normalized_account_number,
+                        payment_period=normalized_period,
+                        paid_date=datetime.strptime(normalized_paid_date, "%Y-%m-%d").date(),
+                        amount=Decimal(normalized_amount),
+                        source_index=normalized_source_index,
+                        batch_id=batch.id,
+                    )
+                    db.session.add(fingerprint_row)
+                    db.session.flush()
+
+                    kv = KVStore.query.filter_by(owner=batch.owner_id, k=key).with_for_update().first()
                     ledger = []
+                    if kv and kv.v:
+                        try:
+                            ledger = json.loads(kv.v)
+                            if not isinstance(ledger, list):
+                                ledger = []
+                        except Exception:
+                            ledger = []
 
-            max_id = 0
-            for x in ledger:
-                try:
-                    max_id = max(max_id, int(x.get("id") or 0))
-                except Exception:
-                    continue
-            next_id = max_id + 1
-            yy, mm = _extract_year_month(r.payment_period)
-            ledger_item = {
-                "id": next_id,
-                "year": yy,
-                "month": mm,
-                "accrued": 0,
-                "paid": float(r.amount),
-                "paid_date": r.payment_date,
-                "source": sources_map.get(r.source_index) or r.source_label or f"Платёж {r.source_index}",
-                "payment_period": r.payment_period,
-            }
-            ledger.append(ledger_item)
-            if kv:
-                kv.v = json.dumps(ledger, ensure_ascii=False)
-            else:
-                db.session.add(KVStore(owner=batch.owner_id, k=key, v=json.dumps(ledger, ensure_ascii=False)))
+                    max_id = 0
+                    for x in ledger:
+                        try:
+                            max_id = max(max_id, int(x.get("id") or 0))
+                        except Exception:
+                            continue
+                    next_id = max_id + 1
+                    yy, mm = _extract_year_month(normalized_period)
+                    ledger_item = {
+                        "id": next_id,
+                        "year": yy,
+                        "month": mm,
+                        "accrued": 0,
+                        "paid": float(normalized_amount),
+                        "paid_date": normalized_paid_date,
+                        "source": sources_map.get(normalized_source_index) or r.source_label or f"Платёж {normalized_source_index}",
+                        "payment_period": normalized_period,
+                    }
+                    ledger.append(ledger_item)
+                    if kv:
+                        kv.v = json.dumps(ledger, ensure_ascii=False)
+                    else:
+                        db.session.add(KVStore(owner=batch.owner_id, k=key, v=json.dumps(ledger, ensure_ascii=False)))
 
-            payment_id = f"{r.account_uid}:{next_id}"
-            db.session.add(ImportAppliedFingerprint(
-                owner_id=batch.owner_id,
-                fingerprint=r.fingerprint,
-                payment_id=payment_id,
-                batch_id=batch.id,
-            ))
-            r.matched_payment_id = payment_id
-            r.status = "applied"
-            applied_count += 1
+                    payment_id = f"{normalized_uid}:{next_id}"
+                    fingerprint_row.payment_id = payment_id
+                    r.account_uid = normalized_uid
+                    r.account_number = normalized_account_number
+                    r.payment_date = normalized_paid_date
+                    r.paid_date = normalized_paid_date
+                    r.payment_period = normalized_period
+                    r.amount = normalized_amount
+                    r.source_index = normalized_source_index
+                    r.fingerprint = fingerprint
+                    r.matched_payment_id = payment_id
+                    r.applied_at = datetime.utcnow()
+                    r.status = "applied"
+                    r.reason_code = ""
+                    r.reason_text = ""
+
+                applied_count += 1
+            except IntegrityError:
+                r.status = "duplicate"
+                r.reason_code = "DUPLICATE_FINGERPRINT"
+                r.reason_text = "Платёж уже был импортирован ранее"
+                duplicate_count += 1
+            except Exception as ex:
+                r.status = "failed"
+                r.reason_code = "APPLY_ERROR"
+                r.reason_text = str(ex)[:1000]
+                failed_count += 1
 
         batch.rows_applied = applied_count
-        batch.status = "applied"
+        batch.status = "failed" if failed_count > 0 else "applied"
         batch.finished_at = datetime.utcnow()
         if batch.uploaded_at and app.config["IMPORT_UPLOAD_BLOB_TTL_DAYS"] <= 0:
             batch.upload_blob = b""

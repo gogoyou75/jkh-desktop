@@ -43,6 +43,31 @@ class ImportHelpersTest(unittest.TestCase):
         self.assertIn("amount", mapped)
         self.assertIn("source_index", mapped)
 
+    def test_build_payment_fingerprint_is_stable_for_normalized_values(self):
+        fp1 = app_module.build_payment_fingerprint(
+            "owner1",
+            " UID-1 ",
+            "  000123 ",
+            "01.02.2026",
+            "10,5",
+            "2",
+            "2026/2",
+        )
+        fp2 = app_module.build_payment_fingerprint(
+            "owner1",
+            "UID-1",
+            "000123",
+            "2026-02-01",
+            "10.50",
+            2,
+            "2026-02",
+        )
+        self.assertEqual(fp1, fp2)
+
+    def test_normalize_source_index_rejects_non_positive(self):
+        with self.assertRaises(ValueError):
+            app_module.normalize_source_index(0)
+
 
 if __name__ == "__main__":
     unittest.main()
