@@ -181,6 +181,16 @@ function normalizePaidDate(v){
   return s;
 }
 
+function toIsoDateFromDisplayDate(v){
+  const s = normStr(v);
+  if (!s) return '';
+  let m = s.match(/^(\d{2})\.(\d{2})\.(\d{4})$/);
+  if (m) return m[3] + '-' + m[2] + '-' + m[1];
+  m = s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (m) return s;
+  return '';
+}
+
 function canWriteOrExplain(){
   try{ if (window.Data && typeof Data.ensureWriteOrExplain === 'function') return Data.ensureWriteOrExplain(); }catch(e){}
   try{
@@ -1536,41 +1546,6 @@ async function onParse(){
 
   const file = $('fileInput').files[0];
   if (!file) return;
-  if (mode === 'payments'){
-    try{
-      const fd = new FormData();
-      fd.append('file', file);
-      const uploaded = await apiJson('/api/import/payments/upload', { method:'POST', body: fd });
-      serverPaymentBatchId = Number(uploaded.batch && uploaded.batch.id) || 0;
-      await apiJson('/api/import/' + serverPaymentBatchId + '/parse', { method:'POST' });
-      await apiJson('/api/import/' + serverPaymentBatchId + '/validate', { method:'POST' });
-      const rowsResp = await apiJson('/api/import/' + serverPaymentBatchId + '/rows');
-      serverPaymentRows = Array.isArray(rowsResp.rows) ? rowsResp.rows : [];
-      preview = [];
-      for (let i=0;i<serverPaymentRows.length;i++){
-        const sr = serverPaymentRows[i];
-        const rowStatusMap = { ready:'OK', applied:'OK', duplicate:'SKIP_DUPLICATE', invalid:'ERROR', failed:'ERROR', skipped:'SKIP_DUPLICATE' };
-        preview.push({
-          excelRow: sr.excel_row_ref || (i+1),
-          uid:normStr(sr.account_uid),
-          ls:normStr(sr.account_number),
-          fio:'',
-          square:'',
-          paymentsBrief: sr.payment_period || '—',
-          status: rowStatusMap[normStr(sr.status)] || 'UPDATED',
-          critical: normStr(sr.status)==='invalid' || normStr(sr.status)==='failed',
-          details:[normStr(sr.reason_text) || ('Статус: ' + normStr(sr.status))]
-        });
-      }
-      currentFileName = normStr(file.name);
-      restoredFromDraft = false;
-      renderPreview();
-      return;
-    }catch(e){
-      alert('Ошибка серверного импорта платежей: ' + (e.message || e));
-      return;
-    }
-  }
   const parsedFileName = normStr(file.name);
 
   const buf = await new Promise(function(resolve, reject){
@@ -1592,6 +1567,8 @@ async function onParse(){
   }
 
   dataRows = res.rows;
+  serverPaymentBatchId = 0;
+  serverPaymentRows = [];
   primaryApplied = false;
   primaryBlocked = false;
   mode='primary';
@@ -1663,8 +1640,50 @@ async function applyPrimary(){
 }
 
 async function applyPayments(){
-  if (!serverPaymentBatchId) return alert('Сначала выполните серверный парсинг платежей.');
+  const db = getDB();
+  if (!db || !db.abonents) return alert('База абонентов не загружена.');
+
+  const rows = [];
+  for (let i=0;i<dataRows.length;i++){
+    const row = dataRows[i];
+    const uid = normStr(row.uid);
+    const foundU = uid ? findAbonentByUid(db, uid) : null;
+    const ab = foundU ? foundU.abonent : null;
+    const accountUid = uid || '';
+    const accountNumber = normStr(ab && ab.id ? ab.id : row.ls);
+
+    for (let p=0;p<(row.payments || []).length;p++){
+      const pay = row.payments[p];
+      const amountNum = normNum(pay.amount);
+      if (!Number.isFinite(amountNum) || amountNum <= 0) continue;
+      const per = normalizePeriod(pay.periodRaw);
+      const year = normStr(pay.year) || extractYearFromAny(pay.periodRaw) || extractYearFromAny(pay.paidDateRaw) || normStr(row.rowYear) || parseMeta.workbookYear || (per ? per.period.slice(0,4) : '') || String(new Date().getFullYear());
+      const month = pad2(pay.month || (per ? per.period.slice(5,7) : ''));
+      if (!/^\d{4}$/.test(year) || !/^\d{2}$/.test(month)) continue;
+      const paidDateDisplay = normalizePaidDate(pay.paidDateRaw) || ('01.' + month + '.' + year);
+      const paymentDate = toIsoDateFromDisplayDate(paidDateDisplay) || (year + '-' + month + '-01');
+      const paymentPeriod = year + '-' + month;
+      rows.push({
+        account_uid: accountUid,
+        account_number: accountNumber,
+        payment_date: paymentDate,
+        payment_period: paymentPeriod,
+        amount: amountNum,
+        source_index: Number(pay.sourceIndex || 1)
+      });
+    }
+  }
+
+  if (!rows.length) return alert('Нет валидных платежей для отправки.');
+
   try{
+    const uploaded = await apiJson('/api/import/payments/upload_rows', {
+      method:'POST',
+      headers:{ 'Content-Type':'application/json' },
+      body: JSON.stringify({ rows: rows })
+    });
+    serverPaymentBatchId = Number(uploaded.batch && uploaded.batch.id) || 0;
+    await apiJson('/api/import/' + serverPaymentBatchId + '/validate', { method:'POST' });
     const applied = await apiJson('/api/import/' + serverPaymentBatchId + '/apply', { method:'POST' });
     const s = applied.summary || {};
     alert('Платежи применены на сервере.\nПроведено: ' + (s.applied_count || 0) + '\nПропущено: ' + (s.skipped_count || 0) + '\nДубликаты: ' + (s.duplicate_count || 0) + '\nОшибки: ' + (s.failed_count || 0));
