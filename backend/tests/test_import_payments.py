@@ -1,6 +1,8 @@
 import os
 import sys
 import unittest
+from unittest.mock import patch
+import json
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 import app as app_module
@@ -79,6 +81,57 @@ class ImportHelpersTest(unittest.TestCase):
 
     def test_to_ledger_paid_date_uses_legacy_format(self):
         self.assertEqual(app_module.to_ledger_paid_date("2026-02-01"), "01.02.2026")
+
+    def test_find_owner_accounts_reads_nested_abonents_from_abonents_db_v1(self):
+        owner_id = "owner-1"
+        uid = "uid_mo9q8hat_yq3n5r"
+        ls = "100500"
+        payload = {
+            "abonents": {
+                "a1": {"uid": uid, "id": ls},
+            }
+        }
+
+        class DummyQuery:
+            def filter_by(self, owner, k):
+                self.owner = owner
+                self.k = k
+                return self
+
+            def first(self):
+                if self.owner == owner_id and self.k == "abonents_db_v1":
+                    return type("Row", (), {"v": json.dumps(payload)})()
+                return None
+
+        with app_module.app.app_context():
+            with patch.object(app_module.KVStore, "query", DummyQuery()):
+                result = app_module._find_owner_accounts(owner_id, uid, ls)
+
+        self.assertTrue(result["uid_found"])
+        self.assertEqual(len(result["matches"]), 1)
+
+    def test_find_owner_accounts_reports_uid_ls_mismatch(self):
+        owner_id = "owner-1"
+        uid = "uid_mo9q8hat_yq3n5r"
+        payload = {"abonents": {"a1": {"uid": uid, "id": "777"}}}
+
+        class DummyQuery:
+            def filter_by(self, owner, k):
+                self.owner = owner
+                self.k = k
+                return self
+
+            def first(self):
+                if self.owner == owner_id and self.k == "abonents_db_v1":
+                    return type("Row", (), {"v": json.dumps(payload)})()
+                return None
+
+        with app_module.app.app_context():
+            with patch.object(app_module.KVStore, "query", DummyQuery()):
+                result = app_module._find_owner_accounts(owner_id, uid, "999")
+
+        self.assertTrue(result["uid_found"])
+        self.assertEqual(result["matches"], [])
 
 
 if __name__ == "__main__":

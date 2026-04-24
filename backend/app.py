@@ -548,30 +548,48 @@ def _load_owner_sources(owner_id: str):
     return out
 
 
-def _find_owner_accounts(owner_id: str, account_uid: str, account_number: str):
-    row = KVStore.query.filter_by(owner=owner_id, k="abonents_v1").first()
-    if not row or not row.v:
-        return []
-    try:
-        obj = json.loads(row.v)
-    except Exception:
-        return []
+def _extract_abonents_values(obj):
     if not isinstance(obj, dict):
         return []
+    nested = obj.get("abonents")
+    if isinstance(nested, dict):
+        return nested.values()
+    return obj.values()
+
+
+def _find_owner_accounts(owner_id: str, account_uid: str, account_number: str):
     uid_norm = _norm_text(account_uid).lower()
     ls_norm = _norm_text(account_number).lower()
-    hits = []
-    for abonent in obj.values():
-        if not isinstance(abonent, dict):
+    if not uid_norm:
+        return {"matches": [], "uid_found": False}
+
+    uid_hits = []
+    matches = []
+    for key in ("abonents_db_v1", "abonents_v1"):
+        row = KVStore.query.filter_by(owner=owner_id, k=key).first()
+        if not row or not row.v:
             continue
-        candidate_uid = _norm_text(abonent.get("uid")).lower()
-        candidate_ls = _norm_text(abonent.get("id")).lower()
-        if uid_norm and candidate_uid != uid_norm:
+        try:
+            obj = json.loads(row.v)
+        except Exception:
             continue
-        if ls_norm and candidate_ls != ls_norm:
-            continue
-        hits.append(abonent)
-    return hits
+
+        for abonent in _extract_abonents_values(obj):
+            if not isinstance(abonent, dict):
+                continue
+            candidate_uid = _norm_text(abonent.get("uid")).lower()
+            if candidate_uid != uid_norm:
+                continue
+            uid_hits.append(abonent)
+            candidate_ls = _norm_text(abonent.get("id")).lower()
+            if ls_norm and candidate_ls != ls_norm:
+                continue
+            matches.append(abonent)
+
+        if uid_hits:
+            break
+
+    return {"matches": matches, "uid_found": bool(uid_hits)}
 
 
 def _row_human_error_payload(r: ImportBatchRow):
@@ -1147,8 +1165,16 @@ def import_payments_validate(batch_id):
             details["recommendation"] = "Используйте source_index из справочника источников оплаты."
             invalid += 1
         else:
-            matches = _find_owner_accounts(batch.owner_id, r.account_uid, r.account_number)
-            if not matches:
+            lookup = _find_owner_accounts(batch.owner_id, r.account_uid, r.account_number)
+            matches = lookup["matches"]
+            if not matches and lookup["uid_found"]:
+                r.status = "invalid"
+                r.reason_code = "UID_LS_MISMATCH"
+                r.reason_text = "UID найден, но лицевой счёт не совпадает"
+                details["field"] = "account_number"
+                details["recommendation"] = "Проверьте соответствие UID и лицевого счёта."
+                invalid += 1
+            elif not matches:
                 r.status = "invalid"
                 r.reason_code = "ACCOUNT_NOT_FOUND"
                 r.reason_text = "account_uid не найден у текущего owner"
