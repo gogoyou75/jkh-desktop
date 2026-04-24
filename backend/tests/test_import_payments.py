@@ -71,6 +71,39 @@ class ImportHelpersTest(unittest.TestCase):
         )
         self.assertEqual(fp1, fp2)
 
+    def test_payment_duplicate_same_period_date_amount_has_same_fingerprint(self):
+        fp1 = app_module.build_payment_fingerprint(
+            "owner1", "uid_1", "0001", "2025-02-10", "1500", 1, "2025-02"
+        )
+        fp2 = app_module.build_payment_fingerprint(
+            "owner1", "uid_1", "0001", "10.02.2025", "1500.00", 1, "02.2025"
+        )
+        self.assertEqual(fp1, fp2)
+
+    def test_payment_conflict_same_period_date_other_amount_has_other_fingerprint(self):
+        fp1 = app_module.build_payment_fingerprint(
+            "owner1", "uid_1", "0001", "2025-02-10", "1500", 1, "2025-02"
+        )
+        fp2 = app_module.build_payment_fingerprint(
+            "owner1", "uid_1", "0001", "2025-02-10", "1700", 1, "2025-02"
+        )
+        self.assertNotEqual(fp1, fp2)
+
+    def test_additional_payment_same_period_other_date_has_other_fingerprint(self):
+        fp1 = app_module.build_payment_fingerprint(
+            "owner1", "uid_1", "0001", "2025-02-10", "1500", 1, "2025-02"
+        )
+        fp2 = app_module.build_payment_fingerprint(
+            "owner1", "uid_1", "0001", "2025-02-15", "1500", 1, "2025-02"
+        )
+        self.assertNotEqual(fp1, fp2)
+
+    def test_build_payment_fingerprint_requires_uid(self):
+        with self.assertRaises(ValueError):
+            app_module.build_payment_fingerprint(
+                "owner1", " ", "0001", "2025-02-10", "1500", 1, "2025-02"
+            )
+
     def test_normalize_source_index_rejects_non_positive(self):
         with self.assertRaises(ValueError):
             app_module.normalize_source_index(0)

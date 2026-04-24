@@ -38,6 +38,12 @@
     .status-upd{ background:#fff6e5; }
     .status-skip{ background:#f3f3f3; }
     .status-conflict{ background:#fff0f0; }
+    .status-created{ background:#ffe7c2; }
+    .status-warn{ background:#fff6e5; }
+    .inline-status{ border:1px solid #000; padding:8px; margin-top:8px; font-size:13px; }
+    .inline-status.ok{ background:#eaffea; }
+    .inline-status.err{ background:#ffecec; }
+    .inline-status.info{ background:#eef5ff; }
 
     .mono{ font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
     .pill{ display:inline-block; padding:1px 6px; border:1px solid #000; background:#fff; font-size:11px; }
@@ -64,21 +70,26 @@
 
       <div class="row">
         <input type="file" id="fileInput" accept=".xlsx,.xls" />
-        <button class="btn" id="btnParse" disabled>Считать файл (предпросмотр)</button>
+        <button class="btn" id="btnParse" disabled>Проверить файл</button>
         <button class="btn" id="btnApplyPrimary" disabled>Применить первичку</button>
-        <button class="btn" id="btnApplyPayments" disabled>Применить платежи</button>
+        <button class="btn" id="btnApplyPayments" disabled>Применить: добавить 0 платежей</button>
         <button class="btn" id="btnReset" disabled>Сбросить предпросмотр</button>
       </div>
 
-      <div class="row">
+      <div class="row" id="primarySettings">
         <label class="pill">
           <input type="checkbox" id="optAllowCreate" />
-          Разрешить создание абонента из предпросмотра (если не найден)
+          Разрешить создание новых абонентов
         </label>
-        <label class="pill">
+        <label class="pill" id="squareUpdateWrap">
           <input type="checkbox" id="optAllowSquareUpdate" />
           Разрешить обновление площади из Excel
         </label>
+      </div>
+      <div class="row" id="paymentsSettings" style="display:none">
+        <span class="pill">Импортировать только по UID</span>
+        <span class="pill">Дубликаты пропускать</span>
+        <span class="pill">Конфликты не импортировать</span>
       </div>
 
       <div class="hint mono" id="stepStateLine">Шаг 1 не применён. Шаг 2 заблокирован до успешной первички.</div>
@@ -86,6 +97,7 @@
         Начисления НЕ импортируются — они считаются автоматически (тариф × площадь).
       </div>
       <div class="hint" id="writeWarning"></div>
+      <div id="importStatusBox" class="inline-status info">Готово к импорту.</div>
     </div>
 
     <div class="block">
@@ -107,7 +119,7 @@
             <th style="width:110px">ЛС</th>
             <th>ФИО</th>
             <th style="width:130px">Общая площадь</th>
-            <th style="width:110px">Платежи</th>
+            <th style="width:260px">Платежи</th>
             <th style="width:280px">Статус / детали</th>
           </tr>
         </thead>
@@ -137,6 +149,36 @@ function asSquare(v){ return Number.isFinite(v) ? v : ''; }
 function genUID(){ return 'UID_' + String(Date.now()) + '_' + String(Math.floor(Math.random()*10000)).padStart(4,'0'); }
 function genTempRegnum(){ return 'TEMP-' + String(Date.now()) + '-' + String(Math.floor(Math.random()*10000)).padStart(4,'0'); }
 function pad2(v){ return String(v).padStart(2, '0'); }
+function escHtml(s){
+  return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+function formatMoney(v){
+  const n = Number(v);
+  if (!Number.isFinite(n)) return String(v||'');
+  return n.toLocaleString('ru-RU', { maximumFractionDigits:2 }) + ' ₽';
+}
+function formatPaymentLine(pay, idx){
+  const amount = normNum(pay && pay.amount);
+  if (!Number.isFinite(amount) || amount <= 0) return '';
+  const per = normalizePeriod(pay && pay.periodRaw);
+  const year = normStr(pay && pay.year) || (per ? per.period.slice(0,4) : '');
+  const month = pad2((pay && pay.month) || (per ? per.period.slice(5,7) : ''));
+  const paidDate = normalizePaidDate(pay && pay.paidDateRaw) || (/^\d{4}$/.test(year)&&/^\d{2}$/.test(month)?('01.'+month+'.'+year):'');
+  const periodTxt = per ? per.display : (/^\d{4}$/.test(year)&&/^\d{2}$/.test(month)?(month+'.'+year):'');
+  let txt = (idx+1) + ') ' + formatMoney(amount);
+  if (paidDate) txt += ' от ' + paidDate;
+  if (periodTxt) txt += ' за ' + periodTxt;
+  return txt;
+}
+function formatPaymentListHtml(row){
+  const arr = Array.isArray(row && row.payments) ? row.payments : [];
+  const lines = [];
+  for (let i=0;i<arr.length;i++){
+    const line = formatPaymentLine(arr[i], i);
+    if (line) lines.push('<div>'+escHtml(line)+'</div>');
+  }
+  return lines.length ? lines.join('') : '—';
+}
 
 function normalizePeriod(v){
   const s = normStr(v);
@@ -519,7 +561,7 @@ function tryResumeFromHash(){
     if (row){
       const found = findAbonentByRules(db, row);
       if (found && found.abonent){
-        row.uid = normStr(found.abonent.uid || row.uid);
+        row.createdUid = normStr(found.abonent.uid || "");
       }
     }
   }
@@ -529,7 +571,9 @@ function tryResumeFromHash(){
     saveImportDraftState();
   }
   if (target){
-    alert('Возврат из создания абонента: строка Excel #' + target + ' восстановлена. Можно продолжить импорт.');
+    const row = dataRows.find(function(x){ return Number(x.excelRow)===target; });
+    const uidTxt = row && row.createdUid ? (' UID: ' + row.createdUid + '.') : '';
+    setImportStatus('Абонент создан. Строка Excel #' + target + ' восстановлена. Можно продолжить импорт.' + uidTxt, 'ok');
   }
   clearImportResumeState();
   history.replaceState(null, '', location.pathname + location.search);
@@ -974,6 +1018,7 @@ let currentFileName='';
 let restoredFromDraft=false;
 let serverPaymentBatchId = 0;
 let serverPaymentRows = [];
+let importApplyBusy = false;
 
 async function apiJson(url, options){
   const res = await fetch(url, Object.assign({ credentials:'include' }, options || {}));
@@ -1180,19 +1225,35 @@ function evaluatePrimaryRow(db, row){
   if (found.type === 'UID_MISSING' || found.type === 'NO_ID' || found.type === 'AMBIG'){
     status='ERROR'; critical=true; messages.push(found.msg);
   } else if (found.type === 'NOT_FOUND'){
-    status='ERROR'; critical=true; messages.push(found.msg);
-    if (!normStr(row.uid)) action = { type:'ADD_ABONENT' };
-    if (!normStr(row.ls) || !normStr(row.fam)) messages.push('Для создания нужны непустые ФИО/ЛС.');
+    if (normStr(row.createdUid)){
+      status='WARNING_CREATED';
+      critical=false;
+      messages.push('Абонент создан в базе. Внесите UID в Excel и перезагрузите файл.');
+      messages.push('UID: ' + row.createdUid);
+      action = { type:'COPY_UID', uid: row.createdUid };
+    } else {
+      status='ERROR'; critical=true; messages.push(found.msg);
+      if (!normStr(row.uid)) action = { type:'ADD_ABONENT' };
+      if (!normStr(row.ls) || !normStr(row.fam)) messages.push('Для создания нужны непустые ФИО/ЛС.');
+    }
   } else if (found.type === 'FOUND_BY_LS_FAM'){
     status='UPDATED';
     warnings.push('Абонент найден по ЛС/Фамилии. UID будет присвоен при применении первички.');
   }
 
   if (found.abonent){
-    const dbSq = normNum(found.abonent.square);
+    const reg = normStr(found.abonent.premiseRegnum || found.abonent.regnum);
+    const premise = reg && db.premises ? db.premises[reg] : null;
+    const dbSq = normNum(premise ? premise.square : found.abonent.square);
     if (Number.isFinite(dbSq) && Number.isFinite(row.square) && dbSq !== row.square){
       status = (status==='ERROR') ? 'ERROR' : 'UPDATED';
-      warnings.push('ПРЕДУПРЕЖДЕНИЕ: в базе площадь=' + dbSq + '; в Excel площадь=' + row.square + '.');
+      warnings.push('Площадь в квартире: ' + dbSq + '. Площадь в Excel: ' + row.square + '.');
+      if ($('optAllowSquareUpdate').checked && mode==='primary' && premise){
+        warnings.push('Площадь будет обновлена: было ' + dbSq + ', станет ' + row.square + '.');
+      }
+      if (premise){
+        action = action || { type:'OPEN_PREMISE', regnum: reg };
+      }
     }
   }
 
@@ -1208,24 +1269,23 @@ function evaluatePaymentsRow(db, row){
   const ab = foundU ? foundU.abonent : null;
 
   if (!uid || !ab){
-    return { status:'ERROR', critical:true, details:['Платежи импортируются только по UID после шага 1.'], conflicts:0, unresolved:0 };
+    return { status:'ERROR', critical:true, details:['Для импорта платежей нужен UID. Сначала выполните шаг 1 — Первичка.'], conflicts:0, unresolved:0, adds:0, dups:0, found:paymentPairsCount(row), skipped:0 };
   }
 
   const ls = normStr(ab.id);
   const existing = getPaymentsByLS(ls);
-  let conflicts=0, unresolved=0, errs=0, dups=0, adds=0;
+  let conflicts=0, unresolved=0, errs=0, dups=0, adds=0, found=0;
 
   for (let i=0;i<row.payments.length;i++){
     const p = row.payments[i];
     const amount = normNum(p.amount);
     if (!Number.isFinite(amount) || amount <= 0) continue;
+    found++;
     const per = normalizePeriod(p.periodRaw);
     const year = normStr(p.year) || extractYearFromAny(p.periodRaw) || extractYearFromAny(p.paidDateRaw) || normStr(row.rowYear) || parseMeta.workbookYear || (per ? per.period.slice(0,4) : '') || String(new Date().getFullYear());
     const month = pad2(p.month || (per ? per.period.slice(5,7) : ''));
     if (!/^\d{4}$/.test(year) || !/^\d{2}$/.test(month)){ errs++; continue; }
     const paidDate = normalizePaidDate(p.paidDateRaw) || ('01.' + month + '.' + year);
-    const source = sourceNameByIndex(p.sourceIndex || 1);
-
     const dup = existing.some(function(x){
       const ym = getLedgerYearMonth(x);
       const paid = getLedgerPaidAmount(x);
@@ -1233,33 +1293,32 @@ function evaluatePaymentsRow(db, row){
       return ym.year === year &&
         ym.month === month &&
         getLedgerPaidDate(x) === paidDate &&
-        paid === amount &&
-        getLedgerSource(x) === source;
+        paid === amount;
     });
     if (dup){ dups++; continue; }
 
-    const sameMonthPayment = existing.find(function(x){
+    const sameMonthSameDateDiff = existing.find(function(x){
       const ym = getLedgerYearMonth(x);
       const paid = getLedgerPaidAmount(x);
       if (!ym || !Number.isFinite(paid) || paid <= 0) return false;
-      return ym.year === year && ym.month === month && getLedgerSource(x) === source;
+      return ym.year === year && ym.month === month && getLedgerPaidDate(x) === paidDate && paid !== amount;
     });
-    if (sameMonthPayment){
+    if (sameMonthSameDateDiff){
       conflicts++;
-      const key = ls + '::' + year + '-' + month + '::' + source;
-      if (!conflictDecision[key]) unresolved++;
+      unresolved++;
       continue;
     }
     adds++;
   }
 
   if (errs>0){ status='ERROR'; critical=true; details.push('Есть ошибки платежей: нужен корректный год/месяц и сумма > 0.'); }
-  if (conflicts>0){ status = (status==='ERROR' ? status : 'CONFLICT'); details.push('КОНФЛИКТ: в этом месяце уже есть платёж по тому же источнику.'); }
-  if (!errs && !conflicts && adds===0 && dups>0){ status='SKIP_DUPLICATE'; details.push('Найдены только точные дубликаты — будут пропущены.'); }
-  if (!errs && !conflicts && adds>0){ status='OK'; details.push('Строка платежей готова к применению.'); }
+  if (conflicts>0){ status = (status==='ERROR' ? status : 'CONFLICT'); details.push('Конфликт: на эту дату уже есть платеж с другой суммой.'); }
+  if (!errs && !conflicts && adds===0 && dups>0){ status='SKIP_DUPLICATE'; details.push('Дубликат: уже есть такой платеж.'); }
+  if (!errs && !conflicts && adds>0){ status='OK'; details.push('OK: добавится дополнительный платеж.'); }
   if (!errs && !conflicts && adds===0 && dups===0){ details.push('Платежей в строке нет.'); }
+  details.push('Найдено в Excel: ' + found + '; добавится: ' + adds + '; дубликаты: ' + dups + '; конфликты: ' + conflicts + '.');
 
-  return { status, critical, details, conflicts, unresolved };
+  return { status, critical, details, conflicts, unresolved, adds, dups, found, skipped: dups + conflicts };
 }
 
 function buildPreview(){
@@ -1285,7 +1344,7 @@ function buildPreview(){
     if (mode === 'primary'){
       preview.push({
         excelRow:r.excelRow, uid:normStr(r.uid), ls:normStr(r.ls), fio:toFio(r.fam,r.name,r.otch),
-        square:asSquare(r.square), paymentsBrief: paymentPairsCount(r) ? (paymentPairsCount(r) + ' пар') : '—',
+        square:asSquare(r.square), paymentsBrief: formatPaymentListHtml(r),
         status:p1.status, critical:p1.critical, action:p1.action, details:p1.details
       });
     } else {
@@ -1299,7 +1358,7 @@ function buildPreview(){
           ls:normStr(rr.account_number || r.ls),
           fio:toFio(r.fam,r.name,r.otch),
           square:asSquare(r.square),
-          paymentsBrief: rr.payment_period ? rr.payment_period : '—',
+          paymentsBrief: rr.payment_period ? escHtml(rr.payment_period) : '—',
           status:st,
           critical: st === 'ERROR',
           details:[normStr(rr.reason_text) || ('Статус: ' + normStr(rr.status))]
@@ -1309,7 +1368,7 @@ function buildPreview(){
         p2.details.push('По строке LS ' + (normStr(r.ls) || '—') + ' найдено ' + paymentPairsCount(r) + ' платежей.');
         preview.push({
           excelRow:r.excelRow, uid:normStr(r.uid), ls:normStr(r.ls), fio:toFio(r.fam,r.name,r.otch),
-          square:asSquare(r.square), paymentsBrief: paymentPairsCount(r) ? (paymentPairsCount(r) + ' пар') : '—',
+          square:asSquare(r.square), paymentsBrief: formatPaymentListHtml(r),
           status:p2.status, critical:p2.critical, details:p2.details
         });
       }
@@ -1320,8 +1379,8 @@ function buildPreview(){
   renderPreview();
 }
 
-function statusRU(s){ return ({OK:'ОК', ERROR:'ОШИБКА', UPDATED:'ПРЕДУПРЕЖДЕНИЕ', SKIP_DUPLICATE:'ДУБЛИКАТ', CONFLICT:'КОНФЛИКТ'})[s] || s; }
-function statusClass(s){ return ({OK:'status-ok', ERROR:'status-err', UPDATED:'status-upd', SKIP_DUPLICATE:'status-skip', CONFLICT:'status-conflict'})[s] || ''; }
+function statusRU(s){ return ({OK:'ОК', ERROR:'ОШИБКА', UPDATED:'ПРЕДУПРЕЖДЕНИЕ', WARNING_CREATED:'СОЗДАН', SKIP_DUPLICATE:'ДУБЛИКАТ', CONFLICT:'КОНФЛИКТ'})[s] || s; }
+function statusClass(s){ return ({OK:'status-ok', ERROR:'status-err', UPDATED:'status-warn', WARNING_CREATED:'status-created', SKIP_DUPLICATE:'status-skip', CONFLICT:'status-conflict'})[s] || ''; }
 
 function renderPreview(){
   const body = $('previewBody');
@@ -1333,7 +1392,7 @@ function renderPreview(){
     const r = preview[i];
     if (r.status==='OK') ok++;
     if (r.status==='ERROR') err++;
-    if (r.status==='UPDATED') warn++;
+    if (r.status==='UPDATED' || r.status==='WARNING_CREATED') warn++;
     if (r.status==='SKIP_DUPLICATE') dup++;
     if (r.status==='CONFLICT') conf++;
 
@@ -1342,6 +1401,12 @@ function renderPreview(){
       const allow = $('optAllowCreate').checked;
       actionsHTML = '<button class="action-btn" data-act="add" data-excelrow="' + r.excelRow + '" ' + (allow?'':'disabled') + '>Создать абонента</button>' +
         '<span class="small ' + (allow?'':'danger') + '">' + (allow?'':'Включи "Разрешить создание абонента"') + '</span>';
+    }
+    if (mode==='primary' && r.action && r.action.type==='COPY_UID'){
+      actionsHTML += '<button class="action-btn" data-act="copy_uid" data-uid="' + escHtml(r.action.uid || '') + '">Скопировать UID</button>';
+    }
+    if (mode==='primary' && r.action && r.action.type==='OPEN_PREMISE'){
+      actionsHTML += '<button class="action-btn" data-act="open_premise" data-regnum="' + escHtml(r.action.regnum || '') + '">Открыть квартиру для изменения площади</button>';
     }
 
     if (mode==='payments' && r.status==='CONFLICT'){
@@ -1455,38 +1520,30 @@ function hasPaymentsReadyRows(){
   }
   return preview.some(function(r){ return r.status === 'OK'; });
 }
+function setImportStatus(msg, type){
+  const box = $('importStatusBox');
+  if (!box) return;
+  box.className = 'inline-status ' + (type || 'info');
+  box.textContent = normStr(msg) || '—';
+}
+function setImportBusy(flag, msg){
+  importApplyBusy = !!flag;
+  if (msg) setImportStatus(msg, 'info');
+  setButtons();
+}
 function hasUnresolvedConflicts(){
-  if (mode !== 'payments') return false;
-  for (let i=0;i<dataRows.length;i++){
-    const db = getDB();
-    const r = dataRows[i];
-    const foundU = (!db || !r.uid) ? null : findAbonentByUid(db, r.uid);
-    if (!foundU || !foundU.abonent) continue;
-    const ls = normStr(foundU.abonent.id);
-    const list = getPaymentsByLS(ls);
-    for (let p=0;p<r.payments.length;p++){
-      const pay = r.payments[p];
-      const amount = normNum(pay.amount);
-      if (!Number.isFinite(amount) || amount<=0) continue;
-      const per = normalizePeriod(pay.periodRaw);
-      const year = normStr(pay.year) || extractYearFromAny(pay.periodRaw) || extractYearFromAny(pay.paidDateRaw) || normStr(r.rowYear) || parseMeta.workbookYear || (per ? per.period.slice(0,4) : '') || String(new Date().getFullYear());
-      const month = pad2(pay.month || (per ? per.period.slice(5,7) : ''));
-      if (!/^\d{4}$/.test(year) || !/^\d{2}$/.test(month)) continue;
-      const paidDate = normalizePaidDate(pay.paidDateRaw) || ('01.' + month + '.' + year);
-      const source = sourceNameByIndex(pay.sourceIndex || 1);
-      const hasConflict = list.some(function(x){
-        const ym = getLedgerYearMonth(x);
-        const paid = getLedgerPaidAmount(x);
-        if (!ym || !Number.isFinite(paid) || paid <= 0) return false;
-        return ym.year === year &&
-          ym.month === month &&
-          getLedgerSource(x) === source &&
-          !(getLedgerPaidDate(x) === paidDate && paid === amount);
-      });
-      if (hasConflict && !conflictDecision[ls + '::' + year + '-' + month + '::' + source]) return true;
-    }
-  }
   return false;
+}
+
+function getPaymentsToApplyCount(){
+  const db = getDB();
+  if (!db || !db.abonents) return 0;
+  let adds = 0;
+  for (let i=0;i<dataRows.length;i++){
+    const p = evaluatePaymentsRow(db, dataRows[i]);
+    adds += Number(p.adds || 0);
+  }
+  return adds;
 }
 
 function updateStateLine(){
@@ -1507,9 +1564,15 @@ function setButtons(){
   const canWrite = canWriteOrExplain();
   const parsed = dataRows.length > 0;
 
-  $('btnModePayments').disabled = !canEnterPaymentsMode();
-  $('btnApplyPrimary').disabled = !(mode==='primary' && parsed && canWrite && !primaryBlocked);
-  $('btnApplyPayments').disabled = !(mode==='payments' && parsed && canWrite && hasPaymentsReadyRows() && !hasUnresolvedConflicts());
+  $('btnModePayments').disabled = !canEnterPaymentsMode() || importApplyBusy;
+  const canApplyPrimary = (mode==='primary' && parsed && canWrite && !primaryBlocked && !importApplyBusy);
+  $('btnApplyPrimary').disabled = !canApplyPrimary;
+  const paymentsCount = getPaymentsToApplyCount();
+  $('btnApplyPayments').textContent = 'Применить: добавить ' + paymentsCount + ' платежей';
+  $('btnApplyPayments').disabled = !(mode==='payments' && parsed && canWrite && paymentsCount>0 && !importApplyBusy);
+  $('primarySettings').style.display = mode==='primary' ? 'flex' : 'none';
+  $('paymentsSettings').style.display = mode==='payments' ? 'flex' : 'none';
+  $('optAllowSquareUpdate').disabled = mode!=='primary';
 }
 
 function updateRestoredFileInfo(){
@@ -1553,16 +1616,16 @@ async function onParse(){
     fr.onload = function(){ resolve(fr.result); };
     fr.onerror = function(){ reject(fr.error || new Error('Ошибка чтения файла')); };
     fr.readAsArrayBuffer(file);
-  }).catch(function(e){ alert('Не удалось прочитать файл: ' + (e.message || e)); return null; });
+  }).catch(function(e){ setImportStatus('Ошибка чтения файла: ' + (e.message || e), 'err'); return null; });
   if (!buf) return;
 
-  try{ WB = XLSX.read(buf, { type:'array' }); }catch(e){ alert('Не удалось распарсить XLSX: ' + (e.message || e)); return; }
-  if (!WB.SheetNames || !WB.SheetNames.length){ alert('В книге нет листов.'); return; }
+  try{ WB = XLSX.read(buf, { type:'array' }); }catch(e){ setImportStatus('Не удалось распарсить XLSX: ' + (e.message || e), 'err'); return; }
+  if (!WB.SheetNames || !WB.SheetNames.length){ setImportStatus('В книге нет листов.', 'err'); return; }
 
   const firstSheetName = WB.SheetNames[0];
   const res = parseSheetToRows(WB.Sheets[firstSheetName], parsedFileName, firstSheetName);
   if (!res.ok){
-    alert('Не удалось построить предпросмотр: ' + res.msg);
+    setImportStatus('Не удалось построить предпросмотр: ' + res.msg, 'err');
     return;
   }
 
@@ -1580,19 +1643,21 @@ async function onParse(){
 }
 
 async function applyPrimary(){
+  if (importApplyBusy) return;
   if (!canWriteOrExplain()) return setButtons();
+  setImportBusy(true, 'Идёт запись на сервер... Не закрывайте страницу.');
 
   const db = getDB();
-  if (!db || !db.abonents) return alert('База абонентов не загружена.');
+  if (!db || !db.abonents){ setImportStatus('База абонентов не загружена.', 'err'); setImportBusy(false); return; }
 
   mode='primary';
   buildPreview();
-  if (primaryBlocked) return alert('Шаг 1 заблокирован: есть критические ошибки первички.');
+  if (primaryBlocked){ setImportStatus('Шаг 1 заблокирован: есть критические ошибки первички.', 'err'); return; }
 
   const localSnapshot = { db: deepCloneJSONSafe(getDB()) };
 
   try {
-  let updated=0, uidAssigned=0;
+  let updated=0, uidAssigned=0, premiseUpdated=0;
   const allowSquareUpdate = !!$('optAllowSquareUpdate').checked;
 
   for (let i=0;i<dataRows.length;i++){
@@ -1620,7 +1685,16 @@ async function applyPrimary(){
     a.name = normStr(row.name) || a.name;
     a.otch = normStr(row.otch) || a.otch;
     a.fio = toFio(a.fam,a.name,a.otch);
-    if (allowSquareUpdate) a.square = row.square;
+    if (allowSquareUpdate){
+      const reg = normStr(a.premiseRegnum || a.regnum);
+      if (reg && db.premises && db.premises[reg]){
+        const oldSq = normNum(db.premises[reg].square);
+        if (Number.isFinite(row.square) && oldSq !== row.square){
+          db.premises[reg].square = row.square;
+          premiseUpdated++;
+        }
+      }
+    }
     row.ls = a.id;
     updated++;
   }
@@ -1631,17 +1705,22 @@ async function applyPrimary(){
   mode='payments';
   buildPreview();
   saveImportDraftState();
-  alert('Шаг 1 применён успешно.\nОбновлено строк первички: ' + updated + '\nПрисвоено UID: ' + uidAssigned + '\nОбновление площади: ' + (allowSquareUpdate ? 'включено' : 'выключено'));
+  setImportStatus('Идёт запись на сервер... Не закрывайте страницу.', 'info');
+  setImportStatus('Шаг 1 применён. Обновлено строк первички: ' + updated + '. Присвоено UID: ' + uidAssigned + '. Обновлено площадей квартир: ' + premiseUpdated + '.', 'ok');
   } catch (e) {
     console.error(e);
-    alert('Ошибка сохранения первички на сервер. Локальные изменения будут откатаны.');
+    setImportStatus('Ошибка записи на сервер. Данные не применены.', 'err');
     await rollbackAfterFlushError(localSnapshot, { reason: 'import_apply_primary_flush_error', reload: true });
+  } finally {
+    setImportBusy(false);
   }
 }
 
 async function applyPayments(){
+  if (importApplyBusy) return;
+  setImportBusy(true, "Идёт запись на сервер... Не закрывайте страницу.");
   const db = getDB();
-  if (!db || !db.abonents) return alert('База абонентов не загружена.');
+  if (!db || !db.abonents){ setImportStatus('База абонентов не загружена.', 'err'); setImportBusy(false); return; }
 
   const rows = [];
   for (let i=0;i<dataRows.length;i++){
@@ -1663,6 +1742,20 @@ async function applyPayments(){
       const paidDateDisplay = normalizePaidDate(pay.paidDateRaw) || ('01.' + month + '.' + year);
       const paymentDate = toIsoDateFromDisplayDate(paidDateDisplay) || (year + '-' + month + '-01');
       const paymentPeriod = year + '-' + month;
+      const previewRow = evaluatePaymentsRow(db, row);
+      if (!previewRow || previewRow.status==='ERROR') continue;
+      const existing = getPaymentsByLS(accountNumber);
+      const isDup = existing.some(function(x){
+        const ym = getLedgerYearMonth(x);
+        const paid = getLedgerPaidAmount(x);
+        return ym && ym.year===year && ym.month===month && getLedgerPaidDate(x)===paidDateDisplay && paid===amountNum;
+      });
+      const isConflict = existing.some(function(x){
+        const ym = getLedgerYearMonth(x);
+        const paid = getLedgerPaidAmount(x);
+        return ym && ym.year===year && ym.month===month && getLedgerPaidDate(x)===paidDateDisplay && Number.isFinite(paid) && paid!==amountNum;
+      });
+      if (isDup || isConflict) continue;
       rows.push({
         account_uid: accountUid,
         account_number: accountNumber,
@@ -1674,7 +1767,7 @@ async function applyPayments(){
     }
   }
 
-  if (!rows.length) return alert('Нет валидных платежей для отправки.');
+  if (!rows.length){ setImportStatus('Нет платежей для добавления.', 'err'); return; }
 
   try{
     const uploaded = await apiJson('/api/import/payments/upload_rows', {
@@ -1686,10 +1779,12 @@ async function applyPayments(){
     await apiJson('/api/import/' + serverPaymentBatchId + '/validate', { method:'POST' });
     const applied = await apiJson('/api/import/' + serverPaymentBatchId + '/apply', { method:'POST' });
     const s = applied.summary || {};
-    alert('Платежи применены на сервере.\nПроведено: ' + (s.applied_count || 0) + '\nПропущено: ' + (s.skipped_count || 0) + '\nДубликаты: ' + (s.duplicate_count || 0) + '\nОшибки: ' + (s.failed_count || 0));
+    setImportStatus('Импорт завершён. Добавлено платежей: ' + (s.applied_count || 0) + '. Дубликатов пропущено: ' + (s.duplicate_count || 0) + '. Конфликтов: ' + (s.failed_count || 0) + '.', 'ok');
   } catch (e) {
-    alert('Ошибка применения на сервере: ' + (e.message || e));
+    setImportStatus('Ошибка записи на сервер. Данные не применены. ' + (e.message || e), 'err');
     return;
+  } finally {
+    setImportBusy(false);
   }
   clearRuntimeState();
   serverPaymentBatchId = 0;
@@ -1717,12 +1812,12 @@ $('previewBody').addEventListener('click', function(ev){
     const db = getDB();
     if (!row || !db || !db.abonents) return;
 
-    if (normStr(row.uid)) return alert('В строке уже указан UID.');
-    if (!normStr(row.ls) || !normStr(row.fam)) return alert('Нельзя создать абонента: пустые ЛС/ФИО.');
-    if (!Number.isFinite(row.square) || row.square<=0) return alert('Нельзя создать абонента: "Общая площадь" должна быть > 0.');
+    if (normStr(row.uid)){ setImportStatus('В строке уже указан UID.', 'err'); return; }
+    if (!normStr(row.ls) || !normStr(row.fam)){ setImportStatus('Нельзя создать абонента: пустые ЛС/ФИО.', 'err'); return; }
+    if (!Number.isFinite(row.square) || row.square<=0){ setImportStatus('Нельзя создать абонента: "Общая площадь" должна быть > 0.', 'err'); return; }
 
     const draftOK = saveDraftNewAbonent(row);
-    if (!draftOK) return alert('Не удалось сохранить draft для создания абонента.');
+    if (!draftOK){ setImportStatus('Не удалось сохранить draft для создания абонента.', 'err'); return; }
 
     saveImportResumeState({
       dataRows: dataRows,
@@ -1735,6 +1830,24 @@ $('previewBody').addEventListener('click', function(ev){
     saveImportDraftState();
 
     location.href = 'new_abonent.html?from=import';
+    return;
+  }
+
+  if (act === 'copy_uid'){
+    const uid = normStr(btn.getAttribute('data-uid'));
+    if (!uid) return;
+    if (navigator.clipboard && navigator.clipboard.writeText){
+      navigator.clipboard.writeText(uid).then(function(){ setImportStatus('UID скопирован: ' + uid, 'ok'); });
+    } else {
+      setImportStatus('UID: ' + uid, 'info');
+    }
+    return;
+  }
+
+  if (act === 'open_premise'){
+    const reg = normStr(btn.getAttribute('data-regnum'));
+    if (!reg) return;
+    location.href = 'premises.html?regnum=' + encodeURIComponent(reg);
     return;
   }
 
