@@ -785,7 +785,7 @@ function buildColumnIndexMap(indexRow){
   for (let c=0;c<row.length;c++){
     const n = toFieldNo(row[c]);
     if (!Number.isFinite(n)) continue;
-    if (n < 1 || n > 120) continue;
+    if (n < 0 || n > 120) continue;
     if (!Object.prototype.hasOwnProperty.call(map, n)) map[n] = c;
   }
   return map;
@@ -823,7 +823,7 @@ if (rawUidCell){
   const txt = String(rawUidCell);
 
   // ищем uid внутри строки
-  const match = txt.match(/uid_[a-z0-9]+/i);
+  const match = txt.match(/uid_[a-z0-9_-]+/i);
   if (match){
     uidVal = match[0];
   }
