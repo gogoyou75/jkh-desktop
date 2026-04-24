@@ -98,6 +98,43 @@ class ImportHelpersTest(unittest.TestCase):
         )
         self.assertNotEqual(fp1, fp2)
 
+    def test_fingerprint_does_not_depend_on_period_or_source(self):
+        fp1 = app_module.build_payment_fingerprint(
+            "owner1", "uid_1", "0001", "2025-02-10", "1500", 1, "2025-02"
+        )
+        fp2 = app_module.build_payment_fingerprint(
+            "owner1", "uid_1", "0001", "2025-02-10", "1500", 99, "2025-03"
+        )
+        self.assertEqual(fp1, fp2)
+
+    def test_classification_duplicate_same_uid_date_amount(self):
+        ledger = [{"paid_date": "10.02.2025", "paid": 1500.0}]
+        result = app_module._classify_payment("uid_1", "2025-02-10", "1500.00", ledger)
+        self.assertEqual(result, "DUPLICATE")
+
+    def test_classification_conflict_same_uid_date_other_amount(self):
+        ledger = [{"paid_date": "2025-02-10", "paid": 1700}]
+        result = app_module._classify_payment("uid_1", "2025-02-10", "1500.00", ledger)
+        self.assertEqual(result, "CONFLICT")
+
+    def test_classification_new_payment_same_month_other_date(self):
+        ledger = [{"paid_date": "10.02.2025", "paid": 1500.0, "payment_period": "2025-02"}]
+        result = app_module._classify_payment("uid_1", "2025-02-15", "1500.00", ledger)
+        self.assertEqual(result, "NEW_PAYMENT")
+
+    def test_reapply_batch_is_forbidden_by_state_machine(self):
+        with app_module.app.app_context():
+            res = app_module._ensure_batch_transition(DummyBatch("applied"), "apply")
+            self.assertIsNotNone(res)
+            payload, code = res
+            self.assertEqual(code, 409)
+            self.assertEqual(payload.json.get("error"), "state_transition_forbidden")
+
+    def test_same_uploaded_file_fingerprints_match_and_will_be_treated_as_duplicate(self):
+        fp1 = app_module.payment_fingerprint("uid_1", "2025-02-10", "1500.00")
+        fp2 = app_module.payment_fingerprint("uid_1", "10.02.2025", "1500")
+        self.assertEqual(fp1, fp2)
+
     def test_build_payment_fingerprint_requires_uid(self):
         with self.assertRaises(ValueError):
             app_module.build_payment_fingerprint(
