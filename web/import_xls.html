@@ -75,6 +75,10 @@
           <input type="checkbox" id="optAllowCreate" />
           Разрешить создание абонента из предпросмотра (если не найден)
         </label>
+        <label class="pill">
+          <input type="checkbox" id="optAllowSquareUpdate" />
+          Разрешить обновление площади из Excel
+        </label>
       </div>
 
       <div class="hint mono" id="stepStateLine">Шаг 1 не применён. Шаг 2 заблокирован до успешной первички.</div>
@@ -1178,7 +1182,7 @@ function evaluatePrimaryRow(db, row){
     const dbSq = normNum(found.abonent.square);
     if (Number.isFinite(dbSq) && Number.isFinite(row.square) && dbSq !== row.square){
       status = (status==='ERROR') ? 'ERROR' : 'UPDATED';
-      warnings.push('ПРЕДУПРЕЖДЕНИЕ: в базе площадь=' + dbSq + '; в Excel площадь=' + row.square + ' — при применении будет обновлена.');
+      warnings.push('ПРЕДУПРЕЖДЕНИЕ: в базе площадь=' + dbSq + '; в Excel площадь=' + row.square + '.');
     }
   }
 
@@ -1424,6 +1428,23 @@ function renderPreview(){
 
 function hasPrimaryCritical(){ return preview.some(r => r.critical && r.status==='ERROR'); }
 function hasPaymentsCritical(){ return preview.some(r => r.critical && r.status==='ERROR'); }
+function hasRowsWithUid(){
+  for (let i=0;i<dataRows.length;i++){
+    if (normStr(dataRows[i] && dataRows[i].uid)) return true;
+  }
+  return false;
+}
+function canEnterPaymentsMode(){
+  const parsed = dataRows.length > 0;
+  return parsed && (primaryApplied || hasRowsWithUid());
+}
+function hasPaymentsReadyRows(){
+  if (serverPaymentBatchId){
+    const rows = Array.isArray(serverPaymentRows) ? serverPaymentRows : [];
+    return rows.some(function(x){ return normStr(x && x.status) === 'ready'; });
+  }
+  return preview.some(function(r){ return r.status === 'OK'; });
+}
 function hasUnresolvedConflicts(){
   if (mode !== 'payments') return false;
   for (let i=0;i<dataRows.length;i++){
@@ -1461,8 +1482,8 @@ function hasUnresolvedConflicts(){
 function updateStateLine(){
   if (!dataRows.length){ $('stepStateLine').textContent = 'Шаг 1 не применён. Шаг 2 заблокирован до успешной первички.'; return; }
   if (primaryApplied) $('stepStateLine').textContent = 'Шаг 1 применён успешно. Шаг 2 доступен.';
-  else if (primaryBlocked) $('stepStateLine').textContent = 'Шаг 1: заблокирован (есть ошибки). Шаг 2 заблокирован до успешной первички.';
-  else $('stepStateLine').textContent = 'Шаг 1 не применён. Шаг 2 заблокирован до успешной первички.';
+  else if (primaryBlocked) $('stepStateLine').textContent = canEnterPaymentsMode() ? 'Шаг 1: есть ошибки. Шаг 2 доступен для строк с UID.' : 'Шаг 1: заблокирован (есть ошибки). Шаг 2 заблокирован до успешной первички.';
+  else $('stepStateLine').textContent = canEnterPaymentsMode() ? 'Шаг 1 не применён. Шаг 2 доступен для строк с UID.' : 'Шаг 1 не применён. Шаг 2 заблокирован до успешной первички.';
 }
 
 function setButtons(){
@@ -1476,9 +1497,9 @@ function setButtons(){
   const canWrite = canWriteOrExplain();
   const parsed = dataRows.length > 0;
 
-  $('btnModePayments').disabled = !(parsed && primaryApplied && !primaryBlocked);
+  $('btnModePayments').disabled = !canEnterPaymentsMode();
   $('btnApplyPrimary').disabled = !(mode==='primary' && parsed && canWrite && !primaryBlocked);
-  $('btnApplyPayments').disabled = !(mode==='payments' && parsed && canWrite && primaryApplied && !hasPaymentsCritical() && !hasUnresolvedConflicts());
+  $('btnApplyPayments').disabled = !(mode==='payments' && parsed && canWrite && hasPaymentsReadyRows() && !hasUnresolvedConflicts());
 }
 
 function updateRestoredFileInfo(){
@@ -1595,6 +1616,7 @@ async function applyPrimary(){
 
   try {
   let updated=0, uidAssigned=0;
+  const allowSquareUpdate = !!$('optAllowSquareUpdate').checked;
 
   for (let i=0;i<dataRows.length;i++){
     const row = dataRows[i];
@@ -1621,7 +1643,7 @@ async function applyPrimary(){
     a.name = normStr(row.name) || a.name;
     a.otch = normStr(row.otch) || a.otch;
     a.fio = toFio(a.fam,a.name,a.otch);
-    a.square = row.square;
+    if (allowSquareUpdate) a.square = row.square;
     row.ls = a.id;
     updated++;
   }
@@ -1632,7 +1654,7 @@ async function applyPrimary(){
   mode='payments';
   buildPreview();
   saveImportDraftState();
-  alert('Шаг 1 применён успешно.\nОбновлено строк первички: ' + updated + '\nПрисвоено UID: ' + uidAssigned);
+  alert('Шаг 1 применён успешно.\nОбновлено строк первички: ' + updated + '\nПрисвоено UID: ' + uidAssigned + '\nОбновление площади: ' + (allowSquareUpdate ? 'включено' : 'выключено'));
   } catch (e) {
     console.error(e);
     alert('Ошибка сохранения первички на сервер. Локальные изменения будут откатаны.');
@@ -1729,9 +1751,10 @@ $('previewBody').addEventListener('click', function(ev){
 
   $('fileInput').addEventListener('change', function(){ setButtons(); });
   $('optAllowCreate').addEventListener('change', function(){ renderPreview(); });
+  $('optAllowSquareUpdate').addEventListener('change', function(){ renderPreview(); });
 
   $('btnModePrimary').addEventListener('click', function(){ mode='primary'; buildPreview(); });
-  $('btnModePayments').addEventListener('click', function(){ if (!primaryApplied) return; mode='payments'; buildPreview(); });
+  $('btnModePayments').addEventListener('click', function(){ if (!canEnterPaymentsMode()) return; mode='payments'; buildPreview(); });
 
   $('btnParse').addEventListener('click', onParse);
   $('btnReset').addEventListener('click', resetPreview);
