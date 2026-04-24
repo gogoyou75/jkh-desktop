@@ -522,22 +522,133 @@ function tryResumeFromHash(){
   return true;
 }
 
-function findHeaderRow(aoa){
-  const maxScan = Math.min(80, aoa.length);
+function normalizeHeaderCell(v){
+  return lowKey(v).replace(/\s+/g,' ').trim();
+}
+function headerSemanticFromText(v){
+  const t = normalizeHeaderCell(v);
+  if (!t) return '';
+  if (t === 'uid' || t === 'уид' || t.includes('уникальн') || t.includes('идентификатор')) return 'uid';
+  if (t === 'лс' || t.includes('лицевой счет') || t.includes('лицевой сч') || t.includes('лиц счет') || t.includes('лиц сч')) return 'ls';
+  if (t === 'фамилия' || t === 'фам' || t.includes('фамил')) return 'surname';
+  if (t === 'имя' || t.includes(' имя')) return 'name';
+  if (t === 'отчество' || t.includes('отчеств')) return 'patronymic';
+  if (t.includes('общая площадь') || t.includes('площадь общ') || t.includes('площад')) return 'area_total';
+  if (t === 'телефон' || t.includes('телефон') || t.includes('мобил') || t.includes('контакт')) return 'phone';
+  return '';
+}
+function isLikelySubHeaderRow(row){
+  if (!Array.isArray(row) || !row.length) return false;
+  let nonEmpty=0, numberLike=0, semanticCount=0;
+  for (let c=0;c<row.length;c++){
+    const raw = row[c];
+    const txt = normStr(raw);
+    if (!txt) continue;
+    nonEmpty++;
+    if (/^\d{1,3}(?:[.,]\d+)?$/.test(txt)) numberLike++;
+    if (headerSemanticFromText(raw)) semanticCount++;
+  }
+  if (!nonEmpty) return false;
+  if (semanticCount >= 2) return false;
+  return numberLike >= 2 || numberLike / nonEmpty >= 0.5;
+}
+function detectPrimaryHeaderStructure(aoa){
+  const result = {
+    headerRow:-1,
+    subHeaderRow:-1,
+    dataStartRow:-1,
+    detectedColumns:{},
+    confidence:0,
+    debug:[]
+  };
+  if (!Array.isArray(aoa) || !aoa.length){
+    result.debug.push('Лист пустой или не содержит строк.');
+    return result;
+  }
+
+  const expected = ['uid','ls','surname','name','patronymic','area_total','phone'];
+  const required = ['uid','ls','surname','area_total'];
+  const maxScan = Math.min(120, aoa.length);
+  let best = null;
+
   for (let r=0; r<maxScan; r++){
     const row = aoa[r] || [];
-    let hasUID=false, hasLS=false, hasFam=false, hasSq=false;
+    if (!Array.isArray(row) || !row.length) continue;
+
+    let nonEmpty=0, numericLike=0;
+    const found = {};
+    const cols = {};
+
     for (let c=0;c<row.length;c++){
-      const k = lowKey(row[c]);
-      if (!k) continue;
-      if (k === 'uid' || k === 'уид' || k.includes('уникальный идентификатор')) hasUID = true;
-      if (k === 'лс' || k.includes('лицевой счет') || k.includes('лицевой счёт')) hasLS = true;
-      if (k === 'фамилия' || k === 'фам') hasFam = true;
-      if (k.includes('площад')) hasSq = true;
+      const raw = row[c];
+      const txt = normStr(raw);
+      if (!txt) continue;
+      nonEmpty++;
+      if (Number.isFinite(normNum(raw))) numericLike++;
+      const sem = headerSemanticFromText(raw);
+      if (!sem) continue;
+      found[sem] = true;
+      if (!Object.prototype.hasOwnProperty.call(cols, sem)) cols[sem] = c;
     }
-    if ((hasUID || (hasLS && hasFam)) && hasSq) return r;
+
+    const matched = Object.keys(found);
+    if (!matched.length) continue;
+
+    let requiredHits = 0;
+    for (let i=0;i<required.length;i++) if (found[required[i]]) requiredHits++;
+    const textRatio = nonEmpty ? (1 - (numericLike / nonEmpty)) : 0;
+    const numericPenalty = textRatio < 0.5 ? 2 : 0;
+    const score = (requiredHits * 5) + (matched.length * 3) + Math.round(textRatio * 10) - numericPenalty;
+
+    if (matched.length >= 4 && requiredHits >= 3){
+      const candidate = { row:r, score:score, cols:cols, matched:matched, requiredHits:requiredHits, textRatio:textRatio };
+      if (!best || candidate.score > best.score) best = candidate;
+      result.debug.push('Кандидат header row ' + (r+1) + ': matched=' + matched.join(', ') + '; requiredHits=' + requiredHits + '; score=' + score + '; textRatio=' + textRatio.toFixed(2));
+    }
   }
-  return -1;
+
+  if (!best){
+    result.debug.push('Подходящий header не найден: ни одна строка не набрала порог 4+ ключей и 3+ критичных полей.');
+    return result;
+  }
+
+  result.headerRow = best.row;
+  result.detectedColumns = best.cols;
+
+  const nextRow = aoa[best.row + 1] || [];
+  if (isLikelySubHeaderRow(nextRow)){
+    result.subHeaderRow = best.row + 1;
+    result.dataStartRow = best.row + 2;
+    result.debug.push('Следующая строка ' + (best.row + 2) + ' распознана как subHeader (цифровые/служебные значения).');
+  } else {
+    result.dataStartRow = best.row + 1;
+    result.debug.push('SubHeader не обнаружен.');
+  }
+
+  const matchedCount = best.matched.length;
+  const requiredHits = best.requiredHits;
+  let conf = 0.35 + (matchedCount / expected.length) * 0.4 + (requiredHits / required.length) * 0.25;
+  if (conf > 1) conf = 1;
+  result.confidence = Number(conf.toFixed(2));
+
+  result.debug.push('Выбран header row ' + (result.headerRow + 1) + ' как лучший кандидат (score=' + best.score + ').');
+  result.debug.push('Detected columns: ' + Object.keys(result.detectedColumns).join(', '));
+  result.debug.push('Confidence=' + result.confidence.toFixed(2));
+
+  return result;
+}
+function buildPrimaryColumnMap(headerRow, subHeaderRow){
+  const map = {};
+  const maxLen = Math.max(Array.isArray(headerRow)?headerRow.length:0, Array.isArray(subHeaderRow)?subHeaderRow.length:0);
+  for (let c=0;c<maxLen;c++){
+    const top = Array.isArray(headerRow) ? normStr(headerRow[c]) : '';
+    const sub = Array.isArray(subHeaderRow) ? normStr(subHeaderRow[c]) : '';
+    const combined = (top + ' ' + sub).trim();
+    const sem = headerSemanticFromText(combined || top || sub);
+    if (!sem) continue;
+    if (!Object.prototype.hasOwnProperty.call(map, sem)) map[sem] = c;
+  }
+  return map;
 }
 function findPaymentPairs(hdrRow){
   function isAmountHeader(v){
@@ -674,7 +785,7 @@ function buildColumnIndexMap(indexRow){
   for (let c=0;c<row.length;c++){
     const n = toFieldNo(row[c]);
     if (!Number.isFinite(n)) continue;
-    if (n < 1 || n > 120) continue;
+    if (n < 0 || n > 120) continue;
     if (!Object.prototype.hasOwnProperty.call(map, n)) map[n] = c;
   }
   return map;
@@ -704,14 +815,29 @@ function parseSheetToRowsByFieldMap(aoa, fieldMap, indexRowIndex, workbookYear){
     const line = aoa[r] || [];
     if (line.every(c => normStr(c)==='')) continue;
 
-    const uidVal = firstNonEmptyField(line, fieldMap, [1,6,7,8,9]);
-    const lsVal = firstNonEmptyField(line, fieldMap, [2,3,4,5]);
-    const famVal = firstNonEmptyField(line, fieldMap, [13,14,15,16]);
-    const nameVal = firstNonEmptyField(line, fieldMap, [17,18,19]);
-    const otchVal = firstNonEmptyField(line, fieldMap, [20,21,22]);
-    const sqVal = firstNonEmptyField(line, fieldMap, [23,24,25,26,27]);
+    let uidVal = '';
 
-    const rowYear = extractYearFromAny(firstNonEmptyField(line, fieldMap, [28,29,30,31,32,33,34,35])) || workbookYear || '';
+const rawUidCell = firstNonEmptyField(line, fieldMap, [0]);
+
+if (rawUidCell){
+  const txt = String(rawUidCell);
+
+  // ищем uid внутри строки
+  const match = txt.match(/uid_[a-z0-9_-]+/i);
+  if (match){
+    uidVal = match[0];
+  }
+}
+const lsVal = firstNonEmptyField(line, fieldMap, [1]);
+const famVal = firstNonEmptyField(line, fieldMap, [2]);
+const nameVal = firstNonEmptyField(line, fieldMap, [3]);
+const otchVal = firstNonEmptyField(line, fieldMap, [4]);
+const sqVal = firstNonEmptyField(line, fieldMap, [5]);
+
+const rowYear =
+  extractYearFromAny(firstNonEmptyField(line, fieldMap, [6,7,8,9,10,11,12,13,14,15,16,17])) ||
+  workbookYear ||
+  '';
     const payments = [];
 
     for (let g=0; g<paymentGroups.length; g++){
@@ -824,7 +950,7 @@ function migrateKeyToUID(db, oldKey, newUid){
 }
 
 let WB=null, aoa=null, headerRowIndex=-1, payPairs=[], dataRows=[];
-let parseMeta={ mode:'none', indexRowIndex:-1, fieldMapStatus:null, paymentGroups:[], workbookYear:'' };
+let parseMeta={ mode:'none', indexRowIndex:-1, fieldMapStatus:null, paymentGroups:[], workbookYear:'', headerDetect:null };
 let mode='primary';
 let primaryApplied=false;
 let primaryBlocked=false;
@@ -832,6 +958,17 @@ let conflictDecision={};
 let preview=[];
 let currentFileName='';
 let restoredFromDraft=false;
+let serverPaymentBatchId = 0;
+let serverPaymentRows = [];
+
+async function apiJson(url, options){
+  const res = await fetch(url, Object.assign({ credentials:'include' }, options || {}));
+  const data = await res.json().catch(function(){ return {}; });
+  if (!res.ok || !data || data.ok===false){
+    throw new Error((data && (data.error || data.message)) || ('HTTP ' + res.status));
+  }
+  return data;
+}
 
 function paymentPairsCount(row){
   if (!Array.isArray(row && row.payments)) return 0;
@@ -843,14 +980,131 @@ function paymentPairsCount(row){
 
 function parseSheetToRows(sheet, fileName, sheetName){
   aoa = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '' });
-  parseMeta = { mode:'none', indexRowIndex:-1, fieldMapStatus:null, paymentGroups:[], workbookYear:'' };
+  parseMeta = { mode:'none', indexRowIndex:-1, fieldMapStatus:null, paymentGroups:[], workbookYear:'', headerDetect:null };
 
   const workbookYear = detectWorkbookYear(aoa, fileName, sheetName);
+
+  // =========================================================
+  // 1) СНАЧАЛА ПЫТАЕМСЯ РАЗОБРАТЬ ФАЙЛ НОВЫМ AUTO-DETECT
+  // =========================================================
+  const headerInfo = detectPrimaryHeaderStructure(aoa);
+  const autoDetectDebugText = (headerInfo && Array.isArray(headerInfo.debug)) ? headerInfo.debug.join(' | ') : '';
+
+  let autoDetectCanUse = false;
+  let autoDetectFailReason = '';
+
+  if (!headerInfo || headerInfo.headerRow < 0){
+    autoDetectFailReason = 'Header auto-detect не нашёл строку заголовков.';
+  } else if (headerInfo.confidence < 0.55){
+    autoDetectFailReason = 'Header auto-detect дал низкую уверенность (confidence=' + headerInfo.confidence + ').';
+  } else {
+    const hdrRow = aoa[headerInfo.headerRow] || [];
+    const subHdrRow = headerInfo.subHeaderRow >= 0 ? (aoa[headerInfo.subHeaderRow] || []) : [];
+    const colMap = buildPrimaryColumnMap(hdrRow, subHdrRow);
+
+    const requiredKeys = ['uid','ls','surname','area_total'];
+    const missingRequired = requiredKeys.filter(function(k){
+      return !Number.isInteger(colMap[k]);
+    });
+
+    headerInfo.detectedColumns = colMap;
+    headerInfo.missingRequired = missingRequired;
+
+    if (missingRequired.length){
+      autoDetectFailReason = 'Header auto-detect не нашёл обязательные колонки: ' + missingRequired.join(', ');
+    } else {
+      autoDetectCanUse = true;
+
+      headerRowIndex = headerInfo.headerRow;
+
+      payPairs = findPaymentPairs(hdrRow.map(function(v, i){
+        const top = normStr(v);
+        const sub = normStr(subHdrRow[i]);
+        return (top + ' ' + sub).trim();
+      }));
+
+      const dataStart = Number.isInteger(headerInfo.dataStartRow) && headerInfo.dataStartRow >= 0
+        ? headerInfo.dataStartRow
+        : (headerInfo.headerRow + 1);
+
+      const rows = [];
+      for (let r=dataStart; r<aoa.length; r++){
+        const line = aoa[r] || [];
+        if (line.every(function(c){ return normStr(c)===''; })) continue;
+
+        const rowSemanticHits = ['uid','ls','surname','name','patronymic','area_total','phone'].reduce(function(acc, key){
+          const colIndex = colMap[key];
+          const val = Number.isInteger(colIndex) ? line[colIndex] : '';
+          return acc + (headerSemanticFromText(val) ? 1 : 0);
+        }, 0);
+
+        // защита от ложного чтения header-подобной строки как данных
+        if (rowSemanticHits >= 4) continue;
+
+        const payments = [];
+        for (let i=0;i<payPairs.length;i++){
+          payments.push({
+            amount: line[payPairs[i].sumCol],
+            periodRaw: line[payPairs[i].periodCol],
+            paidDateRaw: line[payPairs[i].dateCol],
+            sourceIndex: 1,
+            sourceName: sourceNameByIndex(1)
+          });
+        }
+
+        const uidVal  = Number.isInteger(colMap.uid)         ? line[colMap.uid] : '';
+        const lsVal   = Number.isInteger(colMap.ls)          ? line[colMap.ls] : '';
+        const famVal  = Number.isInteger(colMap.surname)     ? line[colMap.surname] : '';
+        const nameVal = Number.isInteger(colMap.name)        ? line[colMap.name] : '';
+        const otchVal = Number.isInteger(colMap.patronymic)  ? line[colMap.patronymic] : '';
+        const sqRaw   = Number.isInteger(colMap.area_total)  ? line[colMap.area_total] : '';
+
+        if (
+          !normStr(uidVal) &&
+          !normStr(lsVal) &&
+          !normStr(famVal) &&
+          !normStr(nameVal) &&
+          !normStr(otchVal) &&
+          !Number.isFinite(normNum(sqRaw))
+        ){
+          continue;
+        }
+
+        rows.push({
+          excelRow: r + 1,
+          uid: normStr(uidVal),
+          ls: normStr(lsVal),
+          fam: normStr(famVal),
+          name: normStr(nameVal),
+          otch: normStr(otchVal),
+          square: normNum(sqRaw),
+          squareRaw: sqRaw,
+          payments
+        });
+      }
+
+      parseMeta = {
+        mode:'headers-auto',
+        indexRowIndex:-1,
+        fieldMapStatus:null,
+        paymentGroups:[],
+        workbookYear:workbookYear,
+        headerDetect:headerInfo
+      };
+
+      return { ok:true, rows };
+    }
+  }
+
+  // =========================================================
+  // 2) ЕСЛИ AUTO-DETECT НЕ СПРАВИЛСЯ — ПАДАЕМ В СТАРЫЙ FIELD-MAP
+  // =========================================================
   const indexRowIndex = findIndexMapRow(aoa);
   if (indexRowIndex >= 0){
     const indexRow = aoa[indexRowIndex] || [];
     const fieldMap = buildColumnIndexMap(indexRow);
     const mapped = parseSheetToRowsByFieldMap(aoa, fieldMap, indexRowIndex, workbookYear);
+
     if (mapped && mapped.ok){
       headerRowIndex = indexRowIndex;
       payPairs = [];
@@ -859,6 +1113,18 @@ function parseSheetToRows(sheet, fileName, sheetName){
         indexRowIndex:indexRowIndex,
         workbookYear: workbookYear,
         paymentGroups: mapped.paymentGroups || [],
+        headerDetect:{
+          headerRow:-1,
+          subHeaderRow:-1,
+          dataStartRow:-1,
+          detectedColumns:{},
+          confidence:0,
+          debug:[
+            'Auto-detect не использован: ' + (autoDetectFailReason || 'неизвестная причина'),
+            autoDetectDebugText ? ('Auto-detect debug: ' + autoDetectDebugText) : '',
+            'Включён fallback на field-map.'
+          ].filter(Boolean)
+        },
         fieldMapStatus:{
           10:Number.isInteger(fieldMap[10]),
           11:Number.isInteger(fieldMap[11]),
@@ -869,45 +1135,23 @@ function parseSheetToRows(sheet, fileName, sheetName){
     }
   }
 
-  headerRowIndex = findHeaderRow(aoa);
-  if (headerRowIndex < 0) return { ok:false, msg:'Не нашёл строку заголовков (UID/ЛС/Фамилия/Площадь).' };
-
-  const hdrRow = aoa[headerRowIndex] || [];
-  payPairs = findPaymentPairs(hdrRow);
-
-  const idxUID = hdrRow.findIndex(x => lowKey(x)==='uid' || lowKey(x)==='уид');
-  const idxLS  = hdrRow.findIndex(x => lowKey(x)==='лс' || lowKey(x).includes('лицевой'));
-  const idxFAM = hdrRow.findIndex(x => lowKey(x)==='фамилия' || lowKey(x)==='фам');
-  const idxNAM = hdrRow.findIndex(x => lowKey(x)==='имя');
-  const idxOTC = hdrRow.findIndex(x => lowKey(x)==='отчество');
-  const idxSQ  = hdrRow.findIndex(x => lowKey(x).includes('площад'));
-
-  if (idxFAM < 0) return { ok:false, msg:'Не найдена колонка "Фамилия".' };
-  if (idxSQ < 0) return { ok:false, msg:'Не найдена колонка "Общая площадь".' };
-  if (idxLS < 0 && idxUID < 0) return { ok:false, msg:'Не найдены колонки UID или ЛС.' };
-
-  const rows = [];
-  for (let r=headerRowIndex+1; r<aoa.length; r++){
-    const line = aoa[r] || [];
-    if (line.every(c => normStr(c)==='')) continue;
-
-    const payments = [];
-    for (let i=0;i<payPairs.length;i++) payments.push({ amount: line[payPairs[i].sumCol], periodRaw: line[payPairs[i].periodCol], paidDateRaw: line[payPairs[i].periodCol], sourceIndex:1, sourceName:sourceNameByIndex(1) });
-
-    rows.push({
-      excelRow:r+1,
-      uid:(idxUID>=0)?normStr(line[idxUID]):'',
-      ls:(idxLS>=0)?normStr(line[idxLS]):'',
-      fam:normStr(line[idxFAM]),
-      name:(idxNAM>=0)?normStr(line[idxNAM]):'',
-      otch:(idxOTC>=0)?normStr(line[idxOTC]):'',
-      square:normNum(line[idxSQ]),
-      squareRaw:line[idxSQ],
-      payments
-    });
+  // =========================================================
+  // 3) ЕСЛИ НЕ СРАБОТАЛО НИЧЕГО — ЯВНАЯ ОШИБКА
+  // =========================================================
+  let msg = 'Не удалось определить структуру файла.';
+  if (autoDetectFailReason){
+    msg += ' Auto-detect: ' + autoDetectFailReason;
   }
-  parseMeta = { mode:'headers', indexRowIndex:-1, fieldMapStatus:null, paymentGroups:[], workbookYear:workbookYear };
-  return { ok:true, rows };
+  if (autoDetectDebugText){
+    msg += ' ' + autoDetectDebugText;
+  }
+  if (indexRowIndex < 0){
+    msg += ' Field-map строка тоже не найдена.';
+  } else {
+    msg += ' Field-map найден, но разобрать файл по нему не удалось.';
+  }
+
+  return { ok:false, msg: msg };
 }
 
 function evaluatePrimaryRow(db, row){
@@ -1031,13 +1275,30 @@ function buildPreview(){
         status:p1.status, critical:p1.critical, action:p1.action, details:p1.details
       });
     } else {
-      const p2 = evaluatePaymentsRow(db, r);
-      p2.details.push('По строке LS ' + (normStr(r.ls) || '—') + ' найдено ' + paymentPairsCount(r) + ' платежей.');
-      preview.push({
-        excelRow:r.excelRow, uid:normStr(r.uid), ls:normStr(r.ls), fio:toFio(r.fam,r.name,r.otch),
-        square:asSquare(r.square), paymentsBrief: paymentPairsCount(r) ? (paymentPairsCount(r) + ' пар') : '—',
-        status:p2.status, critical:p2.critical, details:p2.details
-      });
+      if (serverPaymentRows.length){
+        const rr = serverPaymentRows[i] || {};
+        const rowStatusMap = { ready:'OK', applied:'OK', duplicate:'SKIP_DUPLICATE', invalid:'ERROR', failed:'ERROR', skipped:'SKIP_DUPLICATE' };
+        const st = rowStatusMap[normStr(rr.status)] || 'UPDATED';
+        preview.push({
+          excelRow: rr.excel_row_ref || r.excelRow,
+          uid:normStr(rr.account_uid || r.uid),
+          ls:normStr(rr.account_number || r.ls),
+          fio:toFio(r.fam,r.name,r.otch),
+          square:asSquare(r.square),
+          paymentsBrief: rr.payment_period ? rr.payment_period : '—',
+          status:st,
+          critical: st === 'ERROR',
+          details:[normStr(rr.reason_text) || ('Статус: ' + normStr(rr.status))]
+        });
+      } else {
+        const p2 = evaluatePaymentsRow(db, r);
+        p2.details.push('По строке LS ' + (normStr(r.ls) || '—') + ' найдено ' + paymentPairsCount(r) + ' платежей.');
+        preview.push({
+          excelRow:r.excelRow, uid:normStr(r.uid), ls:normStr(r.ls), fio:toFio(r.fam,r.name,r.otch),
+          square:asSquare(r.square), paymentsBrief: paymentPairsCount(r) ? (paymentPairsCount(r) + ' пар') : '—',
+          status:p2.status, critical:p2.critical, details:p2.details
+        });
+      }
     }
   }
 
@@ -1138,9 +1399,21 @@ function renderPreview(){
     const fm = parseMeta.fieldMapStatus || {};
     const fmLine = 'Field-map: 10=' + (fm[10] ? 'OK' : 'missing') + ', 11=' + (fm[11] ? 'OK' : 'missing') + ', 12=' + (fm[12] ? 'OK' : 'missing');
     diag += '<br><span class="mono">' + fmLine + '</span>';
-  } else if (parseMeta.mode === 'headers'){
+  } else if (parseMeta.mode === 'headers-auto'){
+    const hd = parseMeta.headerDetect || {};
+    const missing = Array.isArray(hd.missingRequired) ? hd.missingRequired : [];
+    const ruMap = { uid:'UID', ls:'ЛС', surname:'Фамилия', area_total:'Общая площадь' };
+    const detectedCols = hd.detectedColumns ? Object.keys(hd.detectedColumns).join(', ') : '—';
+    diag += '<br><span class="mono">Header row auto-detected: ' + (Number.isInteger(hd.headerRow) && hd.headerRow>=0 ? (hd.headerRow+1) : '—') + '</span>';
+    diag += '<br><span class="mono">Subheader row: ' + (Number.isInteger(hd.subHeaderRow) && hd.subHeaderRow>=0 ? (hd.subHeaderRow+1) : 'none') + '</span>';
+    diag += '<br><span class="mono">Data starts at: ' + (Number.isInteger(hd.dataStartRow) && hd.dataStartRow>=0 ? (hd.dataStartRow+1) : '—') + '</span>';
+    diag += '<br><span class="mono">Confidence: ' + (Number.isFinite(Number(hd.confidence)) ? Number(hd.confidence).toFixed(2) : '—') + '</span>';
+    diag += '<br><span class="mono">Detected columns: ' + detectedCols + '</span>';
+    diag += '<br><span class="mono">Missing columns: ' + (missing.length ? missing.map(function(k){ return ruMap[k] || k; }).join(', ') : 'none') + '</span>';
     diag += '<br><span class="' + ((Array.isArray(payPairs) && payPairs.length>0) ? 'ok' : 'danger') + '">' +
       ((Array.isArray(payPairs) && payPairs.length>0) ? 'Платёжные колонки определены по заголовкам.' : 'Платёжные колонки не распознаны.') + '</span>';
+    const dbg = Array.isArray(hd.debug) ? hd.debug : [];
+    for (let i=0;i<dbg.length;i++) diag += '<br><span class="mono">' + dbg[i] + '</span>';
   }
   $('errorsBox').innerHTML = diag;
 
@@ -1221,7 +1494,7 @@ function clearRuntimeState(){
   mode='primary';
   currentFileName='';
   restoredFromDraft=false;
-  parseMeta={ mode:'none', indexRowIndex:-1, fieldMapStatus:null, paymentGroups:[], workbookYear:'' };
+  parseMeta={ mode:'none', indexRowIndex:-1, fieldMapStatus:null, paymentGroups:[], workbookYear:'', headerDetect:null };
 }
 function resetPreview(){
   clearRuntimeState();
@@ -1242,6 +1515,41 @@ async function onParse(){
 
   const file = $('fileInput').files[0];
   if (!file) return;
+  if (mode === 'payments'){
+    try{
+      const fd = new FormData();
+      fd.append('file', file);
+      const uploaded = await apiJson('/api/import/payments/upload', { method:'POST', body: fd });
+      serverPaymentBatchId = Number(uploaded.batch && uploaded.batch.id) || 0;
+      await apiJson('/api/import/' + serverPaymentBatchId + '/parse', { method:'POST' });
+      await apiJson('/api/import/' + serverPaymentBatchId + '/validate', { method:'POST' });
+      const rowsResp = await apiJson('/api/import/' + serverPaymentBatchId + '/rows');
+      serverPaymentRows = Array.isArray(rowsResp.rows) ? rowsResp.rows : [];
+      preview = [];
+      for (let i=0;i<serverPaymentRows.length;i++){
+        const sr = serverPaymentRows[i];
+        const rowStatusMap = { ready:'OK', applied:'OK', duplicate:'SKIP_DUPLICATE', invalid:'ERROR', failed:'ERROR', skipped:'SKIP_DUPLICATE' };
+        preview.push({
+          excelRow: sr.excel_row_ref || (i+1),
+          uid:normStr(sr.account_uid),
+          ls:normStr(sr.account_number),
+          fio:'',
+          square:'',
+          paymentsBrief: sr.payment_period || '—',
+          status: rowStatusMap[normStr(sr.status)] || 'UPDATED',
+          critical: normStr(sr.status)==='invalid' || normStr(sr.status)==='failed',
+          details:[normStr(sr.reason_text) || ('Статус: ' + normStr(sr.status))]
+        });
+      }
+      currentFileName = normStr(file.name);
+      restoredFromDraft = false;
+      renderPreview();
+      return;
+    }catch(e){
+      alert('Ошибка серверного импорта платежей: ' + (e.message || e));
+      return;
+    }
+  }
   const parsedFileName = normStr(file.name);
 
   const buf = await new Promise(function(resolve, reject){
@@ -1333,95 +1641,18 @@ async function applyPrimary(){
 }
 
 async function applyPayments(){
-  if (!canWriteOrExplain()) return setButtons();
-  if (!primaryApplied) return alert('Шаг 2 заблокирован до успешной первички.');
-
-  const db = getDB();
-  if (!db || !db.abonents) return alert('База абонентов не загружена.');
-
-  mode='payments';
-  buildPreview();
-  if (hasPaymentsCritical()) return alert('Шаг 2 заблокирован: есть ошибки платежей.');
-  if (hasUnresolvedConflicts()) return alert('Шаг 2 заблокирован: есть нерешённые конфликты платежей.');
-
-  const localSnapshot = {
-    db: deepCloneJSONSafe(getDB()),
-    payments: capturePaymentsSnapshot(db, dataRows)
-  };
-
-  try {
-  let added=0, replaced=0, skipped=0, conflicts=0;
-
-  for (let i=0;i<dataRows.length;i++){
-    const row = dataRows[i];
-    const uid = normStr(row.uid);
-    const foundU = uid ? findAbonentByUid(db, uid) : null;
-  const ab = foundU ? foundU.abonent : null;
-    if (!ab) { skipped++; continue; }
-
-    const ls = normStr(ab.id);
-    let list = getPaymentsByLS(ls);
-
-    for (let p=0;p<row.payments.length;p++){
-      const pay = row.payments[p];
-      const amount = normNum(pay.amount);
-      if (!Number.isFinite(amount) || amount<=0){ skipped++; continue; }
-      const per = normalizePeriod(pay.periodRaw);
-      const year = normStr(pay.year) || extractYearFromAny(pay.periodRaw) || extractYearFromAny(pay.paidDateRaw) || normStr(row.rowYear) || parseMeta.workbookYear || (per ? per.period.slice(0,4) : '') || String(new Date().getFullYear());
-      const month = pad2(pay.month || (per ? per.period.slice(5,7) : ''));
-      if (!/^\d{4}$/.test(year) || !/^\d{2}$/.test(month)){ skipped++; continue; }
-      const importedRow = buildImportedPaymentLedgerRow(list, {
-        amount: amount,
-        paidDateRaw: pay.paidDateRaw || pay.periodRaw,
-        sourceIndex: pay.sourceIndex || 1,
-        year: year,
-        month: month
-      });
-      importedRow.payment_period = year + '-' + month;
-
-      const dup = list.some(function(x){
-        const ym = getLedgerYearMonth(x);
-        const paid = getLedgerPaidAmount(x);
-        const paidDate = getLedgerPaidDate(x);
-        if (!ym || !Number.isFinite(paid)) return false;
-        return ym.year === importedRow.year &&
-          ym.month === importedRow.month &&
-          paidDate === importedRow.paid_date &&
-          paid === importedRow.paid &&
-          getLedgerSource(x) === importedRow.source;
-      });
-      if (dup){ skipped++; continue; }
-
-      const idx = list.findIndex(function(x){
-        const ym = getLedgerYearMonth(x);
-        const paid = getLedgerPaidAmount(x);
-        if (!ym || !Number.isFinite(paid) || paid <= 0) return false;
-        return ym.year === importedRow.year && ym.month === importedRow.month && getLedgerSource(x) === importedRow.source;
-      });
-      if (idx >= 0){
-        conflicts++;
-        const decision = conflictDecision[ls + '::' + importedRow.year + '-' + importedRow.month + '::' + importedRow.source];
-        if (decision === 'overwrite'){
-          list[idx] = importedRow;
-          replaced++;
-        } else {
-          skipped++;
-        }
-        continue;
-      }
-
-      list.push(importedRow);
-      added++;
-    }
-
-    sortLedgerRows(list);
-    setPaymentsByLS(ls, list);
+  if (!serverPaymentBatchId) return alert('Сначала выполните серверный парсинг платежей.');
+  try{
+    const applied = await apiJson('/api/import/' + serverPaymentBatchId + '/apply', { method:'POST' });
+    const s = applied.summary || {};
+    alert('Платежи применены на сервере.\nПроведено: ' + (s.applied_count || 0) + '\nПропущено: ' + (s.skipped_count || 0) + '\nДубликаты: ' + (s.duplicate_count || 0) + '\nОшибки: ' + (s.failed_count || 0));
+  } catch (e) {
+    alert('Ошибка применения на сервере: ' + (e.message || e));
+    return;
   }
-
-  await Data.flushDbToServer();
-
-  alert('Платежи применены.\nДобавлено: ' + added + '\nЗаменено: ' + replaced + '\nПропущено: ' + skipped + '\nКонфликтов обработано: ' + conflicts);
   clearRuntimeState();
+  serverPaymentBatchId = 0;
+  serverPaymentRows = [];
   clearImportResumeState();
   clearImportDraftState();
   $('summaryLine').textContent = 'Импорт завершён. Предпросмотр очищен';
@@ -1431,11 +1662,6 @@ async function applyPayments(){
   updateRestoredFileInfo();
   updateStateLine();
   setButtons();
-  } catch (e) {
-    console.error(e);
-    alert('Ошибка сохранения платежей на сервер. Локальные изменения будут откатаны.');
-    await rollbackAfterFlushError(localSnapshot, { reason: 'import_apply_payments_flush_error', reload: true });
-  }
 }
 
 $('previewBody').addEventListener('click', function(ev){
