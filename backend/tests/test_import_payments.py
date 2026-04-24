@@ -122,6 +122,117 @@ class ImportHelpersTest(unittest.TestCase):
         result = app_module._classify_payment("uid_1", "2025-02-15", "1500.00", ledger)
         self.assertEqual(result, "NEW_PAYMENT")
 
+    def test_classification_skips_ledger_items_with_other_uid(self):
+        ledger = [{"uid": "other_uid", "paid_date": "10.02.2025", "paid": 1500.0}]
+        result = app_module._classify_payment("uid_1", "2025-02-10", "1500.00", ledger)
+        self.assertEqual(result, "NEW_PAYMENT")
+
+    def test_classification_backward_compatible_without_uid(self):
+        ledger = [{"paid_date": "10.02.2025", "paid": 1500.0}]
+        result = app_module._classify_payment("uid_1", "2025-02-10", "1500.00", ledger)
+        self.assertEqual(result, "DUPLICATE")
+
+    def test_apply_skips_row_when_fingerprint_already_applied_after_validation(self):
+        owner_id = "owner-1"
+        account_uid = "uid_1"
+        account_number = "100500"
+        paid_date = "2025-02-10"
+        amount = "1500.00"
+        fingerprint = app_module.payment_fingerprint(account_uid, paid_date, amount)
+
+        class DummyBatch:
+            def __init__(self):
+                self.id = 100
+                self.owner_id = owner_id
+                self.status = "validated"
+                self.rows_applied = 0
+                self.finished_at = None
+                self.uploaded_at = None
+                self.upload_blob = b""
+
+        class DummyRow:
+            def __init__(self):
+                self.id = 200
+                self.row_no = 1
+                self.status = "ready"
+                self.reason_code = "NEW_PAYMENT"
+                self.reason_text = ""
+                self.account_uid = account_uid
+                self.account_number = account_number
+                self.paid_date = paid_date
+                self.payment_date = paid_date
+                self.payment_period = "2025-02"
+                self.amount = amount
+                self.source_index = 1
+                self.source_label = "Источник 1"
+                self.matched_payment_id = ""
+                self.applied_at = None
+                self.fingerprint = ""
+
+        class DummyFilterBy:
+            def __init__(self, result):
+                self._result = result
+
+            def first(self):
+                return self._result
+
+            def order_by(self, *args, **kwargs):
+                return self
+
+            def all(self):
+                return self._result
+
+        class DummySession:
+            def __init__(self):
+                self.added = []
+                self.committed = 0
+                self.rolled_back = 0
+
+            def add(self, obj):
+                self.added.append(obj)
+
+            def flush(self):
+                return None
+
+            def commit(self):
+                self.committed += 1
+
+            def rollback(self):
+                self.rolled_back += 1
+
+        dummy_batch = DummyBatch()
+        dummy_row = DummyRow()
+        existing_fp = type("ExistingFP", (), {"payment_id": "100500:1"})()
+        dummy_session = DummySession()
+
+        with app_module.app.test_request_context("/api/import/100/apply", method="POST"):
+            with patch.object(app_module, "_require_user", return_value=(type("U", (), {"id": owner_id, "role": "user"})(), None)):
+                with patch.object(app_module, "_ensure_batch_transition", return_value=None):
+                    with patch.object(app_module, "_load_owner_sources", return_value={}):
+                        with patch.object(app_module, "_batch_payload", return_value={"id": dummy_batch.id, "status": "applied"}):
+                            with patch.object(app_module.ImportBatch, "query", type("Q", (), {
+                                "filter_by": staticmethod(lambda **kwargs: DummyFilterBy(dummy_batch))
+                            })()):
+                                with patch.object(app_module.ImportBatchRow, "query", type("RQ", (), {
+                                    "filter_by": staticmethod(lambda **kwargs: DummyFilterBy([dummy_row]))
+                                })()):
+                                    with patch.object(app_module.ImportAppliedFingerprint, "query", type("FQ", (), {
+                                        "filter_by": staticmethod(lambda **kwargs: DummyFilterBy(existing_fp))
+                                    })()):
+                                        with patch.object(app_module, "db", type("DB", (), {"session": dummy_session})()):
+                                            resp = app_module.import_payments_apply(100)
+
+        payload = resp.json
+        self.assertTrue(payload.get("ok"))
+        self.assertEqual(payload["summary"]["applied_count"], 0)
+        self.assertEqual(payload["summary"]["duplicate_count"], 1)
+        self.assertEqual(payload["summary"]["conflict_count"], 0)
+        self.assertEqual(dummy_row.status, "duplicate")
+        self.assertEqual(dummy_row.reason_code, "DUPLICATE")
+        self.assertEqual(dummy_row.matched_payment_id, "100500:1")
+        self.assertEqual(dummy_session.committed, 1)
+
+
     def test_reapply_batch_is_forbidden_by_state_machine(self):
         with app_module.app.app_context():
             res = app_module._ensure_batch_transition(DummyBatch("applied"), "apply")
