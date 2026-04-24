@@ -269,7 +269,7 @@ IMPORT_ALLOWED_TRANSITIONS = {
     "apply": {"ready_to_apply"},
 }
 
-IMPORT_REQUIRED_COLUMNS = {"account_uid", "payment_date", "payment_period", "amount", "source_index"}
+IMPORT_REQUIRED_COLUMNS = {"account_uid", "account_number", "payment_date", "payment_period", "amount", "source_index"}
 
 HEADER_ALIASES = {
     "account_uid": {"account_uid", "uid", "уид", "лс uid", "лицевой uid"},
@@ -405,6 +405,11 @@ def normalize_uid(v):
     if not value:
         raise ValueError("account_uid_required")
     return value
+
+
+def to_ledger_paid_date(paid_date_iso: str) -> str:
+    d = datetime.strptime(paid_date_iso, "%Y-%m-%d").date()
+    return d.strftime("%d.%m.%Y")
 
 
 def build_payment_fingerprint(owner_id, account_uid, account_number, paid_date, amount, source_index, payment_period):
@@ -563,7 +568,7 @@ def _find_owner_accounts(owner_id: str, account_uid: str, account_number: str):
         candidate_ls = _norm_text(abonent.get("id")).lower()
         if uid_norm and candidate_uid != uid_norm:
             continue
-        if ls_norm and candidate_ls and candidate_ls != ls_norm:
+        if ls_norm and candidate_ls != ls_norm:
             continue
         hits.append(abonent)
     return hits
@@ -978,10 +983,17 @@ def import_payments_validate(batch_id):
         details = {}
         if not r.account_uid:
             r.status = "invalid"
-            r.reason_code = "account_uid_required"
-            r.reason_text = "Не заполнен account_uid"
+            r.reason_code = "ACCOUNT_UID_REQUIRED"
+            r.reason_text = "Платежи могут учитываться только при наличии UID"
             details["field"] = "account_uid"
             details["recommendation"] = "Заполните account_uid существующим UID абонента."
+            invalid += 1
+        elif not r.account_number:
+            r.status = "invalid"
+            r.reason_code = "ACCOUNT_NUMBER_REQUIRED"
+            r.reason_text = "Для записи оплаты в ledger нужен лицевой счёт"
+            details["field"] = "account_number"
+            details["recommendation"] = "Заполните лицевой счёт (account_number)."
             invalid += 1
         elif not r.payment_date:
             r.status = "invalid"
@@ -1038,7 +1050,7 @@ def import_payments_validate(batch_id):
                 r.source_label = sources_map.get(r.source_index, r.source_label)
                 try:
                     normalized_uid = normalize_uid(r.account_uid)
-                    normalized_account_number = normalize_account_number(r.account_number or r.account_uid)
+                    normalized_account_number = normalize_account_number(r.account_number)
                     normalized_paid_date = normalize_paid_date(r.payment_date)
                     normalized_period = normalize_payment_period(r.payment_period)
                     normalized_amount = normalize_amount(r.amount)
@@ -1054,8 +1066,7 @@ def import_payments_validate(batch_id):
                     continue
 
                 r.account_uid = normalized_uid
-                if not r.account_number:
-                    r.account_number = normalized_account_number
+                r.account_number = normalized_account_number
                 r.payment_date = normalized_paid_date
                 r.paid_date = normalized_paid_date
                 r.payment_period = normalized_period
@@ -1156,7 +1167,7 @@ def import_payments_apply(batch_id):
 
             try:
                 normalized_uid = normalize_uid(r.account_uid)
-                normalized_account_number = normalize_account_number(r.account_number or r.account_uid)
+                normalized_account_number = normalize_account_number(r.account_number)
                 normalized_paid_date = normalize_paid_date(r.paid_date or r.payment_date)
                 normalized_period = normalize_payment_period(r.payment_period)
                 normalized_amount = normalize_amount(r.amount)
@@ -1171,7 +1182,7 @@ def import_payments_apply(batch_id):
                     normalized_period,
                 )
 
-                key = f"payments_{normalized_uid}"
+                key = f"payments_{normalized_account_number}"
                 with db.session.begin_nested():
                     fingerprint_row = ImportAppliedFingerprint(
                         owner_id=batch.owner_id,
@@ -1212,7 +1223,7 @@ def import_payments_apply(batch_id):
                         "month": mm,
                         "accrued": 0,
                         "paid": float(normalized_amount),
-                        "paid_date": normalized_paid_date,
+                        "paid_date": to_ledger_paid_date(normalized_paid_date),
                         "source": sources_map.get(normalized_source_index) or r.source_label or f"Платёж {normalized_source_index}",
                         "payment_period": normalized_period,
                     }
@@ -1222,7 +1233,7 @@ def import_payments_apply(batch_id):
                     else:
                         db.session.add(KVStore(owner=batch.owner_id, k=key, v=json.dumps(ledger, ensure_ascii=False)))
 
-                    payment_id = f"{normalized_uid}:{next_id}"
+                    payment_id = f"{normalized_account_number}:{next_id}"
                     fingerprint_row.payment_id = payment_id
                     r.account_uid = normalized_uid
                     r.account_number = normalized_account_number

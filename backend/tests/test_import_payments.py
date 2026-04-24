@@ -68,6 +68,13 @@ class ImportHelpersTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             app_module.normalize_source_index(0)
 
+    def test_normalize_account_number_is_required(self):
+        with self.assertRaises(ValueError):
+            app_module.normalize_account_number(" ")
+
+    def test_to_ledger_paid_date_uses_legacy_format(self):
+        self.assertEqual(app_module.to_ledger_paid_date("2026-02-01"), "01.02.2026")
+
 
 if __name__ == "__main__":
     unittest.main()
