@@ -611,7 +611,7 @@ window.PremisesAdmin = (function () {
         const ids = Array.from(new Set((abonentIds || []).map(x => String(x || '').trim()).filter(Boolean)));
         if (!ids.length) return { ok: true, total: 0, changed: 0 };
         if (!(window.JKHAutoAccrual && typeof window.JKHAutoAccrual.recalcForMany === 'function')) {
-            return { ok: false, reason: 'NO_RECALC_ENGINE', message: 'Не найден JKHAutoAccrual.recalcForMany().' };
+            return { ok: false, reason: 'NO_RECALC_ENGINE', message: 'Не загружен движок автопересчёта autoaccrual_engine.js' };
         }
         const rowsOrPromise = window.JKHAutoAccrual.recalcForMany(ids);
         const rows = (rowsOrPromise && typeof rowsOrPromise.then === 'function')
