@@ -21,6 +21,21 @@
   var _syncPromise = null;
   var _initStarted = false;
   var _initPromise = null;
+  var _authModuleLoadedMarked = false;
+  var _authSessionReadyMarked = false;
+
+  function _markAuthModuleLoaded() {
+    if (_authModuleLoadedMarked) return;
+    _authModuleLoadedMarked = true;
+    window.JKHBoot?.markReady?.("authModuleLoaded");
+  }
+
+  function _markAuthSessionReady() {
+    if (_authSessionReadyMarked) return;
+    _authSessionReadyMarked = true;
+    window.JKHBoot?.markReady?.("authSessionReady");
+    window.JKHBoot?.markReady?.("auth");
+  }
 
   function _getAutoLoadGate() {
     if (!window.__JKH_LOGIN_AUTOLOAD_GATE) {
@@ -883,7 +898,6 @@ function _isNetworkOrTimeoutError(err) {
       renderAuthStatus();
       protectPages();
       return true;
-
     } catch (e) {
       // ✅ 401 для гостя — не ошибка приложения
       clearSessionCache();
@@ -903,6 +917,8 @@ function _isNetworkOrTimeoutError(err) {
       renderAuthStatus();
       protectPages();
       return true;
+    } finally {
+      _markAuthSessionReady();
     }
   })();
 
@@ -955,7 +971,7 @@ function _isNetworkOrTimeoutError(err) {
     runAutoLoadAfterLoginOnce: runAutoLoadAfterLoginOnce
   };
 
-  window.JKHBoot?.markReady?.('auth');
+  _markAuthModuleLoaded();
 
   // Автозапуск
   if (document.readyState === "loading") {
