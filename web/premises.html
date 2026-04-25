@@ -3,6 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <script src="critical_guard.js" defer></script>
+  <script src="boot.js" defer></script>
   <title>Квартиры / адреса</title>
 
   <link rel="stylesheet" href="style.css">
@@ -44,14 +45,6 @@
   </style>
 </head>
 <body>
-
-<script>
-  // ✅ renderLayout использует Auth/шапку. Поэтому вызываем после загрузки скриптов.
-  document.addEventListener('DOMContentLoaded', () => {
-    if (typeof renderLayout === 'function') renderLayout();
-  });
-</script>
-
 <div class="content">
   <h2>КВАРТИРЫ / АДРЕСА</h2>
 
@@ -142,10 +135,43 @@
 </div>
 
 <script>
-  document.addEventListener('DOMContentLoaded', () => {
+  document.addEventListener('DOMContentLoaded', async () => {
+    const required = ['auth', 'storage', 'data', 'layout', 'autoaccrual'];
+    const warnEl = document.getElementById('premFormWarn');
+
+    let ready = true;
+    if (window.JKHBoot && typeof window.JKHBoot.waitFor === 'function') {
+      ready = await window.JKHBoot.waitFor(required, 5000);
+    }
+
+    if (!ready) {
+      const missing = (window.JKHBoot && typeof window.JKHBoot.getMissing === 'function')
+        ? window.JKHBoot.getMissing(required)
+        : required;
+      if (warnEl) {
+        warnEl.style.display = 'block';
+        warnEl.textContent = 'Не готовы модули: ' + (missing.length ? missing.join(', ') : 'unknown');
+      }
+      return;
+    }
+
+    if (typeof renderLayout === 'function') {
+      renderLayout();
+    } else {
+      if (warnEl) {
+        warnEl.style.display = 'block';
+        warnEl.textContent = 'Не найден renderLayout().';
+      }
+      return;
+    }
+
     if (window.PremisesAdmin && typeof PremisesAdmin.init === 'function') {
       PremisesAdmin.init();
     } else {
+      if (warnEl) {
+        warnEl.style.display = 'block';
+        warnEl.textContent = 'PremisesAdmin не найден. Проверь premises_admin.js';
+      }
       console.error('PremisesAdmin не найден. Проверь premises_admin.js');
     }
   });

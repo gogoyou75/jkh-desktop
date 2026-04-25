@@ -610,6 +610,11 @@ window.PremisesAdmin = (function () {
     async function runExistingRecalcForAbonents(abonentIds) {
         const ids = Array.from(new Set((abonentIds || []).map(x => String(x || '').trim()).filter(Boolean)));
         if (!ids.length) return { ok: true, total: 0, changed: 0 };
+
+        if (window.JKHBoot && typeof window.JKHBoot.waitFor === 'function') {
+            try { await window.JKHBoot.waitFor(['autoaccrual'], 2000); } catch (e) {}
+        }
+
         if (!(window.JKHAutoAccrual && typeof window.JKHAutoAccrual.recalcForMany === 'function')) {
             return { ok: false, reason: 'NO_RECALC_ENGINE', message: 'Не загружен autoaccrual_engine.js. Сохранение остановлено, чтобы не нарушить начисления.' };
         }

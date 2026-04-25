@@ -338,6 +338,8 @@ function renderSearchResults(data, q) {
   requestAnimationFrame(() => box.classList.add("visible"));
 }
 
+window.JKHBoot?.markReady?.('layout');
+
 function globalSearch(q) {
   q = (q || "").toLowerCase();
   const db = window.AbonentsDB?.abonents || {};

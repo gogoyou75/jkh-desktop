@@ -800,6 +800,7 @@
   Data.getAbonentTransferInfo = getAbonentTransferInfo;
 
 window.Data = Data;
+window.JKHBoot?.markReady?.('data');
 
   // Если storage пустой — сохраним пустую структуру один раз
   if (!stored) {

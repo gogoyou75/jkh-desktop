@@ -955,6 +955,8 @@ function _isNetworkOrTimeoutError(err) {
     runAutoLoadAfterLoginOnce: runAutoLoadAfterLoginOnce
   };
 
+  window.JKHBoot?.markReady?.('auth');
+
   // Автозапуск
   if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", init);
