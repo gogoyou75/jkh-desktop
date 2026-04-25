@@ -63,3 +63,22 @@
 4. `docs/logic/LOGIC_CHECKLIST_v1.4.md`
 
 Этого достаточно, чтобы Codex не ушёл в ложную архитектуру.
+
+---
+
+## 8. Frontend boot / загрузка модулей
+
+- `docs/frontend/FRONTEND_BOOT_CANON.md` — канон безопасной инициализации фронта без гонок загрузки.
+
+---
+
+## 9. Оплаты server-first
+
+- `docs/payments/PAYMENTS_SERVER_FIRST_CANON.md` — канон добавления, редактирования, импорта и серверного сохранения оплат.
+
+---
+
+## 10. Задания для Codex по новой архитектуре
+
+- `docs/codex/TASK_FOR_CODEX_PAYMENTS_SERVER_FIRST.md` — внедрение/проверка ручного добавления оплаты через сервер.
+- `docs/codex/TASK_FOR_CODEX_BOOT_AND_PAYMENTS_REGRESSION.md` — регрессия boot-layer + оплаты.

@@ -1,5 +1,17 @@
 # CRITICAL_CHANGELOG
 
+## v1.6.1 — 2026-04-25
+
+### Frontend boot-layer и оплаты server-first
+
+1. Зафиксирован канон фронтенд-инициализации через `web/boot.js`, `window.JKH_READY` и `window.JKHBoot`.
+2. Запрещён прямой запуск контроллеров страниц по `DOMContentLoaded` без ожидания обязательных модулей.
+3. Зафиксированы флаги готовности: `authModuleLoaded`, `authSessionReady`, `auth`, `storage`, `data`, `layout`, `autoaccrual`.
+4. Зафиксировано правило: если операция влияет на начисления, без `autoaccrual_engine.js` сохранять нельзя.
+5. Зафиксирован канон учёта оплат через сервер: `payments_<abonentId>` хранится в owner-контексте server-first, localStorage/JKHStore — не источник истины.
+6. Ручное добавление оплаты и импорт оплат обязаны приводить данные к одной ledger-модели.
+7. Запрещено показывать успешное сохранение оплаты до server flush.
+
 ## v1.6.0 — 2026-03-25
 
 ### Критическое обновление архитектуры и прав
