@@ -1646,7 +1646,8 @@ def import_payments_errors_export(batch_id):
 
 @app.get("/api/store_keys")
 def store_keys():
-    owner, err = _resolve_owner(request.args.get("owner"), allow_admin_override=True)
+    requested_owner = request.args.get("owner") or request.args.get("owner_id")
+    owner, err = _resolve_owner(requested_owner, allow_admin_override=True)
     if err:
         return err
 
@@ -1668,7 +1669,8 @@ def store_keys():
 
 @app.get("/api/store")
 def store_get():
-    owner, err = _resolve_owner(request.args.get("owner"), allow_admin_override=True)
+    requested_owner = request.args.get("owner") or request.args.get("owner_id")
+    owner, err = _resolve_owner(requested_owner, allow_admin_override=True)
     if err:
         return err
 
@@ -1743,7 +1745,8 @@ def store_delete():
 
 @app.get("/api/store_dump")
 def store_dump():
-    owner, err = _resolve_owner(request.args.get("owner"), allow_admin_override=True)
+    requested_owner = request.args.get("owner") or request.args.get("owner_id")
+    owner, err = _resolve_owner(requested_owner, allow_admin_override=True)
     if err:
         return err
 
