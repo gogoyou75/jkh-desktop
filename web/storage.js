@@ -727,7 +727,7 @@
     var v = (value === null || value === undefined) ? "" : String(value);
     if (!window.JKHStore) return;
     if (isGlobalProjectKey(kx)) {
-      _lsSetDirect(k(kx, ownerId), v);
+      _lsSetDirect(k(kx, "GLOBAL"), v);
       return;
     }
     window.JKHStore.setRaw(kx, v, ownerId);

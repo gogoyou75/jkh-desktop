@@ -637,7 +637,10 @@
         if (principal > 0.0000001 && overdueIndex > 30){
           const denom = (overdueIndex <= 90) ? 300 : 130;
           const rawRate = rateOnDate(day, rates);
-          const rate = Number.isFinite(rawRate) ? capRateUntil2027(day, rawRate) : 0;
+          if (!Number.isFinite(rawRate)) {
+          console.error("[calc_engine] missing rate for date", day);
+          continue; // пропускаем день
+}
           penalty += principal * (rate/100) / denom;
         }
       }
