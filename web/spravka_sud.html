@@ -18,10 +18,13 @@ Doc: docs/LOGIC_SPEC_v1.5.3.md
 
 <link rel="stylesheet" href="style.css" />
 
-<!-- ВСЕГДА корректный порядок: данные → storage → layout → spravka_sud -->
+<!-- ВСЕГДА корректный порядок: auth → storage → data → layout → calc_engine → spravka_sud -->
+<script src="auth.js"></script>
+<script src="storage.js"></script>
 <script src="data.js"></script>
 <script src="layout.js"></script>
 <script src="calc_engine.js"></script>
+<script src="spravka_sud.js"></script>
 
 <style>
     body {
@@ -194,6 +197,7 @@ Doc: docs/LOGIC_SPEC_v1.5.3.md
     <div class="org-header" id="orgHeader">
         <div id="orgRowName"><span class="label">Наименование организации:</span> <span id="orgName"></span></div>
         <div id="orgRowInn"><span class="label">ИНН:</span> <span id="orgInn"></span></div>
+        <div id="orgRowOgrn"><span class="label">ОГРН:</span> <span id="orgOgrn"></span></div>
         <div id="orgRowLegal"><span class="label">Юридический адрес:</span> <span id="orgLegal"></span></div>
         <div id="orgRowPostal"><span class="label">Почтовый адрес:</span> <span id="orgPostal"></span></div>
         <div id="orgRowPhone"><span class="label">Телефон:</span> <span id="orgPhone"></span></div>
@@ -284,12 +288,6 @@ Doc: docs/LOGIC_SPEC_v1.5.3.md
 
 </div>
 
-<!-- Скрипты логики -->
-<script src="spravka_sud.js"></script>
-
-<script>
-/* твой JS из второй версии – полностью рабочий */
-</script>
 
 <script>closeLayout();</script>
 

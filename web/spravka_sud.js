@@ -21,18 +21,6 @@
    Любая правка этого блока/связанных расчётов → только через новую версию SPEC.
    ============================================================ */
 
-// spravka_sud.js
-// ✅ CRITICAL v1.6 CANON (ПАПАЖКХ):
-// Дата начала расчёта справки для суда = "Дата начала расчёта абонента"
-// ("с какого дня месяца начать начислять").
-// Источник: abonent.calcStartDate (приоритет) → activeLink.dateFrom → fallback.
-// Если выбранный период начинается раньше — period.from режем снизу.
-//
-// ✅ FIX for scoped storage:
-// источник данных: runtime cache/JKHStore (без прямого localStorage).
-//
-// Требует: calc_engine.js (window.JKHCalcEngine)
-
 (function () {
   if (window.__SPRAVKA_SUD_JS_LOADED__) return;
   window.__SPRAVKA_SUD_JS_LOADED__ = true;
@@ -40,24 +28,24 @@
   function $(id){ return document.getElementById(id); }
 
   function safeJSONParse(raw, def){
-    try{ return JSON.parse(raw); }catch(e){ return def; }
+    try { return JSON.parse(raw); } catch (e) { return def; }
   }
 
   function storeGet(key, ownerId){
-    try{
-      if (window.JKHStore && typeof JKHStore.getRaw === "function") {
+    try {
+      if (window.JKHStore && typeof window.JKHStore.getRaw === "function") {
         return JKHStore.getRaw(key, ownerId);
       }
-    }catch(e){}
+    } catch (e) {}
     return null;
   }
 
-  function safeJSON(key, def){
-    try{
-      const raw = storeGet(key);
+  function safeJSON(key, def, ownerId){
+    try {
+      const raw = storeGet(key, ownerId);
       if (!raw) return def;
       return JSON.parse(raw);
-    }catch(e){ return def; }
+    } catch (e) { return def; }
   }
 
   function setText(id, txt){
@@ -66,8 +54,7 @@
   }
 
   function moneyDot(x){
-    const v = (Math.round((Number(x)||0)*100)/100).toFixed(2);
-    return v;
+    return (Math.round((Number(x) || 0) * 100) / 100).toFixed(2);
   }
 
   function monthNameRU(m){
@@ -76,48 +63,68 @@
 
   function fmtDateRuAny(any){
     const eng = window.JKHCalcEngine;
-    const d = eng?.parseDateAnyToDate(any);
+    const d = eng && typeof eng.parseDateAnyToDate === "function" ? eng.parseDateAnyToDate(any) : null;
     if (!d) return "";
     const months = ["января","февраля","марта","апреля","мая","июня","июля","августа","сентября","октября","ноября","декабря"];
-    return `${d.getDate()} ${months[d.getMonth()]} ${d.getFullYear()} года`;
+    return d.getDate() + " " + months[d.getMonth()] + " " + d.getFullYear() + " года";
   }
 
-  function loadSelectedPeriod(ls){
+  function loadSelectedPeriod(ls, ownerId){
     function parsePeriod(raw){
-      try{
+      try {
         const o = JSON.parse(raw);
         if (!o || !o.from || !o.to) return null;
-        return { from:String(o.from), to:String(o.to) };
-      }catch(e){ return null; }
+        return { from: String(o.from), to: String(o.to) };
+      } catch (e) { return null; }
     }
-    const rp = storeGet("report_period_" + ls);
-    const cp = storeGet("calc_period_" + ls);
+    const rp = storeGet("report_period_" + ls, ownerId);
+    const cp = storeGet("calc_period_" + ls, ownerId);
     return parsePeriod(rp) || parsePeriod(cp);
   }
 
-  // ------------------------------------------------------------
-  // ✅ DETECTOR: find AbonentsDB in runtime/JKHStore scopes
-  // ------------------------------------------------------------
-
-  // Если в URL передали конкретный ключ базы (db=...), используем его как приоритет.
-  // Это убирает ситуации, когда в браузере одновременно лежит несколько баз,
-  // и детектор случайно выбирает "не ту" (что приводило к другой фамилии/пустым данным).
-  function getDbKeyFromURL(){
-    try{
-      const p = new URLSearchParams(location.search);
-      const k = String(p.get("db") || "").trim();
-      return k || "";
-    }catch(e){ return ""; }
+  function getUrlParams(){
+    try { return new URLSearchParams(location.search); } catch (e) { return new URLSearchParams(); }
   }
-  function _extractOwnerFromScopedDbKey(scoped){
-    const s = String(scoped || "");
-    const m = s.match(/^jkhdb::(.+?)::abonents_db_v1$/);
-    return m ? m[1] : "";
+
+  function isDevMode(){
+    const p = getUrlParams();
+    return String(p.get("dev") || "") === "1";
+  }
+
+  function devLog(devMode, tag, payload){
+    if (!devMode) return;
+    try { console.log("[spravka_sud][dev] " + tag, payload || {}); } catch (e) {}
+  }
+
+  function getDbKeyFromURL(){
+    const p = getUrlParams();
+    return String(p.get("db") || "").trim();
+  }
+
+  function extractOwnerFromScopedDbKey(scoped){
+    const m = String(scoped || "").match(/^jkhdb::(.+?)::abonents_db_v1$/);
+    return m ? String(m[1] || "") : "";
+  }
+
+  function getContext(){
+    const p = getUrlParams();
+    const abonentId = String(p.get("abonent") || "").trim();
+    const dbKey = getDbKeyFromURL();
+    const forcedOwner = extractOwnerFromScopedDbKey(dbKey);
+    let currentOwner = "";
+    try { currentOwner = String(window.JKHStore && JKHStore.getOwnerId ? (JKHStore.getOwnerId() || "") : ""); } catch (e) {}
+    const readOwner = forcedOwner || currentOwner || "";
+    return {
+      abonentId: abonentId,
+      dbKey: dbKey,
+      forcedOwner: forcedOwner,
+      currentOwner: currentOwner,
+      readOwner: readOwner
+    };
   }
 
   function normalizeDbRoot(obj){
     if (!obj || typeof obj !== "object") return null;
-    // ожидаем {abonents:{}, premises:{}, links:[]}
     const abonents = (obj.abonents && typeof obj.abonents === "object") ? obj.abonents : null;
     if (!abonents) return null;
     if (!obj.links) obj.links = [];
@@ -125,308 +132,406 @@
     return obj;
   }
 
-  function getDbRootForAbonent(abonentId){
-    // 0) явный ключ базы из URL
-    const forcedKey = getDbKeyFromURL();
-    if (forcedKey){
-      const forcedOwner = _extractOwnerFromScopedDbKey(forcedKey);
-      const raw = forcedOwner ? storeGet("abonents_db_v1", forcedOwner) : storeGet("abonents_db_v1");
-      if (raw){
-        const data = safeJSONParse(raw, null);
-        const db = normalizeDbRoot(data);
-        if (db) return db;
-      }
-    }
-
-    // 1) если window.AbonentsDB есть — используем
-    if (window.AbonentsDB && window.AbonentsDB.abonents){
-      const db = normalizeDbRoot(window.AbonentsDB);
-      if (db && db.abonents && db.abonents[String(abonentId)]) return db;
-    }
-
-    // 2) scoped cache текущего owner
-    const raw = storeGet("abonents_db_v1");
-    const data = safeJSONParse(raw, null);
-    const db = normalizeDbRoot(data);
-    if (db && db.abonents && db.abonents[String(abonentId)]) return db;
-
-    return db || null;
+  function hasAbonentInDbRoot(dbRoot, abonentId){
+    try {
+      if (!dbRoot || !dbRoot.abonents) return false;
+      return !!dbRoot.abonents[String(abonentId || "")];
+    } catch (e) { return false; }
   }
 
-  // активная связь абонент↔квартира (dateFrom/dateTo)
-  function getActiveLinkForAbonent(dbRoot, abonentId){
-    try{
-      const links = Array.isArray(dbRoot?.links) ? dbRoot.links : [];
-      const id = String(abonentId || "");
-      const mine = links.filter(l => String(l?.abonentId || "") === id);
+  function getDbRootForContext(ctx){
+    if (!ctx) return null;
 
+    const cachedRoot = normalizeDbRoot(window.AbonentsDB);
+    if (cachedRoot && hasAbonentInDbRoot(cachedRoot, ctx.abonentId)) {
+      return cachedRoot;
+    }
+
+    if (!ctx.forcedOwner && cachedRoot) {
+      return cachedRoot;
+    }
+
+    const raw = ctx.readOwner
+      ? storeGet("abonents_db_v1", ctx.readOwner)
+      : storeGet("abonents_db_v1");
+    const parsed = safeJSONParse(raw, null);
+    return normalizeDbRoot(parsed);
+  }
+
+  function getActiveLinkForAbonent(dbRoot, abonentId){
+    try {
+      const links = Array.isArray(dbRoot && dbRoot.links) ? dbRoot.links : [];
+      const id = String(abonentId || "");
+      const mine = links.filter(function (l) { return String((l && l.abonentId) || "") === id; });
       if (!mine.length) return null;
-      // активная = без dateTo
-      const active = mine.find(l => !String(l?.dateTo || "").trim());
+      const active = mine.find(function (l) { return !String((l && l.dateTo) || "").trim(); });
       return active || mine[0] || null;
-    }catch(e){ return null; }
+    } catch (e) { return null; }
+  }
+
+  function firstValidDate(eng, values){
+    for (let i = 0; i < values.length; i++) {
+      const raw = String(values[i] || "").trim();
+      if (!raw) continue;
+      const d = eng.parseDateAnyToDate(raw);
+      if (d) return d;
+    }
+    return null;
+  }
+
+  function resolveAbonentStartDate(eng, abonent, activeLink, abonentId){
+    const result = { date: null, source: "" };
+
+    const d1 = firstValidDate(eng, [abonent && abonent.calcStartDate]);
+    if (d1) return { date: eng.startOfDay(d1), source: "abonent.calcStartDate" };
+
+    const d2 = firstValidDate(eng, [activeLink && activeLink.dateFrom]);
+    if (d2) return { date: eng.startOfDay(d2), source: "activeLink.dateFrom" };
+
+    const d3 = firstValidDate(eng, [
+      abonent && abonent.calc_start_date,
+      abonent && abonent.calcStart,
+      abonent && abonent.calc_start,
+      abonent && abonent.startCalc,
+      abonent && abonent.start_calc,
+      abonent && abonent.dateStartCalc,
+      abonent && abonent.date_start_calc,
+      abonent && abonent.calcDateStart,
+      abonent && abonent.calc_date_start,
+      abonent && abonent.calcDate,
+      abonent && abonent.calc_date,
+      abonent && abonent.dateFrom,
+      abonent && abonent.date_from,
+      abonent && abonent.regDate,
+      abonent && abonent.registrationDate,
+      abonent && abonent.date_reg,
+      abonent && abonent.dateRegistration
+    ]);
+    if (d3) return { date: eng.startOfDay(d3), source: "abonent.compat.startDateField" };
+
+    try {
+      const r = eng.getActiveResponsibilityRangeISO(abonentId);
+      const d4 = firstValidDate(eng, [r && r.from]);
+      if (d4) return { date: eng.startOfDay(d4), source: "calcEngine.getActiveResponsibilityRangeISO" };
+    } catch (e) {}
+
+    const fallback = eng.startOfDay(new Date(2000, 0, 1));
+    console.warn("[spravka_sud] fallback start date applied", {
+      reason: "no abonent start date sources",
+      abonentId: String(abonentId || "")
+    });
+    result.date = fallback;
+    result.source = "fallback:2000-01-01";
+    return result;
   }
 
   function renderRow(tbody, cells){
     const tr = document.createElement("tr");
-    tr.innerHTML = `
-      <td>${cells.period}</td>
-      <td class="align-right">${cells.accrued}</td>
-      <td class="align-right">${cells.paid}</td>
-      <td>${cells.paidDate}</td>
-      <td class="align-right">${cells.monthDebtMain}</td>
-      <td class="align-right">${cells.monthDebtPenalty}</td>
-      <td class="align-right">${cells.monthDebtTotal}</td>
-    `;
+    tr.innerHTML = ""
+      + "<td>" + cells.period + "</td>"
+      + "<td class=\"align-right\">" + cells.accrued + "</td>"
+      + "<td class=\"align-right\">" + cells.paid + "</td>"
+      + "<td>" + cells.paidDate + "</td>"
+      + "<td class=\"align-right\">" + cells.monthDebtMain + "</td>"
+      + "<td class=\"align-right\">" + cells.monthDebtPenalty + "</td>"
+      + "<td class=\"align-right\">" + cells.monthDebtTotal + "</td>";
     tbody.appendChild(tr);
   }
 
-  function monthKey(y,m){ return `${y}-${String(m).padStart(2,"0")}`; }
+  function monthKey(y,m){ return y + "-" + String(m).padStart(2, "0"); }
+
+  async function waitForInit(ctx, timeoutMs){
+    const started = Date.now();
+    const stepMs = 100;
+
+    while ((Date.now() - started) < timeoutMs) {
+      const hasStore = !!(window.JKHStore && typeof JKHStore.getRaw === "function");
+      const uiStatus = String((window.JKH_UI_STATE && window.JKH_UI_STATE.data && window.JKH_UI_STATE.data.status) || "");
+      const readyByUI = (uiStatus === "ready" || uiStatus === "empty");
+      const readyByLegacy = (window.JKH_DATA_READY === true);
+      const dataReady = readyByUI || readyByLegacy;
+      const dbRaw = hasStore
+        ? (ctx.readOwner ? storeGet("abonents_db_v1", ctx.readOwner) : storeGet("abonents_db_v1"))
+        : null;
+      const hasDbValue = (dbRaw !== null) || hasAbonentInDbRoot(window.AbonentsDB, ctx.abonentId);
+
+      if (hasStore && dataReady && hasDbValue) {
+        return { ok: true, uiStatus: uiStatus };
+      }
+
+      await new Promise(function(resolve){ setTimeout(resolve, stepMs); });
+    }
+
+    return {
+      ok: false,
+      reason: "INIT_TIMEOUT",
+      uiStatus: String((window.JKH_UI_STATE && window.JKH_UI_STATE.data && window.JKH_UI_STATE.data.status) || ""),
+      hasStore: !!(window.JKHStore && typeof JKHStore.getRaw === "function")
+    };
+  }
+
+  function showFatal(msg, details){
+    console.error("[spravka_sud] " + msg, details || {});
+    alert(msg);
+    const tbody = $("debtRows");
+    if (tbody) {
+      tbody.innerHTML = "<tr><td colspan=\"7\" style=\"color:#b00000;font-weight:bold;\">" + msg + "</td></tr>";
+    }
+  }
 
   document.addEventListener("DOMContentLoaded", function () {
-    const eng = window.JKHCalcEngine;
-    if (!eng){
-      console.error("JKHCalcEngine not found. calc_engine.js is not loaded.");
-      alert("Не найден calc_engine.js. Проверь, что он подключён ПЕРЕД spravka_sud.js");
-      return;
-    }
+    (async function () {
+      const eng = window.JKHCalcEngine;
+      const devMode = isDevMode();
 
-    const ls = (function(){
-      try{
-        const p = new URLSearchParams(location.search);
-        return p.get("abonent") || "";
-      }catch(e){ return ""; }
-    })();
-    if (!ls) return;
+      if (!eng){
+        showFatal("Не найден calc_engine.js. Проверь, что он подключён ПЕРЕД spravka_sud.js");
+        return;
+      }
 
-    // ✅ получаем правильную БД (в т.ч. namespaced)
-    const dbRoot = getDbRootForAbonent(ls);
+      const ctx = getContext();
+      if (!ctx.abonentId) {
+        showFatal("Не передан параметр abonent в URL.");
+        return;
+      }
 
-    // реквизиты
-    const req = safeJSON("organization_requisites_v1", {}) || {};
-    function setReqRow(rowId, spanId, value) {
-      const v = (value == null ? "" : String(value)).trim();
-      const row = document.getElementById(rowId);
-      if (row) row.style.display = v ? "" : "none";
-      setText(spanId, v);
-      return !!v;
-    }
-    const has1 = setReqRow("orgRowName", "orgName", req.full_name);
-    const has2 = setReqRow("orgRowInn", "orgInn", req.inn);
-    const has3 = setReqRow("orgRowLegal", "orgLegal", req.legal_address);
-    const has4 = setReqRow("orgRowPostal", "orgPostal", req.postal_address);
-    const has5 = setReqRow("orgRowPhone", "orgPhone", req.phone);
-    const has6 = setReqRow("orgRowEmail", "orgEmail", req.email);
-    const orgHeader = document.getElementById("orgHeader");
-    if (orgHeader && !(has1 || has2 || has3 || has4 || has5 || has6)) orgHeader.style.display = "none";
+      const gate = await waitForInit(ctx, 8000);
+      if (!gate.ok) {
+        showFatal("Данные ещё не готовы (JKHStore/server-first). Попробуйте открыть справку повторно через 1–2 секунды.", {
+          abonentId: ctx.abonentId,
+          ownerContext: ctx,
+          gate: gate
+        });
+        return;
+      }
 
-    // подписант
-    const signers = safeJSON("organization_signers_v1", []) || [];
-    const activeS = Array.isArray(signers) ? signers.filter(s => s && s.active !== false) : [];
-    const signer = activeS.find(s => s.is_default) || activeS[0] || null;
-    if (signer) {
-      setText("signerPosition", (signer.position || "Председатель правления").trim());
-      setText("chairmanName", (signer.fio || "").trim());
-      const basis = (signer.basis || "").trim();
-      const basisLine = document.getElementById("basisLine");
-      if (basisLine) basisLine.style.display = basis ? "" : "none";
-      setText("signerBasisText", basis);
-    } else {
-      setText("signerPosition", "Председатель правления");
-      setText("chairmanName", "");
-      const basisLine = document.getElementById("basisLine");
-      if (basisLine) basisLine.style.display = "none";
-      setText("signerBasisText", "");
-    }
+      const dbRoot = getDbRootForContext(ctx);
+      const abonent = (dbRoot && dbRoot.abonents && dbRoot.abonents[String(ctx.abonentId)]) ? dbRoot.abonents[String(ctx.abonentId)] : null;
+      if (!abonent) {
+        showFatal("Абонент не найден в текущем owner/db контексте. Справка не построена.", {
+          abonentId: ctx.abonentId,
+          ownerContext: ctx
+        });
+        return;
+      }
 
-    // абонент
-    const abonent = (dbRoot && dbRoot.abonents && dbRoot.abonents[String(ls)]) ? dbRoot.abonents[String(ls)] : null;
+      const req = safeJSON("organization_requisites_v1", {}, ctx.readOwner) || {};
+      function setReqRow(rowId, spanId, value) {
+        const v = (value == null ? "" : String(value)).trim();
+        const row = document.getElementById(rowId);
+        if (row) row.style.display = v ? "" : "none";
+        setText(spanId, v);
+        return !!v;
+      }
+      const has1 = setReqRow("orgRowName", "orgName", req.full_name);
+      const has2 = setReqRow("orgRowInn", "orgInn", req.inn);
+      const hasOgrn = setReqRow("orgRowOgrn", "orgOgrn", req.ogrn);
+      const has3 = setReqRow("orgRowLegal", "orgLegal", req.legal_address);
+      const has4 = setReqRow("orgRowPostal", "orgPostal", req.postal_address);
+      const has5 = setReqRow("orgRowPhone", "orgPhone", req.phone);
+      const has6 = setReqRow("orgRowEmail", "orgEmail", req.email);
+      const orgHeader = document.getElementById("orgHeader");
+      if (orgHeader && !(has1 || has2 || hasOgrn || has3 || has4 || has5 || has6)) orgHeader.style.display = "none";
 
-    if (abonent){
+      const signers = safeJSON("organization_signers_v1", [], ctx.readOwner) || [];
+      const activeS = Array.isArray(signers) ? signers.filter(function (s) { return s && s.active !== false; }) : [];
+      const signer = activeS.find(function (s) { return s && s.is_default === true; }) || activeS[0] || null;
+      if (signer) {
+        setText("signerPosition", String(signer.position || "Председатель правления").trim());
+        setText("chairmanName", String(signer.fio || "").trim());
+        const basis = String(signer.basis || "").trim();
+        const basisLine = document.getElementById("basisLine");
+        if (basisLine) basisLine.style.display = basis ? "" : "none";
+        setText("signerBasisText", basis);
+      } else {
+        setText("signerPosition", "Председатель правления");
+        setText("chairmanName", "");
+        const basisLine = document.getElementById("basisLine");
+        if (basisLine) basisLine.style.display = "none";
+        setText("signerBasisText", "");
+      }
+
       setText("fio", abonent.fio || "");
       setText("address", [abonent.city, abonent.street, abonent.house, abonent.flat].filter(Boolean).join(", "));
       setText("square", abonent.square || "");
       setText("rooms", abonent.rooms || "");
       setText("share", abonent.share || "");
-    }
 
-    // ===== CRITICAL: определяем дату начала расчёта абонента =====
-    let abonentStart = null;
+      const activeLink = getActiveLinkForAbonent(dbRoot, ctx.abonentId);
+      const startResolved = resolveAbonentStartDate(eng, abonent, activeLink, ctx.abonentId);
+      const abonentStart = startResolved.date;
 
-    // 1) abonent.calcStartDate (главный источник)
-    const calcStartRaw = String(abonent?.calcStartDate || "").trim();
-    if (calcStartRaw) {
-      const d = eng.parseDateAnyToDate(calcStartRaw);
-      if (d) abonentStart = eng.startOfDay(d);
-    }
-
-    // 2) если нет calcStartDate — берём activeLink.dateFrom (fallback)
-    if (!abonentStart) {
-      const link = getActiveLinkForAbonent(dbRoot, ls);
-      const linkFrom = String(link?.dateFrom || "").trim();
-      if (linkFrom) {
-        const d = eng.parseDateAnyToDate(linkFrom);
-        if (d) abonentStart = eng.startOfDay(d);
-      }
-    }
-
-    // 3) период (выбранный/авто) + нижняя отсечка от abonentStart
-    let period = loadSelectedPeriod(ls);
-
-    if (!period){
-      let fromISO = null;
-
-      if (abonentStart){
-        fromISO = eng.toISODateString(abonentStart);
+      let period = loadSelectedPeriod(ctx.abonentId, ctx.readOwner);
+      let periodSource = period ? "stored report/calc period" : "auto from start date";
+      if (!period) {
+        period = { from: eng.toISODateString(abonentStart), to: eng.toISODateString(new Date()) };
       } else {
-        // самый последний fallback (старые базы)
-        const r = eng.getActiveResponsibilityRangeISO(ls);
-        fromISO = r?.from || "2000-01-01";
-      }
-
-      const now = new Date();
-      period = { from: String(fromISO), to: eng.toISODateString(now) };
-    } else if (abonentStart) {
-      const pFrom = eng.parseDateAnyToDate(period.from);
-      if (pFrom && eng.startOfDay(pFrom) < abonentStart) {
-        period.from = eng.toISODateString(abonentStart);
-      }
-    }
-
-    setText("period_from", fmtDateRuAny(period.from));
-    setText("period_to", fmtDateRuAny(period.to));
-
-    // итоговая дата — конец месяца period.to (как карточка)
-    const toD = eng.parseDateAnyToDate(period.to) || new Date();
-    const asOfFinal = eng.endOfMonth(toD);
-
-    setText("stateDate", fmtDateRuAny(asOfFinal));
-    setText("docDate", fmtDateRuAny(new Date()));
-
-    // данные оплат/начислений
-    const allRowsRaw = safeJSON("payments_" + ls, []);
-    const allRows = Array.isArray(allRowsRaw) ? allRowsRaw : [];
-
-    // фильтр по месяцам периода
-    const fromD = eng.parseDateAnyToDate(period.from);
-    const toD2  = eng.parseDateAnyToDate(period.to);
-    let baseRows = allRows;
-
-    if (fromD && toD2){
-      const fromKey = (fromD.getFullYear()*12)+(fromD.getMonth()+1);
-      const toKey = (toD2.getFullYear()*12)+(toD2.getMonth()+1);
-      baseRows = allRows.filter(r => {
-        const y = parseInt(r?.year,10);
-        const m = parseInt(r?.month,10);
-        if (!(Number.isFinite(y) && Number.isFinite(m) && y>0 && m>=1 && m<=12)) return false;
-        const k = (y*12)+m;
-        return k>=fromKey && k<=toKey;
-      });
-    }
-
-    const viewRows = eng.buildCourtViewRows(baseRows, period);
-
-    const tbody = $("debtRows");
-    if (!tbody) return;
-    tbody.innerHTML = "";
-
-    let sumAccrued = 0;
-    let sumPaid = 0;
-    let sumPenaltyAccrued = 0;
-
-    let curMonthKey = null;
-    let curMonthAccrued = 0;
-    let curMonthPaidCum = 0;
-
-    let penaltyBySourceMonth = {};
-    try {
-      if (typeof eng.calcPenaltyBreakdownBySourceMonth === "function") {
-        penaltyBySourceMonth = eng.calcPenaltyBreakdownBySourceMonth(
-          baseRows,
-          asOfFinal,
-          { abonentId: ls, applyAdvanceOffset: true, allowNegativePrincipal: true }
-        ) || {};
-      }
-    } catch (e) {
-      penaltyBySourceMonth = {};
-    }
-
-    function isFirstRowOfMonth(mk){ return curMonthKey !== mk; }
-
-    for (const r of viewRows){
-      const y = parseInt(r.year,10);
-      const m = parseInt(r.month,10);
-      const mk = monthKey(y,m);
-      const firstInMonth = isFirstRowOfMonth(mk);
-
-      if (firstInMonth){
-        curMonthKey = mk;
-        curMonthAccrued = 0;
-        curMonthPaidCum = 0;
-      }
-
-      const acc = eng.toNum(r.accrued);
-      const paid = eng.toNum(r.paid);
-
-      curMonthAccrued = eng.r2(curMonthAccrued + acc);
-      curMonthPaidCum = eng.r2(curMonthPaidCum + paid);
-
-      const monthDebtMain = eng.r2(Math.max(curMonthAccrued - curMonthPaidCum, 0));
-
-      let monthDebtPenalty = 0;
-      if (firstInMonth){
-        const v = penaltyBySourceMonth[mk];
-        monthDebtPenalty = (typeof v === "number") ? v : 0;
-      }
-
-      const monthDebtTotal = eng.r2(monthDebtMain + monthDebtPenalty);
-
-      sumAccrued = eng.r2(sumAccrued + acc);
-      sumPaid = eng.r2(sumPaid + paid);
-
-      if (typeof CRITICAL_ASSERT === "function") {
-        CRITICAL_ASSERT(Number.isFinite(monthDebtMain), "Court: monthDebtMain not finite", { mk, monthDebtMain, r });
-        CRITICAL_ASSERT(monthDebtPenalty >= -0.01, "Court: penalty negative", { mk, monthDebtPenalty, r });
-      }
-
-      renderRow(tbody, {
-        period: `${y} ${monthNameRU(m)}`,
-        accrued: moneyDot(acc),
-        paid: moneyDot(paid),
-        paidDate: (paid > 0) ? (r.paid_date || "") : "",
-        monthDebtMain: moneyDot(monthDebtMain),
-        monthDebtPenalty: moneyDot(monthDebtPenalty),
-        monthDebtTotal: moneyDot(monthDebtTotal)
-      });
-    }
-
-    const finalTotals = eng.calcTotalsAsOfAdjusted(baseRows, asOfFinal, {
-      abonentId: ls, applyAdvanceOffset: true, allowNegativePrincipal: true
-    });
-
-    setText("sumAccrued", moneyDot(sumAccrued));
-    setText("sumPaid", moneyDot(sumPaid));
-    setText("sumPenalty", moneyDot(sumPenaltyAccrued));
-
-    setText("sumMainDebt", moneyDot(finalTotals.principal));
-    setText("sumDebtPenalty", moneyDot(finalTotals.penaltyDebt));
-    setText("sumTotalDebt", moneyDot(finalTotals.total));
-
-    setText("mainDebt", moneyDot(finalTotals.principal));
-    setText("peniDebt", moneyDot(finalTotals.penaltyDebt));
-    setText("totalDebt", moneyDot(finalTotals.total));
-
-    // notes
-    const notesEl = $("notes");
-    if (notesEl){
-      const keyNotes = "notes_" + ls;
-      const stored = storeGet(keyNotes);
-      if (stored !== null) notesEl.value = stored;
-      notesEl.addEventListener("input", function(){
-        if (window.JKHStore && typeof JKHStore.setRaw === "function") {
-          JKHStore.setRaw(keyNotes, notesEl.value);
+        const pFrom = eng.parseDateAnyToDate(period.from);
+        if (pFrom && eng.startOfDay(pFrom) < abonentStart) {
+          period.from = eng.toISODateString(abonentStart);
+          periodSource += " + clampedToAbonentStart";
         }
+      }
+
+      setText("period_from", fmtDateRuAny(period.from));
+      setText("period_to", fmtDateRuAny(period.to));
+
+      const toD = eng.parseDateAnyToDate(period.to) || new Date();
+      const asOfFinal = eng.endOfMonth(toD);
+
+      setText("stateDate", fmtDateRuAny(asOfFinal));
+      setText("docDate", fmtDateRuAny(new Date()));
+
+      const paymentsKey = "payments_" + ctx.abonentId;
+      const allRowsRaw = safeJSON(paymentsKey, [], ctx.readOwner);
+      const allRows = Array.isArray(allRowsRaw) ? allRowsRaw : [];
+
+      if (!allRows.length) {
+        devLog(devMode, "payments-empty", {
+          abonentId: ctx.abonentId,
+          abonentFound: !!abonent,
+          paymentsKey: paymentsKey,
+          dataStatus: String((window.JKH_UI_STATE && window.JKH_UI_STATE.data && window.JKH_UI_STATE.data.status) || ""),
+          ownerContext: ctx
+        });
+      }
+
+      const fromD = eng.parseDateAnyToDate(period.from);
+      const toD2 = eng.parseDateAnyToDate(period.to);
+      let baseRows = allRows;
+      if (fromD && toD2){
+        const fromKey = (fromD.getFullYear() * 12) + (fromD.getMonth() + 1);
+        const toKey = (toD2.getFullYear() * 12) + (toD2.getMonth() + 1);
+        baseRows = allRows.filter(function (r) {
+          const y = parseInt(r && r.year, 10);
+          const m = parseInt(r && r.month, 10);
+          if (!(Number.isFinite(y) && Number.isFinite(m) && y > 0 && m >= 1 && m <= 12)) return false;
+          const k = (y * 12) + m;
+          return k >= fromKey && k <= toKey;
+        });
+      }
+
+      const viewRows = eng.buildCourtViewRows(baseRows, period);
+      const tbody = $("debtRows");
+      if (!tbody) return;
+      tbody.innerHTML = "";
+
+      let sumAccrued = 0;
+      let sumPaid = 0;
+      let sumPenaltyAccrued = 0;
+
+      let curMonthKey = null;
+      let curMonthAccrued = 0;
+      let curMonthPaidCum = 0;
+
+      let penaltyBySourceMonth = {};
+      try {
+        if (typeof eng.calcPenaltyBreakdownBySourceMonth === "function") {
+          penaltyBySourceMonth = eng.calcPenaltyBreakdownBySourceMonth(
+            baseRows,
+            asOfFinal,
+            { abonentId: ctx.abonentId, applyAdvanceOffset: true, allowNegativePrincipal: true }
+          ) || {};
+        }
+      } catch (e) {
+        penaltyBySourceMonth = {};
+      }
+
+      function isFirstRowOfMonth(mk){ return curMonthKey !== mk; }
+
+      for (const r of viewRows){
+        const y = parseInt(r.year, 10);
+        const m = parseInt(r.month, 10);
+        const mk = monthKey(y, m);
+        const firstInMonth = isFirstRowOfMonth(mk);
+
+        if (firstInMonth){
+          curMonthKey = mk;
+          curMonthAccrued = 0;
+          curMonthPaidCum = 0;
+        }
+
+        const acc = eng.toNum(r.accrued);
+        const paid = eng.toNum(r.paid);
+
+        curMonthAccrued = eng.r2(curMonthAccrued + acc);
+        curMonthPaidCum = eng.r2(curMonthPaidCum + paid);
+
+        const monthDebtMain = eng.r2(Math.max(curMonthAccrued - curMonthPaidCum, 0));
+
+        let monthDebtPenalty = 0;
+        if (firstInMonth){
+          const v = penaltyBySourceMonth[mk];
+          monthDebtPenalty = (typeof v === "number") ? v : 0;
+        }
+
+        const monthDebtTotal = eng.r2(monthDebtMain + monthDebtPenalty);
+
+        sumAccrued = eng.r2(sumAccrued + acc);
+        sumPaid = eng.r2(sumPaid + paid);
+
+        if (typeof CRITICAL_ASSERT === "function") {
+          CRITICAL_ASSERT(Number.isFinite(monthDebtMain), "Court: monthDebtMain not finite", { mk: mk, monthDebtMain: monthDebtMain, r: r });
+          CRITICAL_ASSERT(monthDebtPenalty >= -0.01, "Court: penalty negative", { mk: mk, monthDebtPenalty: monthDebtPenalty, r: r });
+        }
+
+        renderRow(tbody, {
+          period: y + " " + monthNameRU(m),
+          accrued: moneyDot(acc),
+          paid: moneyDot(paid),
+          paidDate: (paid > 0) ? (r.paid_date || "") : "",
+          monthDebtMain: moneyDot(monthDebtMain),
+          monthDebtPenalty: moneyDot(monthDebtPenalty),
+          monthDebtTotal: moneyDot(monthDebtTotal)
+        });
+      }
+
+      const finalTotals = eng.calcTotalsAsOfAdjusted(baseRows, asOfFinal, {
+        abonentId: ctx.abonentId, applyAdvanceOffset: true, allowNegativePrincipal: true
       });
-    }
+
+      setText("sumAccrued", moneyDot(sumAccrued));
+      setText("sumPaid", moneyDot(sumPaid));
+      setText("sumPenalty", moneyDot(sumPenaltyAccrued));
+
+      setText("sumMainDebt", moneyDot(finalTotals.principal));
+      setText("sumDebtPenalty", moneyDot(finalTotals.penaltyDebt));
+      setText("sumTotalDebt", moneyDot(finalTotals.total));
+
+      setText("mainDebt", moneyDot(finalTotals.principal));
+      setText("peniDebt", moneyDot(finalTotals.penaltyDebt));
+      setText("totalDebt", moneyDot(finalTotals.total));
+
+      const notesEl = $("notes");
+      if (notesEl){
+        const keyNotes = "notes_" + ctx.abonentId;
+        const stored = storeGet(keyNotes, ctx.readOwner);
+        if (stored !== null) notesEl.value = stored;
+        notesEl.addEventListener("input", function(){
+          if (window.JKHStore && typeof JKHStore.setRaw === "function") {
+            JKHStore.setRaw(keyNotes, notesEl.value, ctx.readOwner);
+          }
+        });
+      }
+
+      devLog(devMode, "diagnostics", {
+        abonentId: ctx.abonentId,
+        abonentFound: !!abonent,
+        startDate: abonentStart ? eng.toISODateString(abonentStart) : "",
+        startDateSource: startResolved.source,
+        reportPeriod: period,
+        periodSource: periodSource,
+        paymentsRows: allRows.length,
+        organizationRequisitesFound: !!(req && Object.keys(req).length),
+        organizationSignersFound: Array.isArray(signers) && signers.length > 0,
+        selectedSigner: signer ? {
+          fio: String(signer.fio || ""),
+          position: String(signer.position || ""),
+          basis: String(signer.basis || "")
+        } : null,
+        jkhDataStatus: String((window.JKH_UI_STATE && window.JKH_UI_STATE.data && window.JKH_UI_STATE.data.status) || ""),
+        ownerContext: ctx
+      });
+    })();
   });
 })();
