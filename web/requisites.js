@@ -105,13 +105,18 @@
     let data = null;
     try { data = await res.json(); } catch (e) {}
 
-    const status = res.status + (data && data.ok === true ? '/ok' : '/fail');
+    const success = res.ok && isApiOk(data);
+    const status = res.status + (success ? '/ok' : '/fail');
     console.log('[requisites][api-store] key=' + key + ' status=' + status);
 
-    if (!res.ok || !data || data.ok !== true) {
-      throw new Error((data && data.error) ? data.error : ('HTTP ' + res.status + ' key=' + key));
+    if (!success) {
+      throw new Error((data && (data.error || data.message)) ? (data.error || data.message) : ('HTTP ' + res.status + ' key=' + key));
     }
     return data;
+  }
+
+  function isApiOk(data) {
+    return !!data && (data.ok === true || data.status === 'ok');
   }
 
   async function apiGetStore(ownerId, key) {
@@ -120,8 +125,8 @@
       const res = await fetch(url, { method: 'GET' });
       if (!res.ok) return { available: false, ok: false, value: null };
       const data = await res.json();
-      if (!data || typeof data.ok !== 'boolean') return { available: false, ok: false, value: null };
-      return { available: true, ok: data.ok === true, value: data.value || '' };
+      if (!data) return { available: false, ok: false, value: null };
+      return { available: true, ok: isApiOk(data), value: data.value || '' };
     } catch (e) {
       return { available: false, ok: false, value: null };
     }
