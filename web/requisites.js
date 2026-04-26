@@ -28,29 +28,38 @@
     try { return JSON.parse(raw); } catch { return fallback; }
   }
 
-  function storeGet(key) {
-    try { return (window.JKHStore && typeof JKHStore.getRaw === "function") ? JKHStore.getRaw(key) : null; } catch { return null; }
-  }
-  function storeSet(key, value) {
-    try { if (window.JKHStore && typeof JKHStore.setRaw === "function") JKHStore.setRaw(key, value); } catch {}
-  }
-  function storeRemove(key) {
-    try { if (window.JKHStore && typeof JKHStore.removeRaw === "function") JKHStore.removeRaw(key); } catch {}
+  function getOwnerId() {
+    try {
+      if (window.JKHStore && typeof JKHStore.getOwnerId === 'function') {
+        return JKHStore.getOwnerId() || '';
+      }
+    } catch (e) {}
+    return '';
   }
 
-  function loadReq() {
-    const raw = storeGet(KEY_REQ);
+  function storeGet(key, ownerId) {
+    try { return (window.JKHStore && typeof JKHStore.getRaw === 'function') ? JKHStore.getRaw(key, ownerId) : null; } catch { return null; }
+  }
+  function storeSet(key, value, ownerId) {
+    try { if (window.JKHStore && typeof JKHStore.setRaw === 'function') JKHStore.setRaw(key, value, ownerId); } catch {}
+  }
+  function storeRemove(key, ownerId) {
+    try { if (window.JKHStore && typeof JKHStore.removeRaw === 'function') JKHStore.removeRaw(key, ownerId); } catch {}
+  }
+
+  function loadReq(ownerId) {
+    const raw = storeGet(KEY_REQ, ownerId);
     if (!raw) return { ...reqDefaults };
     const obj = safeJsonParse(raw, null);
     return { ...reqDefaults, ...(obj || {}) };
   }
 
-  function saveReq(obj) {
-    storeSet(KEY_REQ, JSON.stringify(obj));
+  function saveReq(obj, ownerId) {
+    storeSet(KEY_REQ, JSON.stringify(obj), ownerId);
   }
 
-  function loadSigners() {
-    const raw = storeGet(KEY_SIGNERS);
+  function loadSigners(ownerId) {
+    const raw = storeGet(KEY_SIGNERS, ownerId);
     if (!raw) return JSON.parse(JSON.stringify(signerDefaults));
     const arr = safeJsonParse(raw, null);
     const list = Array.isArray(arr) ? arr : [];
@@ -68,7 +77,7 @@
     return norm.length ? norm : JSON.parse(JSON.stringify(signerDefaults));
   }
 
-  function saveSigners(list) {
+  function saveSigners(list, ownerId) {
     let cleaned = (list || []).filter(s =>
       (s.fio && s.fio.trim() !== '') ||
       (s.position && s.position.trim() !== '') ||
@@ -87,8 +96,43 @@
     });
     if (!found && cleaned[0]) cleaned[0].is_default = true;
 
-    storeSet(KEY_SIGNERS, JSON.stringify(cleaned));
+    storeSet(KEY_SIGNERS, JSON.stringify(cleaned), ownerId);
     return cleaned;
+  }
+
+  async function uploadOwnerData() {
+    try {
+      if (window.JKHRemoteSync && typeof window.JKHRemoteSync.uploadNow === 'function') {
+        const ok = await window.JKHRemoteSync.uploadNow();
+        if (ok === false) throw new Error('JKHRemoteSync.uploadNow returned false');
+        console.log('[requisites][upload] success');
+        return true;
+      }
+      if (window.Data && typeof window.Data.flushDbToServer === 'function') {
+        const ok = await window.Data.flushDbToServer();
+        if (!ok) throw new Error('Data.flushDbToServer returned false');
+        console.log('[requisites][upload] success');
+        return true;
+      }
+      throw new Error('No upload helper available');
+    } catch (e) {
+      console.error('[requisites][upload] error', e);
+      throw e;
+    }
+  }
+
+  async function waitForStoreReady(timeoutMs) {
+    const started = Date.now();
+    const waitStep = 100;
+    while ((Date.now() - started) < timeoutMs) {
+      const hasStore = !!(window.JKHStore && typeof JKHStore.getRaw === 'function');
+      const uiStatus = String((window.JKH_UI_STATE && window.JKH_UI_STATE.data && window.JKH_UI_STATE.data.status) || '');
+      const readyByUI = (uiStatus === 'ready' || uiStatus === 'empty' || uiStatus === 'offline' || uiStatus === 'unauthorized' || uiStatus === 'forbidden');
+      const readyByLegacy = (window.JKH_DATA_READY === true);
+      if (hasStore && (readyByUI || readyByLegacy || !uiStatus)) return true;
+      await new Promise(r => setTimeout(r, waitStep));
+    }
+    return false;
   }
 
   function el(id) { return document.getElementById(id); }
@@ -202,8 +246,17 @@
   function bindMain() {
     const btnSave = el('btnSave');
     const btnReset = el('btnReset');
+    let busy = false;
 
-    btnSave.addEventListener('click', () => {
+    function setBusy(isBusy) {
+      busy = !!isBusy;
+      if (btnSave) btnSave.disabled = busy;
+      if (btnReset) btnReset.disabled = busy;
+    }
+
+    btnSave.addEventListener('click', async () => {
+      if (busy) return;
+
       const req = readReqForm();
       if (!req.full_name) {
         setToast('Заполните поле: Полное наименование (как в суде).', 'err');
@@ -211,41 +264,74 @@
         return;
       }
 
-      saveReq(req);
+      const ownerId = getOwnerId();
+      console.log('[requisites][save] ownerId=' + ownerId);
 
-      const signers = saveSigners(collectSignersFromUI());
+      setBusy(true);
+      try {
+        saveReq(req, ownerId);
+        const signers = saveSigners(collectSignersFromUI(), ownerId);
 
-      // Совместимость с data.js (не ломаем старое)
-      if (window.AbonentsDB) {
-        window.AbonentsDB.orgName = req.full_name;
-        if (req.inn) window.AbonentsDB.orgInn = req.inn;
+        // Совместимость с data.js (не ломаем старое)
+        if (window.AbonentsDB) {
+          window.AbonentsDB.orgName = req.full_name;
+          if (req.inn) window.AbonentsDB.orgInn = req.inn;
 
-        const def = signers.find(s => s.is_default) || signers[0];
-        if (def && def.fio && !window.AbonentsDB.chairman) {
-          window.AbonentsDB.chairman = def.fio;
+          const def = signers.find(s => s.is_default) || signers[0];
+          if (def && def.fio && !window.AbonentsDB.chairman) {
+            window.AbonentsDB.chairman = def.fio;
+          }
         }
-      }
 
-      setToast('Реквизиты и подписанты сохранены.', 'ok');
+        await uploadOwnerData();
+        setToast('Реквизиты и подписанты сохранены.', 'ok');
+      } catch (e) {
+        setToast('Ошибка сохранения: ' + (e?.message || e), 'err');
+      } finally {
+        setBusy(false);
+      }
     });
 
-    btnReset.addEventListener('click', () => {
+    btnReset.addEventListener('click', async () => {
+      if (busy) return;
       if (!confirm('Очистить реквизиты и подписантов?')) return;
-      storeRemove(KEY_REQ);
-      storeRemove(KEY_SIGNERS);
-      fillReqForm({ ...reqDefaults });
-      renderSigners(JSON.parse(JSON.stringify(signerDefaults)));
-      setToast('Данные очищены.', 'ok');
+
+      const ownerId = getOwnerId();
+      console.log('[requisites][save] ownerId=' + ownerId);
+
+      setBusy(true);
+      try {
+        storeRemove(KEY_REQ, ownerId);
+        storeRemove(KEY_SIGNERS, ownerId);
+        await uploadOwnerData();
+
+        fillReqForm({ ...reqDefaults });
+        renderSigners(JSON.parse(JSON.stringify(signerDefaults)));
+        setToast('Данные очищены.', 'ok');
+      } catch (e) {
+        setToast('Ошибка очистки: ' + (e?.message || e), 'err');
+      } finally {
+        setBusy(false);
+      }
     });
   }
 
-  document.addEventListener('DOMContentLoaded', () => {
-    fillReqForm(loadReq());
-    renderSigners(loadSigners());
+  document.addEventListener('DOMContentLoaded', async () => {
+    await waitForStoreReady(8000);
+    const ownerId = getOwnerId();
+    console.log('[requisites][load] ownerId=' + ownerId);
+    fillReqForm(loadReq(ownerId));
+    renderSigners(loadSigners(ownerId));
     bindSigners();
     bindMain();
   });
 
-  window.getOrganizationRequisites = function () { return loadReq(); };
-  window.getOrganizationSigners = function () { return loadSigners(); };
+  window.getOrganizationRequisites = function () {
+    const ownerId = getOwnerId();
+    return loadReq(ownerId);
+  };
+  window.getOrganizationSigners = function () {
+    const ownerId = getOwnerId();
+    return loadSigners(ownerId);
+  };
 })();
