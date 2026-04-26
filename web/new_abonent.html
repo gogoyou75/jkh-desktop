@@ -342,6 +342,10 @@
   </div>
 
   <button class="btn btn-wide" id="btnCreate">СОЗДАТЬ АБОНЕНТА</button>
+  <div id="createStatusBox" class="readonly-box" style="margin-top:10px;">
+    <div class="title">Статус</div>
+    <div id="createStatusText">Готово к созданию абонента.</div>
+  </div>
 
 </div>
 
@@ -1013,6 +1017,10 @@ function prefillFromQueryParams() {
 }
 
 let __createAbonentBusy = false;
+function setCreateStatus(msg){
+  const el = document.getElementById("createStatusText");
+  if (el) el.textContent = String(msg || "");
+}
 
 function setCreateUiBusy(flag){
   const busy = !!flag;
@@ -1034,22 +1042,23 @@ async function createAbonent() {
 
   __createAbonentBusy = true;
   setCreateUiBusy(true);
+  setCreateStatus('Создаём абонента и сохраняем на сервер...');
 
   try {
     const last = document.getElementById("na_last").value.trim();
     const first = document.getElementById("na_first").value.trim();
     const mid = document.getElementById("na_mid").value.trim();
     const fio = joinFio(last, first, mid);
-    if (!last || !first) { alert("Заполните Фамилию и Имя"); return; }
+    if (!last || !first) { setCreateStatus("Заполните Фамилию и Имя."); return; }
 
     const dbRoot = window.AbonentsDB;
-    if (!dbRoot || !dbRoot.abonents) { alert("База AbonentsDB не найдена"); return; }
+    if (!dbRoot || !dbRoot.abonents) { setCreateStatus("База AbonentsDB не найдена."); return; }
 
     const regnum = String(document.getElementById("na_regnum").value || "").trim();
-    if (!regnum) { alert("Квартира не выбрана. Выберите квартиру из списка."); return; }
+    if (!regnum) { setCreateStatus("Квартира не выбрана. Выберите квартиру из списка."); return; }
 
     const premise = dbRoot.premises?.[regnum] || null;
-    if (!premise) { alert("Квартира (premises) по regnum не найдена. Сначала заведите квартиру, затем создавайте абонента."); return; }
+    if (!premise) { setCreateStatus("Квартира (premises) по regnum не найдена. Сначала заведите квартиру, затем создавайте абонента."); return; }
 
     const city = String(document.getElementById("na_city").value || "").trim();
     const street = String(document.getElementById("na_street").value || "").trim();
@@ -1078,7 +1087,7 @@ async function createAbonent() {
     // если квартира занята — требуем явную передачу кнопкой
     if (prevActive && String(prevActive.abonentId || '').trim() && String(prevActive.abonentId || '').trim() !== String(ls).trim()){
       if (!__jkhTransferConfirmed){
-        alert('Квартира уже занята. Чтобы правильно закрыть старого владельца и создать нового, используйте одну из кнопок: «ПЕРЕДАТЬ С ДОЛГОМ и СОЗДАТЬ» или «ПЕРЕДАТЬ БЕЗ ДОЛГА и СОЗДАТЬ».');
+        setCreateStatus('Квартира уже занята. Используйте кнопку передачи: «С долгом» или «Без долга».');
         return;
       }
     }
@@ -1209,7 +1218,7 @@ async function createAbonent() {
     }
 
     if (!(window.saveAbonentsDB && window.saveAbonentsDB())) {
-      alert("Не удалось сохранить абонента локально. Проверьте хранилище и попробуйте ещё раз.");
+      setCreateStatus("Не удалось сохранить абонента локально. Проверьте хранилище и попробуйте ещё раз.");
       return;
     }
 
@@ -1222,7 +1231,7 @@ async function createAbonent() {
     }
 
     if (!(window.saveAbonentsDB && window.saveAbonentsDB())) {
-      alert("Не удалось сохранить результаты перерасчёта. Данные не потеряны, повторите попытку.");
+      setCreateStatus("Не удалось сохранить результаты перерасчёта. Данные не потеряны, повторите попытку.");
       return;
     }
 
@@ -1234,14 +1243,14 @@ async function createAbonent() {
       }
     } catch (e) {
       console.warn('[new_abonent] upload failed', e);
-      alert("Абонент сохранён локально, но выгрузка на сервер не выполнена.\nПовторите позже, данные не потеряны.");
+      setCreateStatus("Ошибка записи на сервер. Данные сохранены локально, но не выгружены.");
       return;
     }
 
     const ret = safeReturnUrl(String(document.getElementById("na_return").value || "").trim());
     if (isImportReturnScenario()) {
       clearDraftNewAbonent();
-      alert("Абонент создан и выгружен. Возвращаюсь к импорту.");
+      setCreateStatus("Абонент создан. Строка Excel восстановится после возврата в импорт.");
       goBackToImport();
       return;
     }
@@ -1251,7 +1260,7 @@ async function createAbonent() {
       return;
     }
 
-    alert("Абонент создан и выгружен.");
+    setCreateStatus("Абонент создан и выгружен.");
     location.href = "abonent_card.html?abonent=" + encodeURIComponent(ls);
   } finally {
     __createAbonentBusy = false;

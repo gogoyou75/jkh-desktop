@@ -398,6 +398,8 @@
     }
   };
 
+  window.JKHBoot?.markReady?.('storage');
+
   // ============================================================
   // Strict mode guard for direct localStorage usage (dev assist)
   // ============================================================

@@ -68,7 +68,7 @@ class KVStore(db.Model):
 
 
 class ImportBatch(db.Model):
-    __tablename__ = "import_batch"
+    __tablename__ = "import_batches"
 
     id = db.Column(db.Integer, primary_key=True, autoincrement=True)
     owner_id = db.Column(db.String(128), nullable=False, index=True)
@@ -104,10 +104,10 @@ class ImportBatch(db.Model):
 
 
 class ImportBatchRow(db.Model):
-    __tablename__ = "import_batch_rows"
+    __tablename__ = "import_rows"
 
     id = db.Column(db.Integer, primary_key=True, autoincrement=True)
-    batch_id = db.Column(db.Integer, db.ForeignKey("import_batch.id"), nullable=False, index=True)
+    batch_id = db.Column(db.Integer, db.ForeignKey("import_batches.id"), nullable=False, index=True)
     row_no = db.Column(db.Integer, nullable=False)
     excel_sheet_name = db.Column(db.String(255), nullable=False, default="")
     excel_row_ref = db.Column(db.String(64), nullable=False, default="")
@@ -159,6 +159,19 @@ class ImportAppliedFingerprint(db.Model):
     __table_args__ = (
         db.UniqueConstraint("owner_id", "import_type", "fingerprint", name="uq_owner_import_fp"),
     )
+
+
+class PaymentAuditLog(db.Model):
+    __tablename__ = "payment_audit_log"
+
+    id = db.Column(db.BigInteger, primary_key=True, autoincrement=True)
+    owner_id = db.Column(db.String(128), nullable=False, index=True)
+    batch_id = db.Column(db.Integer, nullable=False, index=True)
+    row_id = db.Column(db.Integer, nullable=True, index=True)
+    action = db.Column(db.String(32), nullable=False)
+    status = db.Column(db.String(32), nullable=False)
+    details_json = db.Column(db.Text, nullable=False, default="{}")
+    created_at = db.Column(db.DateTime, nullable=False, server_default=text("CURRENT_TIMESTAMP"))
 
 
 def _json_error(error: str, code: int):
@@ -257,6 +270,7 @@ ROW_STATUSES = {
     "validated",
     "invalid",
     "duplicate",
+    "conflict",
     "ready",
     "applied",
     "skipped",
@@ -412,24 +426,42 @@ def to_ledger_paid_date(paid_date_iso: str) -> str:
     return d.strftime("%d.%m.%Y")
 
 
-def build_payment_fingerprint(owner_id, account_uid, account_number, paid_date, amount, source_index, payment_period):
-    owner_norm = _norm_text(owner_id)
+def payment_fingerprint(account_uid, paid_date, amount):
     uid_norm = normalize_uid(account_uid)
-    account_norm = normalize_account_number(account_number)
     paid_date_norm = normalize_paid_date(paid_date)
     amount_norm = normalize_amount(amount)
-    source_index_norm = normalize_source_index(source_index)
-    period_norm = normalize_payment_period(payment_period)
     raw = "|".join([
-        owner_norm,
         uid_norm,
-        account_norm,
         paid_date_norm,
         amount_norm,
-        str(source_index_norm),
-        period_norm,
     ])
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def build_payment_fingerprint(owner_id, account_uid, account_number, paid_date, amount, source_index, payment_period):
+    return payment_fingerprint(account_uid, paid_date, amount)
+
+
+def _classify_payment(account_uid, paid_date, amount, ledger_items):
+    paid_date_norm = normalize_paid_date(paid_date)
+    amount_norm = normalize_amount(amount)
+    account_uid_norm = normalize_uid(account_uid)
+    for item in ledger_items:
+        item_date = _norm_date(item.get("paid_date"))
+        if not item_date:
+            continue
+        if item_date != paid_date_norm:
+            continue
+
+        item_uid = _norm_text(item.get("uid"))
+        if item_uid and item_uid != account_uid_norm:
+            continue
+
+        item_amount = _norm_amount(item.get("paid"))
+        if item_amount == amount_norm:
+            return "DUPLICATE"
+        return "CONFLICT"
+    return "NEW_PAYMENT"
 
 
 def _extract_year_month(period):
@@ -557,9 +589,18 @@ def _extract_abonents_values(obj):
     return obj.values()
 
 
+def _extract_abonents_items(obj):
+    if not isinstance(obj, dict):
+        return []
+    nested = obj.get("abonents")
+    if isinstance(nested, dict):
+        return list(nested.items())
+    return list(obj.items())
+
+
 def _find_owner_accounts(owner_id: str, account_uid: str, account_number: str):
     uid_norm = _norm_text(account_uid).lower()
-    ls_norm = _norm_text(account_number).lower()
+    ls_norm = _norm_text(account_number)
     if not uid_norm:
         return {"matches": [], "uid_found": False}
 
@@ -574,15 +615,22 @@ def _find_owner_accounts(owner_id: str, account_uid: str, account_number: str):
         except Exception:
             continue
 
-        for abonent in _extract_abonents_values(obj):
+        for ls_key, abonent in _extract_abonents_items(obj):
             if not isinstance(abonent, dict):
                 continue
             candidate_uid = _norm_text(abonent.get("uid")).lower()
             if candidate_uid != uid_norm:
                 continue
             uid_hits.append(abonent)
-            candidate_ls = _norm_text(abonent.get("id")).lower()
-            if ls_norm and candidate_ls != ls_norm:
+            key_ls = _norm_text(ls_key)
+            fallback_ls = _norm_text(abonent.get("id"))
+            if ls_norm and key_ls and key_ls == ls_norm:
+                matches.append(abonent)
+                continue
+            if ls_norm and fallback_ls and fallback_ls == ls_norm:
+                matches.append(abonent)
+                continue
+            if ls_norm:
                 continue
             matches.append(abonent)
 
@@ -1110,6 +1158,7 @@ def import_payments_validate(batch_id):
         return _json_error("rows_not_found", 400)
 
     seen = set()
+    seen_uid_date = {}
     sources_map = _load_owner_sources(batch.owner_id)
     valid = invalid = duplicate = 0
 
@@ -1223,29 +1272,46 @@ def import_payments_validate(batch_id):
                     r.source_index,
                     r.payment_period,
                 )
-
-                if r.fingerprint in seen:
+                uid_date_key = f"{r.account_uid}|{r.paid_date}"
+                if uid_date_key in seen_uid_date and seen_uid_date[uid_date_key] != r.amount:
+                    r.status = "conflict"
+                    r.reason_code = "CONFLICT"
+                    r.reason_text = "Найден платёж с тем же UID+paid_date, но другой суммой"
+                    duplicate += 1
+                elif r.fingerprint in seen:
                     r.status = "duplicate"
-                    r.reason_code = "duplicate_in_batch"
+                    r.reason_code = "DUPLICATE"
                     r.reason_text = "Дубликат в текущем батче"
                     duplicate += 1
                 else:
-                    seen.add(r.fingerprint)
-                    already = ImportAppliedFingerprint.query.filter_by(
-                        owner_id=batch.owner_id,
-                        import_type="payments",
-                        fingerprint=r.fingerprint,
-                    ).first()
-                    if already:
-                        r.status = "duplicate"
-                        r.reason_code = "DUPLICATE_FINGERPRINT"
-                        r.reason_text = "Платёж уже был импортирован ранее"
-                        duplicate += 1
-                    else:
+                    key = f"payments_{r.account_number}"
+                    kv = KVStore.query.filter_by(owner=batch.owner_id, k=key).first()
+                    ledger = []
+                    if kv and kv.v:
+                        try:
+                            loaded = json.loads(kv.v)
+                            ledger = loaded if isinstance(loaded, list) else []
+                        except Exception:
+                            ledger = []
+
+                    classification = _classify_payment(r.account_uid, r.paid_date, r.amount, ledger)
+                    if classification == "NEW_PAYMENT":
+                        seen.add(r.fingerprint)
+                        seen_uid_date[uid_date_key] = r.amount
                         r.status = "ready"
-                        r.reason_code = ""
+                        r.reason_code = "NEW_PAYMENT"
                         r.reason_text = ""
                         valid += 1
+                    elif classification == "DUPLICATE":
+                        r.status = "duplicate"
+                        r.reason_code = "DUPLICATE"
+                        r.reason_text = "Платёж уже существует"
+                        duplicate += 1
+                    else:
+                        r.status = "conflict"
+                        r.reason_code = "CONFLICT"
+                        r.reason_text = "Найден платёж с тем же UID+paid_date, но другой суммой"
+                        duplicate += 1
         r.error_details_json = json.dumps(details, ensure_ascii=False)
 
     batch.rows_valid = valid
@@ -1290,7 +1356,7 @@ def import_payments_apply(batch_id):
         return transition_err
 
     rows = ImportBatchRow.query.filter_by(batch_id=batch.id).order_by(ImportBatchRow.row_no.asc()).all()
-    applied_count = skipped_count = duplicate_count = failed_count = 0
+    applied_count = skipped_count = duplicate_count = conflict_count = failed_count = 0
     sources_map = _load_owner_sources(batch.owner_id)
     try:
         batch.status = "applying"
@@ -1298,127 +1364,157 @@ def import_payments_apply(batch_id):
 
         for r in rows:
             if r.status != "ready":
-                if r.status == "duplicate":
+                action = r.reason_code or "SKIPPED"
+                if r.reason_code == "DUPLICATE":
                     duplicate_count += 1
+                elif r.reason_code == "CONFLICT":
+                    conflict_count += 1
                 else:
                     skipped_count += 1
+                db.session.add(PaymentAuditLog(
+                    owner_id=batch.owner_id,
+                    batch_id=batch.id,
+                    row_id=r.id,
+                    action=action,
+                    status="SKIPPED",
+                    details_json=json.dumps({"reason_code": r.reason_code, "reason_text": r.reason_text}, ensure_ascii=False),
+                ))
                 continue
 
-            try:
-                normalized_uid = normalize_uid(r.account_uid)
-                normalized_account_number = normalize_account_number(r.account_number)
-                normalized_paid_date = normalize_paid_date(r.paid_date or r.payment_date)
-                normalized_period = normalize_payment_period(r.payment_period)
-                normalized_amount = normalize_amount(r.amount)
-                normalized_source_index = normalize_source_index(r.source_index)
-                fingerprint = build_payment_fingerprint(
-                    batch.owner_id,
-                    normalized_uid,
-                    normalized_account_number,
-                    normalized_paid_date,
-                    normalized_amount,
-                    normalized_source_index,
-                    normalized_period,
-                )
+            normalized_uid = normalize_uid(r.account_uid)
+            normalized_account_number = normalize_account_number(r.account_number)
+            normalized_paid_date = normalize_paid_date(r.paid_date or r.payment_date)
+            normalized_period = normalize_payment_period(r.payment_period)
+            normalized_amount = normalize_amount(r.amount)
+            normalized_source_index = normalize_source_index(r.source_index)
+            fingerprint = payment_fingerprint(normalized_uid, normalized_paid_date, normalized_amount)
 
-                key = f"payments_{normalized_account_number}"
-                with db.session.begin_nested():
-                    fingerprint_row = ImportAppliedFingerprint(
-                        owner_id=batch.owner_id,
-                        import_type="payments",
-                        fingerprint=fingerprint,
-                        account_uid=normalized_uid,
-                        account_number=normalized_account_number,
-                        payment_period=normalized_period,
-                        paid_date=datetime.strptime(normalized_paid_date, "%Y-%m-%d").date(),
-                        amount=Decimal(normalized_amount),
-                        source_index=normalized_source_index,
-                        batch_id=batch.id,
-                    )
-                    db.session.add(fingerprint_row)
-                    db.session.flush()
-
-                    kv = KVStore.query.filter_by(owner=batch.owner_id, k=key).with_for_update().first()
-                    ledger = []
-                    if kv and kv.v:
-                        try:
-                            ledger = json.loads(kv.v)
-                            if not isinstance(ledger, list):
-                                ledger = []
-                        except Exception:
-                            ledger = []
-
-                    max_id = 0
-                    for x in ledger:
-                        try:
-                            max_id = max(max_id, int(x.get("id") or 0))
-                        except Exception:
-                            continue
-                    next_id = max_id + 1
-                    yy, mm = _extract_year_month(normalized_period)
-                    ledger_item = {
-                        "id": next_id,
-                        "year": yy,
-                        "month": mm,
-                        "accrued": 0,
-                        "paid": float(normalized_amount),
-                        "paid_date": to_ledger_paid_date(normalized_paid_date),
-                        "source": sources_map.get(normalized_source_index) or r.source_label or f"Платёж {normalized_source_index}",
-                        "payment_period": normalized_period,
-                    }
-                    ledger.append(ledger_item)
-                    if kv:
-                        kv.v = json.dumps(ledger, ensure_ascii=False)
-                    else:
-                        db.session.add(KVStore(owner=batch.owner_id, k=key, v=json.dumps(ledger, ensure_ascii=False)))
-
-                    payment_id = f"{normalized_account_number}:{next_id}"
-                    fingerprint_row.payment_id = payment_id
-                    r.account_uid = normalized_uid
-                    r.account_number = normalized_account_number
-                    r.payment_date = normalized_paid_date
-                    r.paid_date = normalized_paid_date
-                    r.payment_period = normalized_period
-                    r.amount = normalized_amount
-                    r.source_index = normalized_source_index
-                    r.fingerprint = fingerprint
-                    r.matched_payment_id = payment_id
-                    r.applied_at = datetime.utcnow()
-                    r.status = "applied"
-                    r.reason_code = ""
-                    r.reason_text = ""
-
-                applied_count += 1
-            except IntegrityError:
+            key = f"payments_{normalized_account_number}"
+            existing_fingerprint = ImportAppliedFingerprint.query.filter_by(
+                owner_id=batch.owner_id,
+                import_type="payments",
+                fingerprint=fingerprint,
+            ).first()
+            if existing_fingerprint:
                 r.status = "duplicate"
-                r.reason_code = "DUPLICATE_FINGERPRINT"
-                r.reason_text = "Платёж уже был импортирован ранее"
+                r.reason_code = "DUPLICATE"
+                r.reason_text = "Платёж уже применён ранее"
+                r.matched_payment_id = existing_fingerprint.payment_id or ""
                 duplicate_count += 1
-            except Exception as ex:
-                r.status = "failed"
-                r.reason_code = "APPLY_ERROR"
-                r.reason_text = str(ex)[:1000]
-                failed_count += 1
+                db.session.add(PaymentAuditLog(
+                    owner_id=batch.owner_id,
+                    batch_id=batch.id,
+                    row_id=r.id,
+                    action="DUPLICATE",
+                    status="SKIPPED",
+                    details_json=json.dumps({"reason_code": r.reason_code, "fingerprint": fingerprint}, ensure_ascii=False),
+                ))
+                continue
+
+            fingerprint_row = ImportAppliedFingerprint(
+                owner_id=batch.owner_id,
+                import_type="payments",
+                fingerprint=fingerprint,
+                account_uid=normalized_uid,
+                account_number=normalized_account_number,
+                payment_period=normalized_period,
+                paid_date=datetime.strptime(normalized_paid_date, "%Y-%m-%d").date(),
+                amount=Decimal(normalized_amount),
+                source_index=normalized_source_index,
+                batch_id=batch.id,
+            )
+            db.session.add(fingerprint_row)
+            db.session.flush()
+
+            kv = KVStore.query.filter_by(owner=batch.owner_id, k=key).with_for_update().first()
+            ledger = []
+            if kv and kv.v:
+                try:
+                    ledger = json.loads(kv.v)
+                    if not isinstance(ledger, list):
+                        ledger = []
+                except Exception:
+                    ledger = []
+
+            max_id = 0
+            for x in ledger:
+                try:
+                    max_id = max(max_id, int(x.get("id") or 0))
+                except Exception:
+                    continue
+            next_id = max_id + 1
+            yy, mm = _extract_year_month(normalized_period)
+            ledger_item = {
+                "id": next_id,
+                "uid": normalized_uid,
+                "year": yy,
+                "month": mm,
+                "accrued": 0,
+                "paid": float(normalized_amount),
+                "paid_date": to_ledger_paid_date(normalized_paid_date),
+                "source": sources_map.get(normalized_source_index) or r.source_label or f"Платёж {normalized_source_index}",
+                "payment_period": normalized_period,
+                "fingerprint": fingerprint,
+            }
+            ledger.append(ledger_item)
+            if kv:
+                kv.v = json.dumps(ledger, ensure_ascii=False)
+            else:
+                db.session.add(KVStore(owner=batch.owner_id, k=key, v=json.dumps(ledger, ensure_ascii=False)))
+
+            payment_id = f"{normalized_account_number}:{next_id}"
+            fingerprint_row.payment_id = payment_id
+            r.account_uid = normalized_uid
+            r.account_number = normalized_account_number
+            r.payment_date = normalized_paid_date
+            r.paid_date = normalized_paid_date
+            r.payment_period = normalized_period
+            r.amount = normalized_amount
+            r.source_index = normalized_source_index
+            r.fingerprint = fingerprint
+            r.matched_payment_id = payment_id
+            r.applied_at = datetime.utcnow()
+            r.status = "applied"
+            r.reason_code = ""
+            r.reason_text = ""
+            db.session.add(PaymentAuditLog(
+                owner_id=batch.owner_id,
+                batch_id=batch.id,
+                row_id=r.id,
+                action="NEW_PAYMENT",
+                status="APPLIED",
+                details_json=json.dumps({"payment_id": payment_id, "fingerprint": fingerprint}, ensure_ascii=False),
+            ))
+            applied_count += 1
 
         batch.rows_applied = applied_count
-        batch.status = "failed" if failed_count > 0 else "applied"
+        batch.status = "applied"
         batch.finished_at = datetime.utcnow()
         if batch.uploaded_at and app.config["IMPORT_UPLOAD_BLOB_TTL_DAYS"] <= 0:
             batch.upload_blob = b""
         db.session.commit()
+    except IntegrityError:
+        db.session.rollback()
+        batch = ImportBatch.query.filter_by(id=batch.id).first()
+        batch.status = "failed"
+        batch.finished_at = datetime.utcnow()
+        db.session.commit()
+        failed_count = 1
+        return jsonify(ok=False, error="apply_failed", details="fingerprint_conflict"), 500
     except Exception as ex:
         db.session.rollback()
         batch = ImportBatch.query.filter_by(id=batch.id).first()
         batch.status = "failed"
         batch.finished_at = datetime.utcnow()
         db.session.commit()
-        failed_count += 1
+        failed_count = 1
         return jsonify(ok=False, error="apply_failed", details=str(ex)), 500
 
     summary = {
         "applied_count": applied_count,
         "skipped_count": skipped_count,
         "duplicate_count": duplicate_count,
+        "conflict_count": conflict_count,
         "failed_count": failed_count,
     }
     return jsonify(ok=True, batch=_batch_payload(batch), summary=summary)
@@ -1450,7 +1546,7 @@ def import_payments_errors(batch_id):
 
     bad = ImportBatchRow.query.filter(
         ImportBatchRow.batch_id == batch.id,
-        ImportBatchRow.status.in_(["invalid", "failed", "duplicate"]),
+        ImportBatchRow.status.in_(["invalid", "failed", "duplicate", "conflict"]),
     ).order_by(ImportBatchRow.row_no.asc()).all()
     by_reason = {}
     for r in bad:
@@ -1475,7 +1571,7 @@ def import_payments_errors_export(batch_id):
 
     bad = ImportBatchRow.query.filter(
         ImportBatchRow.batch_id == batch.id,
-        ImportBatchRow.status.in_(["invalid", "failed", "duplicate"]),
+        ImportBatchRow.status.in_(["invalid", "failed", "duplicate", "conflict"]),
     ).order_by(ImportBatchRow.row_no.asc()).all()
 
     fmt = _norm_text(request.args.get("format")).lower() or "csv"

@@ -626,5 +626,6 @@
       };
     }
   };
+  window.JKHBoot?.markReady?.('autoaccrual');
   try{ console.log('[JKHAutoAccrual] engine loaded', window.JKHAutoAccrual.version); }catch(e){}
 })();
