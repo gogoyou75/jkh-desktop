@@ -174,21 +174,6 @@
     }
   }
 
-  async function uploadOwnerDataOptional() {
-    try {
-      if (window.JKHRemoteSync && typeof window.JKHRemoteSync.uploadNow === 'function') {
-        const ok = await window.JKHRemoteSync.uploadNow();
-        if (ok === false) throw new Error('JKHRemoteSync.uploadNow returned false');
-        console.log('[requisites][upload] success');
-        return true;
-      }
-      return false;
-    } catch (e) {
-      console.warn('[requisites][upload] warning', e);
-      return false;
-    }
-  }
-
   async function waitForStoreReady(timeoutMs) {
     const started = Date.now();
     const waitStep = 100;
@@ -370,7 +355,6 @@
           }
         }
 
-        await uploadOwnerDataOptional();
         setToast('Реквизиты и подписанты сохранены.', 'ok');
       } catch (e) {
         setToast('Ошибка сохранения: ' + (e?.message || e), 'err');
@@ -399,11 +383,10 @@
         storeRemove(KEY_SIGNERS, ownerId);
 
         await verifyCleared(ownerId);
-        await uploadOwnerDataOptional();
 
         fillReqForm({ ...reqDefaults });
         renderSigners(JSON.parse(JSON.stringify(signerDefaults)));
-        setToast('Данные очищены.', 'ok');
+        setToast('Реквизиты и подписанты очищены.', 'ok');
       } catch (e) {
         setToast('Ошибка очистки: ' + (e?.message || e), 'err');
       } finally {
