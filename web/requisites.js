@@ -1,4 +1,4 @@
-// requisites.js — Реквизиты + подписанты (server-first via JKHStore)
+// requisites.js — Реквизиты + подписанты (explicit /api/store persist + verify)
 
 (function () {
   const KEY_REQ = 'organization_requisites_v1';
@@ -54,10 +54,6 @@
     return { ...reqDefaults, ...(obj || {}) };
   }
 
-  function saveReq(obj, ownerId) {
-    storeSet(KEY_REQ, JSON.stringify(obj), ownerId);
-  }
-
   function loadSigners(ownerId) {
     const raw = storeGet(KEY_SIGNERS, ownerId);
     if (!raw) return JSON.parse(JSON.stringify(signerDefaults));
@@ -77,7 +73,7 @@
     return norm.length ? norm : JSON.parse(JSON.stringify(signerDefaults));
   }
 
-  function saveSigners(list, ownerId) {
+  function normalizeSigners(list) {
     let cleaned = (list || []).filter(s =>
       (s.fio && s.fio.trim() !== '') ||
       (s.position && s.position.trim() !== '') ||
@@ -96,11 +92,84 @@
     });
     if (!found && cleaned[0]) cleaned[0].is_default = true;
 
-    storeSet(KEY_SIGNERS, JSON.stringify(cleaned), ownerId);
     return cleaned;
   }
 
-  async function uploadOwnerData() {
+  async function apiPostStore(ownerId, key, value) {
+    const res = await fetch('/api/store', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ owner: ownerId, key, value })
+    });
+
+    let data = null;
+    try { data = await res.json(); } catch (e) {}
+
+    const status = res.status + (data && data.ok === true ? '/ok' : '/fail');
+    console.log('[requisites][api-store] key=' + key + ' status=' + status);
+
+    if (!res.ok || !data || data.ok !== true) {
+      throw new Error((data && data.error) ? data.error : ('HTTP ' + res.status + ' key=' + key));
+    }
+    return data;
+  }
+
+  async function apiGetStore(ownerId, key) {
+    try {
+      const url = '/api/store?owner=' + encodeURIComponent(ownerId) + '&key=' + encodeURIComponent(key);
+      const res = await fetch(url, { method: 'GET' });
+      if (!res.ok) return { available: false, ok: false, value: null };
+      const data = await res.json();
+      if (!data || typeof data.ok !== 'boolean') return { available: false, ok: false, value: null };
+      return { available: true, ok: data.ok === true, value: data.value || '' };
+    } catch (e) {
+      return { available: false, ok: false, value: null };
+    }
+  }
+
+  async function verifySaved(ownerId) {
+    const localReq = storeGet(KEY_REQ, ownerId);
+    const localSigners = storeGet(KEY_SIGNERS, ownerId);
+
+    const localReqOk = !!localReq;
+    const localSignersOk = !!localSigners;
+
+    const srvReq = await apiGetStore(ownerId, KEY_REQ);
+    const srvSigners = await apiGetStore(ownerId, KEY_SIGNERS);
+
+    const reqOk = localReqOk && (!srvReq.available || (srvReq.ok && !!srvReq.value));
+    const signersOk = localSignersOk && (!srvSigners.available || (srvSigners.ok && !!srvSigners.value));
+
+    console.log('[requisites][verify] requisites ' + (reqOk ? 'ok' : 'fail'));
+    console.log('[requisites][verify] signers ' + (signersOk ? 'ok' : 'fail'));
+
+    if (!reqOk || !signersOk) {
+      throw new Error('Контроль сохранения не пройден');
+    }
+  }
+
+  async function verifyCleared(ownerId) {
+    const localReq = storeGet(KEY_REQ, ownerId);
+    const localSigners = storeGet(KEY_SIGNERS, ownerId);
+
+    const localReqOk = !localReq;
+    const localSignersOk = !localSigners;
+
+    const srvReq = await apiGetStore(ownerId, KEY_REQ);
+    const srvSigners = await apiGetStore(ownerId, KEY_SIGNERS);
+
+    const reqOk = localReqOk && (!srvReq.available || !srvReq.value);
+    const signersOk = localSignersOk && (!srvSigners.available || !srvSigners.value);
+
+    console.log('[requisites][verify] requisites ' + (reqOk ? 'ok' : 'fail'));
+    console.log('[requisites][verify] signers ' + (signersOk ? 'ok' : 'fail'));
+
+    if (!reqOk || !signersOk) {
+      throw new Error('Контроль очистки не пройден');
+    }
+  }
+
+  async function uploadOwnerDataOptional() {
     try {
       if (window.JKHRemoteSync && typeof window.JKHRemoteSync.uploadNow === 'function') {
         const ok = await window.JKHRemoteSync.uploadNow();
@@ -108,16 +177,10 @@
         console.log('[requisites][upload] success');
         return true;
       }
-      if (window.Data && typeof window.Data.flushDbToServer === 'function') {
-        const ok = await window.Data.flushDbToServer();
-        if (!ok) throw new Error('Data.flushDbToServer returned false');
-        console.log('[requisites][upload] success');
-        return true;
-      }
-      throw new Error('No upload helper available');
+      return false;
     } catch (e) {
-      console.error('[requisites][upload] error', e);
-      throw e;
+      console.warn('[requisites][upload] warning', e);
+      return false;
     }
   }
 
@@ -267,11 +330,25 @@
 
       const ownerId = getOwnerId();
       console.log('[requisites][save] ownerId=' + ownerId);
+      if (!ownerId) {
+        setToast('Не определена база пользователя/owner. Сохранение остановлено.', 'err');
+        return;
+      }
 
       setBusy(true);
       try {
-        saveReq(req, ownerId);
-        const signers = saveSigners(collectSignersFromUI(), ownerId);
+        const signers = normalizeSigners(collectSignersFromUI());
+
+        const reqRaw = JSON.stringify(req);
+        const signersRaw = JSON.stringify(signers);
+
+        storeSet(KEY_REQ, reqRaw, ownerId);
+        storeSet(KEY_SIGNERS, signersRaw, ownerId);
+
+        await apiPostStore(ownerId, KEY_REQ, reqRaw);
+        await apiPostStore(ownerId, KEY_SIGNERS, signersRaw);
+
+        await verifySaved(ownerId);
 
         // Совместимость с data.js (не ломаем старое)
         if (window.AbonentsDB) {
@@ -284,7 +361,7 @@
           }
         }
 
-        await uploadOwnerData();
+        await uploadOwnerDataOptional();
         setToast('Реквизиты и подписанты сохранены.', 'ok');
       } catch (e) {
         setToast('Ошибка сохранения: ' + (e?.message || e), 'err');
@@ -299,12 +376,21 @@
 
       const ownerId = getOwnerId();
       console.log('[requisites][save] ownerId=' + ownerId);
+      if (!ownerId) {
+        setToast('Не определена база пользователя/owner. Сохранение остановлено.', 'err');
+        return;
+      }
 
       setBusy(true);
       try {
+        await apiPostStore(ownerId, KEY_REQ, '');
+        await apiPostStore(ownerId, KEY_SIGNERS, '');
+
         storeRemove(KEY_REQ, ownerId);
         storeRemove(KEY_SIGNERS, ownerId);
-        await uploadOwnerData();
+
+        await verifyCleared(ownerId);
+        await uploadOwnerDataOptional();
 
         fillReqForm({ ...reqDefaults });
         renderSigners(JSON.parse(JSON.stringify(signerDefaults)));
