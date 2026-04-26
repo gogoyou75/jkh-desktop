@@ -7,19 +7,9 @@
     <link rel="stylesheet" href="style.css">
 
     <script src="auth.js"></script>
-  <script src="storage.js"></script>
-  <script src="data.js"></script>
+    <script src="storage.js"></script>
+    <script src="data.js"></script>
     <script src="layout.js"></script>
-
-<script>
-  // scoped key helper for this page
-  function _k(key){
-    try{ if(window.JKHStorage&&typeof JKHStorage.k==='function') return JKHStorage.k(key); }catch(e){}
-    try{ if(window.Auth&&typeof Auth.getActiveDbOwnerId==='function') return 'jkhdb::'+Auth.getActiveDbOwnerId()+'::'+key; }catch(e){}
-    return key;
-  }
-</script>
-
 </head>
 
 <body>
@@ -27,6 +17,8 @@
 
 <h2>Ставка рефинансирования</h2>
 
+<div id="refRatesAccessInfo" style="margin:10px 0 14px; padding:10px 12px; border:1px solid #d0d0d0; background:#fafafa; font-size:13px; display:none;"></div>
+<div id="refRatesStatus" style="margin:10px 0 14px; padding:10px 12px; border:1px solid #d0d0d0; background:#fff; font-size:13px; display:none;"></div>
 
 <div style="border:2px solid #000; padding:12px; background:#fff; margin:12px 0 14px;">
     <div style="font-size:12px; opacity:.85; line-height:1.35;">
@@ -84,57 +76,123 @@
 
 <script>
 /* =========================================================
-   refinancing.html — CRUD ставок (обычные + мораторий)
+   refinancing.html — глобальные ставки рефинансирования
 
-   Хранение:
-   - localStorage["refinancing_rates_normal_v1"]     = [{from:"DD.MM.YYYY", rate:"7.50"}...]
-   - localStorage["refinancing_rates_moratorium_v1"] = [{from:"DD.MM.YYYY", rate:"0.00"}...]
+   Канон проекта:
+   - refinancing_rates_normal_v1 и refinancing_rates_moratorium_v1 = GLOBAL keys.
+   - Редактировать может только администратор.
+   - Все остальные роли имеют только визуальный доступ.
+   - На этой странице НЕ создаются демо-ставки и НЕ используется legacy localStorage.
+   - Серверная защита остается в backend/app.py: запись GLOBAL_KEYS разрешена только admin.
    ========================================================= */
 
 const KEY_NORMAL = "refinancing_rates_normal_v1";
 const KEY_MORA   = "refinancing_rates_moratorium_v1";
-function storeGet(key){ return (window.JKHStore && JKHStore.getRaw) ? JKHStore.getRaw(key) : null; }
-function storeSet(key, value){ if (window.JKHStore && JKHStore.setRaw) JKHStore.setRaw(key, value); }
+
+const REF_STATE = {
+    normal: [],
+    mora: [],
+    editable: false,
+    loaded: false
+};
 
 function currentUser(){
     try{ return (window.Auth && typeof Auth.getCurrentUser === "function") ? Auth.getCurrentUser() : null; }catch(e){ return null; }
 }
+
 function canEditRefRates(){
     const u = currentUser();
     return !!(u && u.role === "admin");
 }
-async function uploadRefRatesNow(){
+
+function activeOwnerId(){
     try{
-        if (window.JKHRemoteSync && typeof window.JKHRemoteSync.uploadNow === "function"){
-            await window.JKHRemoteSync.uploadNow();
-        }
-    }catch(e){
-        try{ console.warn("[refinancing] uploadNow failed:", e); }catch(_){}
-    }
-}
-function applyReadOnlyMode(){
-    const editable = canEditRefRates();
-    if (editable) return;
-    document.querySelectorAll("#addNormalBtn, #addMoraBtn, #saveNormalBtn, #saveMoraBtn").forEach(btn => {
-        btn.disabled = true;
-        btn.title = "Только администратор может изменять ставки рефинансирования";
-        btn.style.opacity = "0.6";
-        btn.style.cursor = "not-allowed";
-    });
-    document.querySelectorAll(".r-from, .r-rate").forEach(inp => inp.disabled = true);
-    const info = document.createElement("div");
-    info.style.cssText = "margin:10px 0 14px; padding:10px 12px; border:1px solid #d0d0d0; background:#fafafa; font-size:13px;";
-    info.textContent = "Ставки рефинансирования общие для всей системы. Изменять их может только администратор.";
-    const h2 = document.querySelector("h2");
-    if (h2 && h2.parentNode) h2.parentNode.insertBefore(info, h2.nextSibling);
+        if (window.Auth && typeof Auth.getActiveDbOwnerId === "function") return Auth.getActiveDbOwnerId();
+    }catch(e){}
+    try{
+        if (window.JKHStore && typeof JKHStore.getOwnerId === "function") return JKHStore.getOwnerId();
+    }catch(e){}
+    return "";
 }
 
 function esc(s){
     return String(s ?? "")
         .replaceAll("&","&amp;").replaceAll("<","&lt;")
-        .replaceAll(">","&gt;")
-        .replaceAll('"',"&quot;")
+        .replaceAll(">","&gt;").replaceAll('"',"&quot;")
         .replaceAll("'","&#039;");
+}
+
+function showStatus(message, kind){
+    const box = document.getElementById("refRatesStatus");
+    if (!box) return;
+    const msg = String(message || "").trim();
+    if (!msg){
+        box.style.display = "none";
+        box.textContent = "";
+        return;
+    }
+    const k = String(kind || "info");
+    let bg = "#fff";
+    let border = "#d0d0d0";
+    if (k === "error") { bg = "#fff4f4"; border = "#b00000"; }
+    if (k === "success") { bg = "#f3fff3"; border = "#4b8b4b"; }
+    if (k === "warn") { bg = "#fffbea"; border = "#b58900"; }
+    box.style.display = "block";
+    box.style.background = bg;
+    box.style.borderColor = border;
+    box.textContent = msg;
+}
+
+function showAccessInfo(){
+    const box = document.getElementById("refRatesAccessInfo");
+    if (!box) return;
+    const u = currentUser();
+    if (!u){
+        box.style.display = "block";
+        box.textContent = "Для просмотра серверных ставок нужно войти в систему.";
+        return;
+    }
+    if (canEditRefRates()){
+        box.style.display = "block";
+        box.textContent = "Режим администратора: ставки рефинансирования являются общими для всей системы и сохраняются как GLOBAL-данные.";
+        return;
+    }
+    box.style.display = "block";
+    box.textContent = "Ставки рефинансирования общие для всей системы. Изменять их может только администратор. Для текущей роли доступен только просмотр.";
+}
+
+function setButtonsBusy(busy){
+    document.querySelectorAll("#addNormalBtn, #addMoraBtn, #saveNormalBtn, #saveMoraBtn").forEach(btn => {
+        if (!btn) return;
+        btn.dataset.busy = busy ? "1" : "0";
+        btn.disabled = !!busy || !REF_STATE.editable;
+        btn.style.opacity = btn.disabled ? "0.6" : "";
+        btn.style.cursor = btn.disabled ? "not-allowed" : "";
+    });
+}
+
+function applyAccessMode(){
+    REF_STATE.editable = canEditRefRates();
+    showAccessInfo();
+
+    document.querySelectorAll("#addNormalBtn, #addMoraBtn, #saveNormalBtn, #saveMoraBtn").forEach(btn => {
+        btn.disabled = !REF_STATE.editable;
+        btn.title = REF_STATE.editable ? "" : "Только администратор может изменять ставки рефинансирования";
+        btn.style.opacity = btn.disabled ? "0.6" : "";
+        btn.style.cursor = btn.disabled ? "not-allowed" : "";
+    });
+
+    document.querySelectorAll(".r-from, .r-rate").forEach(inp => {
+        inp.disabled = !REF_STATE.editable;
+        inp.title = REF_STATE.editable ? "" : "Только просмотр";
+    });
+
+    document.querySelectorAll(".row-del").forEach(btn => {
+        btn.disabled = !REF_STATE.editable;
+        btn.title = REF_STATE.editable ? "Удалить" : "Только администратор может удалять строки";
+        btn.style.opacity = btn.disabled ? "0.6" : "";
+        btn.style.cursor = btn.disabled ? "not-allowed" : "pointer";
+    });
 }
 
 function toISO(dmy){
@@ -143,9 +201,29 @@ function toISO(dmy){
     return `${m[3]}-${m[2]}-${m[1]}`;
 }
 
-/** Маска даты: ввод цифр → ДД.ММ.ГГГГ (автовставка точек) */
+function toDMY(value){
+    const s = String(value || "").trim();
+    if (!s) return "";
+    let m = s.match(/^(\d{2})\.(\d{2})\.(\d{4})$/);
+    if (m) return `${m[1]}.${m[2]}.${m[3]}`;
+    m = s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (m) return `${m[3]}.${m[2]}.${m[1]}`;
+    return s;
+}
+
+function isValidDMY(dmy){
+    const m = String(dmy || "").trim().match(/^(\d{2})\.(\d{2})\.(\d{4})$/);
+    if (!m) return false;
+    const dd = Number(m[1]);
+    const mm = Number(m[2]);
+    const yy = Number(m[3]);
+    const d = new Date(yy, mm - 1, dd, 12, 0, 0);
+    return d.getFullYear() === yy && d.getMonth() === mm - 1 && d.getDate() === dd;
+}
+
+/** Маска даты: ввод цифр → ДД.ММ.ГГГГ */
 function formatDMYFromDigits(digits){
-    const d = (digits || "").replace(/\D/g, "").slice(0, 8); // максимум 8 цифр: ddmmyyyy
+    const d = String(digits || "").replace(/\D/g, "").slice(0, 8);
     const p1 = d.slice(0, 2);
     const p2 = d.slice(2, 4);
     const p3 = d.slice(4, 8);
@@ -154,20 +232,15 @@ function formatDMYFromDigits(digits){
     return `${p1}.${p2}.${p3}`;
 }
 
-/** Применить маску к input даты и аккуратно сохранить позицию курсора */
 function applyDateMaskToInput(inputEl){
-    if (!inputEl) return;
+    if (!inputEl || inputEl.disabled) return;
 
     const old = String(inputEl.value || "");
     const oldPos = inputEl.selectionStart ?? old.length;
-
-    // сколько цифр было слева от курсора
     const digitsLeft = old.slice(0, oldPos).replace(/\D/g, "").length;
-
     const formatted = formatDMYFromDigits(old);
     inputEl.value = formatted;
 
-    // восстановим курсор примерно туда же по количеству цифр слева
     let pos = 0;
     let seenDigits = 0;
     while (pos < formatted.length){
@@ -175,62 +248,70 @@ function applyDateMaskToInput(inputEl){
         pos++;
         if (seenDigits >= digitsLeft) break;
     }
-    inputEl.setSelectionRange(pos, pos);
+    try{ inputEl.setSelectionRange(pos, pos); }catch(e){}
 }
 
-function loadList(key){
+function normalizeList(rawValue){
     try{
-        const raw = storeGet(key);
-        const arr = raw ? JSON.parse(raw) : [];
+        const arr = rawValue ? JSON.parse(rawValue) : [];
         if (!Array.isArray(arr)) return [];
         return arr
-            .map(x => ({ from: String(x.from||""), rate: String(x.rate||"") }))
-            .filter(x => x.from.trim() || x.rate.trim());
-    }catch{
+            .map(x => ({
+                from: toDMY(x && (x.from ?? x.dateFrom ?? x.start ?? x.fromISO ?? x.from_iso)),
+                rate: String(x && (x.rate ?? x.value ?? "") || "").trim().replace(",", ".")
+            }))
+            .filter(x => x.from.trim() || x.rate.trim())
+            .sort(compareRatesByDate);
+    }catch(e){
+        console.warn("[refinancing] invalid JSON for rates", e);
         return [];
     }
 }
 
-function saveList(key, list){
-    const cleaned = (list||[])
-        .map(x => ({ from: String(x.from||"").trim(), rate: String(x.rate||"").trim() }))
-        .filter(x => x.from || x.rate);
+function compareRatesByDate(a,b){
+    const ia = toISO(a.from);
+    const ib = toISO(b.from);
+    if (!ia && !ib) return 0;
+    if (!ia) return 1;
+    if (!ib) return -1;
+    return ia < ib ? -1 : (ia > ib ? 1 : 0);
+}
 
-    cleaned.sort((a,b) => {
-        const da = new Date(toISO(a.from));
-        const db = new Date(toISO(b.from));
-        if (da.toString()==="Invalid Date" && db.toString()==="Invalid Date") return 0;
-        if (da.toString()==="Invalid Date") return 1;
-        if (db.toString()==="Invalid Date") return -1;
-        return da - db;
-    });
-
-    storeSet(key, JSON.stringify(cleaned));
+function cleanList(list){
+    const cleaned = (list || [])
+        .map(x => ({
+            from: String(x.from || "").trim(),
+            rate: String(x.rate || "").trim().replace(",", ".")
+        }))
+        .filter(x => x.from || x.rate)
+        .sort(compareRatesByDate);
+    return cleaned;
 }
 
 function validate(list){
     const errors = [];
 
     list.forEach((r, idx) => {
-        if (!r.from.trim() && !r.rate.trim()) return;
+        const from = String(r.from || "").trim();
+        const rate = String(r.rate || "").trim();
+        if (!from && !rate) return;
 
-        if (!/^(\d{2})\.(\d{2})\.(\d{4})$/.test(r.from.trim())){
-            errors.push(`Строка ${idx+1}: неверная дата (нужно ДД.ММ.ГГГГ).`);
-        }else{
-            const d = new Date(toISO(r.from.trim()));
-            if (d.toString()==="Invalid Date") errors.push(`Строка ${idx+1}: неверная дата.`);
+        if (!isValidDMY(from)){
+            errors.push(`Строка ${idx+1}: неверная дата. Нужно ДД.ММ.ГГГГ.`);
         }
 
-        if (r.rate.trim()){
-            const n = Number(String(r.rate).replace(",", "."));
+        if (!rate){
+            errors.push(`Строка ${idx+1}: ставка не заполнена.`);
+        }else{
+            const n = Number(rate.replace(",", "."));
             if (!Number.isFinite(n)) errors.push(`Строка ${idx+1}: ставка не число.`);
-            if (n < 0 || n > 100) errors.push(`Строка ${idx+1}: ставка должна быть 0..100.`);
+            else if (n < 0 || n > 100) errors.push(`Строка ${idx+1}: ставка должна быть 0..100.`);
         }
     });
 
     const map = new Map();
     list.forEach((r, idx) => {
-        const k = r.from.trim();
+        const k = String(r.from || "").trim();
         if (!k) return;
         if (map.has(k)) errors.push(`Дата начала повторяется: строка ${map.get(k)} и ${idx+1}.`);
         else map.set(k, idx+1);
@@ -239,19 +320,23 @@ function validate(list){
     return errors;
 }
 
-function reindexRows(bodyId){
-    const rows = Array.from(document.querySelectorAll(`#${bodyId} tr`));
-    rows.forEach((tr, i) => tr.dataset.idx = String(i));
+function renderEmptyRow(body, text){
+    body.innerHTML = `
+        <tr>
+            <td colspan="3" style="border:0.5px solid #000; padding:8px; color:#666; font-size:13px;">
+                ${esc(text)}
+            </td>
+        </tr>
+    `;
 }
 
-function renderTable(bodyId, key){
+function renderTable(bodyId, list){
     const body = document.getElementById(bodyId);
     if (!body) return;
 
-    const list = loadList(key);
-
-    if (list.length === 0){
-        body.innerHTML = "";
+    if (!Array.isArray(list) || list.length === 0){
+        renderEmptyRow(body, "Ставки не заполнены на сервере. Администратор должен добавить первую строку.");
+        applyAccessMode();
         return;
     }
 
@@ -268,24 +353,34 @@ function renderTable(bodyId, key){
             </td>
         </tr>
     `).join("");
-
     reindexRows(bodyId);
+    applyAccessMode();
+}
+
+function reindexRows(bodyId){
+    const rows = Array.from(document.querySelectorAll(`#${bodyId} tr`));
+    rows.forEach((tr, i) => tr.dataset.idx = String(i));
 }
 
 function collect(bodyId){
-    const rows = Array.from(document.querySelectorAll(`#${bodyId} tr`));
+    const rows = Array.from(document.querySelectorAll(`#${bodyId} tr`)).filter(tr => tr.querySelector(".r-from") || tr.querySelector(".r-rate"));
     return rows.map(tr => ({
         from: (tr.querySelector(".r-from")?.value || "").trim(),
-        rate: (tr.querySelector(".r-rate")?.value || "").trim()
+        rate: (tr.querySelector(".r-rate")?.value || "").trim().replace(",", ".")
     }));
 }
 
-/**
- * addRow добавляет строку прямо в DOM, а сохранение — только по кнопке "сохранить".
- */
 function addRow(bodyId){
+    if (!canEditRefRates()){
+        alert("Только администратор может изменять ставки рефинансирования");
+        return;
+    }
+
     const body = document.getElementById(bodyId);
     if (!body) return;
+
+    const onlyEmptyInfo = body.querySelector("td[colspan='3']");
+    if (onlyEmptyInfo) body.innerHTML = "";
 
     const tr = document.createElement("tr");
     tr.innerHTML = `
@@ -301,99 +396,185 @@ function addRow(bodyId){
     `;
     body.appendChild(tr);
     reindexRows(bodyId);
+    applyAccessMode();
 
     const fromInput = tr.querySelector(".r-from");
     fromInput?.focus();
 }
 
-async function saveFromUI(key, bodyId){
-    // на всякий случай нормализуем даты перед валидацией
-    const rows = Array.from(document.querySelectorAll(`#${bodyId} .r-from`));
-    rows.forEach(inp => applyDateMaskToInput(inp));
+async function apiGetStore(key){
+    const owner = activeOwnerId();
+    const q = owner ? ("?owner=" + encodeURIComponent(owner) + "&key=" + encodeURIComponent(key)) : ("?key=" + encodeURIComponent(key));
+    const res = await fetch("/api/store" + q, { method:"GET", credentials:"include" });
+    const txt = await res.text();
+    let data = null;
+    try{ data = txt ? JSON.parse(txt) : null; }catch(e){}
 
-    const list = collect(bodyId).filter(x => x.from || x.rate);
+    if (res.status === 404) return "";
+    if (!res.ok || !data || data.ok !== true){
+        const err = (data && data.error) ? data.error : ("HTTP " + res.status);
+        throw new Error(err);
+    }
+    return String(data.value || "");
+}
+
+async function apiSetStore(key, value){
+    const owner = activeOwnerId();
+    const res = await fetch("/api/store", {
+        method:"POST",
+        headers:{ "Content-Type":"application/json" },
+        credentials:"include",
+        body: JSON.stringify({ owner: owner, key: key, value: String(value || "") })
+    });
+    const txt = await res.text();
+    let data = null;
+    try{ data = txt ? JSON.parse(txt) : null; }catch(e){}
+    if (!res.ok || !data || data.ok !== true){
+        const err = (data && data.error) ? data.error : ("HTTP " + res.status);
+        throw new Error(err);
+    }
+    return data;
+}
+
+function updateLocalCacheSoft(key, value){
+    try{
+        if (window.JKHStore && typeof JKHStore.setRaw === "function"){
+            JKHStore.setRaw(key, String(value || ""));
+        }
+    }catch(e){
+        // Для не-admin GLOBAL ключи могут быть read-only в JKHStore. Это не ошибка страницы.
+        console.warn("[refinancing] local cache update skipped:", e);
+    }
+}
+
+async function loadAllRates(){
+    showStatus("Загружаю ставки с сервера...", "info");
+    try{
+        if (window.Auth && typeof Auth.ensureSessionValid === "function"){
+            try{ await Auth.ensureSessionValid(); }catch(e){}
+        }
+        applyAccessMode();
+
+        const rawNormal = await apiGetStore(KEY_NORMAL);
+        const rawMora = await apiGetStore(KEY_MORA);
+
+        REF_STATE.normal = normalizeList(rawNormal);
+        REF_STATE.mora = normalizeList(rawMora);
+        REF_STATE.loaded = true;
+
+        updateLocalCacheSoft(KEY_NORMAL, rawNormal);
+        updateLocalCacheSoft(KEY_MORA, rawMora);
+
+        renderTable("ratesBodyNormal", REF_STATE.normal);
+        renderTable("ratesBodyMora", REF_STATE.mora);
+
+        document.querySelectorAll(".r-from").forEach(inp => applyDateMaskToInput(inp));
+        showStatus("Ставки загружены с сервера.", "success");
+        setTimeout(() => showStatus("", "info"), 2500);
+    }catch(e){
+        console.warn("[refinancing] load failed", e);
+        renderTable("ratesBodyNormal", []);
+        renderTable("ratesBodyMora", []);
+        showStatus("Не удалось загрузить ставки с сервера: " + String(e && e.message ? e.message : e), "error");
+    }
+}
+
+async function saveFromUI(key, bodyId, stateName){
+    if (!canEditRefRates()){
+        alert("Только администратор может изменять ставки рефинансирования");
+        return;
+    }
+
+    document.querySelectorAll(`#${bodyId} .r-from`).forEach(inp => applyDateMaskToInput(inp));
+
+    const list = cleanList(collect(bodyId));
     const errors = validate(list);
     if (errors.length){
         alert("Ошибка сохранения:\n\n" + errors.join("\n"));
         return;
     }
-    saveList(key, list);
-    await uploadRefRatesNow();
-    alert("Сохранено");
-    renderTable(bodyId, key);
-    applyReadOnlyMode();
+
+    const payload = JSON.stringify(list);
+
+    try{
+        setButtonsBusy(true);
+        showStatus("Сохраняю ставки на сервер...", "info");
+        await apiSetStore(key, payload);
+        updateLocalCacheSoft(key, payload);
+        REF_STATE[stateName] = list;
+        renderTable(bodyId, list);
+        showStatus("Сохранено", "success");
+        alert("Сохранено");
+    }catch(e){
+        console.warn("[refinancing] save failed", e);
+        const msg = String(e && e.message ? e.message : e);
+        if (msg === "global_admin_only" || msg === "forbidden"){
+            alert("Сохранение запрещено. Ставки рефинансирования может изменять только администратор.");
+            showStatus("Сохранение запрещено: только администратор может изменять ставки.", "error");
+        }else{
+            alert("Ошибка сохранения:\n\n" + msg);
+            showStatus("Ошибка сохранения: " + msg, "error");
+        }
+    }finally{
+        setButtonsBusy(false);
+        applyAccessMode();
+    }
 }
 
-function bindTbodyHandlers(bodyId, key){
+function bindTbodyHandlers(bodyId, key, stateName){
     const body = document.getElementById(bodyId);
     if (!body) return;
 
-    // Удаление строки
     body.addEventListener("click", async (e) => {
         const btn = e.target.closest(".row-del");
         if (!btn) return;
-        if (!canEditRefRates()) return;
+        if (!canEditRefRates()){
+            alert("Только администратор может изменять ставки рефинансирования");
+            return;
+        }
 
         const tr = btn.closest("tr");
         if (!tr) return;
-
         if (!confirm("Удалить строку?")) return;
 
         tr.remove();
         reindexRows(bodyId);
-
-        // фиксируем состояние сразу
-        saveList(key, collect(bodyId));
-        await uploadRefRatesNow();
+        await saveFromUI(key, bodyId, stateName);
     });
 
-    // Маска даты — делегированно на tbody (работает и для новых строк)
     body.addEventListener("input", (e) => {
         const inp = e.target.closest(".r-from");
         if (!inp) return;
         applyDateMaskToInput(inp);
     });
 
-    // Паста даты — тоже форматируем
     body.addEventListener("paste", (e) => {
         const inp = e.target.closest(".r-from");
         if (!inp) return;
-        // дать вставке произойти, потом форматнуть
         setTimeout(() => applyDateMaskToInput(inp), 0);
     });
 }
 
-document.addEventListener("DOMContentLoaded", () => {
-    // Демо-значения один раз
-    if (!storeGet(KEY_NORMAL)){
-        saveList(KEY_NORMAL, [
-            { from:"01.01.2023", rate:"7.50" },
-            { from:"01.01.2024", rate:"8.00" }
-        ]);
-    }
-    if (!storeGet(KEY_MORA)){
-        saveList(KEY_MORA, [
-            { from:"01.04.2023", rate:"0.00" },
-            { from:"01.06.2023", rate:"3.00" }
-        ]);
-    }
-
-    renderTable("ratesBodyNormal", KEY_NORMAL);
-    renderTable("ratesBodyMora", KEY_MORA);
-
-    // применим маску к уже отрендеренным датам (на всякий)
-    document.querySelectorAll(".r-from").forEach(inp => applyDateMaskToInput(inp));
+async function initRefRatesPage(){
+    applyAccessMode();
 
     document.getElementById("addNormalBtn")?.addEventListener("click", () => addRow("ratesBodyNormal"));
     document.getElementById("addMoraBtn")?.addEventListener("click", () => addRow("ratesBodyMora"));
 
-    document.getElementById("saveNormalBtn")?.addEventListener("click", () => saveFromUI(KEY_NORMAL, "ratesBodyNormal"));
-    document.getElementById("saveMoraBtn")?.addEventListener("click", () => saveFromUI(KEY_MORA, "ratesBodyMora"));
+    document.getElementById("saveNormalBtn")?.addEventListener("click", () => saveFromUI(KEY_NORMAL, "ratesBodyNormal", "normal"));
+    document.getElementById("saveMoraBtn")?.addEventListener("click", () => saveFromUI(KEY_MORA, "ratesBodyMora", "mora"));
 
-    bindTbodyHandlers("ratesBodyNormal", KEY_NORMAL);
-    bindTbodyHandlers("ratesBodyMora", KEY_MORA);
-    applyReadOnlyMode();
-});
+    bindTbodyHandlers("ratesBodyNormal", KEY_NORMAL, "normal");
+    bindTbodyHandlers("ratesBodyMora", KEY_MORA, "mora");
+
+    await loadAllRates();
+}
+
+if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", initRefRatesPage);
+} else {
+    initRefRatesPage();
+}
 </script>
 
 <script>closeLayout();</script>
