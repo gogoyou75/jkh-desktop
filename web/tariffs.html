@@ -570,7 +570,11 @@
     });
   }
 
-  async function persistAccrualAndUpload(){
+  // ВАЖНО:
+  // Тарифы уже сохранены точечно через JKHPersist.
+  // Здесь uploadNow() нужен только для выгрузки пересчитанной базы абонентов,
+  // потому что recalcAll() меняет начисления внутри abonents_db_v1.
+  async function persistAccrualsAfterRecalc(){
     if (!(window.saveAbonentsDB && window.saveAbonentsDB())) {
       alert("Перерасчёт выполнен, но не удалось сохранить базу абонентов локально.");
       return false;
@@ -691,7 +695,7 @@
 
       let uploaded = false;
       try{
-        uploaded = await persistAccrualAndUpload();
+        uploaded = await persistAccrualsAfterRecalc();
       }catch(e){
         console.warn("tariff save upload failed", e);
         alert("Тарифы и перерасчёт сохранены локально, но выгрузка на сервер не выполнена.");
@@ -721,7 +725,7 @@
 
       let uploaded = false;
       try{
-        uploaded = await persistAccrualAndUpload();
+        uploaded = await persistAccrualsAfterRecalc();
       }catch(e){
         console.warn("manual recalc upload failed", e);
         alert("Перерасчёт сохранён локально, но выгрузка на сервер не выполнена.");
