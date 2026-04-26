@@ -9,6 +9,7 @@
 
   <script src="auth.js"></script>
   <script src="storage.js"></script>
+  <script src="persist.js"></script>
   <script src="data.js"></script>
   <script src="layout.js"></script>
   <script src="autoaccrual_engine.js"></script>
@@ -343,6 +344,15 @@
     storeSetRaw(key, JSON.stringify(tariffs));
   }
 
+  async function saveTariffsToCanonPersist(tariffs){
+    const ownerId = getOwnerId();
+    if (!ownerId) throw new Error("NO_ACTIVE_OWNER_ID");
+    const key = cacheKey();
+    console.log("[tariffs][persist] key=" + key + " owner=" + ownerId);
+    await window.JKHPersist.set(key, JSON.stringify(tariffs), ownerId);
+    console.log("[tariffs][persist] ok");
+  }
+
   function validateTariffs(tariffs){
     const errors = [];
 
@@ -643,7 +653,7 @@
       if (!ok) return false;
     }
 
-    saveTariffsToCanon(tariffs);
+    await saveTariffsToCanonPersist(tariffs);
     return true;
   }
 
