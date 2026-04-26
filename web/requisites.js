@@ -1,4 +1,4 @@
-// requisites.js — Реквизиты + подписанты (explicit /api/store persist + verify)
+// requisites.js — Реквизиты + подписанты (persist через JKHPersist)
 
 (function () {
   const KEY_REQ = 'organization_requisites_v1';
@@ -39,12 +39,6 @@
 
   function storeGet(key, ownerId) {
     try { return (window.JKHStore && typeof JKHStore.getRaw === 'function') ? JKHStore.getRaw(key, ownerId) : null; } catch { return null; }
-  }
-  function storeSet(key, value, ownerId) {
-    try { if (window.JKHStore && typeof JKHStore.setRaw === 'function') JKHStore.setRaw(key, value, ownerId); } catch {}
-  }
-  function storeRemove(key, ownerId) {
-    try { if (window.JKHStore && typeof JKHStore.removeRaw === 'function') JKHStore.removeRaw(key, ownerId); } catch {}
   }
 
   function loadReq(ownerId) {
@@ -95,95 +89,17 @@
     return cleaned;
   }
 
-  async function apiPostStore(ownerId, key, value) {
-    const res = await fetch('/api/store', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ owner: ownerId, key, value })
-    });
-
-    let data = null;
-    try { data = await res.json(); } catch (e) {}
-
-    const success = res.ok && isApiOk(data);
-    const status = res.status + (success ? '/ok' : '/fail');
-    console.log('[requisites][api-store] key=' + key + ' status=' + status);
-
-    if (!success) {
-      throw new Error((data && (data.error || data.message)) ? (data.error || data.message) : ('HTTP ' + res.status + ' key=' + key));
-    }
-    return data;
-  }
-
-  function isApiOk(data) {
-    return !!data && (data.ok === true || data.status === 'ok');
-  }
-
-  async function apiGetStore(ownerId, key) {
-    try {
-      const url = '/api/store?owner=' + encodeURIComponent(ownerId) + '&key=' + encodeURIComponent(key);
-      const res = await fetch(url, { method: 'GET' });
-      if (!res.ok) return { available: false, ok: false, value: null };
-      const data = await res.json();
-      if (!data) return { available: false, ok: false, value: null };
-      return { available: true, ok: isApiOk(data), value: data.value || '' };
-    } catch (e) {
-      return { available: false, ok: false, value: null };
-    }
-  }
-
-  async function verifySaved(ownerId) {
-    const localReq = storeGet(KEY_REQ, ownerId);
-    const localSigners = storeGet(KEY_SIGNERS, ownerId);
-
-    const localReqOk = !!localReq;
-    const localSignersOk = !!localSigners;
-
-    const srvReq = await apiGetStore(ownerId, KEY_REQ);
-    const srvSigners = await apiGetStore(ownerId, KEY_SIGNERS);
-
-    const reqOk = localReqOk && (!srvReq.available || (srvReq.ok && !!srvReq.value));
-    const signersOk = localSignersOk && (!srvSigners.available || (srvSigners.ok && !!srvSigners.value));
-
-    console.log('[requisites][verify] requisites ' + (reqOk ? 'ok' : 'fail'));
-    console.log('[requisites][verify] signers ' + (signersOk ? 'ok' : 'fail'));
-
-    if (!reqOk || !signersOk) {
-      throw new Error('Контроль сохранения не пройден');
-    }
-  }
-
-  async function verifyCleared(ownerId) {
-    const localReq = storeGet(KEY_REQ, ownerId);
-    const localSigners = storeGet(KEY_SIGNERS, ownerId);
-
-    const localReqOk = !localReq;
-    const localSignersOk = !localSigners;
-
-    const srvReq = await apiGetStore(ownerId, KEY_REQ);
-    const srvSigners = await apiGetStore(ownerId, KEY_SIGNERS);
-
-    const reqOk = localReqOk && (!srvReq.available || !srvReq.value);
-    const signersOk = localSignersOk && (!srvSigners.available || !srvSigners.value);
-
-    console.log('[requisites][verify] requisites ' + (reqOk ? 'ok' : 'fail'));
-    console.log('[requisites][verify] signers ' + (signersOk ? 'ok' : 'fail'));
-
-    if (!reqOk || !signersOk) {
-      throw new Error('Контроль очистки не пройден');
-    }
-  }
-
   async function waitForStoreReady(timeoutMs) {
     const started = Date.now();
     const waitStep = 100;
     while ((Date.now() - started) < timeoutMs) {
       const hasStore = !!(window.JKHStore && typeof JKHStore.getRaw === 'function');
+      const hasPersist = !!(window.JKHPersist && typeof JKHPersist.set === 'function');
       const uiStatus = String((window.JKH_UI_STATE && window.JKH_UI_STATE.data && window.JKH_UI_STATE.data.status) || '');
       const readyByUI = (uiStatus === 'ready' || uiStatus === 'empty');
       const readyByLegacy = (window.JKH_DATA_READY === true);
 
-      if (hasStore && (readyByUI || readyByLegacy)) return true;
+      if (hasStore && hasPersist && (readyByUI || readyByLegacy)) return true;
       await new Promise(r => setTimeout(r, waitStep));
     }
     return false;
@@ -324,6 +240,10 @@
         setToast('Не определена база пользователя/owner. Сохранение остановлено.', 'err');
         return;
       }
+      if (!window.JKHPersist) {
+        setToast('Модуль сохранения не загружен.', 'err');
+        return;
+      }
 
       setBusy(true);
       try {
@@ -332,17 +252,8 @@
         const reqRaw = JSON.stringify(req);
         const signersRaw = JSON.stringify(signers);
 
-        storeSet(KEY_REQ, reqRaw, ownerId);
-        storeSet(KEY_SIGNERS, signersRaw, ownerId);
-
-        await apiPostStore(ownerId, KEY_REQ, reqRaw);
-        await apiPostStore(ownerId, KEY_SIGNERS, signersRaw);
-
-        storeSet(KEY_REQ, reqRaw, ownerId);
-        storeSet(KEY_SIGNERS, signersRaw, ownerId);
-        console.log('[requisites][cache-sync] updated after api-store');
-
-        await verifySaved(ownerId);
+        await JKHPersist.set(KEY_REQ, reqRaw, ownerId);
+        await JKHPersist.set(KEY_SIGNERS, signersRaw, ownerId);
 
         // Совместимость с data.js (не ломаем старое)
         if (window.AbonentsDB) {
@@ -373,16 +284,15 @@
         setToast('Не определена база пользователя/owner. Сохранение остановлено.', 'err');
         return;
       }
+      if (!window.JKHPersist) {
+        setToast('Модуль сохранения не загружен.', 'err');
+        return;
+      }
 
       setBusy(true);
       try {
-        await apiPostStore(ownerId, KEY_REQ, '');
-        await apiPostStore(ownerId, KEY_SIGNERS, '');
-
-        storeRemove(KEY_REQ, ownerId);
-        storeRemove(KEY_SIGNERS, ownerId);
-
-        await verifyCleared(ownerId);
+        await JKHPersist.remove(KEY_REQ, ownerId);
+        await JKHPersist.remove(KEY_SIGNERS, ownerId);
 
         fillReqForm({ ...reqDefaults });
         renderSigners(JSON.parse(JSON.stringify(signerDefaults)));
