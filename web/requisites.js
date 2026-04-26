@@ -353,6 +353,10 @@
         await apiPostStore(ownerId, KEY_REQ, reqRaw);
         await apiPostStore(ownerId, KEY_SIGNERS, signersRaw);
 
+        storeSet(KEY_REQ, reqRaw, ownerId);
+        storeSet(KEY_SIGNERS, signersRaw, ownerId);
+        console.log('[requisites][cache-sync] updated after api-store');
+
         await verifySaved(ownerId);
 
         // Совместимость с data.js (не ломаем старое)
