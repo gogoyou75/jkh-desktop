@@ -127,9 +127,10 @@
     while ((Date.now() - started) < timeoutMs) {
       const hasStore = !!(window.JKHStore && typeof JKHStore.getRaw === 'function');
       const uiStatus = String((window.JKH_UI_STATE && window.JKH_UI_STATE.data && window.JKH_UI_STATE.data.status) || '');
-      const readyByUI = (uiStatus === 'ready' || uiStatus === 'empty' || uiStatus === 'offline' || uiStatus === 'unauthorized' || uiStatus === 'forbidden');
+      const readyByUI = (uiStatus === 'ready' || uiStatus === 'empty');
       const readyByLegacy = (window.JKH_DATA_READY === true);
-      if (hasStore && (readyByUI || readyByLegacy || !uiStatus)) return true;
+
+    if (hasStore && (readyByUI || readyByLegacy)) return true;
       await new Promise(r => setTimeout(r, waitStep));
     }
     return false;
@@ -317,7 +318,12 @@
   }
 
   document.addEventListener('DOMContentLoaded', async () => {
-    await waitForStoreReady(8000);
+    const ok = await waitForStoreReady(8000);
+    if (!ok) {
+    console.error('[requisites][load] store not ready');
+    setToast('Ошибка загрузки данных (сервер не готов)', 'err');
+    return;
+}
     const ownerId = getOwnerId();
     console.log('[requisites][load] ownerId=' + ownerId);
     fillReqForm(loadReq(ownerId));
