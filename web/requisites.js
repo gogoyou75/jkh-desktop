@@ -391,6 +391,12 @@
     }
 
     fillReqForm(req);
+    console.log('[requisites][fill] applied', req);
+
+    setTimeout(() => {
+      console.log('[requisites][post-check] full_name=', document.getElementById('full_name')?.value);
+    }, 500);
+
     renderSigners(signers);
     bindSigners();
     bindMain();
