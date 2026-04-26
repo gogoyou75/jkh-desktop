@@ -1,84 +1,78 @@
-# 📚 INDEX — Карта документов проекта ПАПАЖКХ
+# ПАПАЖКХ — индекс документации
 
-Этот файл — навигационная карта актуальной документации.
+Дата обновления: 2026-04-26
 
----
+## Критические документы
 
-## 1. Читать в первую очередь
+- `docs/critical/CRITICAL_CHANGELOG.md` — критические изменения архитектуры.
+- `docs/critical/CRITICAL_DO_NOT_TOUCH.md` — что нельзя ломать.
+- `docs/critical/CRITICAL_INDEX.md` — индекс критичных правил.
 
-- `docs/logic/LOGIC_SPEC.md` — актуальный канон по owner, тарифам, ставкам, sync и будущему автообновлению ставок.
-- `docs/critical/CRITICAL_CHANGELOG.md` — журнал критических архитектурных изменений.
+## Логика проекта
 
-Если старые документы конфликтуют с ними — приоритет у этих двух файлов.
+- `docs/logic/LOGIC_SPEC.md` — актуальная логическая спецификация.
+- `docs/logic/LOGIC_SPEC_v1.5.3.md` — зафиксированная версия логики.
+- `docs/logic/LOGIC_CHECKLIST_v1.4.md` — чеклист логики.
+- `docs/logic/PRE_CHANGE_CHECKLIST.md` — проверка перед изменениями.
 
----
+## Server-first и storage
 
-## 2. Логика предметной области
+- `docs/STORAGE_BOUNDARY.md` — границы storage.
+- `docs/STORAGE_CANON_RULE.md` — правила storage.
+- `docs/STRUCTURE.md` — структура проекта.
 
-- `docs/logic/LOGIC_SPEC_v1.5.3.md` — расширенная логика с patch-уточнением под owner/sync/roles.
-- `docs/logic/SHORT_SPEC_v1.5.1.md` — короткое ТЗ для внешнего разработчика / Codex.
-- `docs/logic/LOGIC_CHECKLIST_v1.4.md` — чек-лист обязательных проверок после правок.
-- `docs/logic/PRE_CHANGE_CHECKLIST.md` — что проверить перед изменениями.
+## Frontend boot-layer
 
----
+- `docs/frontend/FRONTEND_BOOT_CANON.md` — канон инициализации frontend без гонок.
 
-## 3. Хранение и границы системы
+Ключевые правила:
 
-- `docs/STORAGE_BOUNDARY.md` — граница localStorage ↔ backend / БД.
-- `docs/STORAGE_CANON_RULE.md` — дополнительные правила хранения.
+- `web/boot.js` обязателен.
+- `authModuleLoaded` отделён от `authSessionReady`.
+- Страница не запускает init до готовности зависимостей.
+- `autoaccrual_engine.js` должен создать `window.JKHAutoAccrual` до перерасчётов.
 
----
+## Импорт оплат
 
-## 4. Критические документы
+- `docs/IMPORT_PAYMENTS_CANON.md` — короткий канон импорта оплат.
+- `docs/payments/PAYMENTS_SERVER_FIRST_CANON.md` — полный server-first канон оплат.
+- `docs/regression/REGRESSION_IMPORT_PAYMENTS_SERVER_FIRST.md` — регресс-тест server-first импорта оплат.
 
-- `docs/critical/CRITICAL_DO_NOT_TOUCH.md`
-- `docs/critical/CRITICAL_CHANGELOG.md`
-- `docs/critical/CRITICAL_INDEX.md`
+Ключевые правила:
 
----
+- Excel/frontend не применяет платежи напрямую.
+- Backend применяет платежи через batch-flow.
+- Канонический ЛС при UID-поиске — ключ `abonents[LS]`.
+- `applied_count=0` не должен маскироваться зелёным успехом.
 
-## 5. Регрессия
+## Импорт данных
 
-- `docs/regression/REGRESSION_TEST_v1.6_CANON.md`
+- `docs/IMPORT_CANON_v1.6.md` — общий канон импорта.
+- `docs/regression/REGRESSION_TEST_v1.6_CANON.md` — общий регресс по импорту.
 
-После правок owner / тарифов / ставок / sync регрессия обязательна.
+## Codex-задачи
 
----
+- `docs/TASK_FOR_CODEX.md`
+- `docs/TASK_FOR_CODEX_PHASE2.md`
+- `docs/TASK_FOR_CODEX_PHASE3.md`
+- `docs/codex/TASK_FOR_CODEX_DOCS_BOOT_PAYMENTS.md`
+- `docs/codex/TASK_FOR_CODEX_PAYMENTS_SERVER_FIRST.md`
+- `docs/codex/TASK_FOR_CODEX_BOOT_AND_PAYMENTS_REGRESSION.md`
 
-## 6. Архив и сопутствующие
+## Desktop / EXE
+
+- `docs/desktop/README_DESKTOP.md`
+- `docs/EXE_FREEZE.md`
+
+## Архив
 
 - `docs/archive/ARCHIVE_ETALON.md`
-- `docs/logic/AUDIT_VERSION_NOTE.md`
-- `docs/CHECKLIST.md`
-- `docs/CONTEXT.md`
 
----
+## Текущее обязательное правило после 2026-04-26
 
-## 7. Как использовать это для Codex
+Если меняются импорт оплат, boot-layer, auth-init, storage-init или autoaccrual:
 
-Перед новым заданием Codex дать минимум такой пакет:
-1. `docs/logic/LOGIC_SPEC.md`
-2. `docs/critical/CRITICAL_CHANGELOG.md`
-3. `docs/STORAGE_BOUNDARY.md`
-4. `docs/logic/LOGIC_CHECKLIST_v1.4.md`
-
-Этого достаточно, чтобы Codex не ушёл в ложную архитектуру.
-
----
-
-## 8. Frontend boot / загрузка модулей
-
-- `docs/frontend/FRONTEND_BOOT_CANON.md` — канон безопасной инициализации фронта без гонок загрузки.
-
----
-
-## 9. Оплаты server-first
-
-- `docs/payments/PAYMENTS_SERVER_FIRST_CANON.md` — канон добавления, редактирования, импорта и серверного сохранения оплат.
-
----
-
-## 10. Задания для Codex по новой архитектуре
-
-- `docs/codex/TASK_FOR_CODEX_PAYMENTS_SERVER_FIRST.md` — внедрение/проверка ручного добавления оплаты через сервер.
-- `docs/codex/TASK_FOR_CODEX_BOOT_AND_PAYMENTS_REGRESSION.md` — регрессия boot-layer + оплаты.
+1. обновить соответствующий канон;
+2. обновить регресс;
+3. не мержить в `main` без ручной проверки импорта платежей;
+4. не делать эталон без проверки карточки абонента после перезагрузки.

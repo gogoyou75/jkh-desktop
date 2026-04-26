@@ -1,54 +1,66 @@
-# FRONTEND_BOOT_CANON.md
+# FRONTEND_BOOT_CANON
 
-Версия: **v1.0 — 2026-04-25**  
-Статус: **КАНОН ДЛЯ ВСЕХ СТРАНИЦ ФРОНТА ПАПАЖКХ**
+Дата: 2026-04-26  
+Статус: обязательный канон для новых и изменяемых страниц ПАПАЖКХ.
 
----
+## 1. Зачем нужен boot-layer
 
-## 1. Цель
+В проекте появились ошибки гонки загрузки: страница уже пыталась сохранять данные или запускать перерасчёт, а нужный JS-модуль ещё не успевал создать глобальный объект.
 
-Исключить гонки загрузки JavaScript-модулей, когда страница начинает работать раньше, чем готовы `auth.js`, `storage.js`, `data.js`, расчётные движки или server-first данные.
-
-Проблема, из-за которой введён канон: на `premises.html` сохранение квартиры блокировалось сообщением о незагруженном `autoaccrual_engine.js`, хотя файл мог появляться позже.
-
----
-
-## 2. Обязательный boot-layer
-
-В проекте должен существовать файл:
+Пример реальной ошибки:
 
 ```text
-web/boot.js
+window.JKHAutoAccrual === undefined
+Ошибка сохранения: Не загружен autoaccrual_engine.js
 ```
 
-Он публикует:
+Причина: страница запускалась по `DOMContentLoaded`, но это не гарантировало готовность всех модулей и server-first данных.
+
+## 2. Главный принцип
+
+Страница не должна сама угадывать порядок загрузки.
+
+Все важные модули обязаны отмечать готовность через:
+
+```js
+window.JKHBoot?.markReady?.('moduleName');
+```
+
+Страница запускает свой init только после ожидания нужных флагов:
+
+```js
+await window.JKHBoot.waitFor(['authModuleLoaded', 'storage', 'data', 'layout', 'autoaccrual'], 5000);
+```
+
+## 3. Обязательный файл
+
+`web/boot.js` — обязательный файл проекта.
+
+Он создаёт:
 
 ```js
 window.JKH_READY
 window.JKHBoot
 ```
 
-Минимальный API:
+Минимальные методы:
 
 ```js
-window.JKHBoot.markReady(name)
-window.JKHBoot.isReady(name)
-window.JKHBoot.waitFor(names, timeoutMs)
-window.JKHBoot.getMissing(names)
+markReady(name)
+isReady(name)
+waitFor(names, timeoutMs)
+getMissing(names)
 ```
 
-`waitFor()` обязан:
+`waitFor`:
+- проверяет готовность каждые 50 мс;
+- возвращает `true`, если все модули готовы;
+- возвращает `false` по timeout;
+- не бросает исключение наружу.
 
-- проверять готовность каждые 50 мс;
-- возвращать `true`, если все модули готовы;
-- возвращать `false` по таймауту;
-- не бросать исключения наружу.
+## 4. Порядок подключения в HTML
 
----
-
-## 3. Правило подключения скриптов
-
-Для страниц, где есть сохранение данных, порядок должен быть таким:
+Для страниц, которые зависят от auth/storage/data/layout/движков, порядок должен быть таким:
 
 ```html
 <script src="critical_guard.js" defer></script>
@@ -57,99 +69,89 @@ window.JKHBoot.getMissing(names)
 <script src="storage.js" defer></script>
 <script src="data.js" defer></script>
 <script src="layout.js" defer></script>
-<!-- затем движки страницы -->
 <script src="autoaccrual_engine.js" defer></script>
-<!-- затем контроллер страницы -->
-<script src="premises_admin.js" defer></script>
+<script src="page_module.js" defer></script>
 ```
 
-Запрещено подключать контроллер страницы раньше его движков.
+`boot.js` должен идти сразу после `critical_guard.js`.
 
----
+## 5. Auth-флаги
 
-## 4. Флаги готовности
+В `auth.js` запрещено отмечать `auth` готовым сразу после загрузки файла.
 
-Каждый модуль после публикации своего глобального объекта отмечает готовность.
-
-Обязательные флаги:
+Нужно различать:
 
 ```text
-authModuleLoaded     — auth.js загружен и window.Auth опубликован
-authSessionReady     — Auth.init() завершил проверку серверной сессии
-auth                 — legacy-флаг совместимости, ставится только после authSessionReady
-storage              — window.JKHStore / window.JKHStorage готовы
-data                 — window.Data готов
-layout               — renderLayout готов
-autoaccrual          — window.JKHAutoAccrual готов
+authModuleLoaded — window.Auth опубликован;
+authSessionReady — серверная сессия проверена;
+auth — legacy-флаг совместимости, отмечается после проверки сессии.
 ```
 
-Критическое правило: `auth` нельзя отмечать до завершения `Auth.init()`.
-
----
-
-## 5. Запуск страницы
-
-Страница не должна вызывать `PremisesAdmin.init()` напрямую по `DOMContentLoaded`.
-
-Правильная модель:
+Правило:
 
 ```js
-document.addEventListener('DOMContentLoaded', async () => {
-  const required = ['authModuleLoaded', 'storage', 'data', 'layout', 'autoaccrual'];
-  const ok = await window.JKHBoot.waitFor(required, 5000);
-
-  if (!ok) {
-    const missing = window.JKHBoot.getMissing(required);
-    showPageError('Не готовы модули: ' + missing.join(', '));
-    return;
-  }
-
-  renderLayout();
-  PremisesAdmin.init();
-});
+_markAuthModuleLoaded(); // сразу после window.Auth = {...}
+_markAuthSessionReady(); // в finally после init()
 ```
 
----
+## 6. Premises bootstrap
 
-## 6. Сохранение данных
+`premises.html` должен ждать:
 
-Перед сохранением страница обязана проверить:
+```js
+['authModuleLoaded', 'storage', 'data', 'layout', 'autoaccrual']
+```
 
-- пользователь не гость;
-- не выбран режим `ALL`;
-- `window.AbonentsDB` существует;
-- `window.JKHStore` готов;
-- `window.Data.flushDbToServer` доступен;
-- если операция влияет на начисления — готов `autoaccrual_engine.js`.
+После готовности:
 
----
+1. вызвать `renderLayout()`;
+2. вызвать `PremisesAdmin.init()`.
 
-## 7. Правило для помещений / квартир
+Если не готовы модули — показать in-page ошибку в `#premFormWarn`, а не падать молча.
 
-Если квартира не связана с абонентами — сохранение адреса/площади может идти без перерасчёта.
+## 7. Autoaccrual
 
-Если квартира связана с абонентами — без `window.JKHAutoAccrual.recalcForMany()` сохранять запрещено.
+`autoaccrual_engine.js` обязан создать:
 
-Причина: изменение площади меняет начисления.
+```js
+window.JKHAutoAccrual
+```
 
----
+Минимальные методы:
 
-## 8. Ошибки
+```js
+recalcForAbonent
+recalcForMany
+recalcAll
+```
 
-Ошибка должна называть точную причину:
+После публикации объекта:
 
-- `Не готовы модули: ...`
-- `Не найден renderLayout()`
-- `PremisesAdmin не найден`
-- `Не загружен autoaccrual_engine.js. Сохранение остановлено, чтобы не нарушить начисления.`
+```js
+window.JKHBoot?.markReady?.('autoaccrual');
+```
 
-Запрещены общие ошибки без причины.
+## 8. Сохранение квартиры
 
----
+Если квартира не связана с абонентами:
+- сохранение может пройти без перерасчёта.
 
-## 9. Регрессия
+Если квартира связана с абонентами:
+- без `autoaccrual_engine.js` сохранять нельзя;
+- нужно дождаться `autoaccrual` через `JKHBoot.waitFor(['autoaccrual'], 2000)`;
+- если движок не готов — показать ошибку и остановить сохранение.
 
-После изменения boot/auth/storage/data/layout/движков обязательно проверить:
+## 9. Запрещено
+
+1. Запускать бизнес-init страницы просто по `DOMContentLoaded`, если есть зависимости.
+2. Полагаться на случайный порядок `defer` как на гарантию полной готовности модулей.
+3. Помечать auth-сессию готовой до завершения `/api/auth/me` / init.
+4. Молча сохранять данные при отсутствии расчётного движка, если есть связанные абоненты.
+5. Удалять `boot.js` как «лишний файл».
+
+## 10. Проверки
+
+В браузере:
 
 ```js
 window.JKHBoot
@@ -161,8 +163,13 @@ typeof window.JKHAutoAccrual.recalcForMany === 'function'
 На сервере:
 
 ```bash
-curl -s http://127.0.0.1/boot.js | head -n 5
-curl -s http://127.0.0.1/autoaccrual_engine.js | head -n 5
+curl -s http://127.0.0.1/boot.js | head
+curl -s http://127.0.0.1/autoaccrual_engine.js | head
 ```
 
-В браузере: `Ctrl + Shift + R` при включённом `Disable cache`.
+Ожидаемо:
+- `boot.js` отдаётся как JS;
+- `autoaccrual_engine.js` отдаётся как читаемый JS;
+- нет 404;
+- нет кракозябр;
+- нет `window.JKHAutoAccrual undefined`.
