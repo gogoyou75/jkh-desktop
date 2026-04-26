@@ -132,15 +132,28 @@
     return obj;
   }
 
-  function getDbRootForContext(ctx){
-    if (!ctx || !ctx.readOwner) return null;
+  function hasAbonentInDbRoot(dbRoot, abonentId){
+    try {
+      if (!dbRoot || !dbRoot.abonents) return false;
+      return !!dbRoot.abonents[String(abonentId || "")];
+    } catch (e) { return false; }
+  }
 
-    if (!ctx.forcedOwner && window.AbonentsDB && window.AbonentsDB.abonents) {
-      const rt = normalizeDbRoot(window.AbonentsDB);
-      if (rt) return rt;
+  function getDbRootForContext(ctx){
+    if (!ctx) return null;
+
+    const cachedRoot = normalizeDbRoot(window.AbonentsDB);
+    if (cachedRoot && hasAbonentInDbRoot(cachedRoot, ctx.abonentId)) {
+      return cachedRoot;
     }
 
-    const raw = storeGet("abonents_db_v1", ctx.readOwner);
+    if (!ctx.forcedOwner && cachedRoot) {
+      return cachedRoot;
+    }
+
+    const raw = ctx.readOwner
+      ? storeGet("abonents_db_v1", ctx.readOwner)
+      : storeGet("abonents_db_v1");
     const parsed = safeJSONParse(raw, null);
     return normalizeDbRoot(parsed);
   }
@@ -237,8 +250,10 @@
       const readyByUI = (uiStatus === "ready" || uiStatus === "empty");
       const readyByLegacy = (window.JKH_DATA_READY === true);
       const dataReady = readyByUI || readyByLegacy;
-      const dbRaw = hasStore && ctx.readOwner ? storeGet("abonents_db_v1", ctx.readOwner) : null;
-      const hasDbValue = dbRaw !== null;
+      const dbRaw = hasStore
+        ? (ctx.readOwner ? storeGet("abonents_db_v1", ctx.readOwner) : storeGet("abonents_db_v1"))
+        : null;
+      const hasDbValue = (dbRaw !== null) || hasAbonentInDbRoot(window.AbonentsDB, ctx.abonentId);
 
       if (hasStore && dataReady && hasDbValue) {
         return { ok: true, uiStatus: uiStatus };
