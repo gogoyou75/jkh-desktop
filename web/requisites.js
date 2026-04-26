@@ -377,6 +377,19 @@
     const req = loadReq(ownerId);
     const signers = loadSigners(ownerId);
 
+    const rawReq = storeGet(KEY_REQ, ownerId);
+    const rawSigners = storeGet(KEY_SIGNERS, ownerId);
+
+    console.log('[requisites][load] rawReq=', rawReq);
+    console.log('[requisites][load] rawSigners=', rawSigners);
+
+    if (!rawReq) {
+      console.warn('[requisites][load] organization_requisites_v1 missing in JKHStore after data-ready');
+    }
+    if (!rawSigners) {
+      console.warn('[requisites][load] organization_signers_v1 missing in JKHStore after data-ready');
+    }
+
     fillReqForm(req);
     renderSigners(signers);
     bindSigners();
