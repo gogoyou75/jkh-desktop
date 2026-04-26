@@ -851,7 +851,8 @@
 
   try {
     // ✅ ПИНГ через store_dump (единый канон)
-    var res = await _apiGet("/api/store_dump");
+    var pingOwner = _ownerId();
+    var res = await _apiGet("/api/store_dump?owner=" + encodeURIComponent(pingOwner));
 
     if (res.okHttp && res.data && res.data.ok === true) {
       _setStatus({ server: "🟢 подключён", lastError: null });
@@ -933,7 +934,7 @@
 
         // safeguard: не перезаписываем непустую базу на сервере пустой локальной базой
         if (baseKey === KEY_DB && _isDbEffectivelyEmpty(raw)) {
-          var resCur = await _apiGet("/api/store?key=" + encodeURIComponent(KEY_DB));
+          var resCur = await _apiGet("/api/store?owner=" + encodeURIComponent(ownerId) + "&key=" + encodeURIComponent(KEY_DB));
           var srv = (resCur.okHttp && resCur.data && resCur.data.ok) ? (resCur.data.value || "") : "";
           if (_isDbEffectivelyEmpty(raw) && !_isDbEffectivelyEmpty(srv)) {
             _setStatus({ lastAction: "Сохранение остановлено", lastError: "EMPTY_DB_OVERWRITE_BLOCKED" });
@@ -942,7 +943,7 @@
           }
         }
 
-        var resSet = await _apiPost("/api/store", { key: baseKey, value: raw });
+        var resSet = await _apiPost("/api/store", { owner: ownerId, key: baseKey, value: raw });
         if (!(resSet.okHttp && resSet.data && resSet.data.ok === true)) {
           _setStatus({ lastAction: "Ошибка сохранения ключа " + baseKey, lastError: (resSet.data && resSet.data.error) ? resSet.data.error : ("HTTP " + resSet.status) });
           console.warn("[JKH sync][save] owner=%s key=%s size=%s status=error", ownerId, baseKey, String(raw || "").length);
@@ -1093,7 +1094,8 @@
       });
 
       try {
-        var resDump = await _apiGet("/api/store_dump");
+        var ownerParam = encodeURIComponent(ownerId);
+        var resDump = await _apiGet("/api/store_dump?owner=" + ownerParam);
         if (!(resDump.okHttp && resDump.data && resDump.data.ok === true)) {
           var httpErr = (resDump.data && resDump.data.error) ? resDump.data.error : ("HTTP " + resDump.status);
           var serverStatus = (resDump.status === 401) ? "unauthorized" : ((resDump.status === 403) ? "forbidden" : "offline");
@@ -1103,6 +1105,17 @@
             data: { status: dataStatus, source: "server", message: (dataStatus === "unauthorized" ? "Требуется вход" : httpErr) }
           });
           return { ok: false, status: dataStatus, serverStatus: serverStatus, message: httpErr };
+        }
+
+        var responseOwner = String((resDump.data && resDump.data.owner) || "");
+        console.info("[JKH sync][load] requested_owner=%s response_owner=%s", ownerId, responseOwner);
+        if (responseOwner !== String(ownerId)) {
+          _setUIState({
+            server: { status: "forbidden", checkedAt: _nowISO(), message: "OWNER_MISMATCH" },
+            data: { status: "invalid", source: "server", message: "Ответ сервера не соответствует выбранной базе" }
+          });
+          _setStatus({ lastAction: "Ошибка загрузки", lastError: "OWNER_MISMATCH" });
+          return { ok: false, status: "invalid", serverStatus: "forbidden", message: "OWNER_MISMATCH" };
         }
 
         var data = (resDump.data && Object.prototype.hasOwnProperty.call(resDump.data, "data")) ? resDump.data.data : null;
