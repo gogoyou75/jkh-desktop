@@ -89,20 +89,55 @@
     return cleaned;
   }
 
-  async function waitForStoreReady(timeoutMs) {
+  async function waitForGlobalReady(checkFn, timeoutMs) {
     const started = Date.now();
-    const waitStep = 100;
     while ((Date.now() - started) < timeoutMs) {
-      const hasStore = !!(window.JKHStore && typeof JKHStore.getRaw === 'function');
-      const hasPersist = !!(window.JKHPersist && typeof JKHPersist.set === 'function');
-      const uiStatus = String((window.JKH_UI_STATE && window.JKH_UI_STATE.data && window.JKH_UI_STATE.data.status) || '');
-      const readyByUI = (uiStatus === 'ready' || uiStatus === 'empty');
-      const readyByLegacy = (window.JKH_DATA_READY === true);
-
-      if (hasStore && hasPersist && (readyByUI || readyByLegacy)) return true;
-      await new Promise(r => setTimeout(r, waitStep));
+      if (checkFn()) return true;
+      await new Promise(resolve => requestAnimationFrame(resolve));
     }
     return false;
+  }
+
+  function getUiDataStatus() {
+    return String((window.JKH_UI_STATE && window.JKH_UI_STATE.data && window.JKH_UI_STATE.data.status) || '');
+  }
+
+  function isUiDataReadyOrEmpty() {
+    const status = getUiDataStatus();
+    return status === 'ready' || status === 'empty';
+  }
+
+  function waitForDataReadyEvent(timeoutMs) {
+    if (isUiDataReadyOrEmpty()) return Promise.resolve(true);
+
+    return new Promise((resolve) => {
+      let done = false;
+      let timeoutId = null;
+
+      function finish(result) {
+        if (done) return;
+        done = true;
+        window.removeEventListener('JKH_UI_STATE_CHANGED', onStateChanged);
+        if (timeoutId) clearTimeout(timeoutId);
+        resolve(result);
+      }
+
+      function onStateChanged() {
+        if (isUiDataReadyOrEmpty()) {
+          finish(true);
+        }
+      }
+
+      window.addEventListener('JKH_UI_STATE_CHANGED', onStateChanged);
+      if (isUiDataReadyOrEmpty()) {
+        finish(true);
+        return;
+      }
+
+      timeoutId = setTimeout(() => {
+        finish(false);
+      }, timeoutMs);
+    });
   }
 
   function el(id) { return document.getElementById(id); }
@@ -306,28 +341,42 @@
   }
 
   document.addEventListener('DOMContentLoaded', async () => {
-    const ok = await waitForStoreReady(8000);
-    if (!ok) {
+    const storeOk = await waitForGlobalReady(
+      () => !!(window.JKHStore && typeof JKHStore.getRaw === 'function'),
+      8000
+    );
+    if (!storeOk) {
       console.error('[requisites][load] store not ready');
+      setToast('Ошибка загрузки данных (store не готов)', 'err');
+      return;
+    }
+
+    const persistOk = await waitForGlobalReady(
+      () => !!(window.JKHPersist && typeof JKHPersist.set === 'function'),
+      8000
+    );
+    if (!persistOk) {
+      console.error('[requisites][load] persist not ready');
+      setToast('Ошибка загрузки данных (persist не готов)', 'err');
+      return;
+    }
+
+    console.log('[requisites][load] waiting data-ready event');
+    const dataReadyOk = await waitForDataReadyEvent(8000);
+    if (dataReadyOk) {
+      console.log('[requisites][load] data-ready event ok');
+    } else {
+      console.warn('[requisites][load] data-ready event timeout');
       setToast('Ошибка загрузки данных (сервер не готов)', 'err');
       return;
     }
+
     const ownerId = getOwnerId();
     console.log('[requisites][load] ownerId=' + ownerId);
 
-    let req = loadReq(ownerId);
-    let signers = loadSigners(ownerId);
-    let retryUsed = false;
+    const req = loadReq(ownerId);
+    const signers = loadSigners(ownerId);
 
-    if (!req.full_name) {
-      retryUsed = true;
-      console.warn('[requisites][load] empty after first read, retrying...');
-      await new Promise(r => setTimeout(r, 600));
-      req = loadReq(ownerId);
-      signers = loadSigners(ownerId);
-    }
-
-    console.log('[requisites][load] retry ' + (retryUsed ? 'used' : 'not used'));
     fillReqForm(req);
     renderSigners(signers);
     bindSigners();
