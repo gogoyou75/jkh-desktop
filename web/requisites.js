@@ -130,7 +130,7 @@
       const readyByUI = (uiStatus === 'ready' || uiStatus === 'empty');
       const readyByLegacy = (window.JKH_DATA_READY === true);
 
-    if (hasStore && (readyByUI || readyByLegacy)) return true;
+      if (hasStore && (readyByUI || readyByLegacy)) return true;
       await new Promise(r => setTimeout(r, waitStep));
     }
     return false;
@@ -320,10 +320,10 @@
   document.addEventListener('DOMContentLoaded', async () => {
     const ok = await waitForStoreReady(8000);
     if (!ok) {
-    console.error('[requisites][load] store not ready');
-    setToast('Ошибка загрузки данных (сервер не готов)', 'err');
-    return;
-}
+      console.error('[requisites][load] store not ready');
+      setToast('Ошибка загрузки данных (сервер не готов)', 'err');
+      return;
+    }
     const ownerId = getOwnerId();
     console.log('[requisites][load] ownerId=' + ownerId);
     fillReqForm(loadReq(ownerId));
