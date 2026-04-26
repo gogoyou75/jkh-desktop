@@ -718,6 +718,21 @@
     if (window.JKHStore) window.JKHStore.setRaw(baseKey, v, ownerId);
   }
 
+  // CRITICAL: server dump is trusted read-path.
+  // GLOBAL keys (refinancing rates) must be cached locally for every logged-in user,
+  // even though users are not allowed to write those keys manually.
+  // This bypass is used ONLY while applying data received from /api/store_dump.
+  function _writeServerDumpLocalCompat(baseKey, value, ownerId) {
+    var kx = String(baseKey || "");
+    var v = (value === null || value === undefined) ? "" : String(value);
+    if (!window.JKHStore) return;
+    if (isGlobalProjectKey(kx)) {
+      _lsSetDirect(k(kx, ownerId), v);
+      return;
+    }
+    window.JKHStore.setRaw(kx, v, ownerId);
+  }
+
   function _projectKeysFromDump(dumpObj) {
     var out = [];
     if (!dumpObj || typeof dumpObj !== "object" || Array.isArray(dumpObj)) return out;
@@ -785,11 +800,9 @@
       var kx = dumpKeys[i];
       var val = dumpObj[kx];
       try {
-        _writeLocalCompat(kx, (val === null || val === undefined) ? "" : String(val), ownerId);
+        _writeServerDumpLocalCompat(kx, (val === null || val === undefined) ? "" : String(val), ownerId);
         written++;
       } catch (eWrite) {
-        var code = String((eWrite && eWrite.message) || eWrite || "");
-        if (code === "GLOBAL_ADMIN_ONLY") continue;
         throw eWrite;
       }
     }

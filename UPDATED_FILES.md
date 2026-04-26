@@ -13,8 +13,19 @@
 Смысл патча:
 - owner только с сервера;
 - тарифы = owner-level;
-- ставки = owner-level;
+- ставки = GLOBAL;
 - менять ставки и тарифы может только admin;
 - user только read-only + сообщение об ошибке ставки;
 - sync между устройствами owner обязателен;
 - автообновление ставок в будущем только через server-side контролируемый механизм.
+
+
+## RefRates GLOBAL update — 2026-04-26
+
+Канон уточнён:
+- ставки рефинансирования не owner-level, а GLOBAL;
+- ключи: `refinancing_rates_normal_v1`, `refinancing_rates_moratorium_v1`;
+- backend owner: `GLOBAL`;
+- write: только admin;
+- read: все роли;
+- запрещены `ref_rates_{owner}`, fallback-ставки и демо-инициализация.

@@ -268,11 +268,12 @@
     const key = isMoratoriumActive(abonentId) ? REFI_KEY_MORA : REFI_KEY_NORMAL;
     try{
       const raw = storeGetRaw(key);
-      let arr = raw ? JSON.parse(raw) : [];
+      const arr = raw ? JSON.parse(raw) : [];
       if (!Array.isArray(arr) || arr.length === 0){
-        // ✅ CANON safety: if rates storage missing, use fallback so penalty does not become 0 silently
-        // rate values are in percent (e.g., 7.50)
-        arr = [{ from: "2000-01-01", rate: 7.5 }];
+        // CRITICAL: ставки рефинансирования = GLOBAL-справочник с сервера.
+        // Запрещено подставлять fallback-ставку: это может дать юридически неверный расчёт пени.
+        console.warn("[calc_engine][ref_rates] empty GLOBAL rates key=", key);
+        return [];
       }
       return arr.map(x => ({
         from: parseDateAnyToDate(x.from ?? x.dateFrom ?? x.start ?? x.fromISO ?? x.from_iso),
@@ -281,7 +282,8 @@
         .filter(x => x.from && x.from.getTime && Number.isFinite(x.rate))
         .sort((a,b)=>a.from.getTime()-b.from.getTime());
     }catch(e){
-      return [{ from: parseDateAnyToDate("2000-01-01"), rate: 7.5 }];
+      console.warn("[calc_engine][ref_rates] failed to load GLOBAL rates key=", key, e);
+      return [];
     }
   }
 

@@ -31,3 +31,14 @@ Date: 2026-03-25
 - LocalStorage:
   - используется как кэш
 - Добавлено требование синхронизации между устройствами owner
+
+
+## RefRates GLOBAL update — 2026-04-26
+
+Канон уточнён:
+- ставки рефинансирования не owner-level, а GLOBAL;
+- ключи: `refinancing_rates_normal_v1`, `refinancing_rates_moratorium_v1`;
+- backend owner: `GLOBAL`;
+- write: только admin;
+- read: все роли;
+- запрещены `ref_rates_{owner}`, fallback-ставки и демо-инициализация.
