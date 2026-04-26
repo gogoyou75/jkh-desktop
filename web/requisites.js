@@ -314,8 +314,22 @@
     }
     const ownerId = getOwnerId();
     console.log('[requisites][load] ownerId=' + ownerId);
-    fillReqForm(loadReq(ownerId));
-    renderSigners(loadSigners(ownerId));
+
+    let req = loadReq(ownerId);
+    let signers = loadSigners(ownerId);
+    let retryUsed = false;
+
+    if (!req.full_name) {
+      retryUsed = true;
+      console.warn('[requisites][load] empty after first read, retrying...');
+      await new Promise(r => setTimeout(r, 600));
+      req = loadReq(ownerId);
+      signers = loadSigners(ownerId);
+    }
+
+    console.log('[requisites][load] retry ' + (retryUsed ? 'used' : 'not used'));
+    fillReqForm(req);
+    renderSigners(signers);
     bindSigners();
     bindMain();
   });
