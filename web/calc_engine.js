@@ -52,7 +52,12 @@
   function pad2(n){ return String(n).padStart(2,"0"); }
   function r2(x){ return Math.round(x * 100) / 100; }
   function toNum(v){ const n = parseFloat(String(v ?? "").replace(/\s+/g,"").replace(",", ".")); return Number.isFinite(n) ? n : 0; }
-  function isDataReady(){ return window.JKH_DATA_READY === true; }
+  function isDataReady(){
+    const legacyReady = (window.JKH_DATA_READY === true);
+    const uiStatus = String((window.JKH_UI_STATE && window.JKH_UI_STATE.data && window.JKH_UI_STATE.data.status) || "");
+    const uiReady = (uiStatus === "ready" || uiStatus === "empty");
+    return legacyReady || uiReady;
+  }
   function storeGetRaw(key){
     if (!isDataReady()) return null;
     if (!(window.JKHStore && typeof window.JKHStore.getRaw === "function")) return null;
