@@ -314,6 +314,29 @@ class ImportHelpersTest(unittest.TestCase):
         self.assertTrue(result["uid_found"])
         self.assertEqual(result["matches"], [])
 
+    def test_find_owner_accounts_uses_abonent_object_key_as_canonical_ls(self):
+        owner_id = "owner-1"
+        uid = "uid_moefhmpj_chndmn"
+        payload = {"abonents": {"1006": {"uid": uid, "id": "9999"}}}
+
+        class DummyQuery:
+            def filter_by(self, owner, k):
+                self.owner = owner
+                self.k = k
+                return self
+
+            def first(self):
+                if self.owner == owner_id and self.k == "abonents_db_v1":
+                    return type("Row", (), {"v": json.dumps(payload)})()
+                return None
+
+        with app_module.app.app_context():
+            with patch.object(app_module.KVStore, "query", DummyQuery()):
+                result = app_module._find_owner_accounts(owner_id, uid, "1006")
+
+        self.assertTrue(result["uid_found"])
+        self.assertEqual(len(result["matches"]), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

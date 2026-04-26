@@ -589,9 +589,18 @@ def _extract_abonents_values(obj):
     return obj.values()
 
 
+def _extract_abonents_items(obj):
+    if not isinstance(obj, dict):
+        return []
+    nested = obj.get("abonents")
+    if isinstance(nested, dict):
+        return list(nested.items())
+    return list(obj.items())
+
+
 def _find_owner_accounts(owner_id: str, account_uid: str, account_number: str):
     uid_norm = _norm_text(account_uid).lower()
-    ls_norm = _norm_text(account_number).lower()
+    ls_norm = _norm_text(account_number)
     if not uid_norm:
         return {"matches": [], "uid_found": False}
 
@@ -606,15 +615,22 @@ def _find_owner_accounts(owner_id: str, account_uid: str, account_number: str):
         except Exception:
             continue
 
-        for abonent in _extract_abonents_values(obj):
+        for ls_key, abonent in _extract_abonents_items(obj):
             if not isinstance(abonent, dict):
                 continue
             candidate_uid = _norm_text(abonent.get("uid")).lower()
             if candidate_uid != uid_norm:
                 continue
             uid_hits.append(abonent)
-            candidate_ls = _norm_text(abonent.get("id")).lower()
-            if ls_norm and candidate_ls != ls_norm:
+            key_ls = _norm_text(ls_key)
+            fallback_ls = _norm_text(abonent.get("id"))
+            if ls_norm and key_ls and key_ls == ls_norm:
+                matches.append(abonent)
+                continue
+            if ls_norm and fallback_ls and fallback_ls == ls_norm:
+                matches.append(abonent)
+                continue
+            if ls_norm:
                 continue
             matches.append(abonent)
 

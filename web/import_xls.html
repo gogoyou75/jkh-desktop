@@ -1779,7 +1779,43 @@ async function applyPayments(){
     await apiJson('/api/import/' + serverPaymentBatchId + '/validate', { method:'POST' });
     const applied = await apiJson('/api/import/' + serverPaymentBatchId + '/apply', { method:'POST' });
     const s = applied.summary || {};
-    setImportStatus('Импорт завершён. Добавлено платежей: ' + (s.applied_count || 0) + '. Дубликатов пропущено: ' + (s.duplicate_count || 0) + '. Конфликтов: ' + (s.failed_count || 0) + '.', 'ok');
+    const appliedCount = Number(s.applied_count || 0);
+    const skippedCount = Number(s.skipped_count || 0);
+    const duplicateCount = Number(s.duplicate_count || 0);
+    const conflictCount = Number(s.conflict_count || 0);
+    const summaryMsg = 'Импорт завершён. Добавлено платежей: ' + appliedCount + '. Пропущено: ' + skippedCount + '. Дубликатов: ' + duplicateCount + '. Конфликтов: ' + conflictCount + '.';
+    const hardReject = rows.length > 0 && appliedCount === 0;
+    setImportStatus(summaryMsg, hardReject ? 'err' : 'ok');
+
+    if (serverPaymentBatchId){
+      try{
+        const badResp = await apiJson('/api/import/' + serverPaymentBatchId + '/errors', { method:'GET' });
+        const errors = Array.isArray(badResp && badResp.errors) ? badResp.errors : [];
+        if (errors.length){
+          const lines = [];
+          const limit = Math.min(errors.length, 10);
+          for (let i=0;i<limit;i++){
+            const er = errors[i] || {};
+            const code = normStr(er.reason_code) || 'UNKNOWN';
+            const text = normStr(er.reason_text) || 'Без описания';
+            lines.push((i + 1) + ') ' + code + ': ' + text);
+          }
+          if (errors.length > limit){
+            lines.push('... и ещё ' + (errors.length - limit) + ' строк.');
+          }
+          $('errorsBox').innerHTML = '<b>Причины отклонения строк:</b><br>' + lines.join('<br>');
+        } else if (hardReject) {
+          $('errorsBox').innerHTML = '<b>Все строки отклонены.</b>';
+        }
+      } catch (_e) {}
+    }
+
+    if (hardReject){
+      updateRestoredFileInfo();
+      updateStateLine();
+      setButtons();
+      return;
+    }
   } catch (e) {
     setImportStatus('Ошибка записи на сервер. Данные не применены. ' + (e.message || e), 'err');
     return;
