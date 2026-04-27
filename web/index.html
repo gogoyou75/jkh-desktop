@@ -477,8 +477,9 @@ function calcTotalsFromPayments(id, abonentObj){
                 const total     = Number(adj?.total) || (principal + penDebt);
 
                 totalDebt = total;
-                // 🔴 CRITICAL: если итог <= 0 (нет долга/аванс) — пеня в сводной = 0
-                penalty = (totalDebt > 0.0000001) ? penDebt : 0;
+                // CRITICAL: пеня берётся напрямую из calc_engine (penaltyDebt).
+                // Запрещено обнулять её в index.html — это нарушает единый расчёт.
+                penalty = penDebt;
 
                 CRITICAL_ASSERT(Number.isFinite(totalDebt), "Index: totalDebt is not finite", { id, totalDebt, adj });
                 CRITICAL_ASSERT(Number.isFinite(penalty),   "Index: penalty is not finite",   { id, penalty, adj });
@@ -519,7 +520,6 @@ function calcTotalsFromPayments(id, abonentObj){
         totalDebt = endRow ? toNum(endRow.total_debt) : 0;
         penalty   = endRow ? toNum(endRow.pay_penalty) : 0;
 
-        if (totalDebt <= 0.0000001) penalty = 0;
     }
 
     // ✅ страховка: если total_debt в строках не заполнен (0), всё равно можем показать аванс/долг по суммам
@@ -529,11 +529,6 @@ function calcTotalsFromPayments(id, abonentObj){
         totalDebt = principalNet + penalty;
     }
 
-    // правило: если итоговый долг <= 0 (аванс/ноль) — пеня в сводной = 0, а "Всего задолженность" = только principalNet
-    if (totalDebt <= 0.0000001) {
-        penalty = 0;
-        if (Math.abs(principalNet) > 0.0000001) totalDebt = principalNet;
-    }
 
     // ✅ дата начала расчёта = дата регистрации абонента (если задана)
     let startDate = "";
