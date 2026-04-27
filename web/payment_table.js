@@ -94,7 +94,7 @@
   // =========================
   // ИСТОЧНИК ПЛАТЕЖА (source)
   // =========================
-  // Справочник источников хранится глобально (на будущее может быть больше 3).
+  // Справочник источников хранится на уровне owner. Нельзя делать GLOBAL, потому что импорт платежей использует source_index текущей базы.
   // По умолчанию: «Платёж 1/2/3».
   const PAYMENT_SOURCES_KEY = 'payment_sources_v1';
 
@@ -115,9 +115,61 @@
     }
   }
 
+  let __paymentSourcesUploadTimer = null;
+  let __paymentSourcesLastValueForUpload = '';
+
+  async function uploadPaymentSourcesKeyToServer(value){
+    const ownerId = (window.JKHStore && typeof JKHStore.getOwnerId === 'function') ? String(JKHStore.getOwnerId() || '').trim() : '';
+    if (!ownerId || ownerId === 'guest' || ownerId === 'ALL') {
+      throw new Error('PAYMENT_SOURCES_UPLOAD_FORBIDDEN_OWNER');
+    }
+    const payload = {
+      owner: ownerId,
+      key: PAYMENT_SOURCES_KEY,
+      value: String(value ?? '')
+    };
+    let res;
+    try {
+      res = await fetch('/api/store', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+    } catch (e) {
+      throw new Error('PAYMENT_SOURCES_UPLOAD_NETWORK_ERROR');
+    }
+    if (!res || !res.ok) {
+      throw new Error('PAYMENT_SOURCES_UPLOAD_HTTP_ERROR');
+    }
+    let data = null;
+    try { data = await res.json(); } catch { data = null; }
+    if (!(data && data.ok === true)) {
+      throw new Error('PAYMENT_SOURCES_UPLOAD_API_ERROR');
+    }
+    console.info('[payment_sources] owner=%s uploaded key=payment_sources_v1 size=%s', ownerId, String(payload.value || '').length);
+  }
+
+  function schedulePaymentSourcesUpload(value){
+    __paymentSourcesLastValueForUpload = String(value ?? '');
+    if (__paymentSourcesUploadTimer) clearTimeout(__paymentSourcesUploadTimer);
+    __paymentSourcesUploadTimer = setTimeout(async () => {
+      __paymentSourcesUploadTimer = null;
+      try {
+        await uploadPaymentSourcesKeyToServer(__paymentSourcesLastValueForUpload);
+      } catch (e) {
+        console.warn('[payment_sources] upload failed', e);
+      }
+    }, 800);
+  }
+
   function savePaymentSources(arr){
     const cleaned = (arr||[]).map(x => String(x||'').trim()).filter(Boolean);
-    storeSetRaw(PAYMENT_SOURCES_KEY, JSON.stringify(cleaned.length ? cleaned : defaultPaymentSources()));
+    if (!cleaned.length) cleaned.push(...defaultPaymentSources());
+    const serialized = JSON.stringify(cleaned);
+    storeSetRaw(PAYMENT_SOURCES_KEY, serialized);
+    console.info('[payment_sources] owner=%s saved count=%s', (window.JKHStore && typeof JKHStore.getOwnerId === 'function') ? JKHStore.getOwnerId() : 'unknown', cleaned.length);
+    schedulePaymentSourcesUpload(serialized);
   }
 
   function ensurePaymentSources(){
