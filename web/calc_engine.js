@@ -638,10 +638,12 @@
           const denom = (overdueIndex <= 90) ? 300 : 130;
           const rawRate = rateOnDate(day, rates);
           if (!Number.isFinite(rawRate)) {
-          console.error("[calc_engine] missing rate for date", day);
-          continue; // пропускаем день
-}
-          penalty += principal * (rate/100) / denom;
+            console.error("[calc_engine] missing rate for date", day);
+            continue; // пропускаем день
+          }
+          // CRITICAL: применяем ограничение ставки до 01.01.2027 перед расчётом пени.
+          const rate = capRateUntil2027(day, rawRate);
+          penalty += principal * (rate / 100) / denom;
         }
       }
       day = addDays(day, 1);
