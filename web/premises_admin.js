@@ -1233,6 +1233,10 @@ function onSave() {
                     };
                     syncLegacyFieldsForRegnum(db, reg);
                     return { ok: true, affectedAbonentIds: collectAffectedAbonentIdsByRegnums(db, [reg]) };
+                },
+                onSuccess: function () {
+                    setFormModeAdd();
+                    setWarn('Сохранено.', true);
                 }
             });
             return;

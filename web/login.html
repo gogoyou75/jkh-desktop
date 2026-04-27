@@ -129,7 +129,7 @@
 
       <div class="tabs">
         <div class="tab active" data-tab="login">Вход</div>
-        <div class="tab" data-tab="register">Регистрация</div>
+        <div class="tab" data-tab="register">Новый пользователь</div>
         <div class="tab" data-tab="recover">Восстановление</div>
       </div>
 
@@ -208,9 +208,34 @@
 
       <!-- RECOVER -->
       <div class="panel" id="panel-recover">
-        <div class="hint" style="font-size:13px;">
-          Восстановление выполняется офлайн: recovery-код или мастер-ключ администратора.
-        </div>
+        <form id="recoverForm" autocomplete="off">
+          <div class="row">
+            <label for="recoverEmail">Email</label>
+            <input id="recoverEmail" type="email" autocomplete="username">
+          </div>
+
+          <div class="row">
+            <label for="recoverCode">Recovery-код</label>
+            <input id="recoverCode" type="text" autocomplete="off">
+          </div>
+
+          <div class="row">
+            <label for="recoverMasterKey">Мастер-ключ администратора</label>
+            <input id="recoverMasterKey" type="password" autocomplete="off">
+          </div>
+
+          <div class="row">
+            <label for="recoverPass">Новый пароль</label>
+            <input id="recoverPass" type="password" autocomplete="new-password">
+          </div>
+
+          <div class="row">
+            <label for="recoverPass2">Повтор нового пароля</label>
+            <input id="recoverPass2" type="password" autocomplete="new-password">
+          </div>
+
+          <button class="btn" type="submit">Восстановить пароль</button>
+        </form>
       </div>
 
     </div>
@@ -252,6 +277,20 @@
 
   var loginSubmitInProgress = false;
   var registerSubmitInProgress = false;
+  var recoverSubmitInProgress = false;
+
+  function activateTab(tabName){
+    var tabs = document.querySelectorAll('.tab');
+    for (var i=0;i<tabs.length;i++){
+      tabs[i].classList.toggle('active', tabs[i].getAttribute('data-tab') === tabName);
+    }
+
+    var panels = document.querySelectorAll('.panel');
+    for (var k=0;k<panels.length;k++) panels[k].classList.remove('active');
+
+    var p = document.getElementById('panel-' + tabName);
+    if (p) p.classList.add('active');
+  }
 
   // email prefill
   document.addEventListener('DOMContentLoaded', function(){
@@ -267,6 +306,30 @@
   });
 
   // ========== ВХОД ==========
+  document.getElementById('loginEmail').addEventListener('keydown', function(e){
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      var loginForm = document.getElementById('loginForm');
+      if (typeof loginForm.requestSubmit === 'function') {
+        loginForm.requestSubmit();
+      } else {
+        loginForm.dispatchEvent(new Event('submit'));
+      }
+    }
+  });
+
+  document.getElementById('loginPass').addEventListener('keydown', function(e){
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      var loginForm = document.getElementById('loginForm');
+      if (typeof loginForm.requestSubmit === 'function') {
+        loginForm.requestSubmit();
+      } else {
+        loginForm.dispatchEvent(new Event('submit'));
+      }
+    }
+  });
+
   document.getElementById('loginForm').addEventListener('submit', function (e){
     e.preventDefault();
     hideStatus();
@@ -448,6 +511,96 @@
       registerSubmitInProgress = false;
       showStatus('Ошибка регистрации: ' + (err && err.message ? err.message : err), true);
     }
+  });
+
+  // ========== ВОССТАНОВЛЕНИЕ ==========
+  document.getElementById('recoverForm').addEventListener('submit', function (e){
+    e.preventDefault();
+    hideStatus();
+
+    if (recoverSubmitInProgress) return;
+
+    var emailEl = document.getElementById('recoverEmail');
+    var codeEl = document.getElementById('recoverCode');
+    var masterEl = document.getElementById('recoverMasterKey');
+    var passEl = document.getElementById('recoverPass');
+    var pass2El = document.getElementById('recoverPass2');
+
+    var email = (emailEl.value || '').trim();
+    var code = (codeEl.value || '').trim();
+    var masterKey = (masterEl.value || '').trim();
+    var pass = (passEl.value || '');
+    var pass2 = (pass2El.value || '');
+
+    if (!email) {
+      showStatus('Введите email', true);
+      emailEl.focus();
+      return;
+    }
+    if (!code && !masterKey) {
+      showStatus('Укажите recovery-код или мастер-ключ администратора', true);
+      codeEl.focus();
+      return;
+    }
+    if (!pass) {
+      showStatus('Введите новый пароль', true);
+      passEl.focus();
+      return;
+    }
+    if (pass.length < 4) {
+      showStatus('Пароль слишком короткий (мин. 4 символа)', true);
+      passEl.focus();
+      return;
+    }
+    if (pass !== pass2) {
+      showStatus('Пароли не совпадают', true);
+      pass2El.focus();
+      return;
+    }
+
+    if (!(window.Auth)) {
+      showStatus('Функция восстановления не подключена', true);
+      return;
+    }
+
+    var recoverPromise = null;
+    try {
+      if (code) {
+        if (typeof Auth.recoverByCode !== 'function') {
+          showStatus('Функция восстановления не подключена', true);
+          return;
+        }
+        recoverPromise = Auth.recoverByCode(email, code, pass);
+      } else {
+        if (typeof Auth.recoverByMasterKey !== 'function') {
+          showStatus('Функция восстановления не подключена', true);
+          return;
+        }
+        recoverPromise = Auth.recoverByMasterKey(email, masterKey, pass);
+      }
+    } catch(err) {
+      showStatus('Ошибка восстановления: ' + (err && err.message ? err.message : err), true);
+      return;
+    }
+
+    if (!recoverPromise || typeof recoverPromise.then !== 'function') {
+      showStatus('Функция восстановления не подключена', true);
+      return;
+    }
+
+    recoverSubmitInProgress = true;
+    recoverPromise.then(function(){
+      showStatus('Пароль изменён', false);
+      activateTab('login');
+      var loginEmail = document.getElementById('loginEmail');
+      if (loginEmail && !loginEmail.value) loginEmail.value = email;
+      var loginPass = document.getElementById('loginPass');
+      if (loginPass) loginPass.focus();
+    }).catch(function(err){
+      showStatus('Ошибка восстановления: ' + (err && err.message ? err.message : err), true);
+    }).finally(function(){
+      recoverSubmitInProgress = false;
+    });
   });
 </script>
 </body>
