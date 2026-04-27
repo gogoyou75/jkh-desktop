@@ -312,15 +312,46 @@ def _effective_owner_for_key(owner: str, base_key: str) -> str:
     return owner
 
 
-def _require_write_access_for_key(base_key: str):
+def _check_store_write_access(user: User, owner: str, base_key: str):
+    key = str(base_key or "").strip()
+    target_owner = str(owner or "").strip()
+
+    if key in GLOBAL_KEYS and user.role != "admin":
+        return False, "global_admin_only"
+
+    if _is_protected_owner_level_key(key):
+        if key.startswith("tariffs_") and user.role == "user":
+            expected_key = f"tariffs_{target_owner}"
+            if target_owner == user.id and key == expected_key:
+                return True, "ok"
+            return False, "tariffs_owner_mismatch"
+        if user.role != "admin":
+            return False, "protected_key_admin_only"
+
+    return True, "ok"
+
+
+def _require_write_access_for_key(owner: str, base_key: str):
     user, err = _require_user()
     if err:
-        return err
-    key = str(base_key or "").strip()
-    if key in GLOBAL_KEYS and user.role != "admin":
-        return _json_error("global_admin_only", 403)
-    if _is_protected_owner_level_key(key) and user.role != "admin":
-        return _json_error("forbidden", 403)
+        return err, None
+    allowed, reason = _check_store_write_access(user, owner, base_key)
+    if not allowed:
+        if reason == "global_admin_only":
+            return _json_error("global_admin_only", 403), reason
+        return _json_error("forbidden", 403), reason
+    return None, None
+
+
+def _log_store_forbidden(user: User | None, owner: str, key: str, reason: str):
+    app.logger.warning(
+        "[store][forbidden] user_id=%s role=%s owner=%s key=%s reason=%s",
+        getattr(user, "id", ""),
+        getattr(user, "role", ""),
+        owner,
+        key,
+        reason,
+    )
     return None
 
 
@@ -1690,6 +1721,9 @@ def store_get():
 @app.post("/api/store")
 def store_set():
     data = request.get_json(silent=True) or {}
+    user, user_err = _require_user()
+    if user_err:
+        return user_err
     owner, err = _resolve_owner(data.get("owner"), allow_admin_override=True)
     if err:
         return err
@@ -1702,8 +1736,9 @@ def store_set():
         value = ""
     if not isinstance(value, str):
         return _json_error("value_must_be_string", 400)
-    access_err = _require_write_access_for_key(key)
+    access_err, reason = _require_write_access_for_key(owner, key)
     if access_err:
+        _log_store_forbidden(user, owner, key, reason or "forbidden")
         return access_err
 
     owner_eff = _effective_owner_for_key(owner, key)
@@ -1720,6 +1755,9 @@ def store_set():
 @app.delete("/api/store")
 def store_delete():
     data = request.get_json(silent=True) or {}
+    user, user_err = _require_user()
+    if user_err:
+        return user_err
     owner, err = _resolve_owner(data.get("owner"), allow_admin_override=True)
     if err:
         return err
@@ -1727,8 +1765,9 @@ def store_delete():
     key = (data.get("key") or "").strip()
     if not key:
         return _json_error("key_required", 400)
-    access_err = _require_write_access_for_key(key)
+    access_err, reason = _require_write_access_for_key(owner, key)
     if access_err:
+        _log_store_forbidden(user, owner, key, reason or "forbidden")
         return access_err
 
     owner_eff = _effective_owner_for_key(owner, key)
