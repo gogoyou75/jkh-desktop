@@ -1236,7 +1236,6 @@ function onSave() {
                 },
                 onSuccess: function () {
                     setFormModeAdd();
-                    setWarn('Сохранено.', true);
                 }
             });
             return;
