@@ -301,6 +301,100 @@ window.PremisesAdmin = (function () {
         refreshStreetDatalist();
     }
 
+    function collectHousesForCityStreet(db, city, street) {
+        const out = new Map();
+        const cityKey = baseKey(city);
+        const streetKey = baseKey(street);
+        if (!cityKey || !streetKey) return [];
+
+        const add = (c, s, h) => {
+            const cc = baseKey(c);
+            const ss = baseKey(s);
+            const hh = normStr(h);
+            if (!hh) return;
+            if (cc !== cityKey || ss !== streetKey) return;
+            const hk = baseKey(hh);
+            if (!out.has(hk)) out.set(hk, hh);
+        };
+
+        const premises = db?.premises || {};
+        Object.keys(premises).forEach(r => {
+            const p = premises[r];
+            add(p?.city, p?.street, p?.house);
+        });
+
+        const abonents = db?.abonents || {};
+        Object.keys(abonents).forEach(id => {
+            const a = abonents[id];
+            add(a?.city, a?.street, a?.house);
+        });
+
+        return Array.from(out.values()).sort((a, b) => a.localeCompare(b, 'ru', { numeric: true, sensitivity: 'base' }));
+    }
+
+    const HOUSE_NEW_VALUE = '__HOUSE_NEW__';
+
+    function ensureHouseSelectorUI() {
+        const original = q('p_house');
+        if (!original || q('p_house_select')) return;
+
+        original.style.display = 'none';
+
+        const holder = document.createElement('div');
+        holder.id = 'p_house_selector_wrap';
+        holder.style.display = 'grid';
+        holder.style.gap = '6px';
+
+        const select = document.createElement('select');
+        select.id = 'p_house_select';
+        select.innerHTML = `<option value="${HOUSE_NEW_VALUE}">+ новый дом</option>`;
+
+        const input = document.createElement('input');
+        input.id = 'p_house_new';
+        input.placeholder = 'например: дом 50';
+        input.style.display = '';
+
+        holder.appendChild(select);
+        holder.appendChild(input);
+        original.insertAdjacentElement('afterend', holder);
+    }
+
+    function syncHouseModelFromUi() {
+        const original = q('p_house');
+        const select = q('p_house_select');
+        const input = q('p_house_new');
+        if (!original || !select || !input) return;
+        const isNew = select.value === HOUSE_NEW_VALUE;
+        input.style.display = isNew ? '' : 'none';
+        original.value = isNew ? normStr(input.value) : normStr(select.value);
+    }
+
+    function refreshHouseChoices() {
+        const select = q('p_house_select');
+        const input = q('p_house_new');
+        const original = q('p_house');
+        if (!select || !input || !original) return;
+
+        const current = normStr(original.value);
+        const city = normStr(q('p_city')?.value);
+        const street = normStr(q('p_street')?.value);
+        const houses = collectHousesForCityStreet(window.AbonentsDB, city, street);
+
+        const options = houses.map(h => `<option value="${esc(h)}">${esc(h)}</option>`).join('');
+        select.innerHTML = `${options}<option value="${HOUSE_NEW_VALUE}">+ новый дом</option>`;
+
+        if (current && houses.some(h => baseKey(h) === baseKey(current))) {
+            const matched = houses.find(h => baseKey(h) === baseKey(current)) || current;
+            select.value = matched;
+            input.value = '';
+            input.style.display = 'none';
+        } else {
+            select.value = HOUSE_NEW_VALUE;
+            input.value = current;
+            input.style.display = '';
+        }
+    }
+
     // -----------------------------
     // Нормализация частей адреса для сравнения (контроль дублей)
     // -----------------------------
@@ -498,6 +592,33 @@ window.PremisesAdmin = (function () {
         return norm(p?.city) === norm(city) && norm(p?.street) === norm(street) && norm(p?.house) === norm(house) && norm(p?.flat) === norm(flat);
     }
 
+    function parseFlatSortParts(flat) {
+        const raw = normStr(flat);
+        const m = raw.match(/^(\d+)\s*([^\d].*)?$/u);
+        if (m) {
+            return {
+                hasNum: true,
+                num: Number(m[1]),
+                suffix: normStr(m[2] || '').toLowerCase(),
+                raw: raw.toLowerCase()
+            };
+        }
+        return { hasNum: false, num: -1, suffix: '', raw: raw.toLowerCase() };
+    }
+
+    function comparePremisesByFlatDesc(a, b) {
+        const pa = parseFlatSortParts(a?.flat);
+        const pb = parseFlatSortParts(b?.flat);
+
+        if (pa.hasNum && pb.hasNum && pa.num !== pb.num) return pb.num - pa.num;
+        if (pa.hasNum !== pb.hasNum) return pa.hasNum ? -1 : 1;
+
+        const suffixCmp = pb.suffix.localeCompare(pa.suffix, 'ru', { numeric: true, sensitivity: 'base' });
+        if (suffixCmp !== 0) return suffixCmp;
+
+        return String(b?.flat || '').localeCompare(String(a?.flat || ''), 'ru', { numeric: true, sensitivity: 'base' });
+    }
+
     const BUSY_NAVIGATION_MESSAGE = 'Сохранение на сервер… не переходите на другую страницу.';
     let state = { editingRegnum: null, busy: false };
     let navigationGuardsBound = false;
@@ -630,30 +751,46 @@ window.PremisesAdmin = (function () {
         return { ok: true, total: ids.length, changed: changed };
     }
 
+    async function uploadOnlyAbonentsDbToServer(ownerId) {
+        const oid = String(ownerId || '').trim();
+        if (!oid || oid === 'guest' || oid === 'ALL') throw new Error('SERVER_UPLOAD_FAILED');
+        const raw = (window.JKHStore && typeof window.JKHStore.getRaw === 'function')
+            ? window.JKHStore.getRaw(KEY_DB, oid)
+            : JSON.stringify(window.AbonentsDB || { premises: {}, links: [], abonents: {} });
+
+        let res = null;
+        try {
+            res = await fetch('/api/store', {
+                method: 'POST',
+                credentials: 'include',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ owner: oid, key: KEY_DB, value: String(raw || '') })
+            });
+        } catch (e) {
+            throw new Error('SERVER_UPLOAD_FAILED');
+        }
+        if (!res || !res.ok) throw new Error('SERVER_UPLOAD_FAILED');
+
+        let data = null;
+        try { data = await res.json(); } catch (e) { data = null; }
+        if (!(data && data.ok === true)) throw new Error('SERVER_UPLOAD_FAILED');
+    }
+
     async function flushDbToServerStrict() {
         if (window.JKHStore && window.AbonentsDB) {
             try {
-                window.JKHStore.setJSON('abonents_db_v1', window.AbonentsDB);
+                window.JKHStore.setJSON(KEY_DB, window.AbonentsDB);
             } catch (e) {
                 throw new Error('Не удалось записать DB в storage: ' + (e?.message || e));
             }
         }
 
-        if (window.Data && typeof window.Data.flushDbToServer === 'function') {
-            const ok = await window.Data.flushDbToServer();
-            if (!ok) throw new Error('Не удалось сохранить базу перед upload.');
-            return true;
-        }
-
-        const saved = !!(window.saveAbonentsDB && window.saveAbonentsDB());
-        if (!saved) throw new Error('Не удалось сохранить базу.');
-
-        if (window.JKHRemoteSync && typeof window.JKHRemoteSync.uploadNow === 'function') {
-            await window.JKHRemoteSync.uploadNow();
-            return true;
-        }
-
-        throw new Error('JKHRemoteSync.uploadNow недоступен.');
+        const ownerId = (window.JKHStore && typeof window.JKHStore.getOwnerId === 'function')
+            ? window.JKHStore.getOwnerId()
+            : getActiveOwnerId();
+        await uploadOnlyAbonentsDbToServer(ownerId);
+        console.log('[premises][save] server flush ok');
+        return true;
     }
 
     async function persistPremiseTransaction(opts) {
@@ -687,6 +824,9 @@ window.PremisesAdmin = (function () {
         } catch (e) {
             console.warn('[premises] transaction failed', e);
             restoreFromTxSnapshot(snapshot);
+            if (String(e?.message || e) === 'SERVER_UPLOAD_FAILED') {
+                console.log('[premises][save] rollback after SERVER_UPLOAD_FAILED');
+            }
             setWarn('Ошибка сохранения: ' + (e?.message || e), false);
         } finally {
             setBusyUI(false);
@@ -773,6 +913,7 @@ window.PremisesAdmin = (function () {
     }
 
     function readForm() {
+        syncHouseModelFromUi();
         const regnum = normRegnum(q('p_regnum').value);
         const regnumUnknown = !!q('p_regnum_unknown')?.checked;
         const createdAt = toISODateFromInput(q('p_created').value);
@@ -818,6 +959,7 @@ window.PremisesAdmin = (function () {
         q('p_flat').value = p?.flat || '';
         q('p_square').value = (p?.square ?? '') === '' ? '' : String(p.square);
         refreshStreetDatalist(); // ✅ улицы зависят от города
+        refreshHouseChoices();
         applyRegnumUIState(p || null);
     }
 
@@ -880,6 +1022,7 @@ window.PremisesAdmin = (function () {
                     if (filter && !hay.includes(filter)) return;
                     list.push(p);
                 });
+                list.sort(comparePremisesByFlatDesc);
 
                 // если фильтр активен и в группе нет совпадений — не показываем группу
                 if (filter && list.length === 0) return;
@@ -936,7 +1079,7 @@ window.PremisesAdmin = (function () {
         // ============================================================
         const db = window.AbonentsDB;
         const premises = db?.premises || {};
-        const rows = Object.keys(premises).sort().map(regnum => premises[regnum]);
+        const rows = Object.keys(premises).map(regnum => premises[regnum]).sort(comparePremisesByFlatDesc);
 
         let shown = 0;
         rows.forEach(p => {
@@ -1020,6 +1163,7 @@ function onSave() {
         const isEdit = !!state.editingRegnum;
         if (isEdit) {
             const reg = state.editingRegnum;
+            console.log('[premises][save] owner=' + getActiveOwnerId() + ' regnum=' + reg + ' action=update');
             const existing = db.premises?.[reg];
             if (!existing) { setWarn('Ошибка: объект не найден в базе.', false); return; }
 
@@ -1078,6 +1222,7 @@ function onSave() {
 
         // добавление нового объекта
         const regKey = isUnknown ? genTempRegnum(db) : f.regnum;
+        console.log('[premises][save] owner=' + getActiveOwnerId() + ' regnum=' + regKey + ' action=create');
 
         if (db.premises?.[regKey]) {
             const p = db.premises[regKey];
@@ -1159,6 +1304,8 @@ function onSave() {
 
     function bind() {
         bindNavigationGuards();
+        ensureHouseSelectorUI();
+        refreshHouseChoices();
         q('btnPremSave')?.addEventListener('click', (e) => { e.preventDefault(); onSave(); });
         q('btnPremReset')?.addEventListener('click', (e) => { e.preventDefault(); clearForm(); });
         q('premSearch')?.addEventListener('input', () => renderTable());
@@ -1167,9 +1314,21 @@ function onSave() {
         ['p_city','p_street','p_house','p_flat'].forEach(id => {
             q(id)?.addEventListener('input', () => renderDupHints());
         });
+        q('p_house_new')?.addEventListener('input', () => {
+            syncHouseModelFromUi();
+            renderDupHints();
+        });
+        q('p_house_select')?.addEventListener('change', () => {
+            syncHouseModelFromUi();
+            renderDupHints();
+        });
 
         // ✅ при изменении города — обновляем улицы (чтобы улицы были по этому городу)
-        q('p_city')?.addEventListener('input', () => refreshStreetDatalist());
+        q('p_city')?.addEventListener('input', () => {
+            refreshStreetDatalist();
+            refreshHouseChoices();
+        });
+        q('p_street')?.addEventListener('input', () => refreshHouseChoices());
 
         // regnum неизвестен / временный
         q('p_regnum_unknown')?.addEventListener('change', () => {
@@ -1218,6 +1377,7 @@ function onSave() {
 
         // ✅ первичная загрузка подсказок
         refreshAddressDatalists();
+        refreshHouseChoices();
     }
 
     return { init };
