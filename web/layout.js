@@ -1,7 +1,6 @@
 /* ============================================================
       layout.js — БЕЗ document.write (DOM-вставка)
       Дизайн не меняем
-      + кнопки: "сброс базы" и "загрузить демо"
       + auth: offline-first (login.html / admin.html)
 
       FIX 2026-01-28:
@@ -251,8 +250,6 @@ function renderLayout() {
     <button class="btn-inline" data-action="print" type="button">распечатать</button>
     <button class="btn-inline" data-action="save" type="button">сохранить</button>
 
-    <button class="btn-inline" data-action="resetdb" type="button" title="Сброс базы (тестовый режим)">сброс базы</button>
-    <button class="btn-inline" data-action="loaddemo" type="button" title="Загрузить демо (только тест)">загрузить демо</button>
   </div>
 
   <div class="login-box" id="authBox" style="font-size:13px;">регистрация / вход</div>
@@ -396,15 +393,6 @@ document.addEventListener("DOMContentLoaded", () => {
       if (a === "save") alert("Данные сохранены (имитация)");
       if (a === "send") alert("Отправка выполнена (имитация)");
 
-      if (a === "resetdb") {
-        if (typeof window.testResetDatabase === "function") window.testResetDatabase();
-        else alert("testResetDatabase() не найдена. Проверь data.js");
-      }
-
-      if (a === "loaddemo") {
-        if (typeof window.testLoadDemoDatabase === "function") window.testLoadDemoDatabase();
-        else alert("testLoadDemoDatabase() не найдена. Проверь data.js");
-      }
     });
   });
 
