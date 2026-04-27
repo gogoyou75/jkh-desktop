@@ -774,9 +774,7 @@ window.PremisesAdmin = (function () {
     async function uploadOnlyAbonentsDbToServer(ownerId) {
         const oid = String(ownerId || '').trim();
         if (!oid || oid === 'guest' || oid === 'ALL') throw new Error('SERVER_UPLOAD_FAILED');
-        const raw = (window.JKHStore && typeof window.JKHStore.getRaw === 'function')
-            ? window.JKHStore.getRaw(KEY_DB, oid)
-            : JSON.stringify(window.AbonentsDB || { premises: {}, links: [], abonents: {} });
+        const raw = JSON.stringify(window.AbonentsDB || { premises: {}, links: [], abonents: {} });
 
         let res = null;
         try {
@@ -816,8 +814,8 @@ window.PremisesAdmin = (function () {
         if (state.busy) return;
         setBusyUI(true);
         const snapshot = makeTxSnapshot();
-        const persistOwnerId = getPersistOwnerIdOrThrow();
         try {
+            const persistOwnerId = getPersistOwnerIdOrThrow();
             const tx = (opts && typeof opts.mutate === 'function') ? (opts.mutate() || {}) : {};
             if (tx && tx.ok === false) {
                 restoreFromTxSnapshot(snapshot);
