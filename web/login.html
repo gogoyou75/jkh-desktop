@@ -309,14 +309,24 @@
   document.getElementById('loginEmail').addEventListener('keydown', function(e){
     if (e.key === 'Enter') {
       e.preventDefault();
-      document.getElementById('loginForm').dispatchEvent(new Event('submit'));
+      var loginForm = document.getElementById('loginForm');
+      if (typeof loginForm.requestSubmit === 'function') {
+        loginForm.requestSubmit();
+      } else {
+        loginForm.dispatchEvent(new Event('submit'));
+      }
     }
   });
 
   document.getElementById('loginPass').addEventListener('keydown', function(e){
     if (e.key === 'Enter') {
       e.preventDefault();
-      document.getElementById('loginForm').dispatchEvent(new Event('submit'));
+      var loginForm = document.getElementById('loginForm');
+      if (typeof loginForm.requestSubmit === 'function') {
+        loginForm.requestSubmit();
+      } else {
+        loginForm.dispatchEvent(new Event('submit'));
+      }
     }
   });
 
