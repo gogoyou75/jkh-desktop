@@ -115,22 +115,61 @@
     }
   }
 
-  async function flushPaymentSourcesToServer(){
-    try {
-      if (window.JKHRemoteSync && typeof JKHRemoteSync.uploadNow === 'function') {
-        await JKHRemoteSync.uploadNow();
-      }
-    } catch (e) {
-      console.warn('[payment_sources] flush failed', e);
+  let __paymentSourcesUploadTimer = null;
+  let __paymentSourcesLastValueForUpload = '';
+
+  async function uploadPaymentSourcesKeyToServer(value){
+    const ownerId = (window.JKHStore && typeof JKHStore.getOwnerId === 'function') ? String(JKHStore.getOwnerId() || '').trim() : '';
+    if (!ownerId || ownerId === 'guest' || ownerId === 'ALL') {
+      throw new Error('PAYMENT_SOURCES_UPLOAD_FORBIDDEN_OWNER');
     }
+    const payload = {
+      owner: ownerId,
+      key: PAYMENT_SOURCES_KEY,
+      value: String(value ?? '')
+    };
+    let res;
+    try {
+      res = await fetch('/api/store', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+    } catch (e) {
+      throw new Error('PAYMENT_SOURCES_UPLOAD_NETWORK_ERROR');
+    }
+    if (!res || !res.ok) {
+      throw new Error('PAYMENT_SOURCES_UPLOAD_HTTP_ERROR');
+    }
+    let data = null;
+    try { data = await res.json(); } catch { data = null; }
+    if (!(data && data.ok === true)) {
+      throw new Error('PAYMENT_SOURCES_UPLOAD_API_ERROR');
+    }
+    console.info('[payment_sources] owner=%s uploaded key=payment_sources_v1 size=%s', ownerId, String(payload.value || '').length);
+  }
+
+  function schedulePaymentSourcesUpload(value){
+    __paymentSourcesLastValueForUpload = String(value ?? '');
+    if (__paymentSourcesUploadTimer) clearTimeout(__paymentSourcesUploadTimer);
+    __paymentSourcesUploadTimer = setTimeout(async () => {
+      __paymentSourcesUploadTimer = null;
+      try {
+        await uploadPaymentSourcesKeyToServer(__paymentSourcesLastValueForUpload);
+      } catch (e) {
+        console.warn('[payment_sources] upload failed', e);
+      }
+    }, 800);
   }
 
   function savePaymentSources(arr){
     const cleaned = (arr||[]).map(x => String(x||'').trim()).filter(Boolean);
-    const next = cleaned.length ? cleaned : defaultPaymentSources();
-    storeSetRaw(PAYMENT_SOURCES_KEY, JSON.stringify(next));
+    if (!cleaned.length) cleaned.push(...defaultPaymentSources());
+    const serialized = JSON.stringify(cleaned);
+    storeSetRaw(PAYMENT_SOURCES_KEY, serialized);
     console.info('[payment_sources] owner=%s saved count=%s', (window.JKHStore && typeof JKHStore.getOwnerId === 'function') ? JKHStore.getOwnerId() : 'unknown', cleaned.length);
-    flushPaymentSourcesToServer();
+    schedulePaymentSourcesUpload(serialized);
   }
 
   function ensurePaymentSources(){
@@ -2071,7 +2110,6 @@ tbody.innerHTML = "";
         if (!sources.includes(n)) {
           sources.push(n);
           savePaymentSources(sources);
-          await flushPaymentSourcesToServer();
         }
         row.source = n;
         await savePaymentsAndFlush(arr);
@@ -2277,7 +2315,6 @@ tbody.innerHTML = "";
           if (!uniq.includes(ss)) uniq.push(ss);
         }
         savePaymentSources(uniq);
-        await flushPaymentSourcesToServer();
 
         // синхронизируем платежи текущего абонента
         try {
@@ -2338,7 +2375,6 @@ tbody.innerHTML = "";
             return;
           }
           savePaymentSources(next);
-          await flushPaymentSourcesToServer();
 
           renderSourcesModalList();
           try { loadPaymentTable(); } catch(e) { console.error(e); throw e; }
@@ -2353,7 +2389,6 @@ tbody.innerHTML = "";
           return;
         }
         savePaymentSources(next);
-        await flushPaymentSourcesToServer();
         renderSourcesModalList();
         try { loadPaymentTable(); } catch(e) { console.error(e); throw e; }
       };
@@ -2388,7 +2423,6 @@ tbody.innerHTML = "";
     if (!cur.includes(v)) {
       cur.push(v);
       savePaymentSources(cur);
-      await flushPaymentSourcesToServer();
     }
     if (inp) inp.value = '';
     renderSourcesModalList();
