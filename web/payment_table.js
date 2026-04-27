@@ -94,7 +94,7 @@
   // =========================
   // ИСТОЧНИК ПЛАТЕЖА (source)
   // =========================
-  // Справочник источников хранится глобально (на будущее может быть больше 3).
+  // Справочник источников хранится на уровне owner. Нельзя делать GLOBAL, потому что импорт платежей использует source_index текущей базы.
   // По умолчанию: «Платёж 1/2/3».
   const PAYMENT_SOURCES_KEY = 'payment_sources_v1';
 
@@ -115,9 +115,22 @@
     }
   }
 
+  async function flushPaymentSourcesToServer(){
+    try {
+      if (window.JKHRemoteSync && typeof JKHRemoteSync.uploadNow === 'function') {
+        await JKHRemoteSync.uploadNow();
+      }
+    } catch (e) {
+      console.warn('[payment_sources] flush failed', e);
+    }
+  }
+
   function savePaymentSources(arr){
     const cleaned = (arr||[]).map(x => String(x||'').trim()).filter(Boolean);
-    storeSetRaw(PAYMENT_SOURCES_KEY, JSON.stringify(cleaned.length ? cleaned : defaultPaymentSources()));
+    const next = cleaned.length ? cleaned : defaultPaymentSources();
+    storeSetRaw(PAYMENT_SOURCES_KEY, JSON.stringify(next));
+    console.info('[payment_sources] owner=%s saved count=%s', (window.JKHStore && typeof JKHStore.getOwnerId === 'function') ? JKHStore.getOwnerId() : 'unknown', cleaned.length);
+    flushPaymentSourcesToServer();
   }
 
   function ensurePaymentSources(){
@@ -2058,6 +2071,7 @@ tbody.innerHTML = "";
         if (!sources.includes(n)) {
           sources.push(n);
           savePaymentSources(sources);
+          await flushPaymentSourcesToServer();
         }
         row.source = n;
         await savePaymentsAndFlush(arr);
@@ -2263,6 +2277,7 @@ tbody.innerHTML = "";
           if (!uniq.includes(ss)) uniq.push(ss);
         }
         savePaymentSources(uniq);
+        await flushPaymentSourcesToServer();
 
         // синхронизируем платежи текущего абонента
         try {
@@ -2323,6 +2338,7 @@ tbody.innerHTML = "";
             return;
           }
           savePaymentSources(next);
+          await flushPaymentSourcesToServer();
 
           renderSourcesModalList();
           try { loadPaymentTable(); } catch(e) { console.error(e); throw e; }
@@ -2337,6 +2353,7 @@ tbody.innerHTML = "";
           return;
         }
         savePaymentSources(next);
+        await flushPaymentSourcesToServer();
         renderSourcesModalList();
         try { loadPaymentTable(); } catch(e) { console.error(e); throw e; }
       };
@@ -2371,6 +2388,7 @@ tbody.innerHTML = "";
     if (!cur.includes(v)) {
       cur.push(v);
       savePaymentSources(cur);
+      await flushPaymentSourcesToServer();
     }
     if (inp) inp.value = '';
     renderSourcesModalList();

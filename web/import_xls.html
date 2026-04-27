@@ -297,7 +297,7 @@ function defaultPaymentSources(){ return ['Платёж 1','Платёж 2','П�
 function loadProgramPaymentSources(){
   try{
     if (window.JKHStore && typeof JKHStore.getRaw === 'function'){
-      const raw = JKHStore.getRaw('payment_sources_v1', null);
+      const raw = JKHStore.getRaw('payment_sources_v1');
       if (raw){
         const arr = JSON.parse(raw);
         if (Array.isArray(arr)){
