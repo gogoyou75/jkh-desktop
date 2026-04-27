@@ -751,6 +751,26 @@ window.PremisesAdmin = (function () {
         return { ok: true, total: ids.length, changed: changed };
     }
 
+    function getPersistOwnerIdOrThrow() {
+        const activeOwnerId = String(getActiveOwnerId() || '').trim();
+        const storeOwnerId = (window.JKHStore && typeof window.JKHStore.getOwnerId === 'function')
+            ? String(window.JKHStore.getOwnerId() || '').trim()
+            : '';
+        const ownerId = activeOwnerId || storeOwnerId;
+
+        if (!ownerId || ownerId === 'guest' || ownerId === 'ALL') {
+            throw new Error('SERVER_UPLOAD_FAILED');
+        }
+
+        if (storeOwnerId && activeOwnerId && storeOwnerId !== activeOwnerId) {
+            console.error('[premises][save][owner-mismatch] active=' + activeOwnerId + ' store=' + storeOwnerId);
+            throw new Error('OWNER_SCOPE_MISMATCH');
+        }
+
+        console.log('[premises][save][owner-check] active=' + activeOwnerId + ' owner=' + ownerId + ' ok=' + String(ownerId === activeOwnerId));
+        return ownerId;
+    }
+
     async function uploadOnlyAbonentsDbToServer(ownerId) {
         const oid = String(ownerId || '').trim();
         if (!oid || oid === 'guest' || oid === 'ALL') throw new Error('SERVER_UPLOAD_FAILED');
@@ -776,20 +796,19 @@ window.PremisesAdmin = (function () {
         if (!(data && data.ok === true)) throw new Error('SERVER_UPLOAD_FAILED');
     }
 
-    async function flushDbToServerStrict() {
+    async function flushDbToServerStrict(ownerId) {
+        const persistOwnerId = String(ownerId || getPersistOwnerIdOrThrow()).trim();
+
         if (window.JKHStore && window.AbonentsDB) {
             try {
-                window.JKHStore.setJSON(KEY_DB, window.AbonentsDB);
+                window.JKHStore.setJSON(KEY_DB, window.AbonentsDB, persistOwnerId);
             } catch (e) {
                 throw new Error('Не удалось записать DB в storage: ' + (e?.message || e));
             }
         }
 
-        const ownerId = (window.JKHStore && typeof window.JKHStore.getOwnerId === 'function')
-            ? window.JKHStore.getOwnerId()
-            : getActiveOwnerId();
-        await uploadOnlyAbonentsDbToServer(ownerId);
-        console.log('[premises][save] server flush ok');
+        await uploadOnlyAbonentsDbToServer(persistOwnerId);
+        console.log('[premises][save] server flush ok owner=' + persistOwnerId);
         return true;
     }
 
@@ -797,6 +816,7 @@ window.PremisesAdmin = (function () {
         if (state.busy) return;
         setBusyUI(true);
         const snapshot = makeTxSnapshot();
+        const persistOwnerId = getPersistOwnerIdOrThrow();
         try {
             const tx = (opts && typeof opts.mutate === 'function') ? (opts.mutate() || {}) : {};
             if (tx && tx.ok === false) {
@@ -815,7 +835,7 @@ window.PremisesAdmin = (function () {
                 throw new Error(recalcRes.message || 'Не удалось выполнить пересчёт начислений.');
             }
 
-            await flushDbToServerStrict();
+            await flushDbToServerStrict(persistOwnerId);
 
             setWarn((opts && opts.successMessage) || 'Сохранено.', true);
             renderTable();
