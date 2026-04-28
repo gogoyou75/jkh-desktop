@@ -1033,11 +1033,8 @@
     }
 
     var mins = Math.max(1, Math.min(120, s.minutes || 5));
-    _setStatus({ autosaveState: "включено (" + mins + " мин), режим: " + (s.scope === "all" ? "вся база" : "только база") + (s.onlyIfChanged ? ", только при изменениях" : "") });
-
-    _timer = setInterval(function () {
-      upload(s.scope === "all" ? "all" : "db");
-    }, mins * 60 * 1000);
+    _setStatus({ autosaveState: "legacy autosave disabled (" + mins + " мин), режим: " + (s.scope === "all" ? "вся база" : "только база") + (s.onlyIfChanged ? ", только при изменениях" : "") });
+    console.info("[sync][legacy-timer-disabled] autosave timer skipped in server-first mode");
   }
 
   function applySettingsFromUI(s) {
@@ -1091,12 +1088,9 @@
   }
 
   async function autoLoadAfterLogin() {
-    if (_isDevMode()) {
-      console.warn("[JKH sync][deprecated] JKHRemoteSync.autoLoadAfterLogin больше не основной сценарий, используется JKHDataLoader.loadFromServer");
-    }
-    if (!window.JKHDataLoader || typeof window.JKHDataLoader.loadFromServer !== "function") return false;
-    var res = await window.JKHDataLoader.loadFromServer({ reason: "legacy_autoload", force: true });
-    return !!(res && res.ok);
+    console.warn("[JKH sync][deprecated] autoLoadAfterLogin disabled; use Auth/JKHDataLoader gate");
+    console.info("[sync][legacy-autoload-disabled] autoLoadAfterLogin no-op in server-first mode");
+    return false;
   }
 
 

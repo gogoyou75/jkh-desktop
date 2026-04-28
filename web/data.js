@@ -13,7 +13,7 @@
   // ✅ JKH_REMOTE_DATA_SYNC v1 (2026-02-10)
   // ONLINE (MySQL) режим без ломания синхронного кода:
   // 1) Всегда читаем AbonentsDB из локального кэша (как раньше)
-  // 2) В фоне подтягиваем с сервера и, если получили данные — обновляем кэш и перезагружаем страницу 1 раз.
+  // 2) В фоне подтягиваем с сервера и, если получили данные — обновляем кэш и уведомляем UI через события.
   // Переводы:
   //   sync = синхронизация
   //   cache = кэш (локальная копия)
@@ -65,6 +65,21 @@
     if (_canWriteStorage()) return true;
     _explainWriteBlocked();
     return false;
+  }
+
+  function _notifyUiStateChanged(reason) {
+    try {
+      if (typeof window.CustomEvent === "function") {
+        window.dispatchEvent(new CustomEvent("JKH_UI_STATE_CHANGED", {
+          detail: {
+            source: "data.js",
+            reason: String(reason || "updated"),
+            ownerId: _ownerId(),
+            updatedAt: new Date().toISOString()
+          }
+        }));
+      }
+    } catch (e) { }
   }
 
   function _k(key, ownerId) {
@@ -1331,8 +1346,8 @@ window.JKHBoot?.markReady?.('data');
     normalizeDb(window.AbonentsDB);
     saveToStorage(window.AbonentsDB);
 
+    _notifyUiStateChanged("test_reset_database");
     alert("Готово. База очищена.");
-    location.reload();
   };
 
   // "Загрузить демо" — полностью заново: очистка + seed 1006/1008 + конфиги
@@ -1353,8 +1368,8 @@ window.JKHBoot?.markReady?.('data');
     window.AbonentsDB = fresh ? mergePreferStored(BASE_DB, fresh) : deepClone(BASE_DB);
     normalizeDb(window.AbonentsDB);
 
+    _notifyUiStateChanged("test_load_demo_database");
     alert("Демо загружено: абоненты 1006 и 1008.");
-    location.reload();
   };
 
   // ============================================================
