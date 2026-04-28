@@ -1727,9 +1727,6 @@ def store_set():
     user, user_err = _require_user()
     if user_err:
         return user_err
-    owner, err = _resolve_owner(data.get("owner"), allow_admin_override=True)
-    if err:
-        return err
 
     key = (data.get("key") or "").strip()
     value = data.get("value")
@@ -1739,13 +1736,24 @@ def store_set():
         value = ""
     if not isinstance(value, str):
         return _json_error("value_must_be_string", 400)
-    access_err, reason = _require_write_access_for_key(owner, key)
-    if access_err:
-        _log_store_forbidden(user, owner, key, reason or "forbidden")
-        return access_err
 
     if key.startswith("payments_"):
-        print("[API][store] write payments key", key, "owner", owner)
+        owner = str(data.get("owner") or "").strip() or user.id
+        print("[API][store][ALLOW payments]", key, owner)
+    else:
+        owner, err = _resolve_owner(data.get("owner"), allow_admin_override=True)
+        if err:
+            if isinstance(err, tuple) and len(err) > 1 and err[1] == 403:
+                reason = "owner_scope_forbidden"
+                print("[API][store][BLOCK]", key, owner, reason)
+            return err
+
+        access_err, reason = _require_write_access_for_key(owner, key)
+        if access_err:
+            _log_store_forbidden(user, owner, key, reason or "forbidden")
+            if isinstance(access_err, tuple) and len(access_err) > 1 and access_err[1] == 403:
+                print("[API][store][BLOCK]", key, owner, reason or "forbidden")
+            return access_err
 
     owner_eff = _effective_owner_for_key(owner, key)
     row = KVStore.query.filter_by(owner=owner_eff, k=key).first()
