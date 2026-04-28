@@ -259,9 +259,19 @@ function setPaymentsByLS(ls, arr){ if (!window.JKHStore || !JKHStore.setJSON) th
 function savePaymentsByAbonentId(abonentId, arr){
   const key = 'payments_' + String(abonentId || '');
   if (!window.JKHStore || typeof JKHStore.setRaw !== 'function') throw new Error('Нет JKHStore.setRaw');
-  const payload = JSON.stringify(Array.isArray(arr) ? arr : []);
-  JKHStore.setRaw(key, payload);
-  console.log('[payments][save]', { key: key, rowsCount: Array.isArray(arr) ? arr.length : 0 });
+  const rows = Array.isArray(arr) ? arr : [];
+  const ownerId = (typeof JKHStore.getOwnerId === 'function') ? String(JKHStore.getOwnerId() || '') : '';
+  console.log('[IMPORT DEBUG]', { abonentId: String(abonentId || ''), rows: rows });
+  const payload = JSON.stringify(rows);
+  JKHStore.setRaw(key, payload, ownerId || null);
+  console.log('[payments][save]', { key: key, rowsCount: rows.length, data: rows.slice(0,2), ownerId: ownerId || null });
+  let savedRaw = null;
+  try{
+    savedRaw = (typeof JKHStore.getRaw === 'function') ? JKHStore.getRaw(key, ownerId || null) : null;
+  }catch(e){
+    savedRaw = null;
+  }
+  console.log('[payments][after-save]', { key: key, ownerId: ownerId || null, raw: savedRaw });
 }
 
 function parseYearMonthFromAny(v){
@@ -1854,9 +1864,12 @@ async function applyPayments(){
       sortLedgerRows(list);
     }
 
+    const params = new URLSearchParams(window.location.search || '');
+    const urlAbonentId = normStr(params.get('abonentId') || params.get('id') || params.get('ls'));
     const abonentIds = Object.keys(localPaymentsByAbonent);
     for (let i=0;i<abonentIds.length;i++){
       const abonentId = abonentIds[i];
+      console.log('[IMPORT DEBUG][abonentId-check]', { urlAbonentId: urlAbonentId || null, importedAbonentId: abonentId });
       savePaymentsByAbonentId(abonentId, localPaymentsByAbonent[abonentId]);
     }
 
