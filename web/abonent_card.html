@@ -795,11 +795,16 @@ function __runAutoAccrualRepairOnce(){
         if (sessionStorage.getItem(gk) === '1') return;
         sessionStorage.setItem(gk, '1');
 
-        if (!window.JKHAutoAccrual || typeof window.JKHAutoAccrual.recalcForAbonent !== 'function') return;
-        const res = window.JKHAutoAccrual.recalcForAbonent(id);
-        if (res && res.ok && res.changed) {
-            try { if (window.__loadPaymentTable) window.__loadPaymentTable(); } catch(e) {}
-        }
+        if (!(window.Data && typeof window.Data.recalcAbonentAfterResponsibilityChange === 'function')) return;
+        window.Data.recalcAbonentAfterResponsibilityChange(id, 'card_open_once_guard', { skipFlush: false })
+          .then(function(res){
+            if (res && res.ok && res.changed) {
+              try { if (window.__loadPaymentTable) window.__loadPaymentTable(); } catch(e) {}
+            }
+          })
+          .catch(function(e){
+            try { console.warn('[autoaccrual] repairOnce error', e); } catch(_){ }
+          });
     } catch(e) {
         try { console.warn('[autoaccrual] repairOnce error', e); } catch(_){ }
     }
@@ -910,6 +915,16 @@ function repairResponsibilityHistorySafe(){
       warning.textContent = 'Автоисправление не выполнено: ' + String((res && res.code) || 'RESPONSIBILITY_INVALID') + '.';
     }
     try { if (window.saveAbonentsDB) window.saveAbonentsDB(); } catch(e){}
+    const currentId = getAbonentIdFromURL();
+    if (res && res.ok && currentId && window.Data && typeof window.Data.recalcAbonentAfterResponsibilityChange === 'function') {
+      window.Data.recalcAbonentAfterResponsibilityChange(currentId, 'responsibility_history_repair', { skipFlush: false })
+        .then(function(rr){
+          if (rr && rr.ok && rr.changed) {
+            try { if (window.__loadPaymentTable) window.__loadPaymentTable(); } catch(e) {}
+          }
+        })
+        .catch(function(e){ console.warn('[autoaccrual] repair after history fix failed', e); });
+    }
     fillAbonentCard();
   } catch(e){
     if (warning) {
@@ -1366,6 +1381,13 @@ async function applyChangeResponsible(mode) {
       window.Data.linkAbonentToPremise(String(newId), String(regnum), String(dateFrom), '');
     }
 
+    const affectedForRecalc = [];
+    activeList.forEach(l => {
+      const oldId = String(l && l.abonentId || '').trim();
+      if (oldId) affectedForRecalc.push(oldId);
+    });
+    if (String(newId || '').trim()) affectedForRecalc.push(String(newId).trim());
+
     // старт расчёта у нового
     const newAb = db[String(newId)];
     if (newAb) {
@@ -1386,6 +1408,16 @@ async function applyChangeResponsible(mode) {
         if (window.Data && typeof window.Data.upsertAbonent === 'function') {
             window.Data.upsertAbonent(Object.assign({}, newAb, { id: String(newId), premiseRegnum: String(regnum) }));
         }
+    }
+
+    if (window.Data && typeof window.Data.recalcAbonentAfterResponsibilityChange === 'function') {
+      const seen = {};
+      for (let i = 0; i < affectedForRecalc.length; i++) {
+        const rid = String(affectedForRecalc[i] || '').trim();
+        if (!rid || seen[rid]) continue;
+        seen[rid] = true;
+        await window.Data.recalcAbonentAfterResponsibilityChange(rid, 'responsibility_change', { skipFlush: true });
+      }
     }
 
     await Data.flushDbToServer();
@@ -1549,6 +1581,10 @@ async function saveAbonentEdit() {
         const url = new URL(window.location.href);
         url.searchParams.set("abonent", String(newId));
         window.history.replaceState({}, "", url.toString());
+    }
+
+    if (window.Data && typeof window.Data.recalcAbonentAfterResponsibilityChange === 'function') {
+      await window.Data.recalcAbonentAfterResponsibilityChange(String(newId), 'abonent_edit', { skipFlush: true });
     }
 
     await Data.flushDbToServer();

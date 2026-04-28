@@ -347,6 +347,31 @@
   function _validateResponsibilityHistory(history, ownerId) {
     return _validateResponsibilityHistoryForDb(history, null, ownerId);
   }
+  function _runAutoAccrualRepairLocal(abonentId, reason) {
+    var id = String(abonentId || "").trim();
+    var rs = String(reason || "").trim() || "manual";
+    if (!id) {
+      console.info("[autoaccrual][repair][skip] abonentId= reason=%s code=EMPTY_ID", rs);
+      return { ok: false, changed: false, reason: "EMPTY_ID", abonentId: "", skipped: true };
+    }
+    console.info("[autoaccrual][repair] abonentId=%s reason=%s", id, rs);
+    if (!(window.JKHAutoAccrual && typeof window.JKHAutoAccrual.recalcForAbonent === "function")) {
+      console.info("[autoaccrual][repair][skip] abonentId=%s reason=%s code=ENGINE_UNAVAILABLE", id, rs);
+      return { ok: false, changed: false, reason: "ENGINE_UNAVAILABLE", abonentId: id, skipped: true };
+    }
+    var out = window.JKHAutoAccrual.recalcForAbonent(id) || {};
+    if (!(out && out.ok)) {
+      console.info("[autoaccrual][repair][skip] abonentId=%s reason=%s code=%s", id, rs, String(out && out.reason || "RECALC_FAILED"));
+      return { ok: false, changed: false, reason: String(out && out.reason || "RECALC_FAILED"), abonentId: id, skipped: true };
+    }
+    if (out.changed) {
+      console.info("[autoaccrual][repair][changed] abonentId=%s reason=%s", id, rs);
+      return { ok: true, changed: true, reason: rs, abonentId: id };
+    }
+    console.info("[autoaccrual][repair][skip] abonentId=%s reason=%s code=NO_CHANGES", id, rs);
+    return { ok: true, changed: false, reason: rs, abonentId: id, skipped: true };
+  }
+
   function _applyResponsibilityChange(db, regnum, abonentId, startDate, ownerId) {
     var r = String(regnum || "").trim();
     var aid = String(abonentId || "").trim();
@@ -735,14 +760,21 @@
     },
     // SERVER-FIRST helper for UI-level async flows:
     // local save -> upload to server. Throws on upload error.
-    flushDbToServer: async function () {
+    flushDbToServer: async function (options) {
       if (!this.ensureWriteOrExplain()) return false;
+      var opts = (options && typeof options === "object") ? options : {};
       var saved = !!(window.saveAbonentsDB && window.saveAbonentsDB());
       if (!saved) throw new Error("LOCAL_SAVE_FAILED");
       if (!(window.JKHRemoteSync && typeof window.JKHRemoteSync.uploadNow === "function")) {
         throw new Error("JKHRemoteSync.uploadNow is not available");
       }
-      var ok = await window.JKHRemoteSync.uploadNow();
+      var keys = Array.isArray(opts.keys) ? opts.keys.filter(Boolean) : [];
+      var ok;
+      if (keys.length > 0 && window.JKHRemoteSync && typeof window.JKHRemoteSync.uploadKeysNow === "function") {
+        ok = await window.JKHRemoteSync.uploadKeysNow(keys);
+      } else {
+        ok = await window.JKHRemoteSync.uploadNow();
+      }
       if (ok !== true) throw new Error("SERVER_UPLOAD_FAILED");
       return true;
     },
@@ -870,6 +902,10 @@
           return false;
         }
 
+        if (regnum && startDate && !endDate) {
+          _runAutoAccrualRepairLocal(id, "upsert_abonent_with_calc_start");
+        }
+
         return true;
       } catch (e) {
         window.AbonentsDB = beforeDb;
@@ -916,6 +952,7 @@
       }
       var saved = !!window.saveAbonentsDB && window.saveAbonentsDB();
       if (!saved) window.AbonentsDB = beforeDb;
+      if (saved) _runAutoAccrualRepairLocal(id, "soft_delete_active_responsible");
       return saved;
     },
     normalizeResponsibilityHistory: function (history) { return _normalizeResponsibilityHistory(history, _ownerId()); },
@@ -931,7 +968,30 @@
     },
     applyResponsibilityChange: function (regnum, abonentId, startDate) {
       if (!window.AbonentsDB) return false;
-      return _applyResponsibilityChange(window.AbonentsDB, regnum, abonentId, startDate, _ownerId());
+      var res = _applyResponsibilityChange(window.AbonentsDB, regnum, abonentId, startDate, _ownerId());
+      _runAutoAccrualRepairLocal(String(abonentId || ""), "apply_responsibility_change");
+      return res;
+    },
+    recalcAbonentAfterResponsibilityChange: async function (abonentId, reason, options) {
+      var result = _runAutoAccrualRepairLocal(abonentId, reason || "responsibility_change");
+      var opts = (options && typeof options === "object") ? options : {};
+      if (!(result && result.ok && result.changed)) return result;
+      try {
+        var saved = !!(window.saveAbonentsDB && window.saveAbonentsDB());
+        if (!saved) {
+          result.ok = false;
+          result.reason = "LOCAL_SAVE_FAILED";
+          return result;
+        }
+      } catch (e) {
+        result.ok = false;
+        result.reason = "LOCAL_SAVE_FAILED";
+        return result;
+      }
+      if (opts.skipFlush === true) return result;
+      var id = String(abonentId || "").trim();
+      await this.flushDbToServer({ keys: [KEY_DB, "payments_" + id] });
+      return result;
     },
     repairResponsibilityHistorySafe: function () {
       if (!this.ensureWriteOrExplain()) return { ok: false, code: "WRITE_BLOCKED" };

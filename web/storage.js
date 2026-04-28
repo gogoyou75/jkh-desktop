@@ -487,7 +487,6 @@
     "abonents_db_v1",
     "abonent_notes_v1",
     "exclude_periods_v1",
-    "tariffs_dynamic_v1",
     "tariffs_content_repair_v1",
     "tariffs_content_repair_v1_backup",
     "refinancing_rates_normal_v1",
@@ -534,6 +533,13 @@
     } catch (e) {
       return true;
     }
+  }
+  function _shouldSkipLegacyUpload(baseKey) {
+    var kx = String(baseKey || "").trim();
+    if (kx !== "tariffs_dynamic_v1") return false;
+    if (_isAdmin()) return false;
+    console.info("[sync][skip-legacy] key=tariffs_dynamic_v1 reason=legacy_forbidden_for_user");
+    return true;
   }
 
   function _lsGet(key, def) {
@@ -907,7 +913,7 @@
   }
   }
 
-  async function upload(scope) {
+  async function upload(scope, options) {
     if (!isOnlineMode()) {
       _setStatus({ lastAction: "Сохранение пропущено: OFFLINE режим", lastError: null });
       return false;
@@ -929,20 +935,24 @@
     return false;
   }
 
+    options = options || {};
     var ownerId = _ownerId();
     var onlyIfChanged = (_lsGet(K_AS_ONLY_CHANGED, "0") === "1");
     var scopeNorm = (scope === "all") ? "all" : "db";
+    var explicitKeys = Array.isArray(options.keys) ? _uniq(options.keys) : [];
+    var hasExplicitKeys = explicitKeys.length > 0;
     var sig = (scopeNorm === "all") ? _sigForALL(ownerId) : _sigForDB(ownerId);
     var lastSig = _lsGet(_getLastSigKey(scopeNorm), "");
-    if (onlyIfChanged && lastSig && sig === lastSig) {
+    if (!hasExplicitKeys && onlyIfChanged && lastSig && sig === lastSig) {
       _setStatus({ lastAction: "Изменений нет — сохранение пропущено", lastError: null });
       return true;
     }
 
     try {
-      var keysToSave = _projectKeysForScope(scopeNorm, ownerId);
+      var keysToSave = hasExplicitKeys ? explicitKeys : _projectKeysForScope(scopeNorm, ownerId);
       for (var i = 0; i < keysToSave.length; i++) {
         var baseKey = keysToSave[i];
+        if (_shouldSkipLegacyUpload(baseKey)) continue;
         var raw = _readLocalCompat(baseKey, ownerId);
 
         // safeguard: не перезаписываем непустую базу на сервере пустой локальной базой
@@ -963,9 +973,12 @@
           return false;
         }
         console.info("[JKH sync][save] owner=%s key=%s size=%s status=ok", ownerId, baseKey, String(raw || "").length);
+        if (baseKey === KEY_DB) {
+          console.info("[sync][save] owner=%s key=%s status=ok", ownerId, baseKey);
+        }
       }
 
-      _lsSet(_getLastSigKey(scopeNorm), sig);
+      if (!hasExplicitKeys) _lsSet(_getLastSigKey(scopeNorm), sig);
       _setStatus({ lastSaveAt: _nowISO(), lastAction: "✅ Сохранено на сервер", lastError: null, ownerId: ownerId, loadSource: "server" });
       return true;
     } catch (e) {
@@ -1041,6 +1054,15 @@
     var s = getSettings();
     var scope = (s.scope === "all") ? "all" : "db";
     return await upload(scope);
+  }
+
+  async function uploadKeysNow(keys) {
+    if (_isGuestOrAll()) {
+      alert("Сохранение запрещено: режим 'Гость' или 'ALL'.\n\nПояснение:\n- Гость (Guest) = только просмотр\n- ALL = сводный просмотр админом");
+      return false;
+    }
+    var list = Array.isArray(keys) ? keys : [];
+    return await upload("db", { keys: list });
   }
 
   async function downloadNow() {
@@ -1195,6 +1217,7 @@
     // public
     pingServer: pingServer,
     uploadNow: uploadNow,
+    uploadKeysNow: uploadKeysNow,
     downloadNow: downloadNow,
     applySettingsFromUI: applySettingsFromUI,
     getSettings: getSettings,
