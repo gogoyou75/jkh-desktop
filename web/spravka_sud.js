@@ -240,6 +240,55 @@
 
   function monthKey(y,m){ return y + "-" + String(m).padStart(2, "0"); }
 
+  function resolvePaymentsRowsForCourt(ctx, abonent, ownerId){
+    const rawCandidates = [
+      ctx && ctx.abonentId,
+      abonent && abonent.ls,
+      abonent && abonent.personalAccount,
+      abonent && abonent.account,
+      abonent && abonent.accountNumber,
+      abonent && abonent.uid,
+      abonent && abonent.id
+    ];
+
+    const uniqueIds = [];
+    for (let i = 0; i < rawCandidates.length; i++) {
+      const v = String(rawCandidates[i] == null ? "" : rawCandidates[i]).trim();
+      if (!v) continue;
+      if (uniqueIds.indexOf(v) !== -1) continue;
+      uniqueIds.push(v);
+    }
+
+    const triedKeys = uniqueIds.map(function (id) { return "payments_" + id; });
+    let selectedKey = "";
+    let rows = [];
+
+    for (let i = 0; i < triedKeys.length; i++) {
+      const key = triedKeys[i];
+      const candidateRaw = safeJSON(key, [], ownerId);
+      const candidateRows = Array.isArray(candidateRaw) ? candidateRaw : [];
+      if (candidateRows.length > 0) {
+        selectedKey = key;
+        rows = candidateRows;
+        break;
+      }
+    }
+
+    console.log("[spravka_sud][payments-resolve]", {
+      abonentId: String((ctx && ctx.abonentId) || ""),
+      ownerId: String(ownerId || ""),
+      triedKeys: triedKeys,
+      selectedKey: selectedKey || null,
+      rows: rows.length
+    });
+
+    return {
+      triedKeys: triedKeys,
+      selectedKey: selectedKey,
+      rows: rows
+    };
+  }
+
   async function waitForInit(ctx, timeoutMs){
     const started = Date.now();
     const stepMs = 100;
@@ -382,15 +431,15 @@
       setText("stateDate", fmtDateRuAny(asOfFinal));
       setText("docDate", fmtDateRuAny(new Date()));
 
-      const paymentsKey = "payments_" + ctx.abonentId;
-      const allRowsRaw = safeJSON(paymentsKey, [], ctx.readOwner);
-      const allRows = Array.isArray(allRowsRaw) ? allRowsRaw : [];
+      const paymentsResolved = resolvePaymentsRowsForCourt(ctx, abonent, ctx.readOwner);
+      const allRows = Array.isArray(paymentsResolved.rows) ? paymentsResolved.rows : [];
 
       if (!allRows.length) {
         devLog(devMode, "payments-empty", {
           abonentId: ctx.abonentId,
           abonentFound: !!abonent,
-          paymentsKey: paymentsKey,
+          paymentsKey: paymentsResolved.selectedKey || "",
+          triedKeys: paymentsResolved.triedKeys,
           dataStatus: String((window.JKH_UI_STATE && window.JKH_UI_STATE.data && window.JKH_UI_STATE.data.status) || ""),
           ownerContext: ctx
         });
@@ -415,6 +464,13 @@
       const tbody = $("debtRows");
       if (!tbody) return;
       tbody.innerHTML = "";
+
+      if (!allRows.length) {
+        const tried = (paymentsResolved.triedKeys || []).join(", ");
+        const msg = "Нет данных начислений/оплат для этого абонента. Проверены ключи: " + (tried || "(нет ключей)");
+        tbody.innerHTML = "<tr><td colspan=\"7\" style=\"color:#b00000;font-weight:bold;\">" + msg + "</td></tr>";
+        return;
+      }
 
       let sumAccrued = 0;
       let sumPaid = 0;
