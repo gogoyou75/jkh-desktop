@@ -290,17 +290,6 @@
         await JKHPersist.set(KEY_REQ, reqRaw, ownerId);
         await JKHPersist.set(KEY_SIGNERS, signersRaw, ownerId);
 
-        // Совместимость с data.js (не ломаем старое)
-        if (window.AbonentsDB) {
-          window.AbonentsDB.orgName = req.full_name;
-          if (req.inn) window.AbonentsDB.orgInn = req.inn;
-
-          const def = signers.find(s => s.is_default) || signers[0];
-          if (def && def.fio && !window.AbonentsDB.chairman) {
-            window.AbonentsDB.chairman = def.fio;
-          }
-        }
-
         setToast('Реквизиты и подписанты сохранены.', 'ok');
       } catch (e) {
         setToast('Ошибка сохранения: ' + (e?.message || e), 'err');
