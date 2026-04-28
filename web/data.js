@@ -237,7 +237,8 @@
   function _ownerMismatch(linkOwner, ownerId) {
     var lo = String(linkOwner || "").trim();
     var oo = String(ownerId || "").trim();
-    return !!(lo && oo && lo !== oo);
+    if (!oo) return false;
+    return lo !== oo;
   }
   function _normalizeResponsibilityHistory(history, ownerId) {
     console.log("[responsibility][normalize]", { count: Array.isArray(history) ? history.length : 0 });
@@ -269,7 +270,7 @@
     });
     return out;
   }
-  function _validateResponsibilityHistory(history, ownerId) {
+  function _validateResponsibilityHistoryForDb(history, db, ownerId) {
     console.log("[responsibility][validate]", { count: Array.isArray(history) ? history.length : 0, ownerId: ownerId || "" });
     var grouped = {};
     var arr = Array.isArray(history) ? history : [];
@@ -282,10 +283,17 @@
         eOm.code = "RESPONSIBILITY_OWNER_MISMATCH";
         throw eOm;
       }
-      if (!_isIsoDate(l && l.dateFrom) || (String(l && l.dateTo || "").trim() && !_isIsoDate(l.dateTo))) {
+      var dfRaw = String(l && l.dateFrom || "").trim();
+      var dtRaw = String(l && l.dateTo || "").trim();
+      if (!_isIsoDate(dfRaw) || (dtRaw && !_isIsoDate(dtRaw))) {
         var eId = new Error("RESPONSIBILITY_INVALID_DATE");
         eId.code = "RESPONSIBILITY_INVALID_DATE";
         throw eId;
+      }
+      if (dtRaw && _isoToTs(dtRaw) < _isoToTs(dfRaw)) {
+        var eInvRange = new Error("RESPONSIBILITY_INVALID_DATE");
+        eInvRange.code = "RESPONSIBILITY_INVALID_DATE";
+        throw eInvRange;
       }
       if (!grouped[reg]) grouped[reg] = [];
       grouped[reg].push(l);
@@ -295,14 +303,26 @@
       var items = grouped[regs[r]].slice().sort(function (a, b) {
         return String(a.dateFrom || "").localeCompare(String(b.dateFrom || ""));
       });
+      var activeCount = 0;
       for (var j = 0; j < items.length; j++) {
         var cur = items[j];
         var curFrom = _isoToTs(cur.dateFrom);
         var curTo = String(cur.dateTo || "").trim() ? _isoToTs(cur.dateTo) : Number.POSITIVE_INFINITY;
+        var isOpen = !String(cur.dateTo || "").trim();
+        if (isOpen) activeCount++;
         if (!Number.isFinite(curFrom) || !(Number.isFinite(curTo) || curTo === Number.POSITIVE_INFINITY) || curTo < curFrom) {
           var eInv = new Error("RESPONSIBILITY_INVALID_DATE");
           eInv.code = "RESPONSIBILITY_INVALID_DATE";
           throw eInv;
+        }
+        if (isOpen && db && db.abonents) {
+          var aid = String(cur.abonentId || "").trim();
+          var ab = db.abonents[aid];
+          if (ab && !_isActiveAbonent(ab)) {
+            var eDel = new Error("RESPONSIBILITY_DELETED_ACTIVE");
+            eDel.code = "RESPONSIBILITY_DELETED_ACTIVE";
+            throw eDel;
+          }
         }
         for (var k = j + 1; k < items.length; k++) {
           var nxt = items[k];
@@ -316,8 +336,16 @@
           }
         }
       }
+      if (activeCount > 1) {
+        var eMa = new Error("RESPONSIBILITY_MULTIPLE_ACTIVE");
+        eMa.code = "RESPONSIBILITY_MULTIPLE_ACTIVE";
+        throw eMa;
+      }
     }
     return true;
+  }
+  function _validateResponsibilityHistory(history, ownerId) {
+    return _validateResponsibilityHistoryForDb(history, null, ownerId);
   }
   function _applyResponsibilityChange(db, regnum, abonentId, startDate, ownerId) {
     var r = String(regnum || "").trim();
@@ -329,34 +357,64 @@
       throw e;
     }
     if (!Array.isArray(db.links)) db.links = [];
+    var beforeLinks = deepClone(db.links);
     var duplicate = db.links.find(function (l) {
       return String(l && l.regnum || "").trim() === r &&
         String(l && l.abonentId || "").trim() === aid &&
         String(l && l.dateFrom || "").trim() === sd;
     });
     if (duplicate) {
-      var de = new Error("RESPONSIBILITY_DUPLICATE");
-      de.code = "RESPONSIBILITY_DUPLICATE";
-      throw de;
+      return { ok: true, skipped: true, reason: "duplicate" };
     }
-    for (var i = 0; i < db.links.length; i++) {
-      var l = db.links[i];
-      if (String(l && l.regnum || "").trim() !== r) continue;
-      if (_ownerMismatch(l && l.ownerId, ownerId)) {
-        var eOm = new Error("RESPONSIBILITY_OWNER_MISMATCH");
-        eOm.code = "RESPONSIBILITY_OWNER_MISMATCH";
-        throw eOm;
+    try {
+      for (var i = 0; i < db.links.length; i++) {
+        var l = db.links[i];
+        if (String(l && l.regnum || "").trim() !== r) continue;
+        if (_ownerMismatch(l && l.ownerId, ownerId)) {
+          var eOm = new Error("RESPONSIBILITY_OWNER_MISMATCH");
+          eOm.code = "RESPONSIBILITY_OWNER_MISMATCH";
+          throw eOm;
+        }
+        var lf = String(l && l.dateFrom || "").trim();
+        var lt = String(l && l.dateTo || "").trim();
+        if (_isIsoDate(lf) && lt && _isIsoDate(lt)) {
+          var lfTs = _isoToTs(lf);
+          var ltTs = _isoToTs(lt);
+          var sdTs = _isoToTs(sd);
+          if (lfTs <= sdTs && sdTs <= ltTs) {
+            var isSameStart = String(l && l.abonentId || "").trim() === aid && lf === sd;
+            if (!isSameStart) {
+              var eOvClosed = new Error("RESPONSIBILITY_PERIOD_OVERLAP");
+              eOvClosed.code = "RESPONSIBILITY_PERIOD_OVERLAP";
+              throw eOvClosed;
+            }
+          }
+        }
       }
-      var lf = String(l && l.dateFrom || "").trim();
-      var lt = String(l && l.dateTo || "").trim();
-      if (!lt && _isIsoDate(lf) && _isoToTs(lf) < _isoToTs(sd)) {
-        l.dateTo = _isoMinusOne(sd);
+      for (var j = 0; j < db.links.length; j++) {
+        var al = db.links[j];
+        if (String(al && al.regnum || "").trim() !== r) continue;
+        var alt = String(al && al.dateTo || "").trim();
+        if (alt) continue;
+        var alf = String(al && al.dateFrom || "").trim();
+        if (!_isIsoDate(alf)) continue;
+        if (_isoToTs(alf) < _isoToTs(sd)) {
+          al.dateTo = _isoMinusOne(sd);
+          continue;
+        }
+        var eOvActive = new Error("RESPONSIBILITY_PERIOD_OVERLAP");
+        eOvActive.code = "RESPONSIBILITY_PERIOD_OVERLAP";
+        throw eOvActive;
       }
+
+      db.links.push({ abonentId: aid, regnum: r, dateFrom: sd, dateTo: "", ownerId: ownerId || "" });
+      db.links = _normalizeResponsibilityHistory(db.links, ownerId);
+      _validateResponsibilityHistoryForDb(db.links, db, ownerId);
+      return { ok: true, skipped: false };
+    } catch (err) {
+      db.links = beforeLinks;
+      throw err;
     }
-    db.links.push({ abonentId: aid, regnum: r, dateFrom: sd, dateTo: "", ownerId: ownerId || "" });
-    db.links = _normalizeResponsibilityHistory(db.links, ownerId);
-    _validateResponsibilityHistory(db.links, ownerId);
-    return true;
   }
 
   function removeProjectKeys() {
@@ -587,10 +645,17 @@
       return abonentOk && premiseOk;
     });
     db.links = _normalizeResponsibilityHistory(db.links, _ownerId());
+    db._responsibilityInvalid = false;
+    db._responsibilityInvalidCode = "";
+    db._responsibilityInvalidAt = "";
     try {
-      _validateResponsibilityHistory(db.links, _ownerId());
+      _validateResponsibilityHistoryForDb(db.links, db, _ownerId());
     } catch (e) {
-      console.warn("[responsibility][validate] normalizeDb warning", e && e.code ? e.code : e);
+      var code = e && e.code ? e.code : "RESPONSIBILITY_INVALID";
+      db._responsibilityInvalid = true;
+      db._responsibilityInvalidCode = String(code);
+      db._responsibilityInvalidAt = new Date().toISOString();
+      console.warn("[responsibility][validate] normalizeDb warning", code);
     }
   }
 
@@ -780,11 +845,7 @@
         if (startDate && !endDate) {
           try { _applyResponsibilityChange(window.AbonentsDB, regnum, id, startDate, _ownerId()); }
           catch (e) {
-            if (e && e.code === "RESPONSIBILITY_DUPLICATE") {
-              console.log("[responsibility][dedupe]", { regnum: regnum, abonentId: id, dateFrom: startDate });
-            } else {
-              throw e;
-            }
+            throw e;
           }
         } else {
           this.linkAbonentToPremise(id, regnum, startDate, endDate);
@@ -799,21 +860,98 @@
       var id = String(abonentId || "").trim();
       if (!id) return false;
       var reason = arguments.length > 1 ? String(arguments[1] || "").trim() : "";
+      var beforeDb = deepClone(window.AbonentsDB);
       if (window.AbonentsDB.abonents && window.AbonentsDB.abonents[id]) {
         var a = window.AbonentsDB.abonents[id];
+        var deletedAt = new Date().toISOString();
+        var deletedIso = String(deletedAt).slice(0, 10);
         a.status = "deleted";
-        a.deleted_at = new Date().toISOString();
+        a.deleted_at = deletedAt;
         a.deleted_reason = reason || "manual";
         console.warn("[abonent][soft-delete]", { abonentId: id, reason: a.deleted_reason });
+        if (Array.isArray(window.AbonentsDB.links)) {
+          for (var i = 0; i < window.AbonentsDB.links.length; i++) {
+            var l = window.AbonentsDB.links[i];
+            if (String(l && l.abonentId || "").trim() !== id) continue;
+            var dt = String(l && l.dateTo || "").trim();
+            if (dt) continue;
+            var df = String(l && l.dateFrom || "").trim();
+            if (_isIsoDate(df) && _isoToTs(df) > _isoToTs(deletedIso)) {
+              l.dateTo = df;
+            } else {
+              l.dateTo = deletedIso;
+            }
+            console.warn("[responsibility][close-on-delete]", { abonentId: id, regnum: l.regnum || "", dateTo: l.dateTo });
+          }
+        }
+        try {
+          window.AbonentsDB.links = _normalizeResponsibilityHistory(window.AbonentsDB.links, _ownerId());
+          _validateResponsibilityHistoryForDb(window.AbonentsDB.links, window.AbonentsDB, _ownerId());
+        } catch (e) {
+          window.AbonentsDB = beforeDb;
+          throw e;
+        }
       }
-
-      return !!window.saveAbonentsDB && window.saveAbonentsDB();
+      var saved = !!window.saveAbonentsDB && window.saveAbonentsDB();
+      if (!saved) window.AbonentsDB = beforeDb;
+      return saved;
     },
     normalizeResponsibilityHistory: function (history) { return _normalizeResponsibilityHistory(history, _ownerId()); },
-    validateResponsibilityHistory: function (history) { return _validateResponsibilityHistory(history, _ownerId()); },
+    validateResponsibilityHistory: function (history) { return _validateResponsibilityHistoryForDb(history, this.getDb() || null, _ownerId()); },
+    getResponsibilityHealth: function () {
+      var db = this.getDb() || {};
+      var ok = !db._responsibilityInvalid;
+      return {
+        ok: !!ok,
+        code: ok ? "" : String(db._responsibilityInvalidCode || "RESPONSIBILITY_INVALID"),
+        at: ok ? "" : String(db._responsibilityInvalidAt || "")
+      };
+    },
     applyResponsibilityChange: function (regnum, abonentId, startDate) {
       if (!window.AbonentsDB) return false;
       return _applyResponsibilityChange(window.AbonentsDB, regnum, abonentId, startDate, _ownerId());
+    },
+    repairResponsibilityHistorySafe: function () {
+      if (!this.ensureWriteOrExplain()) return { ok: false, code: "WRITE_BLOCKED" };
+      if (!window.AbonentsDB) return { ok: false, code: "NO_DB" };
+      var beforeDb = deepClone(window.AbonentsDB);
+      var ownerId = _ownerId();
+      try {
+        var src = Array.isArray(window.AbonentsDB.links) ? window.AbonentsDB.links : [];
+        var out = [];
+        var seen = {};
+        for (var i = 0; i < src.length; i++) {
+          var l = src[i];
+          if (!l || typeof l !== "object") continue;
+          var reg = String(l.regnum || "").trim();
+          var aid = String(l.abonentId || "").trim();
+          var df = String(l.dateFrom || "").trim();
+          if (!reg || !aid || !df) continue;
+          var lo = String(l.ownerId || "").trim();
+          if (ownerId && lo && lo !== ownerId) {
+            var eOwn = new Error("RESPONSIBILITY_OWNER_MISMATCH");
+            eOwn.code = "RESPONSIBILITY_OWNER_MISMATCH";
+            throw eOwn;
+          }
+          var key = reg + "::" + aid + "::" + df;
+          if (seen[key]) continue;
+          seen[key] = true;
+          var ln = Object.assign({}, l);
+          if (ownerId && !String(ln.ownerId || "").trim()) ln.ownerId = ownerId;
+          out.push(ln);
+        }
+        window.AbonentsDB.links = _normalizeResponsibilityHistory(out, ownerId);
+        _validateResponsibilityHistoryForDb(window.AbonentsDB.links, window.AbonentsDB, ownerId);
+        var saved = !!window.saveAbonentsDB && window.saveAbonentsDB();
+        if (!saved) {
+          window.AbonentsDB = beforeDb;
+          return { ok: false, code: "SAVE_FAILED" };
+        }
+        return { ok: true };
+      } catch (e) {
+        window.AbonentsDB = beforeDb;
+        return { ok: false, code: String((e && e.code) || "RESPONSIBILITY_INVALID") };
+      }
     },
     isAbonentActive: function (abonentObj) { return _isActiveAbonent(abonentObj); },
     runResponsibilitySelfCheck: function () {
