@@ -582,7 +582,13 @@
     const arr = loadPayments(id);
     const res = ensureAutoAccrualsForAbonent(id, arr);
     if (res.changed) savePayments(id, arr);
-    return { ok:true, ...res, ls:id };
+    return {
+      ok:true,
+      changed: !!res.changed,
+      reason: String(res.reason || ''),
+      ls:id,
+      rowsCount: Array.isArray(arr) ? arr.length : 0
+    };
   }
 
   function recalcForMany(list){

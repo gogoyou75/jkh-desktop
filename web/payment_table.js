@@ -1093,6 +1093,26 @@ for (const p of parts) {
     }
   }
 
+  async function flushPaymentsAfterAutoAccrual(reason, result) {
+    if (!result || result.changed !== true) return;
+    console.info(
+      "[payment_table][autoaccrual] changed reason=%s ls=%s rows=%s",
+      String(reason || result.reason || ""),
+      String(result.ls || getAbonentId() || ""),
+      String(result.rowsCount ?? "")
+    );
+    if (window.Data && typeof Data.flushDbToServer === "function") {
+      try {
+        await Data.flushDbToServer();
+        console.info("[payment_table][autoaccrual] flushed");
+      } catch (e) {
+        console.warn("[payment_table][autoaccrual] flush failed", e);
+      }
+    } else {
+      console.warn("[payment_table][autoaccrual] flush failed", "Data.flushDbToServer not available");
+    }
+  }
+
   // =========================================================
 // РАСЧЁТ ДОЛГА И ПЕНИ (юридическая логика ЖКХ)
 // - Пеня считается ПО ДНЯМ, по каждой "обязательной сумме" отдельно
@@ -1708,9 +1728,12 @@ function applyRunningTotals(viewRows) {
     // используем ЕГО, чтобы работало пропорциональное начисление при смене тарифа внутри месяца.
     try {
       if (window.JKHAutoAccrual && typeof window.JKHAutoAccrual.recalcForAbonent === 'function') {
-        window.JKHAutoAccrual.recalcForAbonent(getAbonentId());
-        // движок сам пишет в JKHStore -> перечитываем
-        arr = getPayments();
+        const recalcRes = window.JKHAutoAccrual.recalcForAbonent(getAbonentId());
+        if (recalcRes && recalcRes.changed === true) {
+          // движок сам пишет в JKHStore -> перечитываем только при изменениях
+          arr = getPayments();
+          await flushPaymentsAfterAutoAccrual("refreshRunningTotalsInDOM", recalcRes);
+        }
       } else {
         if (ensureAutoAccruals(arr)) {
           // на рендере НЕ flush-им: только локальный пересчёт для отображения
@@ -1783,9 +1806,12 @@ function applyRunningTotals(viewRows) {
     // используем ЕГО, чтобы работало пропорциональное начисление при смене тарифа внутри месяца.
     try {
       if (window.JKHAutoAccrual && typeof window.JKHAutoAccrual.recalcForAbonent === 'function') {
-        window.JKHAutoAccrual.recalcForAbonent(getAbonentId());
-        // движок сам пишет в JKHStore -> перечитываем
-        arr = getPayments();
+        const recalcRes = window.JKHAutoAccrual.recalcForAbonent(getAbonentId());
+        if (recalcRes && recalcRes.changed === true) {
+          // движок сам пишет в JKHStore -> перечитываем только при изменениях
+          arr = getPayments();
+          await flushPaymentsAfterAutoAccrual("loadPaymentTable", recalcRes);
+        }
       } else {
         if (ensureAutoAccruals(arr)) {
           // на загрузке/рендере НЕ flush-им: только локальный пересчёт

@@ -1224,12 +1224,35 @@ async function createAbonent() {
       return;
     }
 
+    let recalcRes = null;
     try {
       if (window.JKHAutoAccrual && typeof window.JKHAutoAccrual.recalcForAbonent === 'function') {
-        window.JKHAutoAccrual.recalcForAbonent(String(ls));
+        recalcRes = window.JKHAutoAccrual.recalcForAbonent(String(ls));
+        console.info('[new_abonent][autoaccrual] recalc result', recalcRes);
+        if (recalcRes && recalcRes.changed) {
+          if (window.Data && typeof Data.flushDbToServer === 'function') {
+            await Data.flushDbToServer();
+            console.info('[new_abonent][autoaccrual] flushed');
+          } else {
+            console.warn('[new_abonent][autoaccrual] flush skipped: Data.flushDbToServer not available');
+          }
+        }
       }
     } catch (e) {
       console.warn('[new_abonent] recalcForAbonent failed', e);
+    }
+
+    try {
+      const paymentsKey = "payments_" + String(ls);
+      const rawPayments = (window.JKHStore && typeof window.JKHStore.getRaw === 'function')
+        ? JKHStore.getRaw(paymentsKey)
+        : null;
+      console.info("[new_abonent][payments] key=", paymentsKey, "size=", rawPayments ? rawPayments.length : 0);
+      if (!rawPayments || String(rawPayments).trim() === "[]") {
+        console.warn("[new_abonent][payments] payments key is empty after recalc", String(ls), recalcRes);
+      }
+    } catch (e) {
+      console.warn('[new_abonent][payments] probe failed', e);
     }
 
     if (!(window.saveAbonentsDB && window.saveAbonentsDB())) {
