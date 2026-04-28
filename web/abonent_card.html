@@ -864,7 +864,7 @@ function waitForCardDataReadyThenRender(){
         if (READY[status]) {
             clearTimeout(timer);
             onReadyStatus(status);
-            document.removeEventListener('JKH_UI_STATE_CHANGED', handleStateChange);
+            window.removeEventListener('JKH_UI_STATE_CHANGED', handleStateChange);
         }
     }
 
@@ -881,7 +881,7 @@ function waitForCardDataReadyThenRender(){
         __showCardDataTimeoutMessage();
     }, 12000);
 
-    document.addEventListener('JKH_UI_STATE_CHANGED', handleStateChange);
+    window.addEventListener('JKH_UI_STATE_CHANGED', handleStateChange);
 }
 
 document.addEventListener("DOMContentLoaded", () => {
