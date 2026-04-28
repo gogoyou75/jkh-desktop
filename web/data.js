@@ -364,6 +364,7 @@
         String(l && l.dateFrom || "").trim() === sd;
     });
     if (duplicate) {
+      console.log("[responsibility][dedupe]", { regnum: r, abonentId: aid, dateFrom: sd });
       return { ok: true, skipped: true, reason: "duplicate" };
     }
     try {
@@ -607,6 +608,7 @@
       const a = db.abonents[abonentId];
       if (!a) return;
       if (!String(a.status || "").trim()) a.status = "active";
+      var isDeleted = String(a.status || "").trim() === "deleted";
 
       const regnum = String(a.regnum || a.premiseRegnum || "").trim();
       if (!regnum) return;
@@ -625,7 +627,7 @@
       }
 
       // links
-      if (!hasLink(abonentId, regnum)) {
+      if (!isDeleted && !hasLink(abonentId, regnum)) {
         db.links.push({
           abonentId: String(abonentId),
           regnum,
@@ -810,49 +812,69 @@
     upsertAbonent: function (abonentObj) {
       if (!this.ensureWriteOrExplain()) return false;
       if (!window.AbonentsDB) return false;
+      var beforeDb = deepClone(window.AbonentsDB);
 
-      var input = Object.assign({}, abonentObj || {});
-      var id = String(input.id || "").trim();
-      if (!id) return false;
-
-      if (!window.AbonentsDB.abonents || typeof window.AbonentsDB.abonents !== "object") {
-        window.AbonentsDB.abonents = {};
-      }
-
-      var regnum = normalizeRegnumValue(input.premiseRegnum || input.regnum);
-      if (regnum) {
-        input.premiseRegnum = regnum;
-        input.regnum = regnum;
-      }
-      if (!String(input.status || "").trim()) input.status = "active";
-      if (!String(input.ownerId || "").trim()) input.ownerId = _ownerId();
-
-      window.AbonentsDB.abonents[id] = input;
-
-      if (regnum) {
-        var premiseObj = {
-          regnum: regnum,
-          city: input.city || "",
-          street: input.street || "",
-          house: input.house || "",
-          flat: input.flat || "",
-          square: input.square !== undefined ? input.square : (input.totalArea !== undefined ? input.totalArea : ""),
-          createdAt: input.premiseCreatedAt || input.premiseCreated || "2000-01-01"
-        };
-        this.ensurePremise(premiseObj);
-        var startDate = input.calcStartDate || input.startDate || "";
-        var endDate = input.calcEndDate || input.endDate || "";
-        if (startDate && !endDate) {
-          try { _applyResponsibilityChange(window.AbonentsDB, regnum, id, startDate, _ownerId()); }
-          catch (e) {
-            throw e;
-          }
-        } else {
-          this.linkAbonentToPremise(id, regnum, startDate, endDate);
+      try {
+        var input = Object.assign({}, abonentObj || {});
+        var id = String(input.id || "").trim();
+        if (!id) {
+          window.AbonentsDB = beforeDb;
+          return false;
         }
-      }
 
-      return !!window.saveAbonentsDB && window.saveAbonentsDB();
+        if (!window.AbonentsDB.abonents || typeof window.AbonentsDB.abonents !== "object") {
+          window.AbonentsDB.abonents = {};
+        }
+
+        var regnum = normalizeRegnumValue(input.premiseRegnum || input.regnum);
+        if (regnum) {
+          input.premiseRegnum = regnum;
+          input.regnum = regnum;
+        }
+        if (!String(input.status || "").trim()) input.status = "active";
+        if (!String(input.ownerId || "").trim()) input.ownerId = _ownerId();
+
+        window.AbonentsDB.abonents[id] = input;
+
+        if (regnum) {
+          var premiseObj = {
+            regnum: regnum,
+            city: input.city || "",
+            street: input.street || "",
+            house: input.house || "",
+            flat: input.flat || "",
+            square: input.square !== undefined ? input.square : (input.totalArea !== undefined ? input.totalArea : ""),
+            createdAt: input.premiseCreatedAt || input.premiseCreated || "2000-01-01"
+          };
+          var premiseOk = this.ensurePremise(premiseObj);
+          if (!premiseOk) {
+            window.AbonentsDB = beforeDb;
+            return false;
+          }
+          var startDate = input.calcStartDate || input.startDate || "";
+          var endDate = input.calcEndDate || input.endDate || "";
+          if (startDate && !endDate) {
+            _applyResponsibilityChange(window.AbonentsDB, regnum, id, startDate, _ownerId());
+          } else {
+            var linkOk = this.linkAbonentToPremise(id, regnum, startDate, endDate);
+            if (!linkOk) {
+              window.AbonentsDB = beforeDb;
+              return false;
+            }
+          }
+        }
+
+        var saved = !!window.saveAbonentsDB && window.saveAbonentsDB();
+        if (!saved) {
+          window.AbonentsDB = beforeDb;
+          return false;
+        }
+
+        return true;
+      } catch (e) {
+        window.AbonentsDB = beforeDb;
+        throw e;
+      }
     },
     deleteAbonent: function (abonentId) {
       if (!this.ensureWriteOrExplain()) return false;
