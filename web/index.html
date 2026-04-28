@@ -641,6 +641,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
     for (const id in db) {
         const a = db[id];
+        if (String(a?.status || "active").trim() === "deleted") continue;
 
         const fio = (a.fio || "").split(" ");
         const fam = fio[0] || "";

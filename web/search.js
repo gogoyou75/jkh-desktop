@@ -32,6 +32,7 @@ function runSearch() {
 
     for (const id in db) {
         const a = db[id];
+        if (String(a?.status || "active").trim() === "deleted") continue;
 
         const fio = a.fio.toLowerCase();
         const city = (a.city || "").toLowerCase();

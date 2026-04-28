@@ -1235,10 +1235,14 @@ function evaluatePrimaryRow(db, row){
       status='ERROR'; critical=true; messages.push(found.msg);
       if (!normStr(row.uid)) action = { type:'ADD_ABONENT' };
       if (!normStr(row.ls) || !normStr(row.fam)) messages.push('Для создания нужны непустые ФИО/ЛС.');
+      messages.push('Классификация: new');
     }
   } else if (found.type === 'FOUND_BY_LS_FAM'){
     status='UPDATED';
     warnings.push('Абонент найден по ЛС/Фамилии. UID будет присвоен при применении первички.');
+    warnings.push('Классификация: update_existing');
+  } else if (found.type === 'UID_OK'){
+    warnings.push('Классификация: duplicate_skipped / update_existing');
   }
 
   if (found.abonent){
@@ -1667,6 +1671,11 @@ async function applyPrimary(){
     if (!Number.isFinite(row.square) || row.square<=0) continue;
 
     let a = found.abonent;
+    if (String(a?.status || "active").trim() === "deleted") {
+      a.status = "active";
+      a.deleted_at = "";
+      a.deleted_reason = "";
+    }
 
     // Канон: ключуем по ЛС, UID — поле внутри записи.
     // Если UID не указан в Excel, но у абонента его ещё нет — генерируем (чтобы шаг 2 мог работать по UID).
@@ -1696,6 +1705,12 @@ async function applyPrimary(){
       }
     }
     row.ls = a.id;
+    console.log("[import][abonent-dedupe]", {
+      excelRow: row.excelRow,
+      mode: found.type === "UID_OK" || found.type === "FOUND_BY_LS_FAM" ? "update_existing" : "new",
+      ls: row.ls,
+      uid: normStr(row.uid)
+    });
     updated++;
   }
 

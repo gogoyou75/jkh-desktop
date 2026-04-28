@@ -1082,6 +1082,25 @@ async function createAbonent() {
     const respStart = String(dateFrom || "").trim() || today;
 
     if (!Array.isArray(dbRoot.links)) dbRoot.links = [];
+    const uidImport = String(document.getElementById("na_uid_import").value || "").trim();
+    const existingByUid = uidImport
+      ? Object.keys(dbRoot.abonents || {}).find(function(k){
+          const ab = dbRoot.abonents[k];
+          return String(ab?.uid || "").trim() === uidImport && String(ab?.status || "active").trim() !== "deleted";
+        })
+      : "";
+    if (existingByUid){
+      const hasSamePremise = dbRoot.links.some(function(l){
+        return String(l?.abonentId || "").trim() === String(existingByUid) &&
+          String(l?.regnum || "").trim() === regnum;
+      });
+      if (hasSamePremise){
+        console.log("[import][abonent-dedupe]", { mode: "update_existing", abonentId: existingByUid, regnum: regnum });
+        setCreateStatus("Найден существующий абонент по UID и квартире. Открываем карточку без создания дубля.");
+        location.href = "abonent_card.html?abonent=" + encodeURIComponent(String(existingByUid));
+        return;
+      }
+    }
     const prevActive = activeLinkForRegnumLocal(dbRoot, regnum);
 
     // если квартира занята — требуем явную передачу кнопкой
@@ -1093,7 +1112,6 @@ async function createAbonent() {
     }
 
     // UID
-    const uidImport = String(document.getElementById("na_uid_import").value || "").trim();
     const uid = (uidImport && uidImport.startsWith("uid_")) ? uidImport : generateUid();
 
     // создаём нового с нулевым долгом (как и было)
@@ -1155,12 +1173,30 @@ async function createAbonent() {
     }
 
     // 4) новый link
-    dbRoot.links.push({
-      abonentId: String(ls),
-      regnum,
-      dateFrom: respStart,
-      dateTo: ""
-    });
+    try{
+      if (window.Data && typeof window.Data.applyResponsibilityChange === "function") {
+        window.Data.applyResponsibilityChange(regnum, String(ls), String(respStart));
+      } else {
+        dbRoot.links.push({
+          abonentId: String(ls),
+          regnum,
+          dateFrom: respStart,
+          dateTo: ""
+        });
+      }
+    }catch(e){
+      const code = String(e?.code || e?.message || "");
+      if (code === "RESPONSIBILITY_PERIOD_OVERLAP") {
+        setCreateStatus("Ошибка: пересечение периодов ответственности по квартире.");
+      } else if (code === "RESPONSIBILITY_DUPLICATE") {
+        setCreateStatus("Дубликат ответственности: этот период уже существует.");
+      } else if (code === "RESPONSIBILITY_OWNER_MISMATCH") {
+        setCreateStatus("Ошибка owner scope: запрещено сохранять в чужую базу.");
+      } else {
+        setCreateStatus("Ошибка истории ответственности. Проверьте дубли/периоды по квартире.");
+      }
+      return;
+    }
 
     // 5) Перенос долга/пени (CANON TRANSFER v1.7)
     // ВАЖНО: перенос делаем через scoped store-ключ "jkh_transfer_balance_v1:<newId>:<regnum>",
@@ -1271,7 +1307,16 @@ async function createAbonent() {
 /* =========================================================
    Список всех абонентов + фильтры
    ========================================================= */
-function getDb(){ return window.AbonentsDB?.abonents || {}; }
+function getDb(){
+  const src = window.AbonentsDB?.abonents || {};
+  const out = {};
+  Object.keys(src).forEach(function(id){
+    const a = src[id];
+    if (String(a?.status || "active").trim() === "deleted") return;
+    out[id] = a;
+  });
+  return out;
+}
 function getPremises(){ return window.AbonentsDB?.premises || {}; }
 function getLinks(){ return Array.isArray(window.AbonentsDB?.links) ? window.AbonentsDB.links : []; }
 

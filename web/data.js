@@ -212,6 +212,153 @@
     }
   }
 
+  function _isActiveAbonent(a) {
+    var st = String((a && a.status) || "active").trim().toLowerCase();
+    return st !== "deleted";
+  }
+  function _isIsoDate(v) {
+    return /^\d{4}-\d{2}-\d{2}$/.test(String(v || "").trim());
+  }
+  function _isoToTs(v) {
+    var s = String(v || "").trim();
+    if (!_isIsoDate(s)) return NaN;
+    var d = new Date(s + "T12:00:00");
+    return Number.isFinite(d.getTime()) ? d.getTime() : NaN;
+  }
+  function _isoMinusOne(iso) {
+    if (!_isIsoDate(iso)) return "";
+    var d = new Date(String(iso) + "T12:00:00");
+    d.setDate(d.getDate() - 1);
+    var y = d.getFullYear();
+    var m = String(d.getMonth() + 1).padStart(2, "0");
+    var dd = String(d.getDate()).padStart(2, "0");
+    return y + "-" + m + "-" + dd;
+  }
+  function _ownerMismatch(linkOwner, ownerId) {
+    var lo = String(linkOwner || "").trim();
+    var oo = String(ownerId || "").trim();
+    return !!(lo && oo && lo !== oo);
+  }
+  function _normalizeResponsibilityHistory(history, ownerId) {
+    console.log("[responsibility][normalize]", { count: Array.isArray(history) ? history.length : 0 });
+    var src = Array.isArray(history) ? history.slice() : [];
+    var dedupeMap = {};
+    var out = [];
+    for (var i = 0; i < src.length; i++) {
+      var l = src[i];
+      if (!l || typeof l !== "object") continue;
+      var regnum = String(l.regnum || "").trim();
+      var abonentId = String(l.abonentId || "").trim();
+      var dateFrom = String(l.dateFrom || "").trim();
+      if (!regnum || !abonentId || !dateFrom) continue;
+      var key = regnum + "::" + abonentId + "::" + dateFrom;
+      if (dedupeMap[key]) {
+        console.warn("[responsibility][dedupe]", { key: key });
+        continue;
+      }
+      dedupeMap[key] = true;
+      var ln = Object.assign({}, l);
+      if (ownerId && !String(ln.ownerId || "").trim()) ln.ownerId = String(ownerId);
+      out.push(ln);
+    }
+    out.sort(function (a, b) {
+      var ra = String(a.regnum || "").trim();
+      var rb = String(b.regnum || "").trim();
+      if (ra !== rb) return ra.localeCompare(rb, "ru");
+      return String(a.dateFrom || "").localeCompare(String(b.dateFrom || ""));
+    });
+    return out;
+  }
+  function _validateResponsibilityHistory(history, ownerId) {
+    console.log("[responsibility][validate]", { count: Array.isArray(history) ? history.length : 0, ownerId: ownerId || "" });
+    var grouped = {};
+    var arr = Array.isArray(history) ? history : [];
+    for (var i = 0; i < arr.length; i++) {
+      var l = arr[i];
+      var reg = String(l && l.regnum || "").trim();
+      if (!reg) continue;
+      if (_ownerMismatch(l && l.ownerId, ownerId)) {
+        var eOm = new Error("RESPONSIBILITY_OWNER_MISMATCH");
+        eOm.code = "RESPONSIBILITY_OWNER_MISMATCH";
+        throw eOm;
+      }
+      if (!_isIsoDate(l && l.dateFrom) || (String(l && l.dateTo || "").trim() && !_isIsoDate(l.dateTo))) {
+        var eId = new Error("RESPONSIBILITY_INVALID_DATE");
+        eId.code = "RESPONSIBILITY_INVALID_DATE";
+        throw eId;
+      }
+      if (!grouped[reg]) grouped[reg] = [];
+      grouped[reg].push(l);
+    }
+    var regs = Object.keys(grouped);
+    for (var r = 0; r < regs.length; r++) {
+      var items = grouped[regs[r]].slice().sort(function (a, b) {
+        return String(a.dateFrom || "").localeCompare(String(b.dateFrom || ""));
+      });
+      for (var j = 0; j < items.length; j++) {
+        var cur = items[j];
+        var curFrom = _isoToTs(cur.dateFrom);
+        var curTo = String(cur.dateTo || "").trim() ? _isoToTs(cur.dateTo) : Number.POSITIVE_INFINITY;
+        if (!Number.isFinite(curFrom) || !(Number.isFinite(curTo) || curTo === Number.POSITIVE_INFINITY) || curTo < curFrom) {
+          var eInv = new Error("RESPONSIBILITY_INVALID_DATE");
+          eInv.code = "RESPONSIBILITY_INVALID_DATE";
+          throw eInv;
+        }
+        for (var k = j + 1; k < items.length; k++) {
+          var nxt = items[k];
+          var nf = _isoToTs(nxt.dateFrom);
+          var nt = String(nxt.dateTo || "").trim() ? _isoToTs(nxt.dateTo) : Number.POSITIVE_INFINITY;
+          if (!(curTo < nf || nt < curFrom)) {
+            console.warn("[responsibility][overlap]", { regnum: regs[r], left: cur, right: nxt });
+            var eOv = new Error("RESPONSIBILITY_PERIOD_OVERLAP");
+            eOv.code = "RESPONSIBILITY_PERIOD_OVERLAP";
+            throw eOv;
+          }
+        }
+      }
+    }
+    return true;
+  }
+  function _applyResponsibilityChange(db, regnum, abonentId, startDate, ownerId) {
+    var r = String(regnum || "").trim();
+    var aid = String(abonentId || "").trim();
+    var sd = String(startDate || "").trim();
+    if (!r || !aid || !_isIsoDate(sd)) {
+      var e = new Error("RESPONSIBILITY_INVALID_DATE");
+      e.code = "RESPONSIBILITY_INVALID_DATE";
+      throw e;
+    }
+    if (!Array.isArray(db.links)) db.links = [];
+    var duplicate = db.links.find(function (l) {
+      return String(l && l.regnum || "").trim() === r &&
+        String(l && l.abonentId || "").trim() === aid &&
+        String(l && l.dateFrom || "").trim() === sd;
+    });
+    if (duplicate) {
+      var de = new Error("RESPONSIBILITY_DUPLICATE");
+      de.code = "RESPONSIBILITY_DUPLICATE";
+      throw de;
+    }
+    for (var i = 0; i < db.links.length; i++) {
+      var l = db.links[i];
+      if (String(l && l.regnum || "").trim() !== r) continue;
+      if (_ownerMismatch(l && l.ownerId, ownerId)) {
+        var eOm = new Error("RESPONSIBILITY_OWNER_MISMATCH");
+        eOm.code = "RESPONSIBILITY_OWNER_MISMATCH";
+        throw eOm;
+      }
+      var lf = String(l && l.dateFrom || "").trim();
+      var lt = String(l && l.dateTo || "").trim();
+      if (!lt && _isIsoDate(lf) && _isoToTs(lf) < _isoToTs(sd)) {
+        l.dateTo = _isoMinusOne(sd);
+      }
+    }
+    db.links.push({ abonentId: aid, regnum: r, dateFrom: sd, dateTo: "", ownerId: ownerId || "" });
+    db.links = _normalizeResponsibilityHistory(db.links, ownerId);
+    _validateResponsibilityHistory(db.links, ownerId);
+    return true;
+  }
+
   function removeProjectKeys() {
     // ВАЖНО: сброс делаем в рамках выбранной базы (scoped).
     // admin в режиме "ALL" — сбрасывает ВСЕ пользовательские базы.
@@ -401,6 +548,7 @@
     Object.keys(db.abonents).forEach((abonentId) => {
       const a = db.abonents[abonentId];
       if (!a) return;
+      if (!String(a.status || "").trim()) a.status = "active";
 
       const regnum = String(a.regnum || a.premiseRegnum || "").trim();
       if (!regnum) return;
@@ -438,6 +586,12 @@
       const premiseOk = !!db.premises?.[String(l?.regnum || "").trim()];
       return abonentOk && premiseOk;
     });
+    db.links = _normalizeResponsibilityHistory(db.links, _ownerId());
+    try {
+      _validateResponsibilityHistory(db.links, _ownerId());
+    } catch (e) {
+      console.warn("[responsibility][validate] normalizeDb warning", e && e.code ? e.code : e);
+    }
   }
 
   // ============================================================
@@ -478,12 +632,13 @@
     },
     listAbonents: function () {
       var db = this.getDb();
-      return listByObjectValues(db && db.abonents);
+      return listByObjectValues(db && db.abonents).filter(_isActiveAbonent);
     },
     getAbonent: function (abonentId) {
       var db = this.getDb();
       if (!db || !db.abonents) return null;
-      return db.abonents[String(abonentId)] || null;
+      var ab = db.abonents[String(abonentId)] || null;
+      return _isActiveAbonent(ab) ? ab : null;
     },
     listPremises: function () {
       var db = this.getDb();
@@ -604,6 +759,8 @@
         input.premiseRegnum = regnum;
         input.regnum = regnum;
       }
+      if (!String(input.status || "").trim()) input.status = "active";
+      if (!String(input.ownerId || "").trim()) input.ownerId = _ownerId();
 
       window.AbonentsDB.abonents[id] = input;
 
@@ -618,12 +775,20 @@
           createdAt: input.premiseCreatedAt || input.premiseCreated || "2000-01-01"
         };
         this.ensurePremise(premiseObj);
-        this.linkAbonentToPremise(
-          id,
-          regnum,
-          input.calcStartDate || input.startDate || "",
-          input.calcEndDate || input.endDate || ""
-        );
+        var startDate = input.calcStartDate || input.startDate || "";
+        var endDate = input.calcEndDate || input.endDate || "";
+        if (startDate && !endDate) {
+          try { _applyResponsibilityChange(window.AbonentsDB, regnum, id, startDate, _ownerId()); }
+          catch (e) {
+            if (e && e.code === "RESPONSIBILITY_DUPLICATE") {
+              console.log("[responsibility][dedupe]", { regnum: regnum, abonentId: id, dateFrom: startDate });
+            } else {
+              throw e;
+            }
+          }
+        } else {
+          this.linkAbonentToPremise(id, regnum, startDate, endDate);
+        }
       }
 
       return !!window.saveAbonentsDB && window.saveAbonentsDB();
@@ -633,17 +798,29 @@
       if (!window.AbonentsDB) return false;
       var id = String(abonentId || "").trim();
       if (!id) return false;
-
+      var reason = arguments.length > 1 ? String(arguments[1] || "").trim() : "";
       if (window.AbonentsDB.abonents && window.AbonentsDB.abonents[id]) {
-        delete window.AbonentsDB.abonents[id];
-      }
-      if (Array.isArray(window.AbonentsDB.links)) {
-        window.AbonentsDB.links = window.AbonentsDB.links.filter(function (l) {
-          return String(l && l.abonentId) !== id;
-        });
+        var a = window.AbonentsDB.abonents[id];
+        a.status = "deleted";
+        a.deleted_at = new Date().toISOString();
+        a.deleted_reason = reason || "manual";
+        console.warn("[abonent][soft-delete]", { abonentId: id, reason: a.deleted_reason });
       }
 
       return !!window.saveAbonentsDB && window.saveAbonentsDB();
+    },
+    normalizeResponsibilityHistory: function (history) { return _normalizeResponsibilityHistory(history, _ownerId()); },
+    validateResponsibilityHistory: function (history) { return _validateResponsibilityHistory(history, _ownerId()); },
+    applyResponsibilityChange: function (regnum, abonentId, startDate) {
+      if (!window.AbonentsDB) return false;
+      return _applyResponsibilityChange(window.AbonentsDB, regnum, abonentId, startDate, _ownerId());
+    },
+    isAbonentActive: function (abonentObj) { return _isActiveAbonent(abonentObj); },
+    runResponsibilitySelfCheck: function () {
+      var tdb = { links: [] };
+      tdb.links.push({ abonentId: "1", regnum: "R1", dateFrom: "2009-01-01", dateTo: "" });
+      _applyResponsibilityChange(tdb, "R1", "2", "2015-01-01", _ownerId());
+      return tdb.links;
     }
   };
 
