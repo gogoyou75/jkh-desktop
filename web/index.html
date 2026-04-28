@@ -433,100 +433,40 @@ function getPaymentsForAbonent(id){
 //    - если totalDebt > 0 -> сегодня
 //    - если totalDebt == 0 -> max(paid_date)
 function calcTotalsFromPayments(id, abonentObj){
-    const arr = getPaymentsForAbonent(id);
-    if (!arr.length) return null;
+    const rows = getPaymentsForAbonent(id);
+    if (!rows.length) return null;
 
     let sumAcc = 0;
     let sumPaid = 0;
 
-    for (const r of arr){
+    for (const r of rows){
         sumAcc += toNum(r.accrued);
         sumPaid += toNum(r.paid);
     }
 
-    // ✅ Итоговые "Всего задолженность" и "ПЕНЯ за период" должны совпадать с логикой карточки.
-    // Важно: в LS строки payments_<id> могут НЕ содержать актуальные total_debt/pay_penalty,
-    // потому что карточка пересчитывает это "на лету".
-    // Поэтому:
-    //   1) если доступен calc_engine (JKHCalcEngine) — считаем итог прямо сейчас (это самый надёжный вариант)
-    //   2) иначе — fallback к данным из последней строки последнего месяца.
-
     let totalDebt = 0;
     let penalty = 0;
 
-    // (1) основной путь — через calc_engine
     try {
-        if (window.JKHCalcEngine) {
-            // ✅ ЕДИНЫЙ ДВИЖОК: для сводной главной используем тот же метод,
-            // что и карточка/справка: calcTotalsAsOfAdjusted() на дату окончания расчёта.
-            //
-            // ВАЖНО:
-            // - calcTotalsAsOfCore() отдаёт "начисленную пеню" (penaltyAccruedTotal) — это ДРУГОЕ.
-            // - нам нужна "пеня к взысканию / задолженность по пени" (penaltyDebt),
-            //   которая согласована с карточкой и справкой.
-            const asOf = new Date(); // дата окончания расчёта на главной = сегодня
-            if (typeof window.JKHCalcEngine.calcTotalsAsOfAdjusted === 'function') {
-                const adj = window.JKHCalcEngine.calcTotalsAsOfAdjusted(
-                    arr,
-                    asOf,
-                    { abonentId: id, applyAdvanceOffset: true, allowNegativePrincipal: true }
-                );
-
-                const principal = Number(adj?.principal) || 0;       // может быть отрицательный (аванс)
-                const penDebt   = Number(adj?.penaltyDebt) || 0;
-                const total     = Number(adj?.total) || (principal + penDebt);
-
-                totalDebt = total;
-                // CRITICAL: пеня берётся напрямую из calc_engine (penaltyDebt).
-                // Запрещено обнулять её в index.html — это нарушает единый расчёт.
-                penalty = penDebt;
-
-                CRITICAL_ASSERT(Number.isFinite(totalDebt), "Index: totalDebt is not finite", { id, totalDebt, adj });
-                CRITICAL_ASSERT(Number.isFinite(penalty),   "Index: penalty is not finite",   { id, penalty, adj });
-            } else {
-                throw new Error('JKHCalcEngine.calcTotalsAsOfAdjusted is missing');
-            }
-        } else {
-            throw new Error('no JKHCalcEngine');
+        if (!window.JKHCalcEngine || typeof window.JKHCalcEngine.calcTotalsAsOfAdjusted !== 'function') {
+            throw new Error('JKHCalcEngine.calcTotalsAsOfAdjusted is missing');
         }
+        const today = new Date();
+        const totals = JKHCalcEngine.calcTotalsAsOfAdjusted(rows, today, {
+            abonentId: id,
+            applyAdvanceOffset: true,
+            allowNegativePrincipal: false
+        });
+
+        const principal = Number(totals?.principal) || 0;
+        const penaltyDebt = Number(totals?.penaltyDebt) || 0;
+        const total = Number(totals?.total);
+
+        totalDebt = Number.isFinite(total) ? total : (principal + penaltyDebt);
+        penalty = penaltyDebt;
     } catch (e) {
-        // (2) fallback — последняя строка последнего месяца (как раньше)
-        let endRow = null;
-        let bestKey = -Infinity;
-        let bestIsAccr = false;
-        let bestId = -Infinity;
-
-        for (const r of arr){
-            const y = Number(r.year) || 0;
-            const m = Number(r.month) || 0;
-            const key = (y * 12) + m;
-            const isAccr = Math.abs(toNum(r.accrued)) > 0.0000001;
-
-            const rid = Number(r.id) || 0;
-
-            const better =
-                (key > bestKey) ||
-                (key === bestKey && isAccr && !bestIsAccr) ||
-                (key === bestKey && isAccr === bestIsAccr && rid >= bestId);
-
-            if (better){
-                bestKey = key;
-                bestIsAccr = isAccr;
-                bestId = rid;
-                endRow = r;
-            }
-        }
-
-        totalDebt = endRow ? toNum(endRow.total_debt) : 0;
-        penalty   = endRow ? toNum(endRow.pay_penalty) : 0;
-
-    }
-
-    // ✅ страховка: если total_debt в строках не заполнен (0), всё равно можем показать аванс/долг по суммам
-    // principalNet = начислено - оплачено (может быть < 0)
-    const principalNet = sumAcc - sumPaid;
-    if (Math.abs(totalDebt) <= 0.0000001 && Math.abs(principalNet) > 0.0000001) {
-        totalDebt = principalNet + penalty;
+        totalDebt = 0;
+        penalty = 0;
     }
 
 
@@ -540,7 +480,7 @@ function calcTotalsFromPayments(id, abonentObj){
     if (!startDate){
         let minKey = Infinity;
         let minY = 0, minM = 0;
-        for (const r of arr){
+        for (const r of rows){
             const y = Number(r.year) || 0;
             const m = Number(r.month) || 0;
             const key = (y * 12) + m;
