@@ -777,29 +777,77 @@ function fillAbonentCard() {
     try { renderTransferInfo(id, regnum || a.regnum || ''); } catch(e) {}
 }
 
-// 🔴 CRITICAL: автоначисление + контроль пропусков
+// 🔴 SAFE INIT: карточка не должна зависать при входе
+let __abonentCardInitStarted = false;
+let __paymentTableLoading = false;
+
+function __safeLoadPaymentTableOnce(reason){
+    if (__paymentTableLoading) {
+        try { console.warn('[abonent_card] payment table load skipped, already running:', reason); } catch(e){}
+        return;
+    }
+
+    if (!window.__loadPaymentTable) return;
+
+    __paymentTableLoading = true;
+
+    setTimeout(() => {
+        try {
+            window.__loadPaymentTable();
+        } catch(e) {
+            try { console.error('[abonent_card] __loadPaymentTable failed:', reason, e); } catch(_){}
+        } finally {
+            setTimeout(() => { __paymentTableLoading = false; }, 300);
+        }
+    }, 0);
+}
+
 function __runAutoAccrualRepairOnce(){
     try {
         const id = getAbonentIdFromURL();
         if (!id) return;
+
+        const db = getDb();
+        if (!db || !db[String(id)]) {
+            try { console.warn('[abonent_card] skip autoaccrual: abonent not ready', id); } catch(e){}
+            return;
+        }
+
         const gk = 'jkh_autoaccrual_repair_once_v1:' + String(id);
         if (sessionStorage.getItem(gk) === '1') return;
         sessionStorage.setItem(gk, '1');
 
         if (!window.JKHAutoAccrual || typeof window.JKHAutoAccrual.recalcForAbonent !== 'function') return;
-        const res = window.JKHAutoAccrual.recalcForAbonent(id);
-        if (res && res.ok && res.changed) {
-            try { if (window.__loadPaymentTable) window.__loadPaymentTable(); } catch(e) {}
-        }
+
+        setTimeout(() => {
+            try {
+                const res = window.JKHAutoAccrual.recalcForAbonent(id);
+                if (res && res.ok && res.changed) {
+                    __safeLoadPaymentTableOnce('autoaccrual_changed');
+                }
+            } catch(e) {
+                try { console.warn('[autoaccrual] repairOnce error', e); } catch(_){}
+            }
+        }, 0);
     } catch(e) {
-        try { console.warn('[autoaccrual] repairOnce error', e); } catch(_){ }
+        try { console.warn('[autoaccrual] repairOnce outer error', e); } catch(_){}
     }
 }
 
+function __initAbonentCardSafe(){
+    if (__abonentCardInitStarted) return;
+    __abonentCardInitStarted = true;
+
+    try { fillAbonentCard(); } catch(e) { try { console.error('[abonent_card] fill failed', e); } catch(_){} }
+
+    setTimeout(() => {
+        __runAutoAccrualRepairOnce();
+        __safeLoadPaymentTableOnce('DOMContentLoaded');
+    }, 0);
+}
+
 document.addEventListener("DOMContentLoaded", () => {
-    fillAbonentCard();
-    __runAutoAccrualRepairOnce();
-    try { if (window.__loadPaymentTable) window.__loadPaymentTable(); } catch(e) {}
+    __initAbonentCardSafe();
 });
 
 function renderResponsibilityHistory(regnum){
