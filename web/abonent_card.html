@@ -1565,7 +1565,7 @@ function loadCalcPeriodUI(){
             fromEl.value = "";
             toEl.value   = "";
         }
-    } catch {
+    } catch (e) {
         fromEl.value = "";
         toEl.value   = "";
     }
@@ -1588,7 +1588,7 @@ function isValidPeriod(from, to){
         const a = new Date(from);
         const b = new Date(to);
         return a.toString() !== "Invalid Date" && b.toString() !== "Invalid Date" && a <= b;
-    } catch { return false; }
+    } catch (e) { return false; }
 }
 
 function bindCalcButtons(){
