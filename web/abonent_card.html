@@ -985,10 +985,11 @@ function renderTransferInfo(abonentId, regnum){
     const fromId = incoming.fromAbonentId || "";
     const fio = fromId && db[fromId] ? String(db[fromId].fio || "").trim() : "";
     const txt = fromId ? (fio ? `${fromId} — ${fio}` : fromId) : "—";
+    const safeTxt = String(txt).replace(/<\/script>/gi, "<\\/script>");
     const el = document.getElementById("ti_from");
     if (el) {
       if (fromId){
-        el.innerHTML = `<a href="abonent_card.html?abonent=${encodeURIComponent(fromId)}">${txt}</a>`;
+        el.innerHTML = `<a href="abonent_card.html?abonent=${encodeURIComponent(fromId)}">${safeTxt}</a>`;
       } else {
         el.textContent = txt;
       }
