@@ -356,7 +356,7 @@
     }
     console.info("[autoaccrual][repair] abonentId=%s reason=%s", id, rs);
     if (!(window.JKHAutoAccrual && typeof window.JKHAutoAccrual.recalcForAbonent === "function")) {
-      console.info("[autoaccrual][repair][skip] abonentId=%s reason=%s code=ENGINE_UNAVAILABLE", id, rs);
+      console.warn("[autoaccrual][repair][skip] ENGINE_UNAVAILABLE — проверь подключение autoaccrual_engine.js", { abonentId: id, reason: rs });
       return { ok: false, changed: false, reason: "ENGINE_UNAVAILABLE", abonentId: id, skipped: true };
     }
     var out = window.JKHAutoAccrual.recalcForAbonent(id) || {};

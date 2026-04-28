@@ -536,10 +536,19 @@
   }
   function _shouldSkipLegacyUpload(baseKey) {
     var kx = String(baseKey || "").trim();
-    if (kx !== "tariffs_dynamic_v1") return false;
     if (_isAdmin()) return false;
-    console.info("[sync][skip-legacy] key=tariffs_dynamic_v1 reason=legacy_forbidden_for_user");
-    return true;
+
+    if (
+      kx === "tariffs_dynamic_v1" ||
+      kx === "tariffs_content_repair_v1" ||
+      kx === "tariffs_content_repair_v1_backup" ||
+      kx.indexOf("tariffs_") === 0
+    ) {
+      console.info("[sync][skip-tariffs] key=%s reason=forbidden_for_user", kx);
+      return true;
+    }
+
+    return false;
   }
 
   function _lsGet(key, def) {
