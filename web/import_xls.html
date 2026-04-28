@@ -529,7 +529,6 @@ function getCurrentOwnerId(){
   catch(e){ return ''; }
 }
 function saveDraftNewAbonent(row){
-  if (!window.JKHStore || !JKHStore.setJSON) return false;
   const draft = {
     fam: normStr(row && row.fam),
     name: normStr(row && row.name),
@@ -539,7 +538,7 @@ function saveDraftNewAbonent(row){
     regnum: '',
     excelRow: Number(row && row.excelRow) || 0
   };
-  try{ JKHStore.setJSON('draft_new_abonent_v1', draft, null); return true; }catch(e){ return false; }
+  try{ sessionStorage.setItem('ui_draft_new_abonent_v1', JSON.stringify(draft)); return true; }catch(e){ return false; }
 }
 function tryResumeFromHash(){
   if (location.hash !== '#resume=1') return false;

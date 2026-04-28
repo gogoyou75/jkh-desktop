@@ -794,12 +794,14 @@ function refreshDebtTransferBox() {
    DRAFT (import)
    ========================= */
 function loadDraftNewAbonent(){
-  if (!window.JKHStore || !JKHStore.getJSON) return null;
-  try{ return JKHStore.getJSON('draft_new_abonent_v1', null, null); }catch(e){ return null; }
+  try{
+    let raw = sessionStorage.getItem('ui_draft_new_abonent_v1');
+    let draft = raw ? JSON.parse(raw) : null;
+    return draft;
+  }catch(e){ return null; }
 }
 function clearDraftNewAbonent(){
-  if (!window.JKHStore || !JKHStore.setJSON) return;
-  try{ JKHStore.setJSON('draft_new_abonent_v1', null, null); }catch(e){}
+  try{ sessionStorage.removeItem('ui_draft_new_abonent_v1'); }catch(e){}
 }
 
 /* =========================
@@ -1260,6 +1262,7 @@ async function createAbonent() {
       return;
     }
 
+    clearDraftNewAbonent();
     setCreateStatus("Абонент создан и выгружен.");
     location.href = "abonent_card.html?abonent=" + encodeURIComponent(ls);
   } finally {

@@ -165,7 +165,6 @@
     "payment_sources_v1",
     "last_abonent_id",
     "import_preview_v1",
-    "draft_new_abonent_v1",
     "jkh_excel_date_debug"
   ];
   var SYNC_CANON_PREFIX = [
@@ -195,6 +194,7 @@
   function _isProjectDataKey(baseKey) {
   var kx = String(baseKey || "");
   if (!kx || _isScopedKeyName(kx)) return false;
+  if (kx === "draft_new_abonent_v1") return false;
 
   if (kx.indexOf("tariffs_") === 0) return true;
   if (kx.indexOf("ref_rates_") === 0) return true;
@@ -497,7 +497,6 @@
     "payment_sources_v1",
     "last_abonent_id",
     "import_preview_v1",
-    "draft_new_abonent_v1",
     "jkh_excel_date_debug"
   ];
 
