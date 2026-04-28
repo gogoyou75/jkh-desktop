@@ -841,6 +841,7 @@ function __showCardDataTimeoutMessage(){
 function waitForCardDataReadyThenRender(){
     const READY = { ready: true, empty: true };
     let timeoutFired = false;
+    let timer = null;
 
     function getStatus(){
         try {
@@ -862,7 +863,7 @@ function waitForCardDataReadyThenRender(){
         const status = getStatus();
         console.log('[card][data-wait] status=' + status);
         if (READY[status]) {
-            clearTimeout(timer);
+            if (timer) clearTimeout(timer);
             onReadyStatus(status);
             window.removeEventListener('JKH_UI_STATE_CHANGED', handleStateChange);
         }
@@ -875,7 +876,7 @@ function waitForCardDataReadyThenRender(){
         return;
     }
 
-    const timer = setTimeout(function(){
+    timer = setTimeout(function(){
         timeoutFired = true;
         console.warn('[card][data-timeout]');
         __showCardDataTimeoutMessage();
