@@ -256,6 +256,13 @@ function getPaymentsByLS(ls){
   catch(e){ return []; }
 }
 function setPaymentsByLS(ls, arr){ if (!window.JKHStore || !JKHStore.setJSON) throw new Error('Нет JKHStore.setJSON'); return JKHStore.setJSON(payKey(ls), arr, null); }
+function savePaymentsByAbonentId(abonentId, arr){
+  const key = 'payments_' + String(abonentId || '');
+  if (!window.JKHStore || typeof JKHStore.setRaw !== 'function') throw new Error('Нет JKHStore.setRaw');
+  const payload = JSON.stringify(Array.isArray(arr) ? arr : []);
+  JKHStore.setRaw(key, payload);
+  console.log('[payments][save]', { key: key, rowsCount: Array.isArray(arr) ? arr.length : 0 });
+}
 
 function parseYearMonthFromAny(v){
   const s = normStr(v);
@@ -1814,6 +1821,51 @@ async function applyPayments(){
       updateStateLine();
       setButtons();
       return;
+    }
+
+    const localPaymentsByAbonent = {};
+    for (let i=0;i<rows.length;i++){
+      const serverRow = rows[i] || {};
+      const abonentId = normStr(serverRow.account_number);
+      if (!abonentId) continue;
+      const period = normStr(serverRow.payment_period);
+      const periodParts = period.match(/^(\d{4})-(\d{2})$/);
+      if (!periodParts) continue;
+      const year = periodParts[1];
+      const month = periodParts[2];
+      const paidDate = normalizePaidDate(serverRow.payment_date) || ('01.' + month + '.' + year);
+      const paid = normNum(serverRow.amount);
+      if (!Number.isFinite(paid) || paid <= 0) continue;
+      if (!Array.isArray(localPaymentsByAbonent[abonentId])) localPaymentsByAbonent[abonentId] = getPaymentsByLS(abonentId);
+      const list = localPaymentsByAbonent[abonentId];
+      const isDup = list.some(function(x){
+        const ym = getLedgerYearMonth(x);
+        const exPaid = getLedgerPaidAmount(x);
+        return ym && ym.year === year && ym.month === month && getLedgerPaidDate(x) === paidDate && exPaid === paid;
+      });
+      if (isDup) continue;
+      list.push({
+        year: year,
+        month: month,
+        accrued: 0,
+        paid: paid,
+        paid_date: paidDate
+      });
+      sortLedgerRows(list);
+    }
+
+    const abonentIds = Object.keys(localPaymentsByAbonent);
+    for (let i=0;i<abonentIds.length;i++){
+      const abonentId = abonentIds[i];
+      savePaymentsByAbonentId(abonentId, localPaymentsByAbonent[abonentId]);
+    }
+
+    if (abonentIds.length){
+      if (window.Data && typeof Data.flushDbToServer === 'function'){
+        await Data.flushDbToServer();
+      } else {
+        throw new Error('Data.flushDbToServer not available');
+      }
     }
   } catch (e) {
     setImportStatus('Ошибка записи на сервер. Данные не применены. ' + (e.message || e), 'err');
