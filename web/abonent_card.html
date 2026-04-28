@@ -811,10 +811,81 @@ function __runAutoAccrualRepairOnce(){
     }
 }
 
-document.addEventListener("DOMContentLoaded", () => {
+window.__JKH_CARD_RENDERED_ONCE = false;
+
+function __renderCardPipeline(force){
+    if (window.__JKH_CARD_RENDERED_ONCE && !force) return;
+    console.log('[card][data-ready] render');
     fillAbonentCard();
     __runAutoAccrualRepairOnce();
     try { if (window.__loadPaymentTable) window.__loadPaymentTable(); } catch(e) {}
+    window.__JKH_CARD_RENDERED_ONCE = true;
+}
+
+function __showCardDataTimeoutMessage(){
+    const msg = 'Данные абонента загружаются дольше обычного. Попробуйте подождать несколько секунд или обновить страницу.';
+    const infoBody = document.getElementById('abonentInfoBody');
+    if (infoBody && !infoBody.children.length) {
+        infoBody.innerHTML = '<tr><td colspan="14" style="border:2px solid #000; padding:8px; color:#b00;">' + msg + '</td></tr>';
+    }
+    const respBody = document.getElementById('respHistoryBody');
+    if (respBody && !respBody.children.length) {
+        respBody.innerHTML = '<tr><td colspan="5" style="border:2px solid #000; padding:8px; color:#b00;">' + msg + '</td></tr>';
+    }
+    const payBody = document.getElementById('paymentTableBody');
+    if (payBody && !payBody.children.length) {
+        payBody.innerHTML = '<tr><td colspan="7" style="border:2px solid #000; padding:8px; color:#b00;">' + msg + '</td></tr>';
+    }
+}
+
+function waitForCardDataReadyThenRender(){
+    const READY = { ready: true, empty: true };
+    let timeoutFired = false;
+
+    function getStatus(){
+        try {
+            return String((window && window.JKH_UI_STATE && window.JKH_UI_STATE.data && window.JKH_UI_STATE.data.status) || 'idle');
+        } catch(e) {
+            return 'idle';
+        }
+    }
+
+    function onReadyStatus(status){
+        if (status === 'ready') {
+            __renderCardPipeline(timeoutFired);
+        } else {
+            __renderCardPipeline(false);
+        }
+    }
+
+    function handleStateChange(){
+        const status = getStatus();
+        console.log('[card][data-wait] status=' + status);
+        if (READY[status]) {
+            clearTimeout(timer);
+            onReadyStatus(status);
+            document.removeEventListener('JKH_UI_STATE_CHANGED', handleStateChange);
+        }
+    }
+
+    const initial = getStatus();
+    console.log('[card][data-wait] status=' + initial);
+    if (READY[initial]) {
+        onReadyStatus(initial);
+        return;
+    }
+
+    const timer = setTimeout(function(){
+        timeoutFired = true;
+        console.warn('[card][data-timeout]');
+        __showCardDataTimeoutMessage();
+    }, 12000);
+
+    document.addEventListener('JKH_UI_STATE_CHANGED', handleStateChange);
+}
+
+document.addEventListener("DOMContentLoaded", () => {
+    waitForCardDataReadyThenRender();
 });
 
 function renderResponsibilityHistory(regnum){
