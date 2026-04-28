@@ -774,7 +774,7 @@
   }
 
   function _replaceOwnerProjectScopeFromDump(ownerId, dumpObj) {
-    if (!window.JKHStore) return { removed: 0, written: 0 };
+    if (!window.JKHStore) return { removed: 0, written: 0, invalidAbonentsDb: false };
     var dumpKeys = _projectKeysFromDump(dumpObj);
     var keep = {};
     var i;
@@ -796,9 +796,18 @@
     }
 
     var written = 0;
+    var invalidAbonentsDb = false;
     for (i = 0; i < dumpKeys.length; i++) {
       var kx = dumpKeys[i];
       var val = dumpObj[kx];
+      if (kx === KEY_DB) {
+        var rawDb = (val === null || val === undefined) ? "" : String(val);
+        if (!_validateAbonentsDbRaw(rawDb)) {
+          invalidAbonentsDb = true;
+          console.error("[JKH sync][load] owner=%s key=%s status=invalid_schema_from_server raw_preview=%s", ownerId, kx, _rawPreview(rawDb, 500));
+          continue;
+        }
+      }
       try {
         _writeServerDumpLocalCompat(kx, (val === null || val === undefined) ? "" : String(val), ownerId);
         written++;
@@ -806,7 +815,7 @@
         throw eWrite;
       }
     }
-    return { removed: removed, written: written };
+    return { removed: removed, written: written, invalidAbonentsDb: invalidAbonentsDb };
   }
 
   function _isDbEffectivelyEmpty(rawDb) {
@@ -819,6 +828,27 @@
       var ln = Array.isArray(db.links) ? db.links.length : 0;
       return (ab + pr + ln) === 0;
     } catch (e) { return true; }
+  }
+
+  function _validateAbonentsDbRaw(rawDb) {
+    if (!rawDb || !String(rawDb).trim()) return false;
+    try {
+      var obj = JSON.parse(String(rawDb));
+      if (!obj || typeof obj !== "object" || Array.isArray(obj)) return false;
+      if (!obj.abonents || typeof obj.abonents !== "object" || Array.isArray(obj.abonents)) return false;
+      if (!obj.premises || typeof obj.premises !== "object" || Array.isArray(obj.premises)) return false;
+      if (!Array.isArray(obj.links)) return false;
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function _rawPreview(raw, maxLen) {
+    var s = (raw === null || raw === undefined) ? "" : String(raw);
+    var lim = (typeof maxLen === "number" && maxLen > 0) ? maxLen : 400;
+    if (s.length <= lim) return s;
+    return s.slice(0, lim) + "...";
   }
 
   // ---- API calls ----
@@ -954,6 +984,11 @@
             console.warn("[JKH sync][save] owner=%s key=%s size=%s status=blocked_empty_overwrite", ownerId, baseKey, String(raw || "").length);
             return false;
           }
+        }
+        if (baseKey === KEY_DB && !_validateAbonentsDbRaw(raw)) {
+          _setStatus({ lastAction: "Сохранение остановлено", lastError: "INVALID_ABONENTS_DB_SCHEMA" });
+          console.error("[JKH sync][save] owner=%s key=%s status=invalid_schema raw_preview=%s", ownerId, baseKey, _rawPreview(raw, 500));
+          return false;
         }
 
         var resSet = await _apiPost("/api/store", { owner: ownerId, key: baseKey, value: raw });
@@ -1142,6 +1177,15 @@
         }
 
         var replaced = _replaceOwnerProjectScopeFromDump(ownerId, data);
+        if (replaced.invalidAbonentsDb) {
+          _setUIState({
+            server: { status: "online", checkedAt: _nowISO(), message: "" },
+            data: { status: "invalid", source: "server", message: "Некорректная структура abonents_db_v1 в dump" }
+          });
+          _setStatus({ lastAction: "Ошибка загрузки", lastError: "INVALID_ABONENTS_DB_SCHEMA_FROM_SERVER" });
+          return { ok: false, status: "invalid", serverStatus: "online", message: "INVALID_ABONENTS_DB_SCHEMA_FROM_SERVER" };
+        }
+
         var applied = replaced.written;
         var status = applied > 0 ? "ready" : "empty";
         var loadedAt = _nowISO();
