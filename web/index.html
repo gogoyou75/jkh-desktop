@@ -23,6 +23,7 @@ Doc: docs/LOGIC_SPEC_v1.5.3.md
     <!-- данные и лэйаут -->
     <script src="data.js"></script>
     <script src="calc_engine.js"></script>
+    <script src="autoaccrual_engine.js"></script>
 <script src="layout.js"></script>
 
     <style>
@@ -308,6 +309,8 @@ const pageSize = 20;
 let sortField = null;
 let sortAsc = true;
 const filters = {};
+let indexAutoAccrualRun = false;
+let indexAutoAccrualInFlight = false;
 
 // ============================================================
 // 🔐 CRITICAL_ASSERT (DEV)
@@ -545,37 +548,8 @@ if (document.readyState === "loading") {
 /* ============================================================
      ЗАГРУЗКА ДАННЫХ ИЗ data.js + (при наличии) из payments_<id>
 ============================================================ */
-document.addEventListener("DOMContentLoaded", () => {
-
-        var uiState = (window.JKH_UI_STATE && typeof window.JKH_UI_STATE === "object")
-        ? window.JKH_UI_STATE
-        : { auth: { status: "unknown", userId: null, email: "", role: "guest" }, server: { status: "unknown", checkedAt: "", message: "" }, data: { status: "idle", loadedAt: "", source: "none", message: "" } };
-
-    var user = (window.Auth && typeof Auth.getCurrentUser === "function")
-        ? Auth.getCurrentUser()
-        : null;
-
-    // ✅ Гость никогда не получает блокировку главной страницы
-    if (!user || (uiState.auth && uiState.auth.status === "guest")) {
-        console.warn("[JKH] guest mode — UI not blocked");
-    }
-    // ✅ Для вошедшего пользователя показываем блокировку только при data=error
-    else if (uiState.data && uiState.data.status === "error") {
-        const table = document.getElementById("abonentsTable");
-        if (table) table.style.display = "none";
-
-        const blocker = document.createElement("div");
-        blocker.id = "dataNotReadyBlock";
-        blocker.style.cssText = "margin:16px 0;padding:12px;border:1px solid #b00020;border-radius:8px;background:#fff4f4;color:#7a0016;";
-        blocker.textContent = (uiState.data && uiState.data.message) || "Данные не загружены с сервера. Интерфейс заблокирован до успешной автозагрузки.";
-
-        var anchor = document.querySelector("h2");
-        if (anchor && anchor.parentNode) anchor.parentNode.insertBefore(blocker, anchor.nextSibling);
-
-        return;
-    }
-
-    syncLoadingWarning();
+function rebuildIndexRows(){
+    allRows = [];
 
     const db = window.AbonentsDB?.abonents || {};
 
@@ -609,10 +583,99 @@ document.addEventListener("DOMContentLoaded", () => {
             flatReg: (a.regnum || a.premiseRegnum || a.premise_regnum || a.regNumber || a.reg_no || a.flat || '')
         });
     }
+}
+
+function isServerFirstReadyForIndexAutoAccrual(){
+    var uiState = (window.JKH_UI_STATE && typeof window.JKH_UI_STATE === "object") ? window.JKH_UI_STATE : null;
+    var dataState = (uiState && uiState.data && typeof uiState.data === "object") ? uiState.data : null;
+    if (!dataState) return false;
+    if (dataState.source !== "server") return false;
+    return dataState.status === "ready" || dataState.status === "empty";
+}
+
+async function runIndexAutoAccrualMassOnce(){
+    if (indexAutoAccrualRun || indexAutoAccrualInFlight) return;
+    if (!isServerFirstReadyForIndexAutoAccrual()) return;
+    if (!(window.JKHAutoAccrual && typeof window.JKHAutoAccrual.recalcAll === "function")) return;
+
+    indexAutoAccrualInFlight = true;
+    indexAutoAccrualRun = true;
+
+    try {
+        console.log("[index][autoaccrual] recalcAll start");
+
+        const res = JKHAutoAccrual.recalcAll();
+        console.log("[index][autoaccrual] recalcAll result", res);
+
+        const list = Array.isArray(res) ? res : [];
+        const hasChanges = list.some(function(item){ return !!(item && item.changed === true); });
+
+        if (hasChanges) {
+            if (window.Data && typeof window.Data.flushDbToServer === "function") {
+                await Data.flushDbToServer();
+                console.log("[index][autoaccrual] flushed");
+            } else {
+                console.warn("[index][autoaccrual] Data.flushDbToServer missing");
+            }
+            rebuildIndexRows();
+            currentPage = 1;
+            render();
+        } else {
+            console.log("[index][autoaccrual] no changes");
+        }
+    } catch (e) {
+        console.warn("[index][autoaccrual] failed", e);
+    } finally {
+        indexAutoAccrualInFlight = false;
+    }
+}
+
+/* ============================================================
+     ЗАГРУЗКА ДАННЫХ ИЗ data.js + (при наличии) из payments_<id>
+============================================================ */
+document.addEventListener("DOMContentLoaded", async () => {
+
+        var uiState = (window.JKH_UI_STATE && typeof window.JKH_UI_STATE === "object")
+        ? window.JKH_UI_STATE
+        : { auth: { status: "unknown", userId: null, email: "", role: "guest" }, server: { status: "unknown", checkedAt: "", message: "" }, data: { status: "idle", loadedAt: "", source: "none", message: "" } };
+
+    var user = (window.Auth && typeof Auth.getCurrentUser === "function")
+        ? Auth.getCurrentUser()
+        : null;
+
+    // ✅ Гость никогда не получает блокировку главной страницы
+    if (!user || (uiState.auth && uiState.auth.status === "guest")) {
+        console.warn("[JKH] guest mode — UI not blocked");
+    }
+    // ✅ Для вошедшего пользователя показываем блокировку только при data=error
+    else if (uiState.data && uiState.data.status === "error") {
+        const table = document.getElementById("abonentsTable");
+        if (table) table.style.display = "none";
+
+        const blocker = document.createElement("div");
+        blocker.id = "dataNotReadyBlock";
+        blocker.style.cssText = "margin:16px 0;padding:12px;border:1px solid #b00020;border-radius:8px;background:#fff4f4;color:#7a0016;";
+        blocker.textContent = (uiState.data && uiState.data.message) || "Данные не загружены с сервера. Интерфейс заблокирован до успешной автозагрузки.";
+
+        var anchor = document.querySelector("h2");
+        if (anchor && anchor.parentNode) anchor.parentNode.insertBefore(blocker, anchor.nextSibling);
+
+        return;
+    }
+
+    syncLoadingWarning();
+
+    rebuildIndexRows();
 
     initFilters();
     initSorting();
     render();
+
+    await runIndexAutoAccrualMassOnce();
+
+    window.addEventListener("JKH_UI_STATE_CHANGED", function(){
+        runIndexAutoAccrualMassOnce();
+    });
 });
 
 /* ============================================================
