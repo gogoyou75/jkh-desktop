@@ -394,7 +394,7 @@
       let allRowsRaw = safeJSON(paymentsKey, [], ctx.readOwner);
       let allRows = Array.isArray(allRowsRaw) ? allRowsRaw : [];
       const hasLedger = hasUsableLedgerRows(allRows);
-      console.log('[spravka_sud][ledger-check] id=' + ctx.abonentId + ' exists=' + hasLedger);
+      console.log('[spravka_sud][ledger-check] id=' + ctx.abonentId + ' len=' + allRows.length + ' exists=' + hasLedger);
       if (!hasLedger) {
         let recalcResult = { changed: false, reason: 'autoaccrual-unavailable' };
         if (window.JKHAutoAccrual && typeof window.JKHAutoAccrual.recalcForAbonent === 'function') {

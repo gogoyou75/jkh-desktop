@@ -604,10 +604,12 @@
       if (check) {
         try { checkLen = JSON.parse(check).length || 0; } catch (_) { checkLen = 0; }
       }
+      const len = checkLen;
+      const exists = !!check;
       console.log('[autoaccrual][after-save]', {
         id,
-        exists: !!check,
-        len: checkLen
+        len,
+        exists
       });
     }
 

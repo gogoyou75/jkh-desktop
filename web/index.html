@@ -663,7 +663,7 @@ async function ensureIndexAccrualsReady(){
         let missing = 0;
         let changed = false;
         for (const id of ids) if (!hasUsablePaymentLedger(id)) missing++;
-        console.log('[index][ledger-check] owner=' + ownerId + ' abonents=' + ids.length + ' missing=' + missing);
+        console.log('[index][ledger-check] id=' + ownerId + ' len=' + ids.length + ' missing=' + missing);
 
         for (const id of ids) {
             if (hasUsablePaymentLedger(id)) {
