@@ -681,14 +681,19 @@ async function ensureIndexAccrualsReady(){
         if (changed) {
             console.log('[index][autoaccrual] changed=true flush start');
             if (window.Data && typeof Data.flushDbToServer === 'function') {
-                await Data.flushDbToServer();
-                console.log('[index][autoaccrual] flush ok');
+                try {
+                    await Data.flushDbToServer();
+                    console.log('[index][autoaccrual] flush ok');
+                } catch(e){
+                    console.warn('[index][autoaccrual] flush failed but continue', e);
+                }
             }
         } else {
             console.log('[index][autoaccrual] changed=false no flush');
         }
 
         rebuildIndexRows();
+        console.log('[index][rebuild] after autoaccrual');
         render();
         indexAutoAccrualDoneForOwner = ownerId;
     } finally {
