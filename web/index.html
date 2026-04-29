@@ -638,16 +638,24 @@ function rebuildIndexRows(){
 }
 
 function hasUsablePaymentLedger(abonentId){
+    let rowsCount = 0;
+    let hasAccrued = false;
+    let hasPaid = false;
     try {
         const raw = (window.JKHStore && JKHStore.getRaw) ? JKHStore.getRaw("payments_" + abonentId) : null;
-        if (!raw) return false;
-        const arr = JSON.parse(raw);
-        if (!Array.isArray(arr)) return false;
-        for (const row of arr){
-            if (toNum(row && row.accrued) > 0 || toNum(row && row.paid) > 0) return true;
+        if (raw) {
+            const arr = JSON.parse(raw);
+            if (Array.isArray(arr)) {
+                rowsCount = arr.length;
+                for (const row of arr){
+                    if (toNum(row && row.accrued) > 0) hasAccrued = true;
+                    if (toNum(row && row.paid) > 0) hasPaid = true;
+                }
+            }
         }
     } catch (e) {}
-    return false;
+    console.log('[index][ledger-check] id=' + abonentId + ' rows=' + rowsCount + ' hasAccrued=' + hasAccrued + ' hasPaid=' + hasPaid);
+    return hasAccrued === true;
 }
 
 async function ensureIndexAccrualsReady(){
@@ -681,8 +689,12 @@ async function ensureIndexAccrualsReady(){
         if (changed) {
             console.log('[index][autoaccrual] changed=true flush start');
             if (window.Data && typeof Data.flushDbToServer === 'function') {
-                await Data.flushDbToServer();
-                console.log('[index][autoaccrual] flush ok');
+                try {
+                    await Data.flushDbToServer();
+                    console.log('[index][autoaccrual] flush ok');
+                } catch (e) {
+                    console.warn('[index][autoaccrual] flush failed but continue', e);
+                }
             }
         } else {
             console.log('[index][autoaccrual] changed=false no flush');

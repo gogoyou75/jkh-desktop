@@ -384,17 +384,23 @@
 
       const paymentsKey = "payments_" + ctx.abonentId;
       function hasUsableLedgerRows(rows){
-        if (!Array.isArray(rows)) return false;
-        for (let i = 0; i < rows.length; i++) {
-          const row = rows[i] || {};
-          if ((Number(row.accrued) || 0) > 0 || (Number(row.paid) || 0) > 0) return true;
+        let rowsCount = 0;
+        let hasAccrued = false;
+        let hasPaid = false;
+        if (Array.isArray(rows)) {
+          rowsCount = rows.length;
+          for (let i = 0; i < rows.length; i++) {
+            const row = rows[i] || {};
+            if ((Number(row.accrued) || 0) > 0) hasAccrued = true;
+            if ((Number(row.paid) || 0) > 0) hasPaid = true;
+          }
         }
-        return false;
+        console.log('[spravka_sud][ledger-check] id=' + ctx.abonentId + ' rows=' + rowsCount + ' hasAccrued=' + hasAccrued + ' hasPaid=' + hasPaid);
+        return hasAccrued === true;
       }
       let allRowsRaw = safeJSON(paymentsKey, [], ctx.readOwner);
       let allRows = Array.isArray(allRowsRaw) ? allRowsRaw : [];
       const hasLedger = hasUsableLedgerRows(allRows);
-      console.log('[spravka_sud][ledger-check] id=' + ctx.abonentId + ' exists=' + hasLedger);
       if (!hasLedger) {
         let recalcResult = { changed: false, reason: 'autoaccrual-unavailable' };
         if (window.JKHAutoAccrual && typeof window.JKHAutoAccrual.recalcForAbonent === 'function') {
@@ -402,8 +408,12 @@
         }
         console.log('[spravka_sud][autoaccrual] recalc result=', recalcResult);
         if (recalcResult && recalcResult.changed === true && window.Data && typeof Data.flushDbToServer === 'function') {
-          await Data.flushDbToServer();
-          console.log('[spravka_sud][autoaccrual] flush ok');
+          try {
+            await Data.flushDbToServer();
+            console.log('[spravka_sud][autoaccrual] flush ok');
+          } catch (e) {
+            console.warn('[spravka_sud][autoaccrual] flush failed but continue', e);
+          }
         }
         allRowsRaw = safeJSON(paymentsKey, [], ctx.readOwner);
         allRows = Array.isArray(allRowsRaw) ? allRowsRaw : [];
