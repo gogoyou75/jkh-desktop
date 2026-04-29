@@ -383,8 +383,33 @@
       setText("docDate", fmtDateRuAny(new Date()));
 
       const paymentsKey = "payments_" + ctx.abonentId;
-      const allRowsRaw = safeJSON(paymentsKey, [], ctx.readOwner);
-      const allRows = Array.isArray(allRowsRaw) ? allRowsRaw : [];
+      function hasUsableLedgerRows(rows){
+        if (!Array.isArray(rows)) return false;
+        for (let i = 0; i < rows.length; i++) {
+          const row = rows[i] || {};
+          if ((Number(row.accrued) || 0) > 0 || (Number(row.paid) || 0) > 0) return true;
+        }
+        return false;
+      }
+      let allRowsRaw = safeJSON(paymentsKey, [], ctx.readOwner);
+      let allRows = Array.isArray(allRowsRaw) ? allRowsRaw : [];
+      const hasLedger = hasUsableLedgerRows(allRows);
+      console.log('[spravka_sud][ledger-check] id=' + ctx.abonentId + ' exists=' + hasLedger);
+      if (!hasLedger) {
+        let recalcResult = { changed: false, reason: 'autoaccrual-unavailable' };
+        if (window.JKHAutoAccrual && typeof window.JKHAutoAccrual.recalcForAbonent === 'function') {
+          recalcResult = await window.JKHAutoAccrual.recalcForAbonent(ctx.abonentId);
+        }
+        console.log('[spravka_sud][autoaccrual] recalc result=', recalcResult);
+        if (recalcResult && recalcResult.changed === true && window.Data && typeof Data.flushDbToServer === 'function') {
+          await Data.flushDbToServer();
+          console.log('[spravka_sud][autoaccrual] flush ok');
+        }
+        allRowsRaw = safeJSON(paymentsKey, [], ctx.readOwner);
+        allRows = Array.isArray(allRowsRaw) ? allRowsRaw : [];
+      } else {
+        console.log('[spravka_sud][autoaccrual] skipped existing ledger');
+      }
 
       if (!allRows.length) {
         devLog(devMode, "payments-empty", {
