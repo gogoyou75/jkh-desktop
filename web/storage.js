@@ -695,6 +695,11 @@
     return READ_LEGACY_KEYS.indexOf(String(baseKey || "")) >= 0;
   }
 
+  function _isAdminUploadBlockedKey(baseKey) {
+    var key = String(baseKey || "");
+    return key === "refinancing_rates_normal_v1" || key === "refinancing_rates_moratorium_v1";
+  }
+
   function _projectKeysForScope(scope, ownerId) {
     var keys = [];
     // db/all: всегда используем единый канонический список + динамика
@@ -715,6 +720,10 @@
       var key = String(uniq[j] || "");
       if (_isLegacyUploadBlockedKey(key)) {
         console.warn("[JKH sync][skip-legacy-upload]", key);
+        continue;
+      }
+      if (_isAdminUploadBlockedKey(key)) {
+        console.warn("[JKH sync][skip-admin-upload]", key);
         continue;
       }
       filtered.push(key);
