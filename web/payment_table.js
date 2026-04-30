@@ -636,7 +636,7 @@ function getOwnershipHistoryForPremise() {
   function loadTariffTable(){
     // 1) JKHStore — известные ключи (старые/новые версии)
     const keys = [
-      "tariffs_content_repair_v1",
+      "tariffs_content_repair_v1", // legacy read-only / migration only / excluded from upload
       "tariffs_content_repair",
       "tariffs_table_v1",
       "tariffs_table",
@@ -690,8 +690,10 @@ function getOwnershipHistoryForPremise() {
       { from: "2024-01-01", content: 38.5, repair: 12 }
     ];
     try{
-      storeSetRaw("tariffs_content_repair_v1", JSON.stringify(defaults));
-      console.warn("[autoaccrual] тарифы не найдены — создал tariffs_content_repair_v1 (defaults)");
+      const ownerId = (window.JKHStore && typeof JKHStore.getOwnerId === "function") ? String(JKHStore.getOwnerId() || "").trim() : "";
+      const tariffsKey = ownerId ? ("tariffs_" + ownerId) : "tariffs_v1";
+      storeSetRaw(tariffsKey, JSON.stringify(defaults));
+      console.warn("[autoaccrual] тарифы не найдены — создал " + tariffsKey + " (defaults)");
     }catch(e){ console.error(e); throw e; }
     return defaults;
   }

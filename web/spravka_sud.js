@@ -402,11 +402,18 @@
         }
         console.log('[spravka_sud][autoaccrual] recalc result=', recalcResult);
         if (recalcResult && recalcResult.changed === true && window.Data && typeof Data.flushDbToServer === 'function') {
-          await Data.flushDbToServer();
-          console.log('[spravka_sud][autoaccrual] flush ok');
+          try {
+            await Data.flushDbToServer();
+            console.log('[spravka_sud][autoaccrual] flush ok');
+          } catch (e) {
+            console.warn('[spravka_sud][autoaccrual] flush failed but continue', e);
+          }
         }
+
         allRowsRaw = safeJSON(paymentsKey, [], ctx.readOwner);
         allRows = Array.isArray(allRowsRaw) ? allRowsRaw : [];
+
+        console.log('[spravka_sud][ledger-after-recalc] id=' + ctx.abonentId + ' len=' + allRows.length);
       } else {
         console.log('[spravka_sud][autoaccrual] skipped existing ledger');
       }

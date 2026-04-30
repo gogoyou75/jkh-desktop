@@ -184,8 +184,8 @@
     "import_preview_v1",
     "draft_new_abonent_v1",
     "payment_sources_v1",
-    "tariffs_content_repair_v1",
-    "tariffs_content_repair_v1_backup",
+    "tariffs_content_repair_v1", // legacy read-only / migration only / excluded from upload
+    "tariffs_content_repair_v1_backup", // legacy read-only / migration only / excluded from upload
     "refinancing_rates_normal_v1",
     "refinancing_rates_moratorium_v1",
     "jkh_excel_date_debug",
@@ -882,10 +882,7 @@ window.JKHBoot?.markReady?.('data');
     _setRawScoped("payment_sources_v1", JSON.stringify(["Платёж 1", "Платёж 2", "Платёж 3"]));
 
     // 4) тарифы (как у тебя на скрине: content/repair)
-    _setRawScoped("tariffs_content_repair_v1", JSON.stringify({
-      content: [{ date: "2025-01-01", rate: 10 }],
-      repair: [{ date: "2025-01-01", rate: 10 }]
-    }));
+    _setRawScoped("tariffs_" + _ownerId(), JSON.stringify([{ from: "2025-01-01", content: 10, repair: 10 }]));
 
     // 5) ставки рефинансирования (normal + moratorium)
     _setRawScoped("refinancing_rates_normal_v1", JSON.stringify([
