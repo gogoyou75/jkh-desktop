@@ -66,14 +66,14 @@
     return Number.isFinite(n) ? n : 0;
   }
   function isDataReady(){ return window.JKH_DATA_READY === true; }
-  function storeGetRaw(key){
+  function storeGetRaw(key, ownerId){
     if (!isDataReady()) return null;
     if (!(window.JKHStore && typeof window.JKHStore.getRaw === 'function')) return null;
-    try{ return JKHStore.getRaw(String(key)); } catch { return null; }
+    try{ return JKHStore.getRaw(String(key), ownerId); } catch { return null; }
   }
-  function storeSetRaw(key, value){
+  function storeSetRaw(key, value, ownerId){
     if (!(window.JKHStore && typeof window.JKHStore.setRaw === 'function')) return;
-    try{ JKHStore.setRaw(String(key), value); } catch {}
+    try{ JKHStore.setRaw(String(key), value, ownerId); } catch {}
   }
 
   function iso(y,m,d){ return `${y}-${pad2(m)}-${pad2(d)}`; }
@@ -152,16 +152,16 @@
 
   function paymentsKey(ls){ return `payments_${ls}`; }
 
-  function loadPayments(ls){
+  function loadPayments(ls, ownerId){
     try{
-      const raw = storeGetRaw(paymentsKey(ls));
+      const raw = storeGetRaw(paymentsKey(ls), ownerId);
       if (!raw) return [];
       const arr = JSON.parse(raw);
       return Array.isArray(arr) ? arr : [];
     } catch { return []; }
   }
-  function savePayments(ls, arr){
-    storeSetRaw(paymentsKey(ls), JSON.stringify(arr||[]));
+  function savePayments(ls, arr, ownerId){
+    storeSetRaw(paymentsKey(ls), JSON.stringify(arr||[]), ownerId);
   }
 
   // ----------------------------
@@ -579,9 +579,34 @@
   function recalcForAbonent(ls){
     const id = String(ls||'').trim();
     if (!id) return { ok:false, reason:'EMPTY_ID' };
-    const arr = loadPayments(id);
+
+    const ownerId = (window.JKHStore && typeof window.JKHStore.getOwnerId === 'function')
+      ? String(window.JKHStore.getOwnerId() || '').trim()
+      : '';
+    if (!ownerId) return { ok:false, reason:'EMPTY_OWNER', ls:id };
+
+    const arr = loadPayments(id, ownerId);
     const res = ensureAutoAccrualsForAbonent(id, arr);
-    if (res.changed) savePayments(id, arr);
+    const rows = arr;
+
+    if (!rows.length && res.changed) return { ok:true, changed:false, reason:'EMPTY_ROWS', ls:id };
+
+    if (res.changed){
+      savePayments(id, rows, ownerId);
+      const lenSaved = rows.length;
+      const existsSaved = lenSaved > 0;
+      console.log('[autoaccrual][save]', { id, len: lenSaved, exists: existsSaved });
+
+      const check = storeGetRaw(paymentsKey(id), ownerId);
+      let checkLen = 0;
+      if (check) {
+        try { checkLen = JSON.parse(check).length || 0; } catch (_) { checkLen = 0; }
+      }
+      const len = checkLen;
+      const exists = !!check;
+      console.log('[autoaccrual][after-save]', { id, len, exists });
+    }
+
     return { ok:true, ...res, ls:id };
   }
 

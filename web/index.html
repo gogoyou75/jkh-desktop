@@ -23,6 +23,7 @@ Doc: docs/LOGIC_SPEC_v1.5.3.md
     <!-- данные и лэйаут -->
     <script src="data.js"></script>
     <script src="calc_engine.js"></script>
+<script src="autoaccrual_engine.js"></script>
 <script src="layout.js"></script>
 
     <style>
@@ -605,74 +606,132 @@ if (document.readyState === "loading") {
 /* ============================================================
      ЗАГРУЗКА ДАННЫХ ИЗ data.js + (при наличии) из payments_<id>
 ============================================================ */
-document.addEventListener("DOMContentLoaded", () => {
+let indexAutoAccrualInFlight = false;
+let indexAutoAccrualDoneForOwner = "";
+let indexTableInitDone = false;
 
-        var uiState = (window.JKH_UI_STATE && typeof window.JKH_UI_STATE === "object")
-        ? window.JKH_UI_STATE
-        : { auth: { status: "unknown", userId: null, email: "", role: "guest" }, server: { status: "unknown", checkedAt: "", message: "" }, data: { status: "idle", loadedAt: "", source: "none", message: "" } };
-
-    var user = (window.Auth && typeof Auth.getCurrentUser === "function")
-        ? Auth.getCurrentUser()
-        : null;
-
-    // ✅ Гость никогда не получает блокировку главной страницы
-    if (!user || (uiState.auth && uiState.auth.status === "guest")) {
-        console.warn("[JKH] guest mode — UI not blocked");
-    }
-    // ✅ Для вошедшего пользователя показываем блокировку только при data=error
-    else if (uiState.data && uiState.data.status === "error") {
-        const table = document.getElementById("abonentsTable");
-        if (table) table.style.display = "none";
-
-        const blocker = document.createElement("div");
-        blocker.id = "dataNotReadyBlock";
-        blocker.style.cssText = "margin:16px 0;padding:12px;border:1px solid #b00020;border-radius:8px;background:#fff4f4;color:#7a0016;";
-        blocker.textContent = (uiState.data && uiState.data.message) || "Данные не загружены с сервера. Интерфейс заблокирован до успешной автозагрузки.";
-
-        var anchor = document.querySelector("h2");
-        if (anchor && anchor.parentNode) anchor.parentNode.insertBefore(blocker, anchor.nextSibling);
-
-        return;
-    }
-
-    syncLoadingWarning();
-
+function rebuildIndexRows(){
+    allRows = [];
     const db = window.AbonentsDB?.abonents || {};
-
     for (const id in db) {
         const a = db[id];
-
         const fio = (a.fio || "").split(" ");
         const fam = fio[0] || "";
         const name = fio[1] || "";
         const otch = fio[2] || "";
-
         const totals = calcTotalsFromPayments(id, a);
-
         allRows.push({
             id,
             fam,
             name,
             otch,
-
-            // ✅ если есть payments_<id> — берём итоги из них
             totalDebt: (totals?.totalDebt ?? a.totalDebt ?? a.total_debt ?? a.mainDebtTotal ?? ""),
             penalty:   (totals?.penalty   ?? a.penalty ?? a.penaltyTotal ?? ""),
-
             nachisleno: (totals?.nachisleno ?? ""),
             oplacheno:  (totals?.oplacheno  ?? ""),
-
             startDate:  (totals?.startDate ?? ""),
             endDate:    (totals?.endDate   ?? ""),
-
             note: getAbonentNote(id, a),
             flatReg: (a.regnum || a.premiseRegnum || a.premise_regnum || a.regNumber || a.reg_no || a.flat || '')
         });
     }
+}
 
-    initFilters();
-    initSorting();
-    render();
+function hasUsablePaymentLedger(abonentId){
+    try {
+        const raw = (window.JKHStore && JKHStore.getRaw) ? JKHStore.getRaw("payments_" + abonentId) : null;
+        if (!raw) return false;
+        const arr = JSON.parse(raw);
+        if (!Array.isArray(arr)) return false;
+        for (const row of arr){
+            if (toNum(row && row.accrued) > 0 || toNum(row && row.paid) > 0) return true;
+        }
+    } catch (e) {}
+    return false;
+}
+
+async function ensureIndexAccrualsReady(){
+    const uiStatus = String((window.JKH_UI_STATE && window.JKH_UI_STATE.data && window.JKH_UI_STATE.data.status) || "");
+    if (!(uiStatus === "ready" || uiStatus === "empty")) return;
+    const ownerId = (window.JKHStore && JKHStore.getOwnerId) ? (JKHStore.getOwnerId() || "") : "";
+    if (indexAutoAccrualInFlight) return;
+    if (indexAutoAccrualDoneForOwner === ownerId) return;
+    indexAutoAccrualInFlight = true;
+    try {
+        const db = window.AbonentsDB?.abonents || {};
+        const ids = Object.keys(db);
+        let missing = 0;
+        let changed = false;
+        for (const id of ids) if (!hasUsablePaymentLedger(id)) missing++;
+        console.log('[index][ledger-check] id=' + ownerId + ' len=' + ids.length);
+
+        for (const id of ids) {
+            if (hasUsablePaymentLedger(id)) {
+                console.log('[index][autoaccrual] skip existing payments_' + id);
+                continue;
+            }
+            let res = { changed: false, reason: 'autoaccrual-unavailable' };
+            if (window.JKHAutoAccrual && typeof window.JKHAutoAccrual.recalcForAbonent === 'function') {
+                res = await window.JKHAutoAccrual.recalcForAbonent(id);
+            }
+            console.log('[index][autoaccrual] recalc id=' + id + ' result=', res);
+            if (res && res.changed === true) changed = true;
+        }
+
+        if (changed) {
+            console.log('[index][autoaccrual] changed=true flush start');
+            if (window.Data && typeof Data.flushDbToServer === 'function') {
+                try {
+                    await Data.flushDbToServer();
+                    console.log('[index][autoaccrual] flush ok');
+                } catch(e){
+                    console.warn('[index][autoaccrual] flush failed but continue', e);
+                }
+            }
+        } else {
+            console.log('[index][autoaccrual] changed=false no flush');
+        }
+
+        rebuildIndexRows();
+        console.log('[index][rebuild] id=' + ownerId + ' len=' + ids.length);
+        render();
+        indexAutoAccrualDoneForOwner = ownerId;
+    } finally {
+        indexAutoAccrualInFlight = false;
+    }
+}
+
+function initIndexPage(){
+    var uiState = (window.JKH_UI_STATE && typeof window.JKH_UI_STATE === "object")
+        ? window.JKH_UI_STATE
+        : { auth: { status: "unknown", userId: null, email: "", role: "guest" }, server: { status: "unknown", checkedAt: "", message: "" }, data: { status: "idle", loadedAt: "", source: "none", message: "" } };
+    var user = (window.Auth && typeof Auth.getCurrentUser === "function") ? Auth.getCurrentUser() : null;
+    if (!user || (uiState.auth && uiState.auth.status === "guest")) {
+        console.warn("[JKH] guest mode — UI not blocked");
+    } else if (uiState.data && uiState.data.status === "error") {
+        const table = document.getElementById("abonentsTable");
+        if (table) table.style.display = "none";
+        const blocker = document.createElement("div");
+        blocker.id = "dataNotReadyBlock";
+        blocker.style.cssText = "margin:16px 0;padding:12px;border:1px solid #b00020;border-radius:8px;background:#fff4f4;color:#7a0016;";
+        blocker.textContent = (uiState.data && uiState.data.message) || "Данные не загружены с сервера. Интерфейс заблокирован до успешной автозагрузки.";
+        var anchor = document.querySelector("h2");
+        if (anchor && anchor.parentNode) anchor.parentNode.insertBefore(blocker, anchor.nextSibling);
+        return;
+    }
+    syncLoadingWarning();
+    if (!indexTableInitDone){
+        initFilters();
+        initSorting();
+        indexTableInitDone = true;
+    }
+    ensureIndexAccrualsReady();
+}
+
+document.addEventListener("DOMContentLoaded", initIndexPage);
+window.addEventListener("JKH_UI_STATE_CHANGED", function(){
+    const st = String((window.JKH_UI_STATE && window.JKH_UI_STATE.data && window.JKH_UI_STATE.data.status) || "");
+    if (st === "ready" || st === "empty") ensureIndexAccrualsReady();
 });
 
 /* ============================================================

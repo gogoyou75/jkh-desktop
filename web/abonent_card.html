@@ -151,6 +151,11 @@ Doc: docs/LOGIC_SPEC_v1.5.3.md
             font-size: 13px;
             white-space: nowrap;
         }
+        .abonent-edit-actions .danger-btn {
+            background: #7b1e1e;
+            color: #fff;
+            border-color: #4b0f0f;
+        }
         .readonly-hint {
             font-size: 12px;
             opacity: 0.85;
@@ -561,6 +566,7 @@ Doc: docs/LOGIC_SPEC_v1.5.3.md
 
         <div class="abonent-edit-actions">
             <button type="button" onclick="saveAbonentEdit()">Сохранить изменения</button>
+            <button type="button" class="danger-btn" onclick="deleteAbonentFromCard()">Удалить абонента</button>
             <button type="button" onclick="closeAbonentEdit()">Отмена</button>
         </div>
     </div>
@@ -1439,6 +1445,123 @@ function migrateLocalKeys(oldId, newId) {
         }
         if (val !== null) storeRemove(oldKey);
     });
+}
+
+function __collectAbonentScopedKeysForDelete(abonentId, uid, account){
+    const out = [];
+    const rawKeys = storeKeysForOwner((window.JKHStore && JKHStore.getOwnerId) ? JKHStore.getOwnerId() : undefined) || [];
+    const scopePrefix = storeCurrentScopePrefix();
+    const id = String(abonentId || '').trim();
+    const uidStr = String(uid || '').trim();
+    const accountStr = String(account || '').trim();
+
+    function matchesSuffix(k, prefix){
+        if (k.indexOf(prefix) !== 0) return false;
+        const suffix = String(k.slice(prefix.length) || '').trim();
+        if (!suffix) return false;
+        return suffix === id || suffix === uidStr || suffix === accountStr;
+    }
+
+    function add(baseKey){
+        if (!baseKey) return;
+        if (out.indexOf(baseKey) === -1) out.push(baseKey);
+    }
+
+    for (let i = 0; i < rawKeys.length; i++) {
+        const scoped = String(rawKeys[i] || '');
+        if (!scoped) continue;
+        const baseKey = (scopePrefix && scoped.indexOf(scopePrefix) === 0) ? scoped.slice(scopePrefix.length) : scoped;
+        if (!baseKey) continue;
+
+        if (matchesSuffix(baseKey, 'payments_') ||
+            matchesSuffix(baseKey, 'note_') ||
+            matchesSuffix(baseKey, 'exclude_periods_') ||
+            matchesSuffix(baseKey, 'calc_period_') ||
+            matchesSuffix(baseKey, 'calc_period_active_') ||
+            matchesSuffix(baseKey, 'report_period_') ||
+            matchesSuffix(baseKey, 'moratorium_')) {
+            add(baseKey);
+            continue;
+        }
+
+        if (baseKey.indexOf('jkh_freeze_to_v1:') === 0 ||
+            baseKey.indexOf('jkh_transfer_to_v1:') === 0) {
+            const tail = String(baseKey.split(':')[1] || '').trim();
+            if (tail === id || tail === uidStr || tail === accountStr) add(baseKey);
+            continue;
+        }
+
+        if (baseKey.indexOf('jkh_transfer_balance_v1:') === 0 ||
+            baseKey.indexOf('jkh_transfer_v1:') === 0 ||
+            baseKey.indexOf('jkh_frozen_debt_v1:') === 0) {
+            const parts = baseKey.split(':');
+            const p1 = String(parts[1] || '').trim();
+            const p2 = String(parts[2] || '').trim();
+            if (p1 === id || p1 === uidStr || p1 === accountStr || p2 === id || p2 === uidStr || p2 === accountStr) add(baseKey);
+        }
+    }
+
+    return out;
+}
+
+function __restoreDeletedRuntimeState(snapshot){
+    try{
+        if (snapshot && snapshot.db && typeof window.AbonentsDB === 'object'){
+            window.AbonentsDB = __deepCloneJSONSafe(snapshot.db) || snapshot.db;
+            if (typeof window.saveAbonentsDB === 'function') window.saveAbonentsDB();
+        }
+        const keys = (snapshot && snapshot.keys) ? Object.keys(snapshot.keys) : [];
+        for (let i = 0; i < keys.length; i++) {
+            const k = keys[i];
+            const v = snapshot.keys[k];
+            if (v === null || v === undefined) {
+                storeRemove(k);
+            } else {
+                storeSet(k, v);
+            }
+        }
+    }catch(e){
+        console.warn('restore deleted runtime failed', e);
+    }
+}
+
+async function deleteAbonentFromCard(){
+    if (!canWriteOrExplainLocal()) return;
+    const { id: abonentId, a } = getCurrentAbonent();
+    if (!a) { alert('Абонент не найден'); return; }
+
+    const uid = String(a.uid || '').trim();
+    const account = String(a.account || a.ls || abonentId || '').trim();
+    const ownerId = (window.JKHStore && typeof JKHStore.getOwnerId === 'function') ? JKHStore.getOwnerId() : 'guest';
+
+    console.log('[abonent][delete] start', { ownerId: ownerId, abonentId: String(abonentId), uid: uid, account: account });
+
+    const ok = window.confirm('Точно удалить абонента? Будут удалены карточка абонента, начисления, платежи, примечания и связанные данные. Действие нельзя отменить.');
+    if (!ok) return;
+
+    const keysToDelete = __collectAbonentScopedKeysForDelete(String(abonentId), uid, account);
+    const keySnapshot = {};
+    for (let i = 0; i < keysToDelete.length; i++) keySnapshot[keysToDelete[i]] = storeGet(keysToDelete[i]);
+
+    const __localSnapshot = { db: __deepCloneJSONSafe(getDb()), keys: keySnapshot };
+
+    try {
+        if (window.Data && typeof window.Data.deleteAbonent === 'function') {
+            window.Data.deleteAbonent(String(abonentId));
+        }
+        for (let i = 0; i < keysToDelete.length; i++) storeRemove(keysToDelete[i]);
+
+        await Data.flushDbToServer();
+
+        console.log('[abonent][delete] success', { ownerId: ownerId, abonentId: String(abonentId) });
+        alert('Абонент удалён');
+        closeAbonentEdit();
+        window.location.href = 'index.html';
+    } catch (err) {
+        console.error('[abonent][delete] failed', err);
+        __restoreDeletedRuntimeState(__localSnapshot);
+        alert('Ошибка удаления абонента: не удалось сохранить изменения на сервере. Данные восстановлены.');
+    }
 }
 
 async function saveAbonentEdit() {
