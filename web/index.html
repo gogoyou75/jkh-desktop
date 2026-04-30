@@ -663,7 +663,7 @@ async function ensureIndexAccrualsReady(){
         let missing = 0;
         let changed = false;
         for (const id of ids) if (!hasUsablePaymentLedger(id)) missing++;
-        console.log('[index][ledger-check] id=' + ownerId + ' len=' + ids.length + ' missing=' + missing);
+        console.log('[index][ledger-check] id=' + ownerId + ' len=' + ids.length);
 
         for (const id of ids) {
             if (hasUsablePaymentLedger(id)) {
@@ -693,7 +693,7 @@ async function ensureIndexAccrualsReady(){
         }
 
         rebuildIndexRows();
-        console.log('[index][rebuild] after autoaccrual');
+        console.log('[index][rebuild] id=' + ownerId + ' len=' + ids.length);
         render();
         indexAutoAccrualDoneForOwner = ownerId;
     } finally {

@@ -593,11 +593,9 @@
 
     if (res.changed){
       savePayments(id, rows, ownerId);
-      console.log('[autoaccrual][save]', {
-        id,
-        rowsCount: rows.length,
-        owner: ownerId
-      });
+      const lenSaved = rows.length;
+      const existsSaved = lenSaved > 0;
+      console.log('[autoaccrual][save]', { id, len: lenSaved, exists: existsSaved });
 
       const check = storeGetRaw(paymentsKey(id), ownerId);
       let checkLen = 0;
@@ -606,11 +604,7 @@
       }
       const len = checkLen;
       const exists = !!check;
-      console.log('[autoaccrual][after-save]', {
-        id,
-        len,
-        exists
-      });
+      console.log('[autoaccrual][after-save]', { id, len, exists });
     }
 
     return { ok:true, ...res, ls:id };
