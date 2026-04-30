@@ -1,9 +1,9 @@
 # CANON_VERSION
 
 Project: ПАПАЖКХ  
-Version: v1.8.2  
+Version: v1.8.3  
 Status: ETALON (обновлено под новую архитектуру)  
-Date: 2026-03-25
+Date: 2026-04-30
 
 ## CANON TRANSFER v18
 - Передача задолженности и пени между абонентами работает корректно
@@ -42,38 +42,22 @@ Date: 2026-03-25
 - write: только admin;
 - read: все роли;
 - запрещены `ref_rates_{owner}`, fallback-ставки и демо-инициализация.
-## Storage Sync Hardening — 2026-04-30
 
-Введён строгий whitelist ключей для upload.
 
-Правило:
-- серверу отправляются только разрешённые owner-ключи
-- любые неизвестные / legacy / admin-only ключи НЕ отправляются
+## STORAGE SYNC + AUTOACCRUAL HARDENING v1.8.3 — 2026-04-30
 
-Разделение:
+Канон уточнён:
+- `payments_<ЛС>` — канонический owner-scoped ledger начислений/оплат;
+- `JKHAutoAccrual.recalcForAbonent()` обязан сохранять ledger в тот же owner, из которого UI его читает;
+- `index.html` не делает массовый blind-recalc, а сначала проверяет ledger и ремонтирует только отсутствующие начисления;
+- `spravka_sud.js` строится из локального ledger и не падает при ошибке upload;
+- `storage.js` использует строгий upload whitelist `_isUploadAllowedKey()`;
+- legacy/admin/global ключи читаются при необходимости, но обычным owner-upload не отправляются;
+- `tariffs_<ownerId>` — единственный разрешённый upload-ключ тарифов;
+- `refinancing_rates_normal_v1` и `refinancing_rates_moratorium_v1` — GLOBAL/admin-only, обычным upload не отправляются.
 
-### USER / OWNER (разрешено upload)
-- abonents_db_v1
-- payments_*
-- exclude_periods_*
-- note_*
-- tariffs_<ownerId>
-- organization_*
-- import_*
-- draft_*
-- jkh_transfer_*
-- moratorium_*
-
-### GLOBAL / ADMIN (запрещено upload)
-- refinancing_rates_normal_v1
-- refinancing_rates_moratorium_v1
-
-### LEGACY (read-only)
-- tariffs_dynamic_v1
-- tariffs_content_repair_v1
-- *_backup
-
-Принцип:
-LocalStorage = cache  
-Backend = source of truth  
-UI не должен зависеть от успешности upload
+Запрещено:
+- `await Data.flushDbToServer()` без `try/catch` в UI-сценариях;
+- `changed:true` при пустом ledger;
+- upload неизвестных, legacy или GLOBAL/admin-only ключей;
+- считать `paid > 0` полноценным ledger без `accrued > 0`.

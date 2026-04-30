@@ -1,6 +1,6 @@
 # PROMPT_CANON — ПАПАЖКХ
 
-Версия: v1.6.0
+Версия: v1.8.3
 
 ## 🔴 CRITICAL ARCHITECTURE UPDATE (2026-03-25)
 
@@ -40,14 +40,19 @@
 - write: только admin;
 - read: все роли;
 - запрещены `ref_rates_{owner}`, fallback-ставки и демо-инициализация.
-## 🔴 STORAGE RULE (2026-04-30)
 
-Запрещено:
-- отправлять на сервер ключи вне whitelist
-- писать GLOBAL ключи (refinancing_rates_*) с клиента
 
-Обязательно:
-- использовать owner-scoped ключи
-- UI должен работать при падении upload (try/catch)
+## 🔴 STORAGE SYNC + AUTOACCRUAL RULE (2026-04-30)
 
-Любой код, нарушающий это — критическая ошибка.
+Перед выполнением задач Codex обязательно учитывать:
+
+1. `payments_<ЛС>` — owner-scoped ledger.
+2. Autoaccrual обязан писать и проверять ledger в одном ownerId.
+3. `index.html` сначала читает ledger, потом точечно ремонтирует отсутствующие начисления.
+4. `spravka_sud.js` не имеет права падать из-за `Data.flushDbToServer()`.
+5. Upload работает только по whitelist `_isUploadAllowedKey()`.
+6. Legacy ключи тарифов read-only/migration only.
+7. GLOBAL/admin-only ключи `refinancing_rates_*` не отправляются обычным owner-upload.
+8. UI должен строиться даже при ошибке sync, если локальные данные есть.
+
+Нарушение любого пункта = критическая ошибка.

@@ -21,17 +21,20 @@
 - write: только admin;
 - read: все роли;
 - запрещены `ref_rates_{owner}`, fallback-ставки и демо-инициализация.
-## ⚠️ Sync политика (важно)
 
-Система использует строгий whitelist ключей при upload.
 
-Это означает:
-- не все данные отправляются на сервер
-- часть данных (GLOBAL / admin) только читается
+## Storage Sync + Autoaccrual v1.8.3
 
-Если видите в консоли:
-[JKH sync][skip-upload-not-allowed]
+Система использует строгий whitelist upload-ключей.
 
-— это нормальное поведение.
+Нормальное поведение:
+- `[JKH sync][skip-upload-not-allowed]` — ключ найден, но специально не отправлен;
+- `[index][autoaccrual] skip existing payments_...` — начисления уже есть;
+- `[spravka_sud][autoaccrual] skipped existing ledger` — справка читает готовый ledger.
 
-Сервер защищён от некорректных записей.
+Ошибки, которые не должны появляться:
+- `POST /api/store 403` при обычной работе пользователя;
+- `SyntaxError` в консоли;
+- пустая справка при наличии `payments_<ЛС>`.
+
+Ключевой принцип: UI строится из локального owner-cache, а sync не должен блокировать отображение данных.
