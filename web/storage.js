@@ -151,13 +151,16 @@
   // ============================================================
   // Project key registry (единый канон sync/storage)
   // ============================================================
+  var READ_LEGACY_KEYS = [
+    "tariffs_dynamic_v1", // legacy read-only / migration only / excluded from upload
+    "tariffs_content_repair_v1", // legacy read-only / migration only / excluded from upload
+    "tariffs_content_repair_v1_backup" // legacy read-only / migration only / excluded from upload
+  ];
+
   var SYNC_CANON_EXACT = [
     "abonents_db_v1",
     "abonent_notes_v1",
     "exclude_periods_v1",
-    "tariffs_dynamic_v1",
-    "tariffs_content_repair_v1",
-    "tariffs_content_repair_v1_backup",
     "refinancing_rates_normal_v1",
     "refinancing_rates_moratorium_v1",
     "organization_requisites_v1",
@@ -487,9 +490,6 @@
     "abonents_db_v1",
     "abonent_notes_v1",
     "exclude_periods_v1",
-    "tariffs_dynamic_v1",
-    "tariffs_content_repair_v1",
-    "tariffs_content_repair_v1_backup",
     "refinancing_rates_normal_v1",
     "refinancing_rates_moratorium_v1",
     "organization_requisites_v1",
@@ -691,6 +691,10 @@
     return out;
   }
 
+  function _isLegacyUploadBlockedKey(baseKey) {
+    return READ_LEGACY_KEYS.indexOf(String(baseKey || "")) >= 0;
+  }
+
   function _projectKeysForScope(scope, ownerId) {
     var keys = [];
     // db/all: всегда используем единый канонический список + динамика
@@ -705,7 +709,17 @@
         if (_isProjectDataKeyLocal(baseKey)) keys.push(baseKey);
       }
     }
-    return _uniq(keys);
+    var uniq = _uniq(keys);
+    var filtered = [];
+    for (var j = 0; j < uniq.length; j++) {
+      var key = String(uniq[j] || "");
+      if (_isLegacyUploadBlockedKey(key)) {
+        console.warn("[JKH sync][skip-legacy-upload]", key);
+        continue;
+      }
+      filtered.push(key);
+    }
+    return filtered;
   }
 
   function _readLocalCompat(baseKey, ownerId) {

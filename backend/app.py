@@ -245,9 +245,9 @@ GLOBAL_KEYS = {
 }
 
 PROTECTED_OWNER_LEVEL_KEYS = {
-    "tariffs_dynamic_v1",
-    "tariffs_content_repair_v1",
-    "tariffs_content_repair_v1_backup",
+    "tariffs_dynamic_v1",  # legacy read-only / migration only / excluded from upload
+    "tariffs_content_repair_v1",  # legacy read-only / migration only / excluded from upload
+    "tariffs_content_repair_v1_backup",  # legacy read-only / migration only / excluded from upload
 }
 PROTECTED_OWNER_LEVEL_PREFIXES = (
     "tariffs_",
