@@ -71,3 +71,23 @@
 
 - uploadNow пока остаётся для abonents_db_v1
 - полный отказ — отдельный этап
+
+---
+
+## 2026-04-30 — STORAGE SYNC + AUTOACCRUAL HARDENING v1.8.3
+
+### Изменено
+- `autoaccrual_engine.js`: `recalcForAbonent()` пишет `payments_<ЛС>` строго в owner-scope и проверяет сохранение через `[autoaccrual][after-save]`.
+- `index.html`: главная сначала читает ledger, точечно ремонтирует отсутствующие начисления, затем всегда делает rebuild/render.
+- `spravka_sud.js`: справка не падает от `SERVER_UPLOAD_FAILED`, повторно читает ledger после autoaccrual и строится из локальных данных.
+- `storage.js`: введён строгий upload whitelist `_isUploadAllowedKey()`; legacy/admin/global ключи не отправляются на `/api/store`.
+
+### Устранены классы ошибок
+- пустой index при существующих/созданных начислениях;
+- пустая судебная справка из-за падения upload;
+- `changed:true` при пустом ledger;
+- 403 по `tariffs_dynamic_v1` / `refinancing_rates_*` в обычном user upload;
+- повторная отправка неизвестных ключей на сервер.
+
+### Новое критическое правило
+UI строится из локального owner-cache, если данные есть. Sync/upload — важен, но не имеет права блокировать отображение уже созданного ledger.

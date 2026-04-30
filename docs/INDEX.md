@@ -76,3 +76,20 @@
 2. обновить регресс;
 3. не мержить в `main` без ручной проверки импорта платежей;
 4. не делать эталон без проверки карточки абонента после перезагрузки.
+
+
+## v1.8.3 — Storage Sync + Autoaccrual Hardening
+
+Главный документ:
+- `docs/logic/LOGIC_SPEC_v1.8.3_STORAGE_SYNC_AUTOACCRUAL.md`
+
+Связанные документы:
+- `docs/logic/LOGIC_SPEC.md`
+- `docs/STORAGE_BOUNDARY.md`
+- `docs/critical/CRITICAL_CHANGELOG.md`
+
+Смысл:
+- строгий upload whitelist;
+- устойчивый UI при ошибке sync;
+- owner-scoped сохранение ledger;
+- запрет отправки legacy/admin/global ключей обычным upload.

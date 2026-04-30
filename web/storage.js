@@ -695,6 +695,55 @@
     return READ_LEGACY_KEYS.indexOf(String(baseKey || "")) >= 0;
   }
 
+
+
+  function _isUploadAllowedKey(baseKey, ownerId) {
+    var key = String(baseKey || "");
+    var oid = String(ownerId || "").trim();
+
+    var exact = [
+      "abonents_db_v1",
+      "abonent_notes_v1",
+      "exclude_periods_v1",
+      "organization_requisites_v1",
+      "organization_signers_v1",
+      "payment_sources_v1",
+      "last_abonent_id",
+      "import_preview_v1",
+      "draft_new_abonent_v1",
+      "jkh_excel_date_debug"
+    ];
+
+    if (exact.indexOf(key) >= 0) return true;
+
+    var prefixes = [
+      "payments_",
+      "exclude_periods_",
+      "note_",
+      "calc_period_",
+      "calc_period_active_",
+      "report_period_",
+      "payments_ui_collapsed_",
+      "jkh_transfer_to_v1:",
+      "jkh_transfer_balance_v1:",
+      "jkh_freeze_to_v1:",
+      "jkh_frozen_debt_v1:",
+      "moratorium_"
+    ];
+
+    for (var i = 0; i < prefixes.length; i++) {
+      if (key.indexOf(prefixes[i]) === 0) return true;
+    }
+
+    if (oid && key === ("tariffs_" + oid)) return true;
+
+    return false;
+  }
+  function _isAdminUploadBlockedKey(baseKey) {
+    var key = String(baseKey || "");
+    return key === "refinancing_rates_normal_v1" || key === "refinancing_rates_moratorium_v1";
+  }
+
   function _projectKeysForScope(scope, ownerId) {
     var keys = [];
     // db/all: всегда используем единый канонический список + динамика
@@ -717,8 +766,19 @@
         console.warn("[JKH sync][skip-legacy-upload]", key);
         continue;
       }
+      if (_isAdminUploadBlockedKey(key)) {
+        console.warn("[JKH sync][skip-admin-upload]", key);
+        continue;
+      }
       filtered.push(key);
     }
+
+    filtered = filtered.filter(function (key) {
+      if (_isUploadAllowedKey(key, ownerId)) return true;
+      console.warn("[JKH sync][skip-upload-not-allowed]", key);
+      return false;
+    });
+
     return filtered;
   }
 

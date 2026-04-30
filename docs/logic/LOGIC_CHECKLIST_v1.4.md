@@ -91,3 +91,21 @@
 - user изменил тариф;
 - owner подменился с клиента;
 - на двух устройствах одного owner разные ставки или тарифы после sync.
+
+
+---
+
+## Проверка v1.8.3 — Storage Sync + Autoaccrual
+
+Перед принятием PR проверить:
+
+- [ ] `node --check web/storage.js`
+- [ ] `node --check web/autoaccrual_engine.js`
+- [ ] `node --check web/spravka_sud.js`
+- [ ] `index.html` после Ctrl+F5 не даёт `SyntaxError`.
+- [ ] На главной при существующем ledger есть `skip existing payments_...`.
+- [ ] На главной нет `POST /api/store 403`.
+- [ ] В справке суда есть строки начислений.
+- [ ] `SERVER_UPLOAD_FAILED` не останавливает справку.
+- [ ] Legacy/admin/global ключи не отправляются обычным upload.
+- [ ] `tariffs_<ownerId>` — единственный новый ключ тарифов для upload.
