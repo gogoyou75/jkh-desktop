@@ -29,3 +29,17 @@
 - write: только admin;
 - read: все роли;
 - запрещены `ref_rates_{owner}`, fallback-ставки и демо-инициализация.
+
+## 2026-04-30
+
+Обновлены:
+
+- web/storage.js (whitelist upload)
+- web/spravka_sud.js (resilient flush)
+- web/index.html (rebuild после autoaccrual)
+- web/autoaccrual_engine.js (фикс сохранения ledger)
+
+Смысл:
+- устранена зависимость UI от сервера
+- устранены 403 ошибки
+- введена защита от некорректных ключей

@@ -42,3 +42,38 @@ Date: 2026-03-25
 - write: только admin;
 - read: все роли;
 - запрещены `ref_rates_{owner}`, fallback-ставки и демо-инициализация.
+## Storage Sync Hardening — 2026-04-30
+
+Введён строгий whitelist ключей для upload.
+
+Правило:
+- серверу отправляются только разрешённые owner-ключи
+- любые неизвестные / legacy / admin-only ключи НЕ отправляются
+
+Разделение:
+
+### USER / OWNER (разрешено upload)
+- abonents_db_v1
+- payments_*
+- exclude_periods_*
+- note_*
+- tariffs_<ownerId>
+- organization_*
+- import_*
+- draft_*
+- jkh_transfer_*
+- moratorium_*
+
+### GLOBAL / ADMIN (запрещено upload)
+- refinancing_rates_normal_v1
+- refinancing_rates_moratorium_v1
+
+### LEGACY (read-only)
+- tariffs_dynamic_v1
+- tariffs_content_repair_v1
+- *_backup
+
+Принцип:
+LocalStorage = cache  
+Backend = source of truth  
+UI не должен зависеть от успешности upload
