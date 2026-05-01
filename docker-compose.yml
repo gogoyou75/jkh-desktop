@@ -1,3 +1,5 @@
+version: "3.8"
+
 services:
   nginx:
     image: nginx:stable
@@ -18,11 +20,13 @@ services:
       --default-authentication-plugin=mysql_native_password
       --character-set-server=utf8mb4
       --collation-server=utf8mb4_unicode_ci
+    env_file:
+      - .env
     environment:
-      MYSQL_ROOT_PASSWORD: rootpass_change_me
-      MYSQL_DATABASE: jkh
-      MYSQL_USER: jkh
-      MYSQL_PASSWORD: jkhpass_change_me
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
     volumes:
       - mysql_data:/var/lib/mysql
     ports:
@@ -34,12 +38,14 @@ services:
     container_name: jkh_api
     volumes:
       - ./backend:/app
+    env_file:
+      - .env
     environment:
-      DB_HOST: mysql
-      DB_PORT: "3306"
-      DB_USER: jkh
-      DB_PASSWORD: jkhpass_change_me
-      DB_NAME: jkh
+      DB_HOST: ${DB_HOST}
+      DB_PORT: ${DB_PORT}
+      DB_USER: ${DB_USER}
+      DB_PASSWORD: ${DB_PASSWORD}
+      DB_NAME: ${DB_NAME}
     depends_on:
       - mysql
     restart: unless-stopped
