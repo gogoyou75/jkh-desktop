@@ -277,6 +277,7 @@
     // новая структура
     premises: {},   // {regnum: {regnum, city, street, house, flat, square, createdAt}}
     links: [],      // [{abonentId, regnum, dateFrom, dateTo}]
+    premiseEvents: [], // [{id,type,date,fromRegnums,toRegnums,...}]
 
     // абоненты
     abonents: {}    // {id: {...}}
@@ -305,6 +306,7 @@
       }
 
       if (Array.isArray(storedDb.links)) out.links = storedDb.links;
+      if (Array.isArray(storedDb.premiseEvents)) out.premiseEvents = storedDb.premiseEvents;
     }
 
     return out;
@@ -389,6 +391,7 @@
 
     if (!db.premises || typeof db.premises !== "object") db.premises = {};
     if (!Array.isArray(db.links)) db.links = [];
+    if (!Array.isArray(db.premiseEvents)) db.premiseEvents = [];
     if (!db.abonents || typeof db.abonents !== "object") db.abonents = {};
 
     const hasLink = (abonentId, regnum) =>
@@ -505,6 +508,16 @@
       if (!db || !Array.isArray(db.links)) return [];
       var r = normalizeRegnumValue(regnum);
       return db.links.filter(function (l) { return normalizeRegnumValue(l && l.regnum) === r; });
+    },
+    getPremiseEventsForRegnum: function (regnum) {
+      var db = this.getDb();
+      if (!db || !Array.isArray(db.premiseEvents)) return [];
+      var r = normalizeRegnumValue(regnum);
+      return db.premiseEvents.filter(function (e) {
+        var from = Array.isArray(e && e.fromRegnums) ? e.fromRegnums : [];
+        var to = Array.isArray(e && e.toRegnums) ? e.toRegnums : [];
+        return from.indexOf(r) >= 0 || to.indexOf(r) >= 0;
+      });
     },
 
     // WRITE
@@ -644,6 +657,109 @@
       }
 
       return !!window.saveAbonentsDB && window.saveAbonentsDB();
+    },
+    mergePremises: async function (options) {
+      if (!this.ensureWriteOrExplain()) return false;
+      if (!window.AbonentsDB) throw new Error("DB_NOT_READY");
+      console.log("[premise-transform] merge start");
+
+      var db = window.AbonentsDB;
+      var snapshot = deepClone(db);
+      try {
+        if (!db.premises || typeof db.premises !== "object") db.premises = {};
+        if (!Array.isArray(db.links)) db.links = [];
+        if (!Array.isArray(db.premiseEvents)) db.premiseEvents = [];
+
+        var fromRegnumsRaw = Array.isArray(options && options.fromRegnums) ? options.fromRegnums : [];
+        var fromRegnums = fromRegnumsRaw.map(normalizeRegnumValue).filter(Boolean);
+        if (fromRegnums.length < 2) throw new Error("MERGE_FROM_MIN_2_REQUIRED");
+
+        var date = String(options && options.date || "").trim();
+        if (!date) throw new Error("MERGE_DATE_REQUIRED");
+
+        var toPremise = Object.assign({}, options && options.toPremise || {});
+        var newRegnum = normalizeRegnumValue(toPremise.regnum);
+        if (!newRegnum) throw new Error("MERGE_TO_REGNUM_REQUIRED");
+        if (db.premises[newRegnum]) throw new Error("MERGE_TO_REGNUM_EXISTS");
+
+        for (var i = 0; i < fromRegnums.length; i++) {
+          var rr = fromRegnums[i];
+          var oldPremise = db.premises[rr];
+          if (!oldPremise) throw new Error("MERGE_FROM_NOT_FOUND:" + rr);
+          var st = String(oldPremise.status || "active").trim() || "active";
+          if (st !== "active") throw new Error("MERGE_FROM_NOT_ACTIVE:" + rr);
+        }
+        console.log("[premise-transform] validate ok");
+
+        var dt = new Date(date + "T12:00:00");
+        dt.setDate(dt.getDate() - 1);
+        var closeY = dt.getFullYear();
+        var closeM = String(dt.getMonth() + 1).padStart(2, "0");
+        var closeD = String(dt.getDate()).padStart(2, "0");
+        var closedAt = closeY + "-" + closeM + "-" + closeD;
+
+        for (var j = 0; j < fromRegnums.length; j++) {
+          var fromR = fromRegnums[j];
+          var cur = db.premises[fromR] || {};
+          db.premises[fromR] = Object.assign({}, cur, {
+            status: "merged",
+            closedAt: closedAt,
+            closedReason: "Объединение квартир",
+            mergedIntoRegnum: newRegnum
+          });
+          console.log("[premise-transform] close old premise", fromR);
+        }
+
+        console.log("[premise-transform] create new premise", newRegnum);
+        db.premises[newRegnum] = {
+          regnum: newRegnum,
+          city: String(toPremise.city || ""),
+          street: String(toPremise.street || ""),
+          house: String(toPremise.house || ""),
+          flat: String(toPremise.flat || ""),
+          square: toPremise.square !== undefined ? toPremise.square : "",
+          createdAt: String(toPremise.createdAt || date),
+          status: "active",
+          createdFromMergeRegnums: fromRegnums.slice(),
+          mergedAt: date
+        };
+
+        db.links.forEach(function (l) {
+          var r = normalizeRegnumValue(l && l.regnum);
+          if (fromRegnums.indexOf(r) >= 0 && !String(l && l.dateTo || "").trim()) {
+            l.dateTo = closedAt;
+          }
+        });
+
+        var newResp = String(options && options.newResponsibleAbonentId || "").trim();
+        if (newResp) {
+          db.links.push({ abonentId: newResp, regnum: newRegnum, dateFrom: date, dateTo: "" });
+        }
+
+        var ev = {
+          id: "evt_" + Date.now() + "_" + Math.floor(Math.random() * 1000000),
+          type: "MERGE",
+          date: date,
+          fromRegnums: fromRegnums.slice(),
+          toRegnums: [newRegnum],
+          reason: String(options && options.reason || ""),
+          documentNumber: String(options && options.documentNumber || ""),
+          documentDate: String(options && options.documentDate || ""),
+          createdAt: (new Date()).toISOString(),
+          createdBy: _ownerId()
+        };
+        db.premiseEvents.push(ev);
+        console.log("[premise-transform] event saved");
+
+        await this.flushDbToServer();
+        console.log("[premise-transform] flush success");
+        return ev;
+      } catch (e) {
+        window.AbonentsDB = snapshot;
+        try { if (window.saveAbonentsDB) window.saveAbonentsDB(); } catch (e2) { }
+        console.log("[premise-transform] flush failed rollback");
+        throw e;
+      }
     }
   };
 

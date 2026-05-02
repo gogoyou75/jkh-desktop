@@ -303,11 +303,17 @@ Doc: docs/LOGIC_SPEC_v1.5.3.md
         <div class="k">Текущий ответственный</div><div><span id="premiseResponsible">—</span></div>
         <div class="k">Период ответственности</div><div><span id="premisePeriod">—</span></div>
         <div class="k">Период ответственности (этот абонент)</div><div><span id="premiseMyPeriod">—</span></div>
+        <div class="k">Статус квартиры</div><div><span id="premiseStatus">—</span></div>
+        <div class="k">Закрыта</div><div><span id="premiseClosedAt">—</span></div>
+        <div class="k">Объединена в</div><div><span id="premiseMergedInto">—</span></div>
+        <div class="k">Создана объединением</div><div><span id="premiseMergeFrom">—</span></div>
+        <div class="k">Дата объединения</div><div><span id="premiseMergeDate">—</span></div>
     </div>
 
     <div class="premise-actions">
         <button class="btn" type="button" onclick="openChangeResponsibleModal()">Сменить ответственного</button>
         <button class="btn" type="button" onclick="openResponsibilityReport()">Отчёт: кто ответственный</button>
+        <button class="btn" type="button" onclick="openPremiseTransformModal()">Преобразовать квартиру</button>
     </div>
 
     <div style="margin-top:12px;">
@@ -353,6 +359,29 @@ Doc: docs/LOGIC_SPEC_v1.5.3.md
     </div>
 
     </div>
+</div>
+<div id="premiseTransformModal" style="position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.4);display:none;align-items:center;justify-content:center;z-index:6600;">
+  <div class="change-resp-card" style="width:680px;">
+    <div style="font-weight:700;font-size:16px;">Преобразовать квартиру</div>
+    <div style="margin-top:6px;font-size:13px;">Тип: <b>Объединение квартир</b></div>
+    <label>Исходные рег. № квартир (через запятую)</label><input id="pt_fromRegnums" type="text">
+    <label>Новый рег. № квартиры</label><input id="pt_newRegnum" type="text">
+    <label>Город</label><input id="pt_city" type="text">
+    <label>Улица</label><input id="pt_street" type="text">
+    <label>Дом</label><input id="pt_house" type="text">
+    <label>Квартира</label><input id="pt_flat" type="text">
+    <label>Новая площадь</label><input id="pt_square" type="number" step="0.01">
+    <label>Дата объединения</label><input id="pt_date" type="date">
+    <label>Новый ответственный</label><select id="pt_newResponsible"></select>
+    <label>Документ-основание</label><input id="pt_documentNumber" type="text">
+    <label>Дата документа</label><input id="pt_documentDate" type="date">
+    <label>Причина</label><input id="pt_reason" type="text">
+    <div class="change-resp-hint">Старые квартиры будут закрыты. Новая квартира будет создана отдельно. Долги и платежи автоматически не переносятся.</div>
+    <div class="change-resp-actions">
+      <button type="button" onclick="applyPremiseMerge()">Выполнить объединение</button>
+      <button type="button" onclick="closePremiseTransformModal()">Отмена</button>
+    </div>
+  </div>
 </div>
 
 <div class="options">
@@ -777,10 +806,70 @@ function fillAbonentCard() {
         : '—';
     const mp = document.getElementById('premiseMyPeriod');
     if (mp) mp.innerHTML = myHtml;
+    setText('premiseStatus', premise.status === 'merged' ? 'объединена' : (premise.status || 'active'));
+    setText('premiseClosedAt', premise.closedAt || '');
+    setText('premiseMergedInto', premise.mergedIntoRegnum || '');
+    setText('premiseMergeFrom', Array.isArray(premise.createdFromMergeRegnums) ? premise.createdFromMergeRegnums.join(', ') : '');
+    setText('premiseMergeDate', premise.mergedAt || '');
 
     // ✅ показываем историю ответственности по квартире
     try { renderResponsibilityHistory(regnum || a.regnum || ''); } catch(e) {}
     try { renderTransferInfo(id, regnum || a.regnum || ''); } catch(e) {}
+}
+function openPremiseTransformModal(){
+  if (!canWriteOrExplainLocal()) return;
+  const { id, a } = getCurrentAbonent();
+  if (!a) return;
+  const db = getDb();
+  const { regnum, p } = getPremiseForAbonent(id, a);
+  document.getElementById('pt_fromRegnums').value = regnum || '';
+  document.getElementById('pt_newRegnum').value = '';
+  document.getElementById('pt_city').value = String(p?.city || a.city || '');
+  document.getElementById('pt_street').value = String(p?.street || a.street || '');
+  document.getElementById('pt_house').value = String(p?.house || a.house || '');
+  document.getElementById('pt_flat').value = '';
+  document.getElementById('pt_square').value = '';
+  document.getElementById('pt_documentNumber').value = '';
+  document.getElementById('pt_documentDate').value = '';
+  document.getElementById('pt_reason').value = '';
+  const d = new Date(); document.getElementById('pt_date').value = d.toISOString().slice(0,10);
+  const sel = document.getElementById('pt_newResponsible'); sel.innerHTML = '<option value="">— не назначать —</option>';
+  Object.keys(db).forEach(function(k){ var opt=document.createElement('option'); opt.value=String(k); opt.textContent=String(k)+' — '+String(db[k]?.fio||''); sel.appendChild(opt); });
+  document.getElementById('premiseTransformModal').style.display = 'flex';
+}
+function closePremiseTransformModal(){ var m=document.getElementById('premiseTransformModal'); if(m)m.style.display='none'; }
+async function applyPremiseMerge(){
+  if (!window.Data || typeof window.Data.mergePremises !== 'function') { alert('merge API недоступен'); return; }
+  const fromRegnums = String(document.getElementById('pt_fromRegnums').value||'').split(',').map(s=>s.trim()).filter(Boolean);
+  const date = String(document.getElementById('pt_date').value||'').trim();
+  const newRegnum = String(document.getElementById('pt_newRegnum').value||'').trim();
+  if (fromRegnums.length < 2) { alert('Нужно выбрать минимум 2 квартиры'); return; }
+  if (!date) { alert('Укажите дату объединения'); return; }
+  if (!newRegnum) { alert('Укажите новый рег. № квартиры'); return; }
+  try{
+    await window.Data.mergePremises({
+      fromRegnums: fromRegnums,
+      toPremise: {
+        regnum: newRegnum,
+        city: String(document.getElementById('pt_city').value||''),
+        street: String(document.getElementById('pt_street').value||''),
+        house: String(document.getElementById('pt_house').value||''),
+        flat: String(document.getElementById('pt_flat').value||''),
+        square: String(document.getElementById('pt_square').value||''),
+        createdAt: date
+      },
+      date: date,
+      reason: String(document.getElementById('pt_reason').value||''),
+      documentNumber: String(document.getElementById('pt_documentNumber').value||''),
+      documentDate: String(document.getElementById('pt_documentDate').value||''),
+      newResponsibleAbonentId: String(document.getElementById('pt_newResponsible').value||'')
+    });
+    alert('Объединение выполнено');
+    closePremiseTransformModal();
+    window.location.reload();
+  }catch(e){
+    alert('Ошибка объединения: ' + (e && e.message ? e.message : e));
+  }
 }
 
 // 🔴 SAFE INIT: карточка не должна зависать при входе
