@@ -236,18 +236,47 @@ Doc: docs/LOGIC_SPEC_v1.5.3.md
         }
 
         .merge-list {
-            max-height: 180px;
+            max-height: 220px;
             overflow-y: auto;
+            overflow-x: hidden;
             border: 2px solid #000;
-            padding: 6px;
-            margin-top: 4px;
             background: #fff;
-        }
-        .merge-item {
-            font-size: 13px;
             margin-top: 4px;
         }
-        .merge-item:first-child { margin-top: 0; }
+        .merge-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 12px;
+            table-layout: fixed;
+        }
+        .merge-table th,
+        .merge-table td {
+            border: 1px solid #000;
+            padding: 3px 5px;
+            vertical-align: middle;
+            word-break: break-word;
+        }
+        .merge-table th {
+            background: #eee;
+            font-weight: 700;
+        }
+        .merge-table input[type="checkbox"] {
+            width: auto;
+            height: auto;
+            transform: none;
+            margin: 0;
+        }
+        .merge-row-current {
+            background: #fff6d5;
+        }
+        .merge-row-selected {
+            background: #eaf7ea;
+        }
+        #merge_selected_count {
+            margin-top: 4px;
+            font-size: 12px;
+            text-align: right;
+        }
     </style>
 </head>
 <body>
@@ -379,7 +408,10 @@ Doc: docs/LOGIC_SPEC_v1.5.3.md
   <div class="change-resp-card" style="width:680px;">
     <div style="font-weight:700;font-size:16px;">Преобразовать квартиру</div>
     <div style="margin-top:6px;font-size:13px;">Тип: <b>Объединение квартир</b></div>
-    <label>Исходные квартиры</label><div id="merge_from_list" class="merge-list"></div>
+    <label>Исходные квартиры</label>
+    <div style="margin-top:4px;font-size:12px;">Выберите минимум 2 квартиры для объединения</div>
+    <div id="merge_from_list" class="merge-list"></div>
+    <div id="merge_selected_count">Выбрано: 0</div>
     <label>Новый рег. № квартиры</label><input id="pt_newRegnum" type="text">
     <label>Город</label><input id="pt_city" type="text">
     <label>Улица</label><input id="pt_street" type="text">
@@ -835,26 +867,68 @@ function fillAbonentCard() {
 function renderMergeList(){
   const db = Data.getDb();
   const container = document.getElementById('merge_from_list');
+  const counter = document.getElementById('merge_selected_count');
   if (!container || !db || !db.premises) return;
 
-  container.innerHTML = '';
+  const activePremises = Object.values(db.premises).filter(p => !p.status || p.status === 'active');
+  const links = Array.isArray(db.links) ? db.links : [];
+  const abonents = db.abonents || {};
 
-  Object.values(db.premises).forEach(p => {
-    if (p.status && p.status !== 'active') return;
+  const rows = activePremises.map(p => {
+    const activeLink = links.find(link => String(link?.regnum || '').trim() === String(p.regnum || '').trim() && !String(link?.dateTo || '').trim());
+    const responsibleId = String(activeLink?.abonentId || '').trim();
+    const responsible = responsibleId ? abonents[responsibleId] : null;
+    const responsibleFio = String(responsible?.fio || '').trim();
+    const responsibleText = responsibleId ? (responsibleFio ? (responsibleId + ' — ' + responsibleFio) : responsibleId) : '—';
+    const address = [p.city || '', p.street || '', ((p.house || '') + '-' + (p.flat || '')).replace(/-$/, '')]
+      .map(v => String(v || '').trim())
+      .filter(Boolean)
+      .join(', ');
 
-    const div = document.createElement('div');
-    div.className = 'merge-item';
-
-    div.innerHTML = `
-      <label>
-        <input type="checkbox" value="${p.regnum}">
-        ${p.officialRegnum || p.regnum}
-        — ${p.city || ''}, ${p.street || ''} ${p.house || ''}-${p.flat || ''}
-      </label>
+    return `
+      <tr data-regnum="${String(p.regnum || '')}">
+        <td style="width:30px;text-align:center;"><input type="checkbox" value="${String(p.regnum || '')}"></td>
+        <td>${String(p.regnum || '')}</td>
+        <td>${String(p.officialRegnum || '—')}</td>
+        <td>${address || '—'}</td>
+        <td>${(p.square === 0 || p.square) ? String(p.square) : '—'}</td>
+        <td>${responsibleText}</td>
+      </tr>
     `;
+  }).join('');
 
-    container.appendChild(div);
+  container.innerHTML = `
+    <table class="merge-table">
+      <thead>
+        <tr>
+          <th style="width:30px;">✓</th>
+          <th>Внутр. regnum</th>
+          <th>Офиц. №</th>
+          <th>Адрес</th>
+          <th style="width:70px;">Площадь</th>
+          <th>Ответственный</th>
+        </tr>
+      </thead>
+      <tbody>${rows}</tbody>
+    </table>
+  `;
+
+  const updateCounter = function(){
+    const checked = container.querySelectorAll('input[type="checkbox"]:checked').length;
+    if (counter) counter.textContent = 'Выбрано: ' + checked;
+  };
+
+  container.querySelectorAll('input[type="checkbox"]').forEach(chk => {
+    chk.addEventListener('change', function(){
+      const row = this.closest('tr');
+      if (!row) return;
+      if (this.checked) row.classList.add('merge-row-selected');
+      else row.classList.remove('merge-row-selected');
+      updateCounter();
+    });
   });
+
+  updateCounter();
 }
 
 function openPremiseTransformModal(){
@@ -878,7 +952,15 @@ function openPremiseTransformModal(){
   renderMergeList();
   if (regnum) {
     const currentCheckbox = document.querySelector('#merge_from_list input[type="checkbox"][value="' + regnum + '"]');
-    if (currentCheckbox) currentCheckbox.checked = true;
+    if (currentCheckbox) {
+      currentCheckbox.checked = true;
+      const row = currentCheckbox.closest('tr');
+      if (row) {
+        row.classList.add('merge-row-current');
+        row.classList.add('merge-row-selected');
+      }
+      currentCheckbox.dispatchEvent(new Event('change'));
+    }
   }
   document.getElementById('premiseTransformModal').style.display = 'flex';
 }
