@@ -211,6 +211,23 @@
       return fallback;
     }
   }
+  function _todayStamp() {
+    var d = new Date();
+    var y = d.getFullYear();
+    var m = String(d.getMonth() + 1).padStart(2, "0");
+    var dd = String(d.getDate()).padStart(2, "0");
+    return String(y) + m + dd;
+  }
+  function _generateUniqueTempRegnum(db) {
+    var stamp = _todayStamp();
+    var premises = (db && db.premises && typeof db.premises === "object") ? db.premises : {};
+    for (var i = 0; i < 10000; i++) {
+      var suffix = String(i).padStart(4, "0");
+      var candidate = "TEMP-" + stamp + "-" + suffix;
+      if (!premises[candidate]) return candidate;
+    }
+    throw new Error("MERGE_TEMP_REGNUM_EXHAUSTED");
+  }
 
   function removeProjectKeys() {
     // ВАЖНО: сброс делаем в рамках выбранной базы (scoped).
@@ -700,7 +717,10 @@
         var toPremise = Object.assign({}, options && options.toPremise || {});
         var officialRegnum = normalizeOfficialRegnumValue(toPremise.officialRegnum || "");
         var newRegnum = normalizeRegnumValue(toPremise.regnum);
-        if (!newRegnum) throw new Error("MERGE_TO_REGNUM_REQUIRED");
+        if (!newRegnum) {
+          newRegnum = _generateUniqueTempRegnum(db);
+          console.log("[premise-transform] generated regnum", newRegnum);
+        }
         if (db.premises[newRegnum]) throw new Error("MERGE_TO_REGNUM_EXISTS");
         if (officialRegnum) {
           var duplicateOfficial = Object.keys(db.premises).find(function (rk) {
@@ -724,6 +744,36 @@
         var closeM = String(dt.getMonth() + 1).padStart(2, "0");
         var closeD = String(dt.getDate()).padStart(2, "0");
         var closedAt = closeY + "-" + closeM + "-" + closeD;
+
+        var activeFromLinks = [];
+        var activeFromMap = {};
+        db.links.forEach(function (l) {
+          var rr = normalizeRegnumValue(l && l.regnum);
+          if (fromRegnums.indexOf(rr) >= 0 && !String(l && l.dateTo || "").trim()) {
+            activeFromLinks.push(l);
+            if (!activeFromMap[rr]) activeFromMap[rr] = l;
+          }
+        });
+        var responsibleSet = {};
+        for (var af = 0; af < activeFromLinks.length; af++) {
+          var rid = String(activeFromLinks[af] && activeFromLinks[af].abonentId || "").trim();
+          if (rid) responsibleSet[rid] = true;
+        }
+        var responsibleIds = Object.keys(responsibleSet);
+        if (responsibleIds.length > 1 && typeof window.confirm === "function") {
+          var newRespId = String(options && options.newResponsibleAbonentId || "").trim();
+          var newRespA = (db.abonents && newRespId) ? db.abonents[newRespId] : null;
+          var newRespName = String(newRespA && newRespA.fio || "").trim();
+          var newRespText = newRespId ? (newRespName ? (newRespId + " — " + newRespName) : newRespId) : "— не назначен —";
+          console.log("[premise-transform] different responsibles confirm");
+          var ok = window.confirm(
+            "Вы объединяете квартиры с разными ответственными.\n" +
+            "Их ответственность по старым квартирам будет закрыта.\n" +
+            "Новым ответственным станет: " + newRespText + ".\n" +
+            "Продолжить?"
+          );
+          if (!ok) throw new Error("MERGE_CANCELLED_BY_USER");
+        }
 
         for (var j = 0; j < fromRegnums.length; j++) {
           var fromR = fromRegnums[j];
@@ -757,6 +807,12 @@
           var r = normalizeRegnumValue(l && l.regnum);
           if (fromRegnums.indexOf(r) >= 0 && !String(l && l.dateTo || "").trim()) {
             l.dateTo = closedAt;
+            console.log("[premise-transform] close responsible", String(l && l.abonentId || ""), r, closedAt);
+            var oldId = String(l && l.abonentId || "").trim();
+            if (oldId && db.abonents && db.abonents[oldId]) {
+              db.abonents[oldId].calcEndDate = closedAt;
+              console.log("[premise-transform] old abonent calcEndDate set", oldId, closedAt);
+            }
           }
         });
 
