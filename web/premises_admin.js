@@ -12,6 +12,16 @@ window.PremisesAdmin = (function () {
 
     function normStr(s) { return String(s ?? '').trim(); }
     function normRegnum(s) { return normStr(s).replace(/\s+/g, ''); }
+    function normalizeOfficialRegnum(s) { return normStr(s).replace(/\s+/g, ' '); }
+    function findOfficialRegnumDuplicate(db, officialRegnum, selfRegnum) {
+        const target = normalizeOfficialRegnum(officialRegnum);
+        if (!target) return null;
+        const premises = db?.premises || {};
+        return Object.keys(premises).find(reg =>
+            String(reg) !== String(selfRegnum || '') &&
+            normalizeOfficialRegnum(premises[reg]?.officialRegnum) === target
+        ) || null;
+    }
 
     // -----------------------------
     // ✅ MULTI-DB SCOPE (admin can view user базы / ALL)
@@ -941,7 +951,8 @@ window.PremisesAdmin = (function () {
         const flat = normStr(q('p_flat').value);
         const square = q('p_square').value;
 
-        return { regnum, regnumUnknown, createdAt, city, street, house, flat, square: square === '' ? '' : numOrEmpty(square) };
+        const officialRegnum = normalizeOfficialRegnum(q('p_official_regnum')?.value);
+        return { regnum, regnumUnknown, createdAt, city, street, house, flat, officialRegnum, square: square === '' ? '' : numOrEmpty(square) };
     }
 
     function setWarn(msg, isOk) {
@@ -970,6 +981,7 @@ window.PremisesAdmin = (function () {
 
     function fillForm(p) {
         q('p_regnum').value = p?.regnum || '';
+        q('p_official_regnum').value = p?.officialRegnum || '';
         q('p_created').value = p?.createdAt || '';
         q('p_city').value = p?.city || '';
         q('p_street').value = p?.street || '';
@@ -1006,7 +1018,7 @@ window.PremisesAdmin = (function () {
     }
 
     function clearForm() {
-        fillForm({ regnum:'', createdAt:'', city:'', street:'', house:'', flat:'', square:'' });
+        fillForm({ regnum:'', officialRegnum:'', createdAt:'', city:'', street:'', house:'', flat:'', square:'' });
         setFormModeAdd();
     }
 
@@ -1036,7 +1048,7 @@ window.PremisesAdmin = (function () {
                 const list = [];
                 regs.forEach(regnum => {
                     const p = premises[regnum];
-                    const hay = [p?.regnum, p?.city, p?.street, p?.house, p?.flat].join(' ').toLowerCase();
+                    const hay = [p?.regnum, p?.officialRegnum, p?.city, p?.street, p?.house, p?.flat].join(' ').toLowerCase();
                     if (filter && !hay.includes(filter)) return;
                     list.push(p);
                 });
@@ -1052,7 +1064,7 @@ window.PremisesAdmin = (function () {
                 trH.style.background = color;
                 trH.style.fontWeight = 'bold';
                 trH.innerHTML = `
-                    <td colspan="9">
+                    <td colspan="10">
                         База: ${esc(owner.role === 'admin' ? 'АДМИН' : 'ЮЗЕР')} — ${esc(owner.email || owner.id)}
                         <span class="small" style="margin-left:10px; font-weight:normal;">(показано: ${list.length} / ${regs.length})</span>
                     </td>
@@ -1074,6 +1086,7 @@ window.PremisesAdmin = (function () {
 
                     tr.innerHTML = `
                         <td class="mono">${regLabel}</td>
+                        <td class="mono">${esc(p.officialRegnum || '—')}</td>
                         <td>${esc(p.city)}</td>
                         <td>${esc(p.street)}</td>
                         <td>${esc(p.house)}</td>
@@ -1101,7 +1114,7 @@ window.PremisesAdmin = (function () {
 
         let shown = 0;
         rows.forEach(p => {
-            const hay = [p.regnum, p.city, p.street, p.house, p.flat].join(' ').toLowerCase();
+            const hay = [p.regnum, p.officialRegnum, p.city, p.street, p.house, p.flat].join(' ').toLowerCase();
             if (filter && !hay.includes(filter)) return;
 
             const link = activeLinkForRegnum(db, p.regnum);
@@ -1112,6 +1125,7 @@ window.PremisesAdmin = (function () {
             const regLabel = isTempRegnum(p.regnum) ? `${esc(p.regnum)} <span class="small" style="background:#fff3bf; padding:0 4px; border:1px solid #000; margin-left:6px;">временный</span>` : esc(p.regnum);
             tr.innerHTML = `
                 <td class="mono">${regLabel}</td>
+                <td class="mono">${esc(p.officialRegnum || '—')}</td>
                 <td>${esc(p.city)}</td>
                 <td>${esc(p.street)}</td>
                 <td>${esc(p.house)}</td>
@@ -1178,10 +1192,18 @@ function onSave() {
             return;
         }
 
+        const duplicateOfficialReg = findOfficialRegnumDuplicate(db, f.officialRegnum, state.editingRegnum || '');
+        if (duplicateOfficialReg) {
+            console.log('[premises][official-regnum] duplicate', f.officialRegnum, duplicateOfficialReg);
+            setWarn('Такой официальный номер уже указан у другой квартиры: ' + duplicateOfficialReg, false);
+            return;
+        }
+
         const isEdit = !!state.editingRegnum;
         if (isEdit) {
             const reg = state.editingRegnum;
             console.log('[premises][save] owner=' + getActiveOwnerId() + ' regnum=' + reg + ' action=update');
+            console.log('[premises][official-regnum] save', f.officialRegnum || '');
             const existing = db.premises?.[reg];
             if (!existing) { setWarn('Ошибка: объект не найден в базе.', false); return; }
 
@@ -1203,7 +1225,9 @@ function onSave() {
                             db.premises[newKey] = {
                                 ...p2,
                                 city: f.city, street: f.street, house: f.house, flat: f.flat,
-                                square: f.square, createdAt: f.createdAt
+                                square: f.square, createdAt: f.createdAt,
+                                officialRegnum: f.officialRegnum,
+                                regnumType: f.officialRegnum ? 'official' : 'temp'
                             };
                         }
                         syncLegacyFieldsForRegnum(db, newKey);
@@ -1229,7 +1253,9 @@ function onSave() {
                     db.premises[reg] = {
                         ...existing,
                         city: f.city, street: f.street, house: f.house, flat: f.flat,
-                        square: f.square, createdAt: f.createdAt
+                        square: f.square, createdAt: f.createdAt,
+                        officialRegnum: f.officialRegnum,
+                        regnumType: f.officialRegnum ? 'official' : 'temp'
                     };
                     syncLegacyFieldsForRegnum(db, reg);
                     return { ok: true, affectedAbonentIds: collectAffectedAbonentIdsByRegnums(db, [reg]) };
@@ -1244,6 +1270,7 @@ function onSave() {
         // добавление нового объекта
         const regKey = isUnknown ? genTempRegnum(db) : f.regnum;
         console.log('[premises][save] owner=' + getActiveOwnerId() + ' regnum=' + regKey + ' action=create');
+        console.log('[premises][official-regnum] save', f.officialRegnum || '');
 
         if (db.premises?.[regKey]) {
             const p = db.premises[regKey];
@@ -1267,7 +1294,9 @@ function onSave() {
                     square: f.square,
                     createdAt: f.createdAt,
                     regnumTemp: isUnknown ? true : false,
-                    regnumLocked: isUnknown ? false : true
+                    regnumLocked: isUnknown ? false : true,
+                    officialRegnum: f.officialRegnum,
+                    regnumType: f.officialRegnum ? 'official' : 'temp'
                 };
                 syncLegacyFieldsForRegnum(db, regKey);
                 return { ok: true, affectedAbonentIds: collectAffectedAbonentIdsByRegnums(db, [regKey]) };
@@ -1385,7 +1414,7 @@ function onSave() {
                 const warn = q('premFormWarn');
                 if (warn) { warn.textContent = 'Режим "все базы" — только просмотр. Выберите конкретную базу (админ/юзер), чтобы добавлять/редактировать.'; warn.style.display = 'block'; }
                 // поля формы
-                ['p_regnum','p_created','p_city','p_street','p_house','p_flat','p_square','p_regnum_unknown'].forEach(id=>{
+                ['p_regnum','p_official_regnum','p_created','p_city','p_street','p_house','p_flat','p_square','p_regnum_unknown'].forEach(id=>{
                     const el = q(id);
                     if (el) { el.disabled = true; el.style.opacity = '0.7'; }
                 });

@@ -296,7 +296,8 @@ Doc: docs/LOGIC_SPEC_v1.5.3.md
     </div>
 
     <div class="premise-grid">
-        <div class="k">Рег. № кв</div><div><span id="premiseRegnum">—</span></div>
+        <div class="k">Внутренний regnum</div><div><span id="premiseRegnum">—</span></div>
+        <div class="k">Официальный №</div><div><span id="premiseOfficialRegnum">—</span></div>
         <div class="k">Адрес</div><div><span id="premiseAddress">—</span></div>
         <div class="k">Площадь</div><div><span id="premiseSquare">—</span></div>
         <div class="k">Квартира заведена</div><div><span id="premiseCreatedAt">—</span></div>
@@ -772,6 +773,7 @@ function fillAbonentCard() {
     };
 
     setText('premiseRegnum', regnum || a.regnum || '');
+    setText('premiseOfficialRegnum', premise.officialRegnum || '—');
     setText('premiseAddress', addr);
     setText('premiseSquare', (premise.square ?? a.square) ?? '');
     setText('premiseCreatedAt', premise.createdAt || '');

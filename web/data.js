@@ -417,7 +417,9 @@
           house: a.house || "",
           flat: a.flat || "",
           square: a.square ?? a.totalArea ?? "",
-          createdAt: a.premiseCreatedAt || a.premiseCreated || "2000-01-01"
+          createdAt: a.premiseCreatedAt || a.premiseCreated || "2000-01-01",
+          officialRegnum: normalizeOfficialRegnumValue(a.officialRegnum || ""),
+          regnumType: a.officialRegnum ? "official" : "temp"
         };
       }
 
@@ -433,6 +435,16 @@
 
       // нормализуем
       a.premiseRegnum = regnum;
+    });
+
+    Object.keys(db.premises).forEach((regKey) => {
+      const p = db.premises[regKey];
+      if (!p || typeof p !== "object") return;
+      const officialRegnum = normalizeOfficialRegnumValue(p.officialRegnum);
+      p.officialRegnum = officialRegnum;
+      if (officialRegnum) p.regnumType = "official";
+      else if (!String(p.regnumType || "").trim()) p.regnumType = "temp";
+      console.log("[premises][official-regnum] normalized", String(regKey));
     });
 
     // чистим битые links
@@ -465,6 +477,9 @@
   // ============================================================
   function normalizeRegnumValue(v) {
     return String(v || "").trim();
+  }
+  function normalizeOfficialRegnumValue(v) {
+    return String(v || "").trim().replace(/\s+/g, " ");
   }
 
   function listByObjectValues(obj) {
@@ -551,7 +566,11 @@
       var current = window.AbonentsDB.premises[regnum] || {};
       var merged = Object.assign({}, current, premiseObj || {});
       merged.regnum = regnum;
+      merged.officialRegnum = normalizeOfficialRegnumValue(merged.officialRegnum);
+      if (merged.officialRegnum) merged.regnumType = "official";
+      else if (!String(merged.regnumType || "").trim()) merged.regnumType = "temp";
       if (!String(merged.createdAt || "").trim()) merged.createdAt = "2000-01-01";
+      console.log("[premises][official-regnum] normalized", regnum);
 
       window.AbonentsDB.premises[regnum] = merged;
       return !!window.saveAbonentsDB && window.saveAbonentsDB();
@@ -628,7 +647,8 @@
           house: input.house || "",
           flat: input.flat || "",
           square: input.square !== undefined ? input.square : (input.totalArea !== undefined ? input.totalArea : ""),
-          createdAt: input.premiseCreatedAt || input.premiseCreated || "2000-01-01"
+          createdAt: input.premiseCreatedAt || input.premiseCreated || "2000-01-01",
+          officialRegnum: normalizeOfficialRegnumValue(input.officialRegnum || "")
         };
         this.ensurePremise(premiseObj);
         this.linkAbonentToPremise(
@@ -678,9 +698,16 @@
         if (!date) throw new Error("MERGE_DATE_REQUIRED");
 
         var toPremise = Object.assign({}, options && options.toPremise || {});
+        var officialRegnum = normalizeOfficialRegnumValue(toPremise.officialRegnum || "");
         var newRegnum = normalizeRegnumValue(toPremise.regnum);
         if (!newRegnum) throw new Error("MERGE_TO_REGNUM_REQUIRED");
         if (db.premises[newRegnum]) throw new Error("MERGE_TO_REGNUM_EXISTS");
+        if (officialRegnum) {
+          var duplicateOfficial = Object.keys(db.premises).find(function (rk) {
+            return normalizeOfficialRegnumValue(db.premises[rk] && db.premises[rk].officialRegnum) === officialRegnum;
+          });
+          if (duplicateOfficial) throw new Error("MERGE_TO_OFFICIAL_REGNUM_DUP:" + duplicateOfficial);
+        }
 
         for (var i = 0; i < fromRegnums.length; i++) {
           var rr = fromRegnums[i];
@@ -719,6 +746,8 @@
           flat: String(toPremise.flat || ""),
           square: toPremise.square !== undefined ? toPremise.square : "",
           createdAt: String(toPremise.createdAt || date),
+          officialRegnum: officialRegnum,
+          regnumType: officialRegnum ? "official" : "temp",
           status: "active",
           createdFromMergeRegnums: fromRegnums.slice(),
           mergedAt: date
