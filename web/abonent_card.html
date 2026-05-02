@@ -234,6 +234,20 @@ Doc: docs/LOGIC_SPEC_v1.5.3.md
         .transfer-item a{
             text-decoration: underline;
         }
+
+        .merge-list {
+            max-height: 180px;
+            overflow-y: auto;
+            border: 2px solid #000;
+            padding: 6px;
+            margin-top: 4px;
+            background: #fff;
+        }
+        .merge-item {
+            font-size: 13px;
+            margin-top: 4px;
+        }
+        .merge-item:first-child { margin-top: 0; }
     </style>
 </head>
 <body>
@@ -365,7 +379,7 @@ Doc: docs/LOGIC_SPEC_v1.5.3.md
   <div class="change-resp-card" style="width:680px;">
     <div style="font-weight:700;font-size:16px;">Преобразовать квартиру</div>
     <div style="margin-top:6px;font-size:13px;">Тип: <b>Объединение квартир</b></div>
-    <label>Исходные рег. № квартир (через запятую)</label><input id="pt_fromRegnums" type="text">
+    <label>Исходные квартиры</label><div id="merge_from_list" class="merge-list"></div>
     <label>Новый рег. № квартиры</label><input id="pt_newRegnum" type="text">
     <label>Город</label><input id="pt_city" type="text">
     <label>Улица</label><input id="pt_street" type="text">
@@ -818,13 +832,37 @@ function fillAbonentCard() {
     try { renderResponsibilityHistory(regnum || a.regnum || ''); } catch(e) {}
     try { renderTransferInfo(id, regnum || a.regnum || ''); } catch(e) {}
 }
+function renderMergeList(){
+  const db = Data.getDb();
+  const container = document.getElementById('merge_from_list');
+  if (!container || !db || !db.premises) return;
+
+  container.innerHTML = '';
+
+  Object.values(db.premises).forEach(p => {
+    if (p.status && p.status !== 'active') return;
+
+    const div = document.createElement('div');
+    div.className = 'merge-item';
+
+    div.innerHTML = `
+      <label>
+        <input type="checkbox" value="${p.regnum}">
+        ${p.officialRegnum || p.regnum}
+        — ${p.city || ''}, ${p.street || ''} ${p.house || ''}-${p.flat || ''}
+      </label>
+    `;
+
+    container.appendChild(div);
+  });
+}
+
 function openPremiseTransformModal(){
   if (!canWriteOrExplainLocal()) return;
   const { id, a } = getCurrentAbonent();
   if (!a) return;
   const db = getDb();
   const { regnum, p } = getPremiseForAbonent(id, a);
-  document.getElementById('pt_fromRegnums').value = regnum || '';
   document.getElementById('pt_newRegnum').value = '';
   document.getElementById('pt_city').value = String(p?.city || a.city || '');
   document.getElementById('pt_street').value = String(p?.street || a.street || '');
@@ -837,20 +875,27 @@ function openPremiseTransformModal(){
   const d = new Date(); document.getElementById('pt_date').value = d.toISOString().slice(0,10);
   const sel = document.getElementById('pt_newResponsible'); sel.innerHTML = '<option value="">— не назначать —</option>';
   Object.keys(db).forEach(function(k){ var opt=document.createElement('option'); opt.value=String(k); opt.textContent=String(k)+' — '+String(db[k]?.fio||''); sel.appendChild(opt); });
+  renderMergeList();
+  if (regnum) {
+    const currentCheckbox = document.querySelector('#merge_from_list input[type="checkbox"][value="' + regnum + '"]');
+    if (currentCheckbox) currentCheckbox.checked = true;
+  }
   document.getElementById('premiseTransformModal').style.display = 'flex';
 }
 function closePremiseTransformModal(){ var m=document.getElementById('premiseTransformModal'); if(m)m.style.display='none'; }
 async function applyPremiseMerge(){
   if (!window.Data || typeof window.Data.mergePremises !== 'function') { alert('merge API недоступен'); return; }
-  const fromRegnums = String(document.getElementById('pt_fromRegnums').value||'').split(',').map(s=>s.trim()).filter(Boolean);
+  const selected = Array.from(
+    document.querySelectorAll('#merge_from_list input:checked')
+  ).map(el => el.value);
   const date = String(document.getElementById('pt_date').value||'').trim();
   const newRegnum = String(document.getElementById('pt_newRegnum').value||'').trim();
-  if (fromRegnums.length < 2) { alert('Нужно выбрать минимум 2 квартиры'); return; }
+  if (selected.length < 2) { alert('Нужно выбрать минимум 2 квартиры'); return; }
   if (!date) { alert('Укажите дату объединения'); return; }
   if (!newRegnum) { alert('Укажите новый рег. № квартиры'); return; }
   try{
     await window.Data.mergePremises({
-      fromRegnums: fromRegnums,
+      fromRegnums: selected,
       toPremise: {
         regnum: newRegnum,
         city: String(document.getElementById('pt_city').value||''),
