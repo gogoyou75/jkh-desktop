@@ -355,9 +355,9 @@ Doc: docs/LOGIC_SPEC_v1.5.3.md
     </div>
 
     <div class="premise-actions">
-        <button class="btn" type="button" onclick="openChangeResponsibleModal()">Сменить ответственного</button>
+        <button class="btn" id="btnChangeResponsible" type="button" onclick="openChangeResponsibleModal()">Сменить ответственного</button>
         <button class="btn" type="button" onclick="openResponsibilityReport()">Отчёт: кто ответственный</button>
-        <button class="btn" type="button" onclick="openPremiseTransformModal()">Преобразовать квартиру</button>
+        <button class="btn" id="btnTransformPremise" type="button" onclick="openPremiseTransformModal()">Преобразовать квартиру</button>
     </div>
 
     <div style="margin-top:12px;">
@@ -855,10 +855,19 @@ function fillAbonentCard() {
         : '—';
     const mp = document.getElementById('premiseMyPeriod');
     if (mp) mp.innerHTML = myHtml;
-        var premiseStatusText = premise.status === 'merged' ? 'объединена (расчёт остановлен)' : (premise.status || 'active');
-    if (mdt) premiseStatusText += ' | Расчёт остановлен с ' + mdt;
+
+    var premiseStatusText = premise.status === 'merged' ? 'объединена (расчёт остановлен)' : (premise.status || 'active');
+    const stopDate = String(mdt || premise.closedAt || '').trim();
+    if (stopDate) premiseStatusText += ' | Расчёт остановлен с ' + stopDate;
     if (premise.mergedIntoRegnum) premiseStatusText += ' | Объединена в ' + premise.mergedIntoRegnum;
     setText('premiseStatus', premiseStatusText);
+
+    const premiseClosed = (String(premise.status || 'active').trim() !== 'active') || !!String(premise.closedAt || '').trim();
+    const disableReason = 'Квартира закрыта/объединена. Действие недоступно.';
+    const btnChange = document.getElementById('btnChangeResponsible');
+    const btnTransform = document.getElementById('btnTransformPremise');
+    if (btnChange) { btnChange.disabled = premiseClosed; btnChange.title = premiseClosed ? disableReason : ''; }
+    if (btnTransform) { btnTransform.disabled = premiseClosed; btnTransform.title = premiseClosed ? disableReason : ''; }
     setText('premiseClosedAt', premise.closedAt || '');
     setText('premiseMergedInto', premise.mergedIntoRegnum || '');
     setText('premiseMergeFrom', Array.isArray(premise.createdFromMergeRegnums) ? premise.createdFromMergeRegnums.join(', ') : '');

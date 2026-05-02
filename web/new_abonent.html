@@ -1121,8 +1121,7 @@ async function createAbonent() {
     }
 
     // UID
-    const uidImport = String(document.getElementById("na_uid_import").value || "").trim();
-    const uid = (uidImport && uidImport.startsWith("uid_")) ? uidImport : generateUid();
+    const uid = generateUid();
 
     // создаём нового с нулевым долгом (как и было)
     dbRoot.abonents[ls] = {

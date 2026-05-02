@@ -1166,7 +1166,7 @@ window.PremisesAdmin = (function () {
                 <td>
                     <div class="row-actions">
                         <button type="button" data-act="edit" data-regnum="${esc(p.regnum)}">ред.</button>
-                        <button type="button" data-act="create" data-regnum="${esc(p.regnum)}" ${closed ? 'disabled title="Для закрытой квартиры недоступно"' : ''}>абонент+</button>
+                        <button type="button" data-act="create" data-regnum="${esc(p.regnum)}" ${closed ? 'disabled title="Квартира закрыта/объединена. Создание нового активного абонента запрещено."' : ''}>абонент+</button>
                         <button type="button" data-act="del" data-regnum="${esc(p.regnum)}">удал.</button>
                     </div>
                 </td>
