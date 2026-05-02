@@ -1022,6 +1022,27 @@ window.PremisesAdmin = (function () {
         setFormModeAdd();
     }
 
+    function premiseSortWeight(p) {
+        var st = String(p?.status || 'active').trim();
+        var hasClosed = !!String(p?.closedAt || '').trim();
+        if (!hasClosed && (!st || st === 'active')) return 0;
+        if (st === 'merged') return 1;
+        if (st === 'archived') return 2;
+        if (st === 'split') return 3;
+        return 4;
+    }
+
+    function premiseStatusBadge(p) {
+        var st = String(p?.status || 'active').trim();
+        var hasClosed = !!String(p?.closedAt || '').trim();
+        if (st === 'merged' || hasClosed) return 'объединена / расчёт остановлен';
+        return '';
+    }
+
+    function isPremiseClosed(p) {
+        return premiseSortWeight(p) > 0;
+    }
+
     function renderTable() {
         const tbody = q('premisesTable')?.querySelector('tbody');
         if (!tbody) return;
@@ -1110,7 +1131,12 @@ window.PremisesAdmin = (function () {
         // ============================================================
         const db = window.AbonentsDB;
         const premises = db?.premises || {};
-        const rows = Object.keys(premises).map(regnum => premises[regnum]).sort(comparePremisesByFlatDesc);
+        const rows = Object.keys(premises).map(regnum => premises[regnum]).sort((a, b) => {
+            const wa = premiseSortWeight(a);
+            const wb = premiseSortWeight(b);
+            if (wa !== wb) return wa - wb;
+            return comparePremisesByFlatDesc(a, b);
+        });
 
         let shown = 0;
         rows.forEach(p => {
@@ -1122,9 +1148,13 @@ window.PremisesAdmin = (function () {
             const fioText = fio ? fio : '—';
 
             const tr = document.createElement('tr');
+            const statusBadge = premiseStatusBadge(p);
             const regLabel = isTempRegnum(p.regnum) ? `${esc(p.regnum)} <span class="small" style="background:#fff3bf; padding:0 4px; border:1px solid #000; margin-left:6px;">временный</span>` : esc(p.regnum);
+            const regCell = statusBadge ? `${regLabel} <span class="small" style="background:#f0f0f0; color:#555; padding:0 4px; border:1px solid #bbb; margin-left:6px;">${esc(statusBadge)}</span>` : regLabel;
+            const closed = isPremiseClosed(p);
+            if (closed) tr.style.opacity = '0.6';
             tr.innerHTML = `
-                <td class="mono">${regLabel}</td>
+                <td class="mono">${regCell}</td>
                 <td class="mono">${p.officialRegnum ? esc(p.officialRegnum) : "—"}</td>
                 <td>${esc(p.city)}</td>
                 <td>${esc(p.street)}</td>
@@ -1136,7 +1166,7 @@ window.PremisesAdmin = (function () {
                 <td>
                     <div class="row-actions">
                         <button type="button" data-act="edit" data-regnum="${esc(p.regnum)}">ред.</button>
-                        <button type="button" data-act="create" data-regnum="${esc(p.regnum)}">абонент+</button>
+                        <button type="button" data-act="create" data-regnum="${esc(p.regnum)}" ${closed ? 'disabled title="Для закрытой квартиры недоступно"' : ''}>абонент+</button>
                         <button type="button" data-act="del" data-regnum="${esc(p.regnum)}">удал.</button>
                     </div>
                 </td>

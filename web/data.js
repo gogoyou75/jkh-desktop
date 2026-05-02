@@ -819,6 +819,18 @@
         var newResp = String(options && options.newResponsibleAbonentId || "").trim();
         if (newResp) {
           db.links.push({ abonentId: newResp, regnum: newRegnum, dateFrom: date, dateTo: "" });
+          if (db.abonents && db.abonents[newResp]) {
+            var newRespAbonent = db.abonents[newResp];
+            newRespAbonent.premiseRegnum = newRegnum;
+            newRespAbonent.regnum = newRegnum;
+            newRespAbonent.city = String(toPremise.city || "");
+            newRespAbonent.street = String(toPremise.street || "");
+            newRespAbonent.house = String(toPremise.house || "");
+            newRespAbonent.flat = String(toPremise.flat || "");
+            newRespAbonent.square = toPremise.square !== undefined ? toPremise.square : "";
+            newRespAbonent.calcStartDate = date;
+            newRespAbonent.calcEndDate = "";
+          }
         }
 
         var ev = {

@@ -846,7 +846,8 @@ function fillAbonentCard() {
     }
 
     // период ответственности этого абонента по квартире
-    const myLink = regnum ? getActiveLinkForAbonent(id, regnum) : null;
+    const myLinks = regnum ? getLinks().filter(l => String(l?.abonentId || '').trim() === String(id).trim() && String(l?.regnum || '').trim() === String(regnum).trim()) : [];
+    const myLink = myLinks.find(l => !String(l?.dateTo || '').trim()) || (myLinks.length ? myLinks.slice().sort((a,b) => String(b?.dateTo || '').localeCompare(String(a?.dateTo || '')))[0] : null);
     const mdf = String(myLink?.dateFrom || '').trim();
     const mdt = String(myLink?.dateTo || '').trim();
     const myHtml = (mdf || mdt)
@@ -854,7 +855,10 @@ function fillAbonentCard() {
         : '—';
     const mp = document.getElementById('premiseMyPeriod');
     if (mp) mp.innerHTML = myHtml;
-    setText('premiseStatus', premise.status === 'merged' ? 'объединена (расчёт остановлен)' : (premise.status || 'active'));
+        var premiseStatusText = premise.status === 'merged' ? 'объединена (расчёт остановлен)' : (premise.status || 'active');
+    if (mdt) premiseStatusText += ' | Расчёт остановлен с ' + mdt;
+    if (premise.mergedIntoRegnum) premiseStatusText += ' | Объединена в ' + premise.mergedIntoRegnum;
+    setText('premiseStatus', premiseStatusText);
     setText('premiseClosedAt', premise.closedAt || '');
     setText('premiseMergedInto', premise.mergedIntoRegnum || '');
     setText('premiseMergeFrom', Array.isArray(premise.createdFromMergeRegnums) ? premise.createdFromMergeRegnums.join(', ') : '');

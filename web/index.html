@@ -627,10 +627,12 @@ function rebuildIndexRows(){
         const totals = calcTotalsFromPayments(id, a);
         const regnum = String(a.regnum || a.premiseRegnum || a.premise_regnum || a.regNumber || a.reg_no || a.flat || '').trim();
         const premise = regnum ? premises[regnum] : null;
-        const anyLink = links.find(l => String(l?.abonentId || '').trim() === id && String(l?.regnum || '').trim() === regnum);
-        const hasClosedLink = !!String(anyLink?.dateTo || '').trim();
+        const ownLinks = links.filter(l => String(l?.abonentId || '').trim() === id && String(l?.regnum || '').trim() === regnum);
+        const activeLink = ownLinks.find(l => !String(l?.dateTo || '').trim());
+        const hasClosedLink = ownLinks.some(l => !!String(l?.dateTo || '').trim());
+        const hasNoActiveButClosed = !activeLink && hasClosedLink;
         const isMerged = String(premise?.status || '').trim() === 'merged';
-        const rowStatusMark = isMerged ? 'объединена' : (hasClosedLink ? 'расчёт остановлен' : '');
+        const rowStatusMark = isMerged ? 'объединена' : (hasNoActiveButClosed ? 'расчёт остановлен' : '');
         allRows.push({
             id,
             fam,
