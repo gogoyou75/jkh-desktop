@@ -1086,7 +1086,7 @@ window.PremisesAdmin = (function () {
 
                     tr.innerHTML = `
                         <td class="mono">${regLabel}</td>
-                        <td class="mono">${esc(p.officialRegnum || '—')}</td>
+                        <td class="mono">${p.officialRegnum ? esc(p.officialRegnum) : '—'}</td>
                         <td>${esc(p.city)}</td>
                         <td>${esc(p.street)}</td>
                         <td>${esc(p.house)}</td>
@@ -1125,7 +1125,7 @@ window.PremisesAdmin = (function () {
             const regLabel = isTempRegnum(p.regnum) ? `${esc(p.regnum)} <span class="small" style="background:#fff3bf; padding:0 4px; border:1px solid #000; margin-left:6px;">временный</span>` : esc(p.regnum);
             tr.innerHTML = `
                 <td class="mono">${regLabel}</td>
-                <td class="mono">${esc(p.officialRegnum || '—')}</td>
+                <td class="mono">${p.officialRegnum ? esc(p.officialRegnum) : '—'}</td>
                 <td>${esc(p.city)}</td>
                 <td>${esc(p.street)}</td>
                 <td>${esc(p.house)}</td>
