@@ -808,6 +808,9 @@ function clearDraftNewAbonent(){
 function paymentsKeyForLs(ls){
   return 'payments_' + String(ls || '').trim();
 }
+function paymentsKeyForUid(uid){
+  return 'payments_' + String(uid || '').trim();
+}
 function storeGet(key){ try { return (window.JKHStore && JKHStore.getRaw) ? JKHStore.getRaw(key) : null; } catch { return null; } }
 function storeSet(key, value){ try { if (window.JKHStore && JKHStore.setRaw) JKHStore.setRaw(key, value); } catch {} }
 function loadPaymentsForLs(ls){
@@ -820,11 +823,28 @@ function loadPaymentsForLs(ls){
     return [];
   }
 }
+function loadPaymentsForUid(uid){
+  try {
+    const raw = storeGet(paymentsKeyForUid(uid));
+    if (!raw) return [];
+    const arr = JSON.parse(raw);
+    return Array.isArray(arr) ? arr : [];
+  } catch {
+    return [];
+  }
+}
 function savePaymentsForLs(ls, arr){
   try {
     storeSet(paymentsKeyForLs(ls), JSON.stringify(Array.isArray(arr) ? arr : []));
   } catch (e){
     console.warn('[new_abonent] savePaymentsForLs error', e);
+  }
+}
+function savePaymentsForUid(uid, arr){
+  try {
+    storeSet(paymentsKeyForUid(uid), JSON.stringify(Array.isArray(arr) ? arr : []));
+  } catch (e){
+    console.warn('[new_abonent] savePaymentsForUid error', e);
   }
 }
 function nextPaymentIdForArray(arr){
@@ -867,7 +887,8 @@ function importPaymentsFromDraftForNewAbonent(ls, abonentObj){
   const pays = Array.isArray(row.payments) ? row.payments : [];
   if (!pays.length) return { ok: true, imported: 0, reason: 'no_payments' };
 
-  const payArr = loadPaymentsForLs(ls);
+  const uidForKey = String(abonentObj?.uid || '').trim();
+  const payArr = uidForKey ? loadPaymentsForUid(uidForKey) : loadPaymentsForLs(ls);
   let idCounter = nextPaymentIdForArray(payArr);
   let addedPays = 0;
 
@@ -902,7 +923,10 @@ function importPaymentsFromDraftForNewAbonent(ls, abonentObj){
     addedPays++;
   }
 
-  if (addedPays) savePaymentsForLs(ls, payArr);
+  if (addedPays){
+    if (uidForKey) savePaymentsForUid(uidForKey, payArr);
+    else savePaymentsForLs(ls, payArr);
+  }
 
   try {
     if (abonentObj){
@@ -1059,6 +1083,10 @@ async function createAbonent() {
 
     const premise = dbRoot.premises?.[regnum] || null;
     if (!premise) { setCreateStatus("Квартира (premises) по regnum не найдена. Сначала заведите квартиру, затем создавайте абонента."); return; }
+    if (String(premise.status || 'active').trim() !== 'active' || String(premise.closedAt || '').trim()){
+      setCreateStatus("Квартира закрыта/объединена. Создание нового активного абонента запрещено.");
+      return;
+    }
 
     const city = String(document.getElementById("na_city").value || "").trim();
     const street = String(document.getElementById("na_street").value || "").trim();

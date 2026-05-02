@@ -364,9 +364,19 @@ function splitAccrualByOwnership(accr, year, month, history) {
     const first = Object.keys(db)[0];
     return first || "27";
   }
+  function getAbonentTechnicalId() {
+    try {
+      const id = String(getAbonentId() || "");
+      const ab = window.AbonentsDB && window.AbonentsDB.abonents ? window.AbonentsDB.abonents[id] : null;
+      const uid = String(ab && ab.uid || "").trim();
+      return uid || id;
+    } catch (e) {
+      return String(getAbonentId() || "");
+    }
+  }
 
   function paymentsKey() {
-    return "payments_" + getAbonentId();
+    return "payments_" + getAbonentTechnicalId();
   }
 
   /* =========================================================
@@ -899,8 +909,8 @@ for (const p of parts) {
 
 
   // ===== ФИЛЬТР ПО ПЕРИОДУ ДЛЯ "РАСЧЁТ ВЗЫСКИВАЕМОЙ СУММЫ" =====
-  function calcPeriodKey() { return "calc_period_" + getAbonentId(); }
-  function calcPeriodActiveKey() { return "calc_period_active_" + getAbonentId(); }
+  function calcPeriodKey() { return "calc_period_" + getAbonentTechnicalId(); }
+  function calcPeriodActiveKey() { return "calc_period_active_" + getAbonentTechnicalId(); }
 
   function lastAddedPaymentKey() { return "last_added_payment_" + getAbonentId(); }
   function setLastAddedPaymentId(id) {
@@ -1443,8 +1453,8 @@ function applyRunningTotals(viewRows) {
   const REFI_KEY_MORA = (window.JKH_CONST && window.JKH_CONST.REFI_KEY_MORA)
     ? window.JKH_CONST.REFI_KEY_MORA
     : "refinancing_rates_moratorium_v1";
-  function excludePeriodsKey() { return "exclude_periods_" + getAbonentId(); }
-  function moratoriumKey() { return "moratorium_" + getAbonentId(); }
+  function excludePeriodsKey() { return "exclude_periods_" + getAbonentTechnicalId(); }
+  function moratoriumKey() { return "moratorium_" + getAbonentTechnicalId(); }
 
   function isMoratoriumActive(){
     return storeGetRaw(moratoriumKey()) === "1";

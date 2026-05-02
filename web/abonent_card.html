@@ -311,7 +311,7 @@ Doc: docs/LOGIC_SPEC_v1.5.3.md
 
     <thead>
     <tr>
-        <th>лицевой счёт</th>
+        <th>Лицевой счёт (бух.)</th>
         <th>рег. № кв</th>
         <th>Фамилия</th>
         <th>Имя</th>
@@ -323,7 +323,7 @@ Doc: docs/LOGIC_SPEC_v1.5.3.md
         <th>улица</th>
         <th>дом</th>
         <th>кв</th>
-        <th>Уникальный ID</th>
+        <th>UID (тех. ID)</th>
         <th>телефон</th>
     </tr>
     </thead>
@@ -1899,16 +1899,23 @@ async function saveAbonentEdit() {
 }
 
 function moratoriumKey(id){ return "moratorium_" + id; }
+function getAbonentTechnicalIdFromURL(){
+    const id = getAbonentIdFromURL();
+    const db = getDb() || {};
+    const a = db[id] || null;
+    const uid = String(a?.uid || '').trim();
+    return uid || id;
+}
 
 function loadMoratoriumUI(){
-    const id = getAbonentIdFromURL();
+    const id = getAbonentTechnicalIdFromURL();
     const el = document.getElementById("moratoriumToggle");
     if (!el) return;
     el.checked = storeGet(moratoriumKey(id)) === "1";
 }
 // intentionally local-only: флаг моратория хранится локально по текущему ЛС
 function bindMoratoriumUI(){
-    const id = getAbonentIdFromURL();
+    const id = getAbonentTechnicalIdFromURL();
     const el = document.getElementById("moratoriumToggle");
     if (!el) return;
     el.addEventListener("change", () => {
@@ -1926,7 +1933,7 @@ document.addEventListener("DOMContentLoaded", () => {
 });
 
 function openNotesModal() {
-    const id = getAbonentIdFromURL();
+    const id = getAbonentTechnicalIdFromURL();
     const note = storeGet("note_" + id) || "";
     document.getElementById("notesText").value = note;
     document.getElementById("notesModal").style.display = "flex";
@@ -1937,7 +1944,7 @@ function closeNotesModal() {
 // intentionally local-only: заметки не входят в server-first сценарий этой задачи
 function saveNotes() {
     if (!canWriteOrExplainLocal()) return;
-    const id = getAbonentIdFromURL();
+    const id = getAbonentTechnicalIdFromURL();
     const txt = document.getElementById("notesText").value.trim();
     storeSet("note_" + id, txt);
     closeNotesModal();
@@ -1948,7 +1955,7 @@ function calcPeriodKey(id){ return "calc_period_" + id; }
 function calcPeriodActiveKey(id){ return "calc_period_active_" + id; }
 
 function loadCalcPeriodUI(){
-    const id = getAbonentIdFromURL();
+    const id = getAbonentTechnicalIdFromURL();
     const fromEl = document.getElementById("calcFrom");
     const toEl   = document.getElementById("calcTo");
     if (!fromEl || !toEl) return;
@@ -1971,12 +1978,12 @@ function loadCalcPeriodUI(){
 
 // intentionally local-only: период расчёта это UI-параметр и не отправляется на сервер
 function saveCalcPeriod(from, to){
-    const id = getAbonentIdFromURL();
+    const id = getAbonentTechnicalIdFromURL();
     storeSet(calcPeriodKey(id), JSON.stringify({from: from || "", to: to || ""}));
 }
 
 function setCalcPeriodActive(active){
-    const id = getAbonentIdFromURL();
+    const id = getAbonentTechnicalIdFromURL();
     storeSet(calcPeriodActiveKey(id), active ? "1" : "0");
 }
 
