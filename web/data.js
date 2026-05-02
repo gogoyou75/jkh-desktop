@@ -811,27 +811,61 @@
             var oldId = String(l && l.abonentId || "").trim();
             if (oldId && db.abonents && db.abonents[oldId]) {
               db.abonents[oldId].calcEndDate = closedAt;
-              console.log("[premise-transform] old abonent calcEndDate set", oldId, closedAt);
+              console.log("[premise-transform] old abonent closed", oldId, closedAt);
             }
           }
         });
 
         var newResp = String(options && options.newResponsibleAbonentId || "").trim();
-        if (newResp) {
-          db.links.push({ abonentId: newResp, regnum: newRegnum, dateFrom: date, dateTo: "" });
-          if (db.abonents && db.abonents[newResp]) {
-            var newRespAbonent = db.abonents[newResp];
-            newRespAbonent.premiseRegnum = newRegnum;
-            newRespAbonent.regnum = newRegnum;
-            newRespAbonent.city = String(toPremise.city || "");
-            newRespAbonent.street = String(toPremise.street || "");
-            newRespAbonent.house = String(toPremise.house || "");
-            newRespAbonent.flat = String(toPremise.flat || "");
-            newRespAbonent.square = toPremise.square !== undefined ? toPremise.square : "";
-            newRespAbonent.calcStartDate = date;
-            newRespAbonent.calcEndDate = "";
-          }
+        if (!newResp) throw new Error("MERGE_RESPONSIBLE_REQUIRED");
+        if (!db.abonents || !db.abonents[newResp]) throw new Error("MERGE_RESPONSIBLE_NOT_FOUND");
+
+        function _generateNewAbonentId(abonents) {
+          var maxNum = -1;
+          Object.keys(abonents || {}).forEach(function (k) {
+            if (/^\d+$/.test(String(k))) {
+              var n = Number(k);
+              if (isFinite(n) && n > maxNum) maxNum = n;
+            }
+          });
+          if (maxNum >= 0) return String(maxNum + 1);
+          return String(Date.now());
         }
+
+        var generatedNewId = _generateNewAbonentId(db.abonents);
+        while (db.abonents[generatedNewId]) {
+          generatedNewId = String(Number(generatedNewId) + 1 || Date.now());
+        }
+
+        var sourceAbonent = db.abonents[newResp] || {};
+        var newAbonent = Object.assign({}, sourceAbonent, {
+          id: generatedNewId,
+          fio: String(sourceAbonent.fio || ""),
+          fam: sourceAbonent.fam,
+          name: sourceAbonent.name,
+          otch: sourceAbonent.otch,
+          phone: sourceAbonent.phone,
+          share: sourceAbonent.share,
+          rooms: sourceAbonent.rooms,
+          regnum: newRegnum,
+          premiseRegnum: newRegnum,
+          city: String(toPremise.city || ""),
+          street: String(toPremise.street || ""),
+          house: String(toPremise.house || ""),
+          flat: String(toPremise.flat || ""),
+          square: toPremise.square !== undefined ? toPremise.square : "",
+          calcStartDate: date,
+          calcEndDate: "",
+          premiseCreatedAt: date,
+          createdFromMerge: true,
+          sourceAbonentId: newResp,
+          sourceMergeEventId: ""
+        });
+        db.abonents[generatedNewId] = newAbonent;
+        console.log("[premise-transform] new abonent generated", generatedNewId, "from", newResp);
+
+        db.links.push({ abonentId: generatedNewId, regnum: newRegnum, dateFrom: date, dateTo: "" });
+        console.log("[premise-transform] new active link created", generatedNewId, newRegnum);
 
         var ev = {
           id: "evt_" + Date.now() + "_" + Math.floor(Math.random() * 1000000),
@@ -845,7 +879,12 @@
           createdAt: (new Date()).toISOString(),
           createdBy: _ownerId()
         };
+        ev.newAbonentId = generatedNewId;
+        ev.sourceAbonentId = newResp;
         db.premiseEvents.push(ev);
+        if (db.abonents && db.abonents[generatedNewId]) {
+          db.abonents[generatedNewId].sourceMergeEventId = ev.id;
+        }
         console.log("[premise-transform] event saved");
 
         await this.flushDbToServer();

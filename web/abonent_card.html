@@ -978,7 +978,7 @@ async function applyPremiseMerge(){
   if (selected.length < 2) { alert('Нужно выбрать минимум 2 квартиры'); return; }
   if (!date) { alert('Укажите дату объединения'); return; }
   try{
-    await window.Data.mergePremises({
+    const mergeResult = await window.Data.mergePremises({
       fromRegnums: selected,
       toPremise: {
         regnum: '',
@@ -997,7 +997,13 @@ async function applyPremiseMerge(){
     });
     alert('Объединение выполнено');
     closePremiseTransformModal();
-    window.location.reload();
+    var redirectAbonentId = String(mergeResult && mergeResult.newAbonentId || '').trim();
+    if (redirectAbonentId) {
+      console.log('[premise-transform] redirect to new abonent', redirectAbonentId);
+      window.location.href = 'abonent_card.html?abonent=' + encodeURIComponent(redirectAbonentId);
+    } else {
+      window.location.reload();
+    }
   }catch(e){
     alert('Ошибка объединения: ' + (e && e.message ? e.message : e));
   }
