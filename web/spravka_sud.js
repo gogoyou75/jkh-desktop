@@ -158,6 +158,37 @@
     return normalizeDbRoot(parsed);
   }
 
+  function resolvePaymentsKeyForSpravka(ctx){
+    const abonentId = String((ctx && ctx.abonentId) || "").trim();
+    if (!abonentId) {
+      console.warn("[spravka_sud][payment-key] blocked", { abonentId: abonentId, reason: "UID_REQUIRED" });
+      return "";
+    }
+
+    try {
+      if (typeof window.getPaymentsKeyForAbonent === "function") {
+        const key = String(window.getPaymentsKeyForAbonent(abonentId) || "").trim();
+        if (key) {
+          console.log("[spravka_sud][payment-key] uid", { abonentId: abonentId, key: key });
+          return key;
+        }
+      }
+    } catch (e) {}
+
+    const dbRoot = getDbRootForContext(ctx);
+    const abonent = dbRoot && dbRoot.abonents ? dbRoot.abonents[abonentId] : null;
+    const uid = String((abonent && abonent.uid) || "").trim();
+    if (uid) {
+      const key = "payments_" + uid;
+      console.log("[spravka_sud][payment-key] uid", { abonentId: abonentId, key: key });
+      return key;
+    }
+
+    console.warn("[spravka_sud][payment-key] blocked", { abonentId: abonentId, reason: "UID_REQUIRED" });
+    return "";
+  }
+
+
   function getActiveLinkForAbonent(dbRoot, abonentId){
     try {
       const links = Array.isArray(dbRoot && dbRoot.links) ? dbRoot.links : [];
@@ -382,7 +413,11 @@
       setText("stateDate", fmtDateRuAny(asOfFinal));
       setText("docDate", fmtDateRuAny(new Date()));
 
-      const paymentsKey = "payments_" + ctx.abonentId;
+      const paymentsKey = resolvePaymentsKeyForSpravka(ctx);
+      if (!paymentsKey) {
+        showFatal("Не удалось определить UID-ключ оплат для справки. Проверьте UID абонента.");
+        return;
+      }
       function hasUsableLedgerRows(rows){
         if (!Array.isArray(rows)) return false;
         for (let i = 0; i < rows.length; i++) {
