@@ -109,3 +109,18 @@
 - [ ] `SERVER_UPLOAD_FAILED` не останавливает справку.
 - [ ] Legacy/admin/global ключи не отправляются обычным upload.
 - [ ] `tariffs_<ownerId>` — единственный новый ключ тарифов для upload.
+
+
+---
+
+## v1.9.0 — UID payments / premise merge checklist
+
+- [ ] Новый абонент с повторным ЛС не читает `payments_<ЛС>`.
+- [ ] В консоли для нового абонента есть `payments_<uid>`.
+- [ ] `index.html` не пишет `skip existing payments_<ЛС>` для абонента с UID.
+- [ ] `payment_table.js`, `autoaccrual_engine.js`, `calc_engine.js`, `import_xls.html` используют UID-key.
+- [ ] Объединение квартир создаёт новую квартиру, новый ЛС и новый UID.
+- [ ] Старые квартиры после merge имеют статус `merged` и `closedAt`.
+- [ ] Старые абоненты после merge имеют `calcEndDate`.
+- [ ] На merged/closed квартиру нельзя создать активного абонента.
+- [ ] Старые оплаты не переносятся в новую объединённую квартиру.

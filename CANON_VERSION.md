@@ -1,63 +1,30 @@
+
 # CANON_VERSION
 
 Project: ПАПАЖКХ  
-Version: v1.8.3  
-Status: ETALON (обновлено под новую архитектуру)  
-Date: 2026-04-30
+Version: v1.9.0  
+Status: ETALON CANDIDATE  
+Date: 2026-05-03
 
-## CANON TRANSFER v18
-- Передача задолженности и пени между абонентами работает корректно
-- WITH_DEBT: долг и пеня переходят, пеня продолжает расти у нового абонента
-- WITHOUT_DEBT: новый абонент с нуля, старый замораживается
-- freeze_to = transfer_date - 1 день
+## v1.9.0 — UID Payments + Premise Merge
 
-## CANON TRANSFER v19 (ARCHITECTURE UPDATE — 2026-03-25)
+### UID-only payments
+- Лицевой счёт может повторяться и не является техническим ключом оплат.
+- Канонический ключ оплат: `payments_<uid>`.
+- Все новые/актуальные абоненты обязаны иметь `uid`.
+- `payments_<ЛС>` запрещён для абонента с UID.
+- Все модули должны использовать `window.getPaymentsKeyForAbonent(abonentId)`.
+- Старые `payments_<ЛС>` могут оставаться в storage, но не должны читаться новым абонентом.
 
-- Введена owner-изоляция данных (server-side only)
-- owner определяется только сервером (из сессии)
-- Тарифы:
-  - принадлежат пользователю (owner)
-  - едины для всех абонентов пользователя
-- Ставки рефинансирования:
-  - являются общими для всей системы (GLOBAL)
-  - одинаковы для всех пользователей и всех баз
-  - изменяются только администратором
-- Пользователь:
-  - не может изменять тарифы и ставки
-  - имеет только read-only доступ
-  - может отправить сообщение об ошибке ставки
-- Backend:
-  - источник истины
-- LocalStorage:
-  - используется как кэш
-- Добавлено требование синхронизации между устройствами owner
+### Premise merge
+- Добавлена операция объединения квартир.
+- Исходные квартиры выбираются из active-списка.
+- Старые квартиры закрываются как `merged`, расчёт по ним останавливается.
+- Новая квартира создаётся как новый объект с новым regnum.
+- Новая квартира получает `createdAt = date объединения`.
+- Создаётся новый абонент с новым ЛС и новым UID.
+- Старые долги/оплаты не переносятся автоматически.
+- Создание активного абонента на closed/merged квартире запрещено.
 
-
-## RefRates GLOBAL update — 2026-04-26
-
-Канон уточнён:
-- ставки рефинансирования не owner-level, а GLOBAL;
-- ключи: `refinancing_rates_normal_v1`, `refinancing_rates_moratorium_v1`;
-- backend owner: `GLOBAL`;
-- write: только admin;
-- read: все роли;
-- запрещены `ref_rates_{owner}`, fallback-ставки и демо-инициализация.
-
-
-## STORAGE SYNC + AUTOACCRUAL HARDENING v1.8.3 — 2026-04-30
-
-Канон уточнён:
-- `payments_<ЛС>` — канонический owner-scoped ledger начислений/оплат;
-- `JKHAutoAccrual.recalcForAbonent()` обязан сохранять ledger в тот же owner, из которого UI его читает;
-- `index.html` не делает массовый blind-recalc, а сначала проверяет ledger и ремонтирует только отсутствующие начисления;
-- `spravka_sud.js` строится из локального ledger и не падает при ошибке upload;
-- `storage.js` использует строгий upload whitelist `_isUploadAllowedKey()`;
-- legacy/admin/global ключи читаются при необходимости, но обычным owner-upload не отправляются;
-- `tariffs_<ownerId>` — единственный разрешённый upload-ключ тарифов;
-- `refinancing_rates_normal_v1` и `refinancing_rates_moratorium_v1` — GLOBAL/admin-only, обычным upload не отправляются.
-
-Запрещено:
-- `await Data.flushDbToServer()` без `try/catch` в UI-сценариях;
-- `changed:true` при пустом ledger;
-- upload неизвестных, legacy или GLOBAL/admin-only ключей;
-- считать `paid > 0` полноценным ledger без `accrued > 0`.
+## Предыдущий канон
+v1.8.3 Storage Sync + Autoaccrual Hardening остаётся действующим, кроме заменённого правила ключа оплат: вместо `payments_<ЛС>` теперь `payments_<uid>`.

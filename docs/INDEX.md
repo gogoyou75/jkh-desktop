@@ -93,3 +93,22 @@
 - устойчивый UI при ошибке sync;
 - owner-scoped сохранение ledger;
 - запрет отправки legacy/admin/global ключей обычным upload.
+
+
+## v1.9.0 — UID Payments + Premise Merge
+
+Главный документ:
+- `docs/logic/LOGIC_SPEC_v1.9.0_UID_PAYMENTS_PREMISE_MERGE.md`
+
+Связанные документы:
+- `docs/logic/LOGIC_SPEC.md`
+- `docs/STORAGE_BOUNDARY.md`
+- `docs/critical/CRITICAL_CHANGELOG.md`
+- `docs/logic/LOGIC_CHECKLIST_v1.4.md`
+
+Смысл:
+- платежи изолированы по UID, а не по лицевому счёту;
+- повторный ЛС больше не наследует старые оплаты;
+- добавлена бизнес-операция объединения квартир;
+- старые квартиры/абоненты закрываются исторически, новая квартира получает новый ЛС/UID;
+- закрытые/объединённые квартиры запрещены для создания новых активных абонентов.
