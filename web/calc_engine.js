@@ -316,9 +316,37 @@
   // Здесь мы умеем читать альтернативную схему:
   //   jkh_transfer_to_v1:<to>  +  jkh_frozen_debt_v1:<from>:<freezeISO>
   // и преобразуем её в формат transfer_balance (на лету).
+  function resolvePaymentKeyForAbonent(abonentId){
+    if (window.getPaymentsKeyForAbonent) {
+      const k = window.getPaymentsKeyForAbonent(abonentId);
+      if (k){
+        console.info('[calc_engine][payment-key] uid', { abonentId: String(abonentId), key: k });
+        return k;
+      }
+    }
+
+    const db = window.AbonentsDB || {};
+    const a = db.abonents && db.abonents[String(abonentId)];
+    const uid = String(a && a.uid || '').trim();
+
+    if (uid){
+      const key = 'payments_' + uid;
+      console.info('[calc_engine][payment-key] uid', { abonentId: String(abonentId), uid: uid, key: key });
+      return key;
+    }
+
+    console.warn('[calc_engine][payment-key] blocked', {
+      abonentId: String(abonentId),
+      reason: 'UID_REQUIRED'
+    });
+    return '';
+  }
+
   function loadPaymentsForAbonent(abonentId){
     try{
-      const raw = (window.JKHStore && JKHStore.getRaw) ? JKHStore.getRaw("payments_" + String(abonentId)) : null;
+      const key = resolvePaymentKeyForAbonent(abonentId);
+      if (!key) return [];
+      const raw = (window.JKHStore && JKHStore.getRaw) ? JKHStore.getRaw(key) : null;
       const arr = raw ? JSON.parse(raw) : [];
       return Array.isArray(arr) ? arr : [];
     }catch(e){ return []; }
