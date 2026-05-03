@@ -29,7 +29,13 @@
   function qs(sel, root = document) { return root.querySelector(sel); }
   function qsa(sel, root = document) { return Array.from(root.querySelectorAll(sel)); }
   function pad2(n) { return String(n).padStart(2, "0"); }
-  function isDataReady(){ return window.JKH_DATA_READY === true; }
+  function isDataReady(){
+  try {
+    return window.JKH_UI_STATE?.data?.status === "ready";
+  } catch {
+    return false;
+  }
+}
   function storeGetRaw(key){
     if (!isDataReady()) return null;
     if (!(window.JKHStore && typeof window.JKHStore.getRaw === "function")) return null;
@@ -364,9 +370,25 @@ function splitAccrualByOwnership(accr, year, month, history) {
     const first = Object.keys(db)[0];
     return first || "27";
   }
+  function getAbonentTechnicalId() {
+    const id = String(getAbonentId() || "");
+    if (typeof window.getAbonentTechId === "function") return window.getAbonentTechId(id);
+    return id;
+  }
 
   function paymentsKey() {
-    return "payments_" + getAbonentId();
+    const id = String(getAbonentId() || "");
+    const key = window.getPaymentsKeyForAbonent
+      ? window.getPaymentsKeyForAbonent(id)
+      : "";
+
+    if (!key) {
+      try { console.warn("[payment-key] read blocked", { abonentId: id, reason: "ABONENT_NOT_READY" }); } catch(e) {}
+      return "";
+    }
+
+    try { console.log("[payment-key] read", { abonentId: id, key: key }); } catch(e) {}
+    return key;
   }
 
   /* =========================================================
@@ -501,7 +523,13 @@ function splitAccrualByOwnership(accr, year, month, history) {
     // (год, месяц) из таблицы оплат и считаем это датой начала расчёта.
     // Это даёт автоперерасчёт начислений сразу после импорта.
     try {
-      const raw = (window.JKHStore && JKHStore.getRaw) ? JKHStore.getRaw("payments_" + id) : null;
+      const pKey = (typeof window.getPaymentsKeyForAbonent === "function") ? window.getPaymentsKeyForAbonent(id) : "";
+      if (!pKey) {
+        try { console.warn("[payment-key] read blocked", { abonentId: id, reason: "ABONENT_NOT_READY_OR_UID_MISSING" }); } catch(e) {}
+        return null;
+      }
+      try { console.log("[payment-key] read", { abonentId: id, key: pKey }); } catch(e) {}
+      const raw = (window.JKHStore && JKHStore.getRaw) ? JKHStore.getRaw(pKey) : null;
       if (raw) {
         const arr = JSON.parse(raw);
         if (Array.isArray(arr) && arr.length) {
@@ -899,8 +927,8 @@ for (const p of parts) {
 
 
   // ===== ФИЛЬТР ПО ПЕРИОДУ ДЛЯ "РАСЧЁТ ВЗЫСКИВАЕМОЙ СУММЫ" =====
-  function calcPeriodKey() { return "calc_period_" + getAbonentId(); }
-  function calcPeriodActiveKey() { return "calc_period_active_" + getAbonentId(); }
+  function calcPeriodKey() { return "calc_period_" + getAbonentTechnicalId(); }
+  function calcPeriodActiveKey() { return "calc_period_active_" + getAbonentTechnicalId(); }
 
   function lastAddedPaymentKey() { return "last_added_payment_" + getAbonentId(); }
   function setLastAddedPaymentId(id) {
@@ -975,6 +1003,7 @@ for (const p of parts) {
   function getPayments() {
     try {
       const key = paymentsKey();
+      if (!key) return [];
       const raw = storeGetRaw(key);
       if (!raw) return [];
       const arr = JSON.parse(raw);
@@ -1079,7 +1108,9 @@ for (const p of parts) {
       normalizePaymentRows(arr);
 
       // локальная запись
-      storeSetRaw(paymentsKey(), JSON.stringify(arr));
+      const key = paymentsKey();
+      if (!key) return;
+      storeSetRaw(key, JSON.stringify(arr));
 
       // ОБЯЗАТЕЛЬНО: сервер
       if (window.Data && typeof Data.flushDbToServer === "function"){
@@ -1443,8 +1474,8 @@ function applyRunningTotals(viewRows) {
   const REFI_KEY_MORA = (window.JKH_CONST && window.JKH_CONST.REFI_KEY_MORA)
     ? window.JKH_CONST.REFI_KEY_MORA
     : "refinancing_rates_moratorium_v1";
-  function excludePeriodsKey() { return "exclude_periods_" + getAbonentId(); }
-  function moratoriumKey() { return "moratorium_" + getAbonentId(); }
+  function excludePeriodsKey() { return "exclude_periods_" + getAbonentTechnicalId(); }
+  function moratoriumKey() { return "moratorium_" + getAbonentTechnicalId(); }
 
   function isMoratoriumActive(){
     return storeGetRaw(moratoriumKey()) === "1";
@@ -1747,6 +1778,16 @@ function applyRunningTotals(viewRows) {
   }
 
   async function loadPaymentTable() {
+    if (!isDataReady()) {
+      try { console.warn('[payment-table] load skipped: DATA_NOT_READY'); } catch(e) {}
+      return;
+    }
+    const keyForReadiness = paymentsKey();
+    if (!keyForReadiness) {
+      try { console.warn('[payment-table] load skipped: PAYMENT_KEY_NOT_READY'); } catch(e) {}
+      return;
+    }
+
     const tbody = qs("#paymentTableBody");
 
     // UI: группировка ledger внутри месяца (начисление сверху, оплаты ниже)
@@ -2266,9 +2307,7 @@ tbody.innerHTML = "";
   };
 
   document.addEventListener("DOMContentLoaded", async () => {
-    loadPaymentTable();
-        JKH_RenameDebtPenaltyHeaders();
-    JKH_RecalcAbonentTotalDebtCard();
+    JKH_RenameDebtPenaltyHeaders();
 // ✅ важно: повесить обработчик сворачивания месяцев сразу, не дожидаясь редактирования полей
     try { refreshRunningTotalsInDOM(); } catch(e) {}
   });
@@ -2430,6 +2469,31 @@ tbody.innerHTML = "";
     renderSourcesModalList();
     try { loadPaymentTable(); } catch(e) { console.error(e); throw e; }
   };
+
+
+(function initPaymentTableServerFirst(){
+  let started = false;
+
+  function tryStart(){
+    if (started) return;
+
+    if (isDataReady()) {
+      started = true;
+      console.log("[payment-table] start after data-ready");
+      loadPaymentTable();
+    }
+  }
+
+  tryStart();
+
+  window.addEventListener("JKH_UI_STATE_CHANGED", tryStart);
+
+  let tries = 0;
+  const t = setInterval(() => {
+    tryStart();
+    if (started || tries++ > 20) clearInterval(t);
+  }, 300);
+})();
 
 
 })();

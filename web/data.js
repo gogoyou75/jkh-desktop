@@ -212,6 +212,84 @@
     }
   }
 
+  function getAbonentTechId(abonentId) {
+    const id = String(abonentId || '').trim();
+    const db = (window.Data && typeof window.Data.getDb === 'function') ? window.Data.getDb() : (window.AbonentsDB || {});
+    const abonents = db && db.abonents && typeof db.abonents === 'object' ? db.abonents : {};
+    const a = abonents[id] || null;
+
+    if (!a) {
+      console.warn('[payment-key] resolve', {
+        abonentId: id,
+        found: false,
+        uid: '',
+        key: '',
+        mode: 'not-ready',
+        reason: 'ABONENT_NOT_READY'
+      });
+      return null;
+    }
+
+    const uid = String(a.uid || '').trim();
+    if (uid) {
+      console.log('[payment-key] resolve', {
+        abonentId: id,
+        found: true,
+        uid,
+        key: 'payments_' + uid,
+        mode: 'uid'
+      });
+      return uid;
+    }
+
+    console.warn('[payment-key] resolve', {
+      abonentId: id,
+      found: true,
+      uid: '',
+      key: '',
+      mode: 'blocked',
+      reason: 'UID_REQUIRED'
+    });
+    return null;
+  }
+
+  function getPaymentsKeyForAbonent(abonentId) {
+    const techId = getAbonentTechId(abonentId);
+    if (!techId) return '';
+    return 'payments_' + techId;
+  }
+
+  window.JKHDebugListLegacyPaymentKeys = function() {
+    try {
+      return Object.keys(localStorage).filter(function(k){
+        return k.includes('payments_') && !k.includes('uid_');
+      });
+    } catch (e) {
+      return [];
+    }
+  };
+
+
+  window.getPaymentsKeyForAbonent = getPaymentsKeyForAbonent;
+
+  function _todayStamp() {
+    var d = new Date();
+    var y = d.getFullYear();
+    var m = String(d.getMonth() + 1).padStart(2, "0");
+    var dd = String(d.getDate()).padStart(2, "0");
+    return String(y) + m + dd;
+  }
+  function _generateUniqueTempRegnum(db) {
+    var stamp = _todayStamp();
+    var premises = (db && db.premises && typeof db.premises === "object") ? db.premises : {};
+    for (var i = 0; i < 10000; i++) {
+      var suffix = String(i).padStart(4, "0");
+      var candidate = "TEMP-" + stamp + "-" + suffix;
+      if (!premises[candidate]) return candidate;
+    }
+    throw new Error("MERGE_TEMP_REGNUM_EXHAUSTED");
+  }
+
   function removeProjectKeys() {
     // ВАЖНО: сброс делаем в рамках выбранной базы (scoped).
     // admin в режиме "ALL" — сбрасывает ВСЕ пользовательские базы.
@@ -277,6 +355,7 @@
     // новая структура
     premises: {},   // {regnum: {regnum, city, street, house, flat, square, createdAt}}
     links: [],      // [{abonentId, regnum, dateFrom, dateTo}]
+    premiseEvents: [], // [{id,type,date,fromRegnums,toRegnums,...}]
 
     // абоненты
     abonents: {}    // {id: {...}}
@@ -305,6 +384,7 @@
       }
 
       if (Array.isArray(storedDb.links)) out.links = storedDb.links;
+      if (Array.isArray(storedDb.premiseEvents)) out.premiseEvents = storedDb.premiseEvents;
     }
 
     return out;
@@ -389,6 +469,7 @@
 
     if (!db.premises || typeof db.premises !== "object") db.premises = {};
     if (!Array.isArray(db.links)) db.links = [];
+    if (!Array.isArray(db.premiseEvents)) db.premiseEvents = [];
     if (!db.abonents || typeof db.abonents !== "object") db.abonents = {};
 
     const hasLink = (abonentId, regnum) =>
@@ -402,6 +483,13 @@
       const a = db.abonents[abonentId];
       if (!a) return;
 
+      if (!String(a.uid || '').trim()) {
+        a.uid = (typeof window.generateUid === 'function')
+          ? String(window.generateUid())
+          : ('uid_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8));
+        console.log('[data][uid] migrated legacy abonent', { abonentId: String(abonentId), uid: String(a.uid) });
+      }
+
       const regnum = String(a.regnum || a.premiseRegnum || "").trim();
       if (!regnum) return;
 
@@ -414,7 +502,9 @@
           house: a.house || "",
           flat: a.flat || "",
           square: a.square ?? a.totalArea ?? "",
-          createdAt: a.premiseCreatedAt || a.premiseCreated || "2000-01-01"
+          createdAt: a.premiseCreatedAt || a.premiseCreated || "2000-01-01",
+          officialRegnum: normalizeOfficialRegnumValue(a.officialRegnum || ""),
+          regnumType: a.officialRegnum ? "official" : "temp"
         };
       }
 
@@ -430,6 +520,16 @@
 
       // нормализуем
       a.premiseRegnum = regnum;
+    });
+
+    Object.keys(db.premises).forEach((regKey) => {
+      const p = db.premises[regKey];
+      if (!p || typeof p !== "object") return;
+      const officialRegnum = normalizeOfficialRegnumValue(p.officialRegnum);
+      p.officialRegnum = officialRegnum;
+      if (officialRegnum) p.regnumType = "official";
+      else if (!String(p.regnumType || "").trim()) p.regnumType = "temp";
+      console.log("[premises][official-regnum] normalized", String(regKey));
     });
 
     // чистим битые links
@@ -462,6 +562,9 @@
   // ============================================================
   function normalizeRegnumValue(v) {
     return String(v || "").trim();
+  }
+  function normalizeOfficialRegnumValue(v) {
+    return String(v || "").trim().replace(/\s+/g, " ");
   }
 
   function listByObjectValues(obj) {
@@ -506,6 +609,16 @@
       var r = normalizeRegnumValue(regnum);
       return db.links.filter(function (l) { return normalizeRegnumValue(l && l.regnum) === r; });
     },
+    getPremiseEventsForRegnum: function (regnum) {
+      var db = this.getDb();
+      if (!db || !Array.isArray(db.premiseEvents)) return [];
+      var r = normalizeRegnumValue(regnum);
+      return db.premiseEvents.filter(function (e) {
+        var from = Array.isArray(e && e.fromRegnums) ? e.fromRegnums : [];
+        var to = Array.isArray(e && e.toRegnums) ? e.toRegnums : [];
+        return from.indexOf(r) >= 0 || to.indexOf(r) >= 0;
+      });
+    },
 
     // WRITE
     ensureWriteOrExplain: function () {
@@ -538,7 +651,11 @@
       var current = window.AbonentsDB.premises[regnum] || {};
       var merged = Object.assign({}, current, premiseObj || {});
       merged.regnum = regnum;
+      merged.officialRegnum = normalizeOfficialRegnumValue(merged.officialRegnum);
+      if (merged.officialRegnum) merged.regnumType = "official";
+      else if (!String(merged.regnumType || "").trim()) merged.regnumType = "temp";
       if (!String(merged.createdAt || "").trim()) merged.createdAt = "2000-01-01";
+      console.log("[premises][official-regnum] normalized", regnum);
 
       window.AbonentsDB.premises[regnum] = merged;
       return !!window.saveAbonentsDB && window.saveAbonentsDB();
@@ -599,6 +716,13 @@
         window.AbonentsDB.abonents = {};
       }
 
+      if (!String(input.uid || '').trim()) {
+        input.uid = (typeof window.generateUid === 'function')
+          ? String(window.generateUid())
+          : ('uid_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8));
+        console.log('[data][uid] generated for abonent', { abonentId: id, uid: String(input.uid) });
+      }
+
       var regnum = normalizeRegnumValue(input.premiseRegnum || input.regnum);
       if (regnum) {
         input.premiseRegnum = regnum;
@@ -615,7 +739,8 @@
           house: input.house || "",
           flat: input.flat || "",
           square: input.square !== undefined ? input.square : (input.totalArea !== undefined ? input.totalArea : ""),
-          createdAt: input.premiseCreatedAt || input.premiseCreated || "2000-01-01"
+          createdAt: input.premiseCreatedAt || input.premiseCreated || "2000-01-01",
+          officialRegnum: normalizeOfficialRegnumValue(input.officialRegnum || "")
         };
         this.ensurePremise(premiseObj);
         this.linkAbonentToPremise(
@@ -644,6 +769,227 @@
       }
 
       return !!window.saveAbonentsDB && window.saveAbonentsDB();
+    },
+    mergePremises: async function (options) {
+      if (!this.ensureWriteOrExplain()) return false;
+      if (!window.AbonentsDB) throw new Error("DB_NOT_READY");
+      console.log("[premise-transform] merge start");
+
+      var db = window.AbonentsDB;
+      var snapshot = deepClone(db);
+      try {
+        if (!db.premises || typeof db.premises !== "object") db.premises = {};
+        if (!Array.isArray(db.links)) db.links = [];
+        if (!Array.isArray(db.premiseEvents)) db.premiseEvents = [];
+
+        var fromRegnumsRaw = Array.isArray(options && options.fromRegnums) ? options.fromRegnums : [];
+        var fromRegnums = fromRegnumsRaw.map(normalizeRegnumValue).filter(Boolean);
+        if (fromRegnums.length < 2) throw new Error("MERGE_FROM_MIN_2_REQUIRED");
+
+        var date = String(options && options.date || "").trim();
+        if (!date) throw new Error("MERGE_DATE_REQUIRED");
+
+        var toPremise = Object.assign({}, options && options.toPremise || {});
+        var officialRegnum = normalizeOfficialRegnumValue(toPremise.officialRegnum || "");
+        var newRegnum = normalizeRegnumValue(toPremise.regnum);
+        if (!newRegnum) {
+          newRegnum = _generateUniqueTempRegnum(db);
+          console.log("[premise-transform] generated regnum", newRegnum);
+        }
+        if (db.premises[newRegnum]) throw new Error("MERGE_TO_REGNUM_EXISTS");
+        if (officialRegnum) {
+          var duplicateOfficial = Object.keys(db.premises).find(function (rk) {
+            return normalizeOfficialRegnumValue(db.premises[rk] && db.premises[rk].officialRegnum) === officialRegnum;
+          });
+          if (duplicateOfficial) throw new Error("MERGE_TO_OFFICIAL_REGNUM_DUP:" + duplicateOfficial);
+        }
+
+        for (var i = 0; i < fromRegnums.length; i++) {
+          var rr = fromRegnums[i];
+          var oldPremise = db.premises[rr];
+          if (!oldPremise) throw new Error("MERGE_FROM_NOT_FOUND:" + rr);
+          var st = String(oldPremise.status || "active").trim() || "active";
+          if (st !== "active") throw new Error("MERGE_FROM_NOT_ACTIVE:" + rr);
+        }
+        console.log("[premise-transform] validate ok");
+
+        var dt = new Date(date + "T12:00:00");
+        dt.setDate(dt.getDate() - 1);
+        var closeY = dt.getFullYear();
+        var closeM = String(dt.getMonth() + 1).padStart(2, "0");
+        var closeD = String(dt.getDate()).padStart(2, "0");
+        var closedAt = closeY + "-" + closeM + "-" + closeD;
+
+        var activeFromLinks = [];
+        var activeFromMap = {};
+        db.links.forEach(function (l) {
+          var rr = normalizeRegnumValue(l && l.regnum);
+          if (fromRegnums.indexOf(rr) >= 0 && !String(l && l.dateTo || "").trim()) {
+            activeFromLinks.push(l);
+            if (!activeFromMap[rr]) activeFromMap[rr] = l;
+          }
+        });
+        var responsibleSet = {};
+        for (var af = 0; af < activeFromLinks.length; af++) {
+          var rid = String(activeFromLinks[af] && activeFromLinks[af].abonentId || "").trim();
+          if (rid) responsibleSet[rid] = true;
+        }
+        var responsibleIds = Object.keys(responsibleSet);
+        if (responsibleIds.length > 1 && typeof window.confirm === "function") {
+          var newRespId = String(options && options.newResponsibleAbonentId || "").trim();
+          var newRespA = (db.abonents && newRespId) ? db.abonents[newRespId] : null;
+          var newRespName = String(newRespA && newRespA.fio || "").trim();
+          var newRespText = newRespId ? (newRespName ? (newRespId + " — " + newRespName) : newRespId) : "— не назначен —";
+          console.log("[premise-transform] different responsibles confirm");
+          var ok = window.confirm(
+            "Вы объединяете квартиры с разными ответственными.\n" +
+            "Их ответственность по старым квартирам будет закрыта.\n" +
+            "Новым ответственным станет: " + newRespText + ".\n" +
+            "Продолжить?"
+          );
+          if (!ok) throw new Error("MERGE_CANCELLED_BY_USER");
+        }
+
+        for (var j = 0; j < fromRegnums.length; j++) {
+          var fromR = fromRegnums[j];
+          var cur = db.premises[fromR] || {};
+          db.premises[fromR] = Object.assign({}, cur, {
+            status: "merged",
+            closedAt: closedAt,
+            closedReason: "Объединение квартир",
+            mergedIntoRegnum: newRegnum
+          });
+          console.log("[premise-transform] close old premise", fromR);
+        }
+
+        console.log("[premise-transform] create new premise", newRegnum);
+        db.premises[newRegnum] = {
+          regnum: newRegnum,
+          city: String(toPremise.city || ""),
+          street: String(toPremise.street || ""),
+          house: String(toPremise.house || ""),
+          flat: String(toPremise.flat || ""),
+          square: toPremise.square !== undefined ? toPremise.square : "",
+          createdAt: String(date),
+          officialRegnum: officialRegnum,
+          regnumType: officialRegnum ? "official" : "temp",
+          status: "active",
+          createdFromMergeRegnums: fromRegnums.slice(),
+          mergedAt: date
+        };
+        console.log("[premise-transform] merge createdAt forced to date", date);
+
+        db.links.forEach(function (l) {
+          var r = normalizeRegnumValue(l && l.regnum);
+          if (fromRegnums.indexOf(r) >= 0 && !String(l && l.dateTo || "").trim()) {
+            l.dateTo = closedAt;
+            console.log("[premise-transform] close responsible", String(l && l.abonentId || ""), r, closedAt);
+            var oldId = String(l && l.abonentId || "").trim();
+            if (oldId && db.abonents && db.abonents[oldId]) {
+              db.abonents[oldId].calcEndDate = closedAt;
+              console.log("[premise-transform] old abonent closed", oldId, closedAt);
+            }
+          }
+        });
+
+        var newResp = String(options && options.newResponsibleAbonentId || "").trim();
+        if (!newResp) throw new Error("MERGE_RESPONSIBLE_REQUIRED");
+        if (!db.abonents || !db.abonents[newResp]) throw new Error("MERGE_RESPONSIBLE_NOT_FOUND");
+
+        function _generateNewLs(abonents, flatValue) {
+          var maxNum = -1;
+          Object.keys(abonents || {}).forEach(function (k) {
+            var id = String(k || "").trim();
+            var m = id.match(/^(\d+)(?:-|$)/);
+            if (!m) return;
+            var n = Number(m[1]);
+            if (isFinite(n) && n > maxNum) maxNum = n;
+          });
+          var flatPart = String(flatValue || "").trim() || "MERGE";
+          var base = "";
+          if (maxNum >= 0) base = String(maxNum + 1) + "-" + flatPart;
+          else base = String(Date.now()) + "-" + flatPart;
+          var candidate = base;
+          var suffix = 1;
+          while (abonents && abonents[candidate]) {
+            candidate = base + "-" + String(suffix++);
+          }
+          return candidate;
+        }
+
+        function _generateNewUid() {
+          try {
+            if (typeof window.generateUid === "function") return String(window.generateUid());
+          } catch (e) { }
+          return "uid_m" + String(Date.now()) + "_" + String(Math.floor(Math.random() * 1000000));
+        }
+        var generatedNewId = _generateNewLs(db.abonents, toPremise.flat);
+        var generatedNewUid = _generateNewUid();
+        console.log("[premise-transform] new LS generated", generatedNewId);
+        console.log("[premise-transform] new UID generated", generatedNewUid);
+
+        var sourceAbonent = db.abonents[newResp] || {};
+        var newAbonent = Object.assign({}, sourceAbonent, {
+          id: generatedNewId,
+          uid: generatedNewUid,
+          fio: String(sourceAbonent.fio || ""),
+          fam: sourceAbonent.fam,
+          name: sourceAbonent.name,
+          otch: sourceAbonent.otch,
+          phone: sourceAbonent.phone,
+          share: sourceAbonent.share,
+          rooms: sourceAbonent.rooms,
+          regnum: newRegnum,
+          premiseRegnum: newRegnum,
+          city: String(toPremise.city || ""),
+          street: String(toPremise.street || ""),
+          house: String(toPremise.house || ""),
+          flat: String(toPremise.flat || ""),
+          square: toPremise.square !== undefined ? toPremise.square : "",
+          calcStartDate: date,
+          calcEndDate: "",
+          premiseCreatedAt: date,
+          createdFromMerge: true,
+          sourceAbonentId: newResp,
+          sourceMergeEventId: ""
+        });
+        db.abonents[generatedNewId] = newAbonent;
+        console.log("[premise-transform] new abonent generated", generatedNewId, "from", newResp);
+        console.log("[premise-transform] old LS preserved", newResp);
+
+        db.links.push({ abonentId: generatedNewId, regnum: newRegnum, dateFrom: date, dateTo: "" });
+        console.log("[premise-transform] new responsibility period created", generatedNewId, newRegnum, date);
+        console.log("[premise-transform] new active link created", generatedNewId, newRegnum);
+
+        var ev = {
+          id: "evt_" + Date.now() + "_" + Math.floor(Math.random() * 1000000),
+          type: "MERGE",
+          date: date,
+          fromRegnums: fromRegnums.slice(),
+          toRegnums: [newRegnum],
+          reason: String(options && options.reason || ""),
+          documentNumber: String(options && options.documentNumber || ""),
+          documentDate: String(options && options.documentDate || ""),
+          createdAt: (new Date()).toISOString(),
+          createdBy: _ownerId()
+        };
+        ev.newAbonentId = generatedNewId;
+        ev.sourceAbonentId = newResp;
+        db.premiseEvents.push(ev);
+        if (db.abonents && db.abonents[generatedNewId]) {
+          db.abonents[generatedNewId].sourceMergeEventId = ev.id;
+        }
+        console.log("[premise-transform] event saved");
+
+        await this.flushDbToServer();
+        console.log("[premise-transform] flush success");
+        return ev;
+      } catch (e) {
+        window.AbonentsDB = snapshot;
+        try { if (window.saveAbonentsDB) window.saveAbonentsDB(); } catch (e2) { }
+        console.log("[premise-transform] flush failed rollback");
+        throw e;
+      }
     }
   };
 

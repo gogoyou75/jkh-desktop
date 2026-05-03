@@ -250,12 +250,30 @@ function refreshWho(){
 
 function getDB(){ return window.AbonentsDB || null; }
 function saveDB(){ try{ if (typeof window.saveAbonentsDB === 'function') return window.saveAbonentsDB(); }catch(e){} }
-function payKey(ls){ return 'payments_' + String(ls); }
-function getPaymentsByLS(ls){
-  try{ return (window.JKHStore && JKHStore.getJSON) ? (JKHStore.getJSON(payKey(ls), [], null) || []) : []; }
+function payKeyByUid(uid){
+  const u = normStr(uid);
+  if (!u) return '';
+  console.info('[import_xls][payment-key] uid', { uid: u, key: 'payments_' + u });
+  return 'payments_' + u;
+}
+function getPaymentsByUid(uid){
+  const key = payKeyByUid(uid);
+  if (!key){
+    console.warn('[import_xls][payment-key] blocked', { uid: normStr(uid), reason: 'UID_REQUIRED' });
+    return [];
+  }
+  try{ return (window.JKHStore && JKHStore.getJSON) ? (JKHStore.getJSON(key, [], null) || []) : []; }
   catch(e){ return []; }
 }
-function setPaymentsByLS(ls, arr){ if (!window.JKHStore || !JKHStore.setJSON) throw new Error('Нет JKHStore.setJSON'); return JKHStore.setJSON(payKey(ls), arr, null); }
+function setPaymentsByUid(uid, arr){
+  const key = payKeyByUid(uid);
+  if (!key){
+    console.warn('[import_xls][payment-key] blocked', { uid: normStr(uid), reason: 'UID_REQUIRED' });
+    throw new Error('PAYMENT_UID_REQUIRED');
+  }
+  if (!window.JKHStore || !JKHStore.setJSON) throw new Error('Нет JKHStore.setJSON');
+  return JKHStore.setJSON(key, arr, null);
+}
 
 function parseYearMonthFromAny(v){
   const s = normStr(v);
@@ -427,9 +445,9 @@ function capturePaymentsSnapshot(db, rows){
     const foundU = uid ? findAbonentByUid(db, uid) : null;
     const ab = foundU ? foundU.abonent : null;
     if (!ab) continue;
-    const ls = normStr(ab.id);
-    if (!ls || Object.prototype.hasOwnProperty.call(snap, ls)) continue;
-    snap[ls] = deepCloneJSONSafe(getPaymentsByLS(ls)) || [];
+    const uidKey = normStr(ab.uid || uid);
+    if (!uidKey || Object.prototype.hasOwnProperty.call(snap, uidKey)) continue;
+    snap[uidKey] = deepCloneJSONSafe(getPaymentsByUid(uidKey)) || [];
   }
   return snap;
 }
@@ -438,8 +456,8 @@ function restorePaymentsSnapshot(paymentsSnapshot){
   if (!paymentsSnapshot || typeof paymentsSnapshot !== 'object') return;
   const keys = Object.keys(paymentsSnapshot);
   for (let i=0;i<keys.length;i++){
-    const ls = keys[i];
-    setPaymentsByLS(ls, Array.isArray(paymentsSnapshot[ls]) ? paymentsSnapshot[ls] : []);
+    const uid = keys[i];
+    setPaymentsByUid(uid, Array.isArray(paymentsSnapshot[uid]) ? paymentsSnapshot[uid] : []);
   }
 }
 
@@ -1272,8 +1290,8 @@ function evaluatePaymentsRow(db, row){
     return { status:'ERROR', critical:true, details:['Для импорта платежей нужен UID. Сначала выполните шаг 1 — Первичка.'], conflicts:0, unresolved:0, adds:0, dups:0, found:paymentPairsCount(row), skipped:0 };
   }
 
-  const ls = normStr(ab.id);
-  const existing = getPaymentsByLS(ls);
+  const uidKey = normStr(ab.uid || row.uid);
+  const existing = getPaymentsByUid(uidKey);
   let conflicts=0, unresolved=0, errs=0, dups=0, adds=0, found=0;
 
   for (let i=0;i<row.payments.length;i++){
@@ -1413,8 +1431,8 @@ function renderPreview(){
       const db = getDB();
       const rr = dataRows.find(x => x.excelRow===r.excelRow);
       const foundU = (rr && rr.uid && db) ? findAbonentByUid(db, rr.uid) : null;
-      const ls = foundU && foundU.abonent ? normStr(foundU.abonent.id) : '';
-      if (ls){
+      const uid = foundU && foundU.abonent ? normStr(foundU.abonent.uid || rr.uid) : '';
+      if (uid){
         rr.payments.forEach(function(p){
           const amount = normNum(p.amount);
           if (!Number.isFinite(amount) || amount<=0) return;
@@ -1424,7 +1442,7 @@ function renderPreview(){
           if (!/^\d{4}$/.test(year) || !/^\d{2}$/.test(month)) return;
           const paidDate = normalizePaidDate(p.paidDateRaw) || ('01.' + month + '.' + year);
           const source = sourceNameByIndex(p.sourceIndex || 1);
-          const ex = getPaymentsByLS(ls).find(function(x){
+          const ex = getPaymentsByUid(uid).find(function(x){
             const ym = getLedgerYearMonth(x);
             const paid = getLedgerPaidAmount(x);
             if (!ym || !Number.isFinite(paid) || paid <= 0) return false;
@@ -1434,7 +1452,7 @@ function renderPreview(){
               !(getLedgerPaidDate(x) === paidDate && paid === amount);
           });
           if (!ex) return;
-          const key = ls + '::' + year + '-' + month + '::' + source;
+          const key = uid + '::' + year + '-' + month + '::' + source;
           const dec = conflictDecision[key] || '';
           actionsHTML += '<div class="small" style="margin-bottom:6px">' + month + '.' + year + ' / ' + source + ': было ' + getLedgerPaidAmount(ex) + ', новое ' + amount + '</div>' +
             '<button class="action-btn" data-act="conf_over" data-key="' + key + '">Принять новый (заменить)</button>' +
@@ -1744,7 +1762,12 @@ async function applyPayments(){
       const paymentPeriod = year + '-' + month;
       const previewRow = evaluatePaymentsRow(db, row);
       if (!previewRow || previewRow.status==='ERROR') continue;
-      const existing = getPaymentsByLS(accountNumber);
+      const paymentUid = normStr(ab && ab.uid ? ab.uid : row.uid);
+      if (!paymentUid){
+        setImportStatus('Для импорта платежей нужен UID.', 'err');
+        continue;
+      }
+      const existing = getPaymentsByUid(paymentUid);
       const isDup = existing.some(function(x){
         const ym = getLedgerYearMonth(x);
         const paid = getLedgerPaidAmount(x);

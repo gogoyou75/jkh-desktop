@@ -61,6 +61,9 @@ Doc: docs/LOGIC_SPEC_v1.5.3.md
         .debt-low td  { background-color: #fff6e5; }
         .debt-mid td  { background-color: #ffe0e0; }
         .debt-high td { background-color: #ffcccc; font-weight: bold; }
+        .row-merged td { background-color: #eef6ee !important; color: #6b6b6b; }
+        .row-stopped td { background-color: #f3f3f3 !important; color: #6b6b6b; }
+        .row-status-badge { font-size: 11px; margin-left: 6px; font-weight: 700; }
 
         /* ===== PAGINATION ===== */
         #paginationInfo {
@@ -417,7 +420,7 @@ function getAbonentNote(id, a){
 
 function getPaymentsForAbonent(id){
     try{
-        const raw = (window.JKHStore && JKHStore.getRaw) ? JKHStore.getRaw("payments_" + id) : null;
+        const raw = (window.JKHStore && JKHStore.getRaw) ? JKHStore.getRaw(((typeof window.getPaymentsKeyForAbonent === "function") ? window.getPaymentsKeyForAbonent(id) : ("payments_" + id))) : null;
         if (!raw) return [];
         const arr = JSON.parse(raw);
         return Array.isArray(arr) ? arr : [];
@@ -613,6 +616,8 @@ let indexTableInitDone = false;
 function rebuildIndexRows(){
     allRows = [];
     const db = window.AbonentsDB?.abonents || {};
+    const links = Array.isArray(window.AbonentsDB?.links) ? window.AbonentsDB.links : [];
+    const premises = window.AbonentsDB?.premises || {};
     for (const id in db) {
         const a = db[id];
         const fio = (a.fio || "").split(" ");
@@ -620,6 +625,14 @@ function rebuildIndexRows(){
         const name = fio[1] || "";
         const otch = fio[2] || "";
         const totals = calcTotalsFromPayments(id, a);
+        const regnum = String(a.regnum || a.premiseRegnum || a.premise_regnum || a.regNumber || a.reg_no || a.flat || '').trim();
+        const premise = regnum ? premises[regnum] : null;
+        const ownLinks = links.filter(l => String(l?.abonentId || '').trim() === id && String(l?.regnum || '').trim() === regnum);
+        const activeLink = ownLinks.find(l => !String(l?.dateTo || '').trim());
+        const hasClosedLink = ownLinks.some(l => !!String(l?.dateTo || '').trim());
+        const hasNoActiveButClosed = !activeLink && hasClosedLink;
+        const isMerged = String(premise?.status || '').trim() === 'merged';
+        const rowStatusMark = isMerged ? 'объединена' : (hasNoActiveButClosed ? 'расчёт остановлен' : '');
         allRows.push({
             id,
             fam,
@@ -632,14 +645,15 @@ function rebuildIndexRows(){
             startDate:  (totals?.startDate ?? ""),
             endDate:    (totals?.endDate   ?? ""),
             note: getAbonentNote(id, a),
-            flatReg: (a.regnum || a.premiseRegnum || a.premise_regnum || a.regNumber || a.reg_no || a.flat || '')
+            flatReg: regnum,
+            rowStatusMark
         });
     }
 }
 
 function hasUsablePaymentLedger(abonentId){
     try {
-        const raw = (window.JKHStore && JKHStore.getRaw) ? JKHStore.getRaw("payments_" + abonentId) : null;
+        const raw = (window.JKHStore && JKHStore.getRaw) ? JKHStore.getRaw(((typeof window.getPaymentsKeyForAbonent === "function") ? window.getPaymentsKeyForAbonent(abonentId) : ("payments_" + abonentId))) : null;
         if (!raw) return false;
         const arr = JSON.parse(raw);
         if (!Array.isArray(arr)) return false;
@@ -667,7 +681,8 @@ async function ensureIndexAccrualsReady(){
 
         for (const id of ids) {
             if (hasUsablePaymentLedger(id)) {
-                console.log('[index][autoaccrual] skip existing payments_' + id);
+                const existingKey = (typeof window.getPaymentsKeyForAbonent === 'function') ? window.getPaymentsKeyForAbonent(id) : ('payments_' + id);
+                console.log('[index][autoaccrual] skip existing ' + existingKey);
                 continue;
             }
             let res = { changed: false, reason: 'autoaccrual-unavailable' };
@@ -830,6 +845,8 @@ function render() {
             else if (debt > 10000) tr.classList.add("debt-mid");
             else if (debt > 0) tr.classList.add("debt-low");
         }
+        if (r.rowStatusMark === "объединена") tr.classList.add("row-merged");
+        else if (r.rowStatusMark === "расчёт остановлен") tr.classList.add("row-stopped");
 
         tr.innerHTML = `
             <td>${r.id}</td>
@@ -843,7 +860,7 @@ function render() {
             <td>${r.startDate}</td>
             <td>${r.endDate}</td>
             <td><textarea class="note-inline note-abonent" data-id="${r.id}" placeholder="">${escapeHtml(String(r.note||""))}</textarea></td>
-            <td>${r.flatReg}</td>
+            <td>${r.flatReg}${r.rowStatusMark ? (' <span class="row-status-badge">' + r.rowStatusMark + '</span>') : ''}</td>
         `;
         tbody.appendChild(tr);
     });

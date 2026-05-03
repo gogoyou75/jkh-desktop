@@ -614,7 +614,10 @@ function __getDebtAndPenaltySnapshotByCalc(oldId, asOfIso){
     }
 
     if (typeof window.JKHCalcEngine.calcTotalsAsOfAdjusted !== 'function') return null;
-    const rows = loadPaymentsForLs(String(oldId));
+    const pKey = (typeof window.getPaymentsKeyForAbonent === "function") ? window.getPaymentsKeyForAbonent(String(oldId)) : ("payments_" + String(oldId));
+    try { console.log("[payment-key] read", { abonentId: String(oldId), key: pKey }); } catch(e) {}
+    const rawRows = storeGet(pKey);
+    const rows = rawRows ? (JSON.parse(rawRows) || []) : [];
     const d = new Date(String(asOfIso) + "T12:00:00");
     const tot = window.JKHCalcEngine.calcTotalsAsOfAdjusted(rows, d, {
       abonentId: String(oldId),
@@ -805,14 +808,16 @@ function clearDraftNewAbonent(){
 /* =========================
    ИМПОРТ ОПЛАТ (как было)
    ========================= */
-function paymentsKeyForLs(ls){
-  return 'payments_' + String(ls || '').trim();
+function paymentsKeyForUid(uid){
+  return 'payments_' + String(uid || '').trim();
 }
 function storeGet(key){ try { return (window.JKHStore && JKHStore.getRaw) ? JKHStore.getRaw(key) : null; } catch { return null; } }
 function storeSet(key, value){ try { if (window.JKHStore && JKHStore.setRaw) JKHStore.setRaw(key, value); } catch {} }
-function loadPaymentsForLs(ls){
+function loadPaymentsForUid(uid){
   try {
-    const raw = storeGet(paymentsKeyForLs(ls));
+    const key = paymentsKeyForUid(uid);
+    try { console.log('[payment-key] read', { abonentId: String(uid || ''), key: key }); } catch(e) {}
+    const raw = storeGet(key);
     if (!raw) return [];
     const arr = JSON.parse(raw);
     return Array.isArray(arr) ? arr : [];
@@ -820,11 +825,13 @@ function loadPaymentsForLs(ls){
     return [];
   }
 }
-function savePaymentsForLs(ls, arr){
+function savePaymentsForUid(uid, arr){
   try {
-    storeSet(paymentsKeyForLs(ls), JSON.stringify(Array.isArray(arr) ? arr : []));
+    const key = paymentsKeyForUid(uid);
+    try { console.log('[payment-key] write', { abonentId: String(uid || ''), key: key }); } catch(e) {}
+    storeSet(key, JSON.stringify(Array.isArray(arr) ? arr : []));
   } catch (e){
-    console.warn('[new_abonent] savePaymentsForLs error', e);
+    console.warn('[new_abonent] savePaymentsForUid error', e);
   }
 }
 function nextPaymentIdForArray(arr){
@@ -867,7 +874,8 @@ function importPaymentsFromDraftForNewAbonent(ls, abonentObj){
   const pays = Array.isArray(row.payments) ? row.payments : [];
   if (!pays.length) return { ok: true, imported: 0, reason: 'no_payments' };
 
-  const payArr = loadPaymentsForLs(ls);
+  const uidForKey = String(abonentObj?.uid || '').trim();
+  const payArr = uidForKey ? loadPaymentsForUid(uidForKey) : [];
   let idCounter = nextPaymentIdForArray(payArr);
   let addedPays = 0;
 
@@ -902,7 +910,9 @@ function importPaymentsFromDraftForNewAbonent(ls, abonentObj){
     addedPays++;
   }
 
-  if (addedPays) savePaymentsForLs(ls, payArr);
+  if (addedPays){
+    if (uidForKey) savePaymentsForUid(uidForKey, payArr);
+  }
 
   try {
     if (abonentObj){
@@ -1059,6 +1069,10 @@ async function createAbonent() {
 
     const premise = dbRoot.premises?.[regnum] || null;
     if (!premise) { setCreateStatus("Квартира (premises) по regnum не найдена. Сначала заведите квартиру, затем создавайте абонента."); return; }
+    if (String(premise.status || 'active').trim() !== 'active' || String(premise.closedAt || '').trim()){
+      setCreateStatus("Квартира закрыта/объединена. Создание нового активного абонента запрещено.");
+      return;
+    }
 
     const city = String(document.getElementById("na_city").value || "").trim();
     const street = String(document.getElementById("na_street").value || "").trim();
@@ -1093,8 +1107,7 @@ async function createAbonent() {
     }
 
     // UID
-    const uidImport = String(document.getElementById("na_uid_import").value || "").trim();
-    const uid = (uidImport && uidImport.startsWith("uid_")) ? uidImport : generateUid();
+    const uid = generateUid();
 
     // создаём нового с нулевым долгом (как и было)
     dbRoot.abonents[ls] = {
@@ -1126,6 +1139,11 @@ async function createAbonent() {
       stateDate: "",
       docDate: ""
     };
+
+
+    const newPaymentsKey = 'payments_' + String(uid || '').trim();
+    storeSet(newPaymentsKey, JSON.stringify([]));
+    try { console.log('[payment-key] create-empty', { abonentId: String(ls), uid: String(uid), key: newPaymentsKey, mode: 'uid' }); } catch(e) {}
 
     // ====== если была передача — закрываем старого и фиксируем его долг ======
     let transferMeta = null;
