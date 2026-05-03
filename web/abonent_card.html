@@ -1087,8 +1087,62 @@ function __initAbonentCardSafe(){
     }, 0);
 }
 
+function __isAbonentCardDataReady() {
+    try {
+        const id = String(getAbonentIdFromURL() || "").trim();
+        const db = (window.Data && typeof Data.getDb === "function") ? Data.getDb() : null;
+        const abonents = db && db.abonents ? db.abonents : null;
+        if (!id || !abonents) return false;
+        const a = abonents[id];
+        if (!a) return false;
+        return true;
+    } catch(e) {
+        return false;
+    }
+}
+
+function __waitForAbonentCardDataReady(cb) {
+    let done = false;
+    let tries = 0;
+
+    function finish(reason) {
+        if (done) return;
+        done = true;
+        try { window.removeEventListener("JKH_UI_STATE_CHANGED", onState); } catch(e) {}
+        console.log("[abonent_card] data ready init", reason);
+        cb();
+    }
+
+    function check(reason) {
+        if (__isAbonentCardDataReady()) {
+            finish(reason);
+            return;
+        }
+
+        tries++;
+        if (tries > 80) {
+            console.warn("[abonent_card] data not ready after wait, init blocked");
+            return;
+        }
+
+        setTimeout(() => check("poll"), 100);
+    }
+
+    function onState() {
+        const st = window.JKH_UI_STATE && window.JKH_UI_STATE.data;
+        if (st && (st.status === "ready" || st.status === "empty")) {
+            check("JKH_UI_STATE_CHANGED");
+        }
+    }
+
+    window.addEventListener("JKH_UI_STATE_CHANGED", onState);
+    check("initial");
+}
+
 document.addEventListener("DOMContentLoaded", () => {
-    __initAbonentCardSafe();
+    __waitForAbonentCardDataReady(() => {
+        __initAbonentCardSafe();
+    });
 });
 
 function renderResponsibilityHistory(regnum){

@@ -372,7 +372,15 @@ function splitAccrualByOwnership(accr, year, month, history) {
 
   function paymentsKey() {
     const id = String(getAbonentId() || "");
-    const key = (typeof window.getPaymentsKeyForAbonent === "function") ? window.getPaymentsKeyForAbonent(id) : ("payments_" + getAbonentTechnicalId());
+    const key = window.getPaymentsKeyForAbonent
+      ? window.getPaymentsKeyForAbonent(id)
+      : "";
+
+    if (!key) {
+      try { console.warn("[payment-key] read blocked", { abonentId: id, reason: "ABONENT_NOT_READY" }); } catch(e) {}
+      return "";
+    }
+
     try { console.log("[payment-key] read", { abonentId: id, key: key }); } catch(e) {}
     return key;
   }
@@ -985,6 +993,7 @@ for (const p of parts) {
   function getPayments() {
     try {
       const key = paymentsKey();
+      if (!key) return [];
       const raw = storeGetRaw(key);
       if (!raw) return [];
       const arr = JSON.parse(raw);
@@ -1089,7 +1098,9 @@ for (const p of parts) {
       normalizePaymentRows(arr);
 
       // локальная запись
-      storeSetRaw(paymentsKey(), JSON.stringify(arr));
+      const key = paymentsKey();
+      if (!key) return;
+      storeSetRaw(key, JSON.stringify(arr));
 
       // ОБЯЗАТЕЛЬНО: сервер
       if (window.Data && typeof Data.flushDbToServer === "function"){
@@ -2276,9 +2287,7 @@ tbody.innerHTML = "";
   };
 
   document.addEventListener("DOMContentLoaded", async () => {
-    loadPaymentTable();
-        JKH_RenameDebtPenaltyHeaders();
-    JKH_RecalcAbonentTotalDebtCard();
+    JKH_RenameDebtPenaltyHeaders();
 // ✅ важно: повесить обработчик сворачивания месяцев сразу, не дожидаясь редактирования полей
     try { refreshRunningTotalsInDOM(); } catch(e) {}
   });
