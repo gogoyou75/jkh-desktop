@@ -29,7 +29,13 @@
   function qs(sel, root = document) { return root.querySelector(sel); }
   function qsa(sel, root = document) { return Array.from(root.querySelectorAll(sel)); }
   function pad2(n) { return String(n).padStart(2, "0"); }
-  function isDataReady(){ return window.JKH_DATA_READY === true; }
+  function isDataReady(){
+  try {
+    return window.JKH_UI_STATE?.data?.status === "ready";
+  } catch {
+    return false;
+  }
+}
   function storeGetRaw(key){
     if (!isDataReady()) return null;
     if (!(window.JKHStore && typeof window.JKHStore.getRaw === "function")) return null;
@@ -2463,6 +2469,31 @@ tbody.innerHTML = "";
     renderSourcesModalList();
     try { loadPaymentTable(); } catch(e) { console.error(e); throw e; }
   };
+
+
+(function initPaymentTableServerFirst(){
+  let started = false;
+
+  function tryStart(){
+    if (started) return;
+
+    if (isDataReady()) {
+      started = true;
+      console.log("[payment-table] start after data-ready");
+      loadPaymentTable();
+    }
+  }
+
+  tryStart();
+
+  window.addEventListener("JKH_UI_STATE_CHANGED", tryStart);
+
+  let tries = 0;
+  const t = setInterval(() => {
+    tryStart();
+    if (started || tries++ > 20) clearInterval(t);
+  }, 300);
+})();
 
 
 })();
