@@ -420,7 +420,7 @@ function getAbonentNote(id, a){
 
 function getPaymentsForAbonent(id){
     try{
-        const raw = (window.JKHStore && JKHStore.getRaw) ? JKHStore.getRaw("payments_" + id) : null;
+        const raw = (window.JKHStore && JKHStore.getRaw) ? JKHStore.getRaw(((typeof window.getPaymentsKeyForAbonent === "function") ? window.getPaymentsKeyForAbonent(id) : ("payments_" + id))) : null;
         if (!raw) return [];
         const arr = JSON.parse(raw);
         return Array.isArray(arr) ? arr : [];
@@ -653,7 +653,7 @@ function rebuildIndexRows(){
 
 function hasUsablePaymentLedger(abonentId){
     try {
-        const raw = (window.JKHStore && JKHStore.getRaw) ? JKHStore.getRaw("payments_" + abonentId) : null;
+        const raw = (window.JKHStore && JKHStore.getRaw) ? JKHStore.getRaw(((typeof window.getPaymentsKeyForAbonent === "function") ? window.getPaymentsKeyForAbonent(abonentId) : ("payments_" + abonentId))) : null;
         if (!raw) return false;
         const arr = JSON.parse(raw);
         if (!Array.isArray(arr)) return false;
@@ -681,7 +681,8 @@ async function ensureIndexAccrualsReady(){
 
         for (const id of ids) {
             if (hasUsablePaymentLedger(id)) {
-                console.log('[index][autoaccrual] skip existing payments_' + id);
+                const existingKey = (typeof window.getPaymentsKeyForAbonent === 'function') ? window.getPaymentsKeyForAbonent(id) : ('payments_' + id);
+                console.log('[index][autoaccrual] skip existing ' + existingKey);
                 continue;
             }
             let res = { changed: false, reason: 'autoaccrual-unavailable' };

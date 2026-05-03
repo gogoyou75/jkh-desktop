@@ -365,18 +365,16 @@ function splitAccrualByOwnership(accr, year, month, history) {
     return first || "27";
   }
   function getAbonentTechnicalId() {
-    try {
-      const id = String(getAbonentId() || "");
-      const ab = window.AbonentsDB && window.AbonentsDB.abonents ? window.AbonentsDB.abonents[id] : null;
-      const uid = String(ab && ab.uid || "").trim();
-      return uid || id;
-    } catch (e) {
-      return String(getAbonentId() || "");
-    }
+    const id = String(getAbonentId() || "");
+    if (typeof window.getAbonentTechId === "function") return window.getAbonentTechId(id);
+    return id;
   }
 
   function paymentsKey() {
-    return "payments_" + getAbonentTechnicalId();
+    const id = String(getAbonentId() || "");
+    const key = (typeof window.getPaymentsKeyForAbonent === "function") ? window.getPaymentsKeyForAbonent(id) : ("payments_" + getAbonentTechnicalId());
+    try { console.log("[payment-key] read", { abonentId: id, key: key }); } catch(e) {}
+    return key;
   }
 
   /* =========================================================
@@ -511,7 +509,9 @@ function splitAccrualByOwnership(accr, year, month, history) {
     // (год, месяц) из таблицы оплат и считаем это датой начала расчёта.
     // Это даёт автоперерасчёт начислений сразу после импорта.
     try {
-      const raw = (window.JKHStore && JKHStore.getRaw) ? JKHStore.getRaw("payments_" + id) : null;
+      const pKey = (typeof window.getPaymentsKeyForAbonent === "function") ? window.getPaymentsKeyForAbonent(id) : ("payments_" + id);
+      try { console.log("[payment-key] read", { abonentId: id, key: pKey }); } catch(e) {}
+      const raw = (window.JKHStore && JKHStore.getRaw) ? JKHStore.getRaw(pKey) : null;
       if (raw) {
         const arr = JSON.parse(raw);
         if (Array.isArray(arr) && arr.length) {

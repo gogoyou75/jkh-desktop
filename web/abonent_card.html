@@ -1694,7 +1694,7 @@ function __collectAbonentScopedKeysForDelete(abonentId, uid, account){
         if (k.indexOf(prefix) !== 0) return false;
         const suffix = String(k.slice(prefix.length) || '').trim();
         if (!suffix) return false;
-        return suffix === id || suffix === uidStr || suffix === accountStr;
+        return suffix === id || suffix === uidStr;
     }
 
     function add(baseKey){
@@ -1722,7 +1722,7 @@ function __collectAbonentScopedKeysForDelete(abonentId, uid, account){
         if (baseKey.indexOf('jkh_freeze_to_v1:') === 0 ||
             baseKey.indexOf('jkh_transfer_to_v1:') === 0) {
             const tail = String(baseKey.split(':')[1] || '').trim();
-            if (tail === id || tail === uidStr || tail === accountStr) add(baseKey);
+            if (tail === id || tail === uidStr) add(baseKey);
             continue;
         }
 
@@ -1732,7 +1732,7 @@ function __collectAbonentScopedKeysForDelete(abonentId, uid, account){
             const parts = baseKey.split(':');
             const p1 = String(parts[1] || '').trim();
             const p2 = String(parts[2] || '').trim();
-            if (p1 === id || p1 === uidStr || p1 === accountStr || p2 === id || p2 === uidStr || p2 === accountStr) add(baseKey);
+            if (p1 === id || p1 === uidStr || p2 === id || p2 === uidStr) add(baseKey);
         }
     }
 

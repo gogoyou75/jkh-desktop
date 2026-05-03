@@ -211,6 +211,29 @@
       return fallback;
     }
   }
+
+  function getAbonentTechId(abonentId) {
+    try {
+      var id = String(abonentId || '').trim();
+      var db = (window.Data && typeof window.Data.getDb === 'function') ? window.Data.getDb() : (window.AbonentsDB || {});
+      var abonents = (db && db.abonents && typeof db.abonents === 'object') ? db.abonents : {};
+      var a = abonents[id] || null;
+      var uid = String(a && a.uid || '').trim();
+      var techId = uid || id;
+      var mode = uid ? 'uid' : 'legacy';
+      try { console.log('[payment-key] resolve', { abonentId: id, uid: uid || '', key: 'payments_' + techId, mode: mode }); } catch(e) {}
+      return techId;
+    } catch (e) {
+      var fallback = String(abonentId || '').trim();
+      try { console.log('[payment-key] resolve', { abonentId: fallback, uid: '', key: 'payments_' + fallback, mode: 'legacy' }); } catch(_) {}
+      return fallback;
+    }
+  }
+
+  function getPaymentsKeyForAbonent(abonentId) {
+    return 'payments_' + getAbonentTechId(abonentId);
+  }
+
   function _todayStamp() {
     var d = new Date();
     var y = d.getFullYear();
