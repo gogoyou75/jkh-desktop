@@ -150,18 +150,48 @@
     return '';
   }
 
-  function paymentsKey(ls){ return `payments_${ls}`; }
+  function resolvePaymentsKeyForAbonent(abonentId){
+    const id = String(abonentId || '').trim();
+    if (!id) {
+      console.warn('[autoaccrual][payment-key] blocked', { abonentId: id, reason: 'EMPTY_ABONENT_ID' });
+      return '';
+    }
 
-  function loadPayments(ls, ownerId){
+    if (typeof window.getPaymentsKeyForAbonent === 'function') {
+      const key = String(window.getPaymentsKeyForAbonent(id) || '').trim();
+      if (key) return key;
+      console.warn('[autoaccrual][payment-key] blocked', { abonentId: id, reason: 'EMPTY_KEY_FROM_RESOLVER' });
+      return '';
+    }
+
+    const dbAbonent = (window.Data && typeof window.Data.getDb === 'function')
+      ? ((window.Data.getDb() || {}).abonents || {})[id]
+      : null;
+    const fallbackAbonent = (window.AbonentsDB && window.AbonentsDB.abonents)
+      ? window.AbonentsDB.abonents[id]
+      : null;
+    const a = dbAbonent || fallbackAbonent || null;
+    const uid = String(a && a.uid || '').trim();
+    if (uid) return 'payments_' + uid;
+
+    console.warn('[autoaccrual][payment-key] blocked', { abonentId: id, reason: 'UID_REQUIRED' });
+    return '';
+  }
+
+  function loadPayments(abonentId, ownerId){
+    const key = resolvePaymentsKeyForAbonent(abonentId);
+    if (!key) return [];
     try{
-      const raw = storeGetRaw(paymentsKey(ls), ownerId);
+      const raw = storeGetRaw(key, ownerId);
       if (!raw) return [];
       const arr = JSON.parse(raw);
       return Array.isArray(arr) ? arr : [];
     } catch { return []; }
   }
-  function savePayments(ls, arr, ownerId){
-    storeSetRaw(paymentsKey(ls), JSON.stringify(arr||[]), ownerId);
+  function savePayments(abonentId, arr, ownerId){
+    const key = resolvePaymentsKeyForAbonent(abonentId);
+    if (!key) return;
+    storeSetRaw(key, JSON.stringify(arr||[]), ownerId);
   }
 
   // ----------------------------
@@ -597,7 +627,8 @@
       const existsSaved = lenSaved > 0;
       console.log('[autoaccrual][save]', { id, len: lenSaved, exists: existsSaved });
 
-      const check = storeGetRaw(paymentsKey(id), ownerId);
+      const key = resolvePaymentsKeyForAbonent(id);
+      const check = key ? storeGetRaw(key, ownerId) : null;
       let checkLen = 0;
       if (check) {
         try { checkLen = JSON.parse(check).length || 0; } catch (_) { checkLen = 0; }

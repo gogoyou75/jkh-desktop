@@ -246,11 +246,11 @@
       abonentId: id,
       found: true,
       uid: '',
-      key: 'payments_' + id,
-      mode: 'legacy',
-      reason: 'NO_UID_ON_ABONENT'
+      key: '',
+      mode: 'blocked',
+      reason: 'UID_REQUIRED'
     });
-    return id;
+    return null;
   }
 
   function getPaymentsKeyForAbonent(abonentId) {
@@ -258,6 +258,19 @@
     if (!techId) return '';
     return 'payments_' + techId;
   }
+
+  window.JKHDebugListLegacyPaymentKeys = function() {
+    try {
+      return Object.keys(localStorage).filter(function(k){
+        return k.includes('payments_') && !k.includes('uid_');
+      });
+    } catch (e) {
+      return [];
+    }
+  };
+
+
+  window.getPaymentsKeyForAbonent = getPaymentsKeyForAbonent;
 
   function _todayStamp() {
     var d = new Date();
@@ -469,6 +482,13 @@
     Object.keys(db.abonents).forEach((abonentId) => {
       const a = db.abonents[abonentId];
       if (!a) return;
+
+      if (!String(a.uid || '').trim()) {
+        a.uid = (typeof window.generateUid === 'function')
+          ? String(window.generateUid())
+          : ('uid_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8));
+        console.log('[data][uid] migrated legacy abonent', { abonentId: String(abonentId), uid: String(a.uid) });
+      }
 
       const regnum = String(a.regnum || a.premiseRegnum || "").trim();
       if (!regnum) return;
@@ -694,6 +714,13 @@
 
       if (!window.AbonentsDB.abonents || typeof window.AbonentsDB.abonents !== "object") {
         window.AbonentsDB.abonents = {};
+      }
+
+      if (!String(input.uid || '').trim()) {
+        input.uid = (typeof window.generateUid === 'function')
+          ? String(window.generateUid())
+          : ('uid_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8));
+        console.log('[data][uid] generated for abonent', { abonentId: id, uid: String(input.uid) });
       }
 
       var regnum = normalizeRegnumValue(input.premiseRegnum || input.regnum);
