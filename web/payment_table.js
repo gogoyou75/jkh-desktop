@@ -517,7 +517,11 @@ function splitAccrualByOwnership(accr, year, month, history) {
     // (год, месяц) из таблицы оплат и считаем это датой начала расчёта.
     // Это даёт автоперерасчёт начислений сразу после импорта.
     try {
-      const pKey = (typeof window.getPaymentsKeyForAbonent === "function") ? window.getPaymentsKeyForAbonent(id) : ("payments_" + id);
+      const pKey = (typeof window.getPaymentsKeyForAbonent === "function") ? window.getPaymentsKeyForAbonent(id) : "";
+      if (!pKey) {
+        try { console.warn("[payment-key] read blocked", { abonentId: id, reason: "ABONENT_NOT_READY_OR_UID_MISSING" }); } catch(e) {}
+        return null;
+      }
       try { console.log("[payment-key] read", { abonentId: id, key: pKey }); } catch(e) {}
       const raw = (window.JKHStore && JKHStore.getRaw) ? JKHStore.getRaw(pKey) : null;
       if (raw) {
@@ -1768,6 +1772,16 @@ function applyRunningTotals(viewRows) {
   }
 
   async function loadPaymentTable() {
+    if (!isDataReady()) {
+      try { console.warn('[payment-table] load skipped: DATA_NOT_READY'); } catch(e) {}
+      return;
+    }
+    const keyForReadiness = paymentsKey();
+    if (!keyForReadiness) {
+      try { console.warn('[payment-table] load skipped: PAYMENT_KEY_NOT_READY'); } catch(e) {}
+      return;
+    }
+
     const tbody = qs("#paymentTableBody");
 
     // UI: группировка ledger внутри месяца (начисление сверху, оплаты ниже)
