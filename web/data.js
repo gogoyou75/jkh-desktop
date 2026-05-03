@@ -795,13 +795,14 @@
           house: String(toPremise.house || ""),
           flat: String(toPremise.flat || ""),
           square: toPremise.square !== undefined ? toPremise.square : "",
-          createdAt: String(toPremise.createdAt || date),
+          createdAt: String(date),
           officialRegnum: officialRegnum,
           regnumType: officialRegnum ? "official" : "temp",
           status: "active",
           createdFromMergeRegnums: fromRegnums.slice(),
           mergedAt: date
         };
+        console.log("[premise-transform] merge createdAt forced to date", date);
 
         db.links.forEach(function (l) {
           var r = normalizeRegnumValue(l && l.regnum);
@@ -820,26 +821,42 @@
         if (!newResp) throw new Error("MERGE_RESPONSIBLE_REQUIRED");
         if (!db.abonents || !db.abonents[newResp]) throw new Error("MERGE_RESPONSIBLE_NOT_FOUND");
 
-        function _generateNewAbonentId(abonents) {
+        function _generateNewLs(abonents, flatValue) {
           var maxNum = -1;
           Object.keys(abonents || {}).forEach(function (k) {
-            if (/^\d+$/.test(String(k))) {
-              var n = Number(k);
-              if (isFinite(n) && n > maxNum) maxNum = n;
-            }
+            var id = String(k || "").trim();
+            var m = id.match(/^(\d+)(?:-|$)/);
+            if (!m) return;
+            var n = Number(m[1]);
+            if (isFinite(n) && n > maxNum) maxNum = n;
           });
-          if (maxNum >= 0) return String(maxNum + 1);
-          return String(Date.now());
+          var flatPart = String(flatValue || "").trim() || "MERGE";
+          var base = "";
+          if (maxNum >= 0) base = String(maxNum + 1) + "-" + flatPart;
+          else base = String(Date.now()) + "-" + flatPart;
+          var candidate = base;
+          var suffix = 1;
+          while (abonents && abonents[candidate]) {
+            candidate = base + "-" + String(suffix++);
+          }
+          return candidate;
         }
 
-        var generatedNewId = _generateNewAbonentId(db.abonents);
-        while (db.abonents[generatedNewId]) {
-          generatedNewId = String(Number(generatedNewId) + 1 || Date.now());
+        function _generateNewUid() {
+          try {
+            if (typeof window.generateUid === "function") return String(window.generateUid());
+          } catch (e) { }
+          return "uid_m" + String(Date.now()) + "_" + String(Math.floor(Math.random() * 1000000));
         }
+        var generatedNewId = _generateNewLs(db.abonents, toPremise.flat);
+        var generatedNewUid = _generateNewUid();
+        console.log("[premise-transform] new LS generated", generatedNewId);
+        console.log("[premise-transform] new UID generated", generatedNewUid);
 
         var sourceAbonent = db.abonents[newResp] || {};
         var newAbonent = Object.assign({}, sourceAbonent, {
           id: generatedNewId,
+          uid: generatedNewUid,
           fio: String(sourceAbonent.fio || ""),
           fam: sourceAbonent.fam,
           name: sourceAbonent.name,
@@ -863,8 +880,10 @@
         });
         db.abonents[generatedNewId] = newAbonent;
         console.log("[premise-transform] new abonent generated", generatedNewId, "from", newResp);
+        console.log("[premise-transform] old LS preserved", newResp);
 
         db.links.push({ abonentId: generatedNewId, regnum: newRegnum, dateFrom: date, dateTo: "" });
+        console.log("[premise-transform] new responsibility period created", generatedNewId, newRegnum, date);
         console.log("[premise-transform] new active link created", generatedNewId, newRegnum);
 
         var ev = {
