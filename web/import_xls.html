@@ -1128,6 +1128,54 @@ function normalizeHeaderIndex(v){
   return Math.floor(num);
 }
 
+function findCustomer2009HeaderRow(rows){
+  let bestRow = -1;
+  let bestScore = -1;
+
+  for (let r = 0; r < Math.min(rows.length, 50); r++){
+    const row = rows[r];
+    if (!row) continue;
+
+    const seen = {};
+    let totalNumeric = 0;
+    let duplicates = 0;
+
+    for (let c = 0; c < row.length; c++){
+      const v = normalizeHeaderIndex(row[c]);
+      if (v === null || v < 0 || v > 77) continue;
+
+      totalNumeric++;
+
+      if (Object.prototype.hasOwnProperty.call(seen, v)){
+        duplicates++;
+      } else {
+        seen[v] = true;
+      }
+    }
+
+    const uniqueCount = Object.keys(seen).length;
+
+    const hasBase = [0,1,2,3,4,5].every(function(n){
+      return Object.prototype.hasOwnProperty.call(seen, n);
+    });
+
+    const hasPayments =
+      Object.prototype.hasOwnProperty.call(seen, 6) &&
+      Object.prototype.hasOwnProperty.call(seen, 7) &&
+      Object.prototype.hasOwnProperty.call(seen, 72) &&
+      Object.prototype.hasOwnProperty.call(seen, 77);
+
+    const score = uniqueCount * 10 + (hasBase ? 100 : 0) + (hasPayments ? 100 : 0) - duplicates;
+
+    if (uniqueCount >= 50 && hasBase && hasPayments && score > bestScore){
+      bestScore = score;
+      bestRow = r;
+    }
+  }
+
+  return bestRow;
+}
+
 function parseSheetToRows(sheet, fileName, sheetName){
   aoa = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '' });
   parseMeta = { mode:'none', indexRowIndex:-1, fieldMapStatus:null, paymentGroups:[], workbookYear:'', headerDetect:null, customer2009FieldMap:null };
@@ -1136,7 +1184,10 @@ function parseSheetToRows(sheet, fileName, sheetName){
   const strictCustomerYear = '2009';
 
   function parseStrictCustomer2009Rows(){
-    const rawRowValues = aoa[14] || [];
+    const headerRowIndex = findCustomer2009HeaderRow(aoa);
+    if (headerRowIndex < 0) return null;
+
+    const rawRowValues = aoa[headerRowIndex] || [];
     const fieldMap = {};
     let duplicateIndexes = [];
     for (let c=0; c<rawRowValues.length; c++){
@@ -1148,7 +1199,7 @@ function parseSheetToRows(sheet, fileName, sheetName){
     }
     const hasCustomer2009Shape = Object.prototype.hasOwnProperty.call(fieldMap, 0) && Object.prototype.hasOwnProperty.call(fieldMap, 77);
     if (duplicateIndexes.length){
-      return { ok:false, msg:'Строка 15 содержит дубли номеров карты 0–77: ' + duplicateIndexes.join(', ') + '.', customerLike:hasCustomer2009Shape };
+      return { ok:false, msg:'Служебная строка содержит дубли номеров карты 0–77: ' + duplicateIndexes.join(', ') + '.', customerLike:hasCustomer2009Shape };
     }
     const missingIndexes = [];
     for (let i=0; i<=77; i++){
@@ -1156,13 +1207,13 @@ function parseSheetToRows(sheet, fileName, sheetName){
     }
     if (missingIndexes.length){
       if (hasCustomer2009Shape){
-        return { ok:false, msg:'Строка 15 не содержит все поля карты 0–77. Не найдены номера: ' + missingIndexes.join(', '), customerLike:true };
+        return { ok:false, msg:'Служебная строка не содержит все поля карты 0–77. Не найдены номера: ' + missingIndexes.join(', '), customerLike:true };
       }
       return null;
     }
     console.log('[CUSTOMER_2009][fieldMap]', fieldMap);
     const rows = [];
-    for (let r=15; r<aoa.length; r++){
+    for (let r=headerRowIndex + 1; r<aoa.length; r++){
       const line = aoa[r] || [];
       if (line.every(function(c){ return normStr(c)===''; })) continue;
       const payments = [];
@@ -1195,14 +1246,14 @@ function parseSheetToRows(sheet, fileName, sheetName){
         payments: payments
       });
     }
-    return { ok:true, rows:rows, fieldMap:fieldMap };
+    return { ok:true, rows:rows, fieldMap:fieldMap, headerRowIndex:headerRowIndex };
   }
 
   const customer2009 = parseStrictCustomer2009Rows();
   if (customer2009 && customer2009.ok){
     parseMeta = {
       mode:'strict-template-customer-2009',
-      indexRowIndex:14,
+      indexRowIndex:customer2009.headerRowIndex,
       fieldMapStatus:null,
       paymentGroups:[],
       workbookYear:strictCustomerYear,
