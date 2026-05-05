@@ -1120,6 +1120,75 @@ function parseSheetToRows(sheet, fileName, sheetName){
   parseMeta = { mode:'none', indexRowIndex:-1, fieldMapStatus:null, paymentGroups:[], workbookYear:'', headerDetect:null };
 
   const workbookYear = detectWorkbookYear(aoa, fileName, sheetName);
+  const strictCustomerYear = '2009';
+
+  function parseStrictCustomer2009Rows(){
+    const indexRow = aoa[14] || [];
+    const fields = [];
+    for (let i=0;i<indexRow.length;i++){
+      const n = Number(normStr(indexRow[i]));
+      if (Number.isFinite(n)) fields.push(n);
+    }
+    const hasAllFields = fields.length >= 78 && fields.slice(0, 78).every(function(v, idx){ return v === idx; });
+    const hasCustomer2009Shape = fields.includes(0) && fields.includes(77);
+    if (!hasAllFields){
+      if (hasCustomer2009Shape){
+        return { ok:false, msg:'Шаблон CUSTOMER_2009 повреждён: строка 15 должна содержать поля 0–77.', customerLike:true };
+      }
+      return null;
+    }
+    const rows = [];
+    for (let r=15; r<aoa.length; r++){
+      const line = aoa[r] || [];
+      if (line.every(function(c){ return normStr(c)===''; })) continue;
+      const payments = [];
+      for (let m=0; m<12; m++){
+        const base = 6 + (m * 6);
+        for (let src=0; src<3; src++){
+          const sumCol = base + (src * 2);
+          const dateCol = sumCol + 1;
+          payments.push({
+            amount: line[sumCol],
+            periodRaw: strictCustomerYear + '-' + pad2(m + 1),
+            paidDateRaw: line[dateCol],
+            sourceIndex: src + 1,
+            sourceName: sourceNameByIndex(src + 1),
+            year: strictCustomerYear,
+            month: pad2(m + 1)
+          });
+        }
+      }
+      rows.push({
+        excelRow: r + 1,
+        uid: normStr(line[0]),
+        ls: normStr(line[1]),
+        fam: normStr(line[2]),
+        name: normStr(line[3]),
+        otch: normStr(line[4]),
+        square: normNum(line[5]),
+        squareRaw: line[5],
+        rowYear: strictCustomerYear,
+        payments: payments
+      });
+    }
+    return { ok:true, rows:rows };
+  }
+
+  const customer2009 = parseStrictCustomer2009Rows();
+  if (customer2009 && customer2009.ok){
+    parseMeta = {
+      mode:'strict-template-customer-2009',
+      indexRowIndex:14,
+      fieldMapStatus:null,
+      paymentGroups:[],
+      workbookYear:strictCustomerYear,
+      headerDetect:null
+    };
+    return { ok:true, rows:customer2009.rows };
+  }
+  if (customer2009 && customer2009.customerLike){
+    return { ok:false, msg:customer2009.msg };
+  }
 
   // =========================================================
   // 1) СНАЧАЛА ПЫТАЕМСЯ РАЗОБРАТЬ ФАЙЛ НОВЫМ AUTO-DETECT
@@ -1354,8 +1423,20 @@ function evaluatePaymentsRow(db, row){
   const foundU = uid ? findAbonentByUid(db, uid) : null;
   const ab = foundU ? foundU.abonent : null;
 
-  if (!uid || !ab){
-    return { status:'ERROR', critical:true, details:['Для импорта платежей нужен UID. Сначала выполните шаг 1 — Первичка.'], conflicts:0, unresolved:0, adds:0, dups:0, found:paymentPairsCount(row), skipped:0 };
+  if (!uid){
+    return { status:'ERROR', critical:true, details:['Создайте абонента в программе и вставьте UID в Excel'], conflicts:0, unresolved:0, adds:0, dups:0, found:paymentPairsCount(row), skipped:0 };
+  }
+  if (!ab){
+    return { status:'ERROR', critical:true, details:['UID из Excel не найден в базе.'], conflicts:0, unresolved:0, adds:0, dups:0, found:paymentPairsCount(row), skipped:0 };
+  }
+  if (parseMeta.mode === 'strict-template-customer-2009'){
+    const lsExcel = normStr(row.ls);
+    const famExcel = normStr(row.fam);
+    const lsDb = normStr(ab.id);
+    const famDb = normStr(ab.fam || ab.surname || ab.last_name);
+    if ((lsExcel && lsDb && lsExcel !== lsDb) || (famExcel && famDb && famExcel !== famDb)){
+      return { status:'CONFLICT', critical:true, details:['Конфликт: UID найден, но ЛС/фамилия не совпадают. Строка не будет импортирована.'], conflicts:1, unresolved:1, adds:0, dups:0, found:paymentPairsCount(row), skipped:paymentPairsCount(row) };
+    }
   }
 
   const uidKey = normStr(ab.uid || row.uid);
@@ -1586,6 +1667,9 @@ function renderPreview(){
       ((Array.isArray(payPairs) && payPairs.length>0) ? 'Платёжные колонки определены по заголовкам. Доступен только предпросмотр/диагностика, применение запрещено.' : 'Платёжные колонки не распознаны.') + '</span>';
     const dbg = Array.isArray(hd.debug) ? hd.debug : [];
     for (let i=0;i<dbg.length;i++) diag += '<br><span class="mono">' + dbg[i] + '</span>';
+  } else if (parseMeta.mode === 'strict-template-customer-2009'){
+    diag += '<br><span class="ok">Распознан строгий шаблон CUSTOMER_2009. Год: 2009. Импорт разрешён.</span>';
+    diag += '<br><span class="mono">Служебная строка: 15; карта полей: 0–77.</span>';
   }
   $('errorsBox').innerHTML = diag;
 
@@ -1595,10 +1679,11 @@ function renderPreview(){
 }
 
 function isStrictTemplateMode(){
-  return !!(parseMeta && parseMeta.mode === 'strict-template');
+  return !!(parseMeta && (parseMeta.mode === 'strict-template' || parseMeta.mode === 'strict-template-customer-2009'));
 }
 function isApplyBlockedByTemplateMode(){
-  return !!(parseMeta && dataRows.length > 0 && parseMeta.mode !== 'strict-template');
+  const allowed = parseMeta && (parseMeta.mode === 'strict-template' || parseMeta.mode === 'strict-template-customer-2009');
+  return !!(parseMeta && dataRows.length > 0 && !allowed);
 }
 function hasPrimaryCritical(){ return preview.some(r => r.critical && r.status==='ERROR'); }
 function hasPaymentsCritical(){ return preview.some(r => r.critical && r.status==='ERROR'); }
