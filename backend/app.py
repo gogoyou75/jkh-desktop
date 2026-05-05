@@ -392,6 +392,20 @@ def _norm_date(v):
     return None
 
 
+def _norm_iso_date(v):
+    if isinstance(v, datetime):
+        return v.date().isoformat()
+    if isinstance(v, date):
+        return v.isoformat()
+    s = _norm_text(v)
+    if not s:
+        return None
+    try:
+        return datetime.strptime(s, "%Y-%m-%d").date().isoformat()
+    except ValueError:
+        return None
+
+
 def _norm_period(v):
     s = _norm_text(v)
     if not s:
@@ -1011,7 +1025,7 @@ def import_payments_upload_rows():
         account_uid = _norm_text(src.get("account_uid"))
         abonent_id = _norm_text(src.get("abonent_id"))
         account_number = _norm_text(src.get("account_number"))
-        payment_date = _norm_date(src.get("payment_date"))
+        payment_date = _norm_iso_date(src.get("payment_date"))
         payment_period = _norm_period(src.get("payment_period"))
         amount = _norm_amount(src.get("amount"))
         src_index_raw = src.get("source_index")
@@ -1211,35 +1225,35 @@ def import_payments_validate(batch_id):
             invalid += 1
         elif not r.payment_date:
             r.status = "invalid"
-            r.reason_code = "payment_date_invalid"
+            r.reason_code = "PAYMENT_DATE_INVALID"
             r.reason_text = "Некорректная дата платежа"
             details["field"] = "payment_date"
             details["recommendation"] = "Проверьте дату платежа, ожидается YYYY-MM-DD."
             invalid += 1
         elif not r.payment_period:
             r.status = "invalid"
-            r.reason_code = "payment_period_invalid"
+            r.reason_code = "PAYMENT_PERIOD_INVALID"
             r.reason_text = "Некорректный период платежа"
             details["field"] = "payment_period"
             details["recommendation"] = "Проверьте период платежа, ожидается YYYY-MM."
             invalid += 1
         elif not r.amount:
             r.status = "invalid"
-            r.reason_code = "amount_invalid"
+            r.reason_code = "AMOUNT_INVALID"
             r.reason_text = "Некорректная сумма"
             details["field"] = "amount"
             details["recommendation"] = "Проверьте сумму, ожидается число > 0."
             invalid += 1
         elif r.source_index is None:
             r.status = "invalid"
-            r.reason_code = "source_index_required"
+            r.reason_code = "SOURCE_INDEX_INVALID"
             r.reason_text = "source_index обязателен"
             details["field"] = "source_index"
             details["recommendation"] = "Укажите индекс источника платежа."
             invalid += 1
         elif r.source_index not in sources_map:
             r.status = "invalid"
-            r.reason_code = "INVALID_SOURCE_INDEX"
+            r.reason_code = "SOURCE_INDEX_INVALID"
             r.reason_text = "source_index отсутствует в справочнике payment_sources"
             details["field"] = "source_index"
             details["recommendation"] = "Используйте source_index из справочника источников оплаты."

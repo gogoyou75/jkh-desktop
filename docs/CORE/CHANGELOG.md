@@ -1,5 +1,13 @@
 # CHANGELOG
 
+## 2026-05-05 — Import XLS: единый frontend/backend контракт
+
+- Зафиксирован единый JSON-контракт для /api/import/payments/upload_rows.
+- Frontend отправляет payment_date только в формате YYYY-MM-DD.
+- Frontend отправляет payment_period только в формате YYYY-MM.
+- Backend строго валидирует upload_rows по тем же правилам.
+- Коды ошибок frontend/backend унифицированы.
+
 ## 2026-05-05 — Import backend: переход на payments_<uid>
 
 - Серверный импорт больше не записывает платежи в payments_<LS>

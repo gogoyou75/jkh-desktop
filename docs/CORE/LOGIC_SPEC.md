@@ -1137,3 +1137,36 @@ Split v1.9.1 — следующий крупный этап после `UID-only
 
 Реализация должна быть выполнена без изменения `calc_engine.js` и без автоматического распределения денег.
 
+
+## 11. Контракт импорта платежей /api/import/payments/upload_rows
+
+Единый контракт строки платежа:
+
+```json
+{
+  "account_uid": "UID_...",
+  "account_number": "1001",
+  "payment_date": "YYYY-MM-DD",
+  "payment_period": "YYYY-MM",
+  "amount": 123.45,
+  "source_index": 1
+}
+```
+
+Правила:
+- frontend может распознавать Excel date в форматах `DD.MM.YYYY` / `YYYY-MM-DD` / serial, но в upload_rows отправляет только `YYYY-MM-DD`;
+- backend для upload_rows принимает только `YYYY-MM-DD`;
+- `payment_period` на сервер отправляется только в `YYYY-MM`;
+- `source_index` обязателен, целое число `>= 1`;
+- backend дополнительно проверяет, что `source_index` существует в `payment_sources_v1`;
+- backend является главным валидатором, но frontend не должен отправлять строку вне контракта.
+
+Коды ошибок контракта:
+- `ACCOUNT_UID_REQUIRED`
+- `ACCOUNT_NUMBER_REQUIRED`
+- `PAYMENT_DATE_REQUIRED`
+- `PAYMENT_DATE_INVALID`
+- `PAYMENT_PERIOD_REQUIRED`
+- `PAYMENT_PERIOD_INVALID`
+- `AMOUNT_INVALID`
+- `SOURCE_INDEX_INVALID`
