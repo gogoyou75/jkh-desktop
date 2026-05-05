@@ -90,6 +90,10 @@
         <span class="pill">Импортировать только по UID</span>
         <span class="pill">Дубликаты пропускать</span>
         <span class="pill">Конфликты не импортировать</span>
+        <label class="pill" id="optAllowLegacyMapWrap">
+          <input type="checkbox" id="optAllowLegacyMap" />
+          Разрешить legacy field-map распознавание
+        </label>
       </div>
 
       <div class="hint mono" id="stepStateLine">Шаг 1 не применён. Шаг 2 заблокирован до успешной первички.</div>
@@ -221,6 +225,30 @@ function normalizePaidDate(v){
   const per = normalizePeriod(s);
   if (per) return '01.' + per.period.slice(5,7) + '.' + per.period.slice(0,4);
   return s;
+}
+
+function normalizePaidDateStrict(v){
+  if (v==null) return '';
+  const s = normStr(v);
+  if (!s) return '';
+
+  if (/^\d+(\.\d+)?$/.test(s)){
+    try{
+      const dc = XLSX.SSF.parse_date_code(Number(s));
+      if (dc && dc.y && dc.m && dc.d){
+        return String(dc.d).padStart(2,'0') + '.' + String(dc.m).padStart(2,'0') + '.' + String(dc.y);
+      }
+    }catch(e){}
+    return '';
+  }
+
+  let m = s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (m) return m[3] + '.' + m[2] + '.' + m[1];
+
+  m = s.match(/^(\d{2})\.(\d{2})\.(\d{4})$/);
+  if (m) return m[1] + '.' + m[2] + '.' + m[3];
+
+  return '';
 }
 
 function toIsoDateFromDisplayDate(v){
@@ -407,14 +435,17 @@ function buildImportedPaymentLedgerRow(list, paymentEntry){
   }
   const year = normStr(paymentEntry && paymentEntry.year) || String(new Date().getFullYear());
   const month = pad2(paymentEntry && paymentEntry.month ? paymentEntry.month : '');
-  const paidDate = normalizePaidDate(paymentEntry && paymentEntry.paidDateRaw);
+  const paidDate = normalizePaidDateStrict(paymentEntry && paymentEntry.paidDateRaw);
+  if (!paidDate) {
+    throw new Error('PAYMENT_DATE_REQUIRED');
+  }
   return {
     id: maxId + 1,
     year: year,
     month: month,
     accrued: 0,
     paid: normNum(paymentEntry && paymentEntry.amount),
-    paid_date: paidDate || ('01.' + month + '.' + year),
+    paid_date: paidDate,
     source: sourceNameByIndex(paymentEntry && paymentEntry.sourceIndex),
     payment_period: year + '-' + month
   };
@@ -1303,7 +1334,12 @@ function evaluatePaymentsRow(db, row){
     const year = normStr(p.year) || extractYearFromAny(p.periodRaw) || extractYearFromAny(p.paidDateRaw) || normStr(row.rowYear) || parseMeta.workbookYear || (per ? per.period.slice(0,4) : '') || String(new Date().getFullYear());
     const month = pad2(p.month || (per ? per.period.slice(5,7) : ''));
     if (!/^\d{4}$/.test(year) || !/^\d{2}$/.test(month)){ errs++; continue; }
-    const paidDate = normalizePaidDate(p.paidDateRaw) || ('01.' + month + '.' + year);
+    const paidDate = normalizePaidDateStrict(p.paidDateRaw);
+    if (!paidDate){
+      errs++;
+      details.push('Ошибка: отсутствует точная дата платежа. Период ' + month + '.' + year + ' не является датой оплаты.');
+      continue;
+    }
     const dup = existing.some(function(x){
       const ym = getLedgerYearMonth(x);
       const paid = getLedgerPaidAmount(x);
@@ -1440,7 +1476,8 @@ function renderPreview(){
           const year = normStr(p.year) || extractYearFromAny(p.periodRaw) || extractYearFromAny(p.paidDateRaw) || normStr(rr.rowYear) || parseMeta.workbookYear || (per ? per.period.slice(0,4) : '') || String(new Date().getFullYear());
           const month = pad2(p.month || (per ? per.period.slice(5,7) : ''));
           if (!/^\d{4}$/.test(year) || !/^\d{2}$/.test(month)) return;
-          const paidDate = normalizePaidDate(p.paidDateRaw) || ('01.' + month + '.' + year);
+          const paidDate = normalizePaidDateStrict(p.paidDateRaw);
+          if (!paidDate) return;
           const source = sourceNameByIndex(p.sourceIndex || 1);
           const ex = getPaymentsByUid(uid).find(function(x){
             const ym = getLedgerYearMonth(x);
@@ -1481,6 +1518,7 @@ function renderPreview(){
   if (err){ diag = '<span class="danger">Есть ошибки, проверь строки со статусом ОШИБКА.</span>'; }
   else { diag = '<span class="ok">Критических ошибок в текущем шаге нет.</span>'; }
   if (parseMeta.mode === 'field-map' && Number.isInteger(parseMeta.indexRowIndex) && parseMeta.indexRowIndex >= 0){
+    diag += '<br><span class="status-warn">Структура файла распознана через legacy field-map. Проверьте предпросмотр перед применением.</span>';
     diag += '<br><span class="ok">Платёжные колонки определены по служебной строке №' + (parseMeta.indexRowIndex + 1) + '.</span>';
     const groups = Array.isArray(parseMeta.paymentGroups) ? parseMeta.paymentGroups : [];
     diag += '<br><span class="mono">Field-map row: ' + (parseMeta.indexRowIndex + 1) + '</span>';
@@ -1586,8 +1624,12 @@ function setButtons(){
   const canApplyPrimary = (mode==='primary' && parsed && canWrite && !primaryBlocked && !importApplyBusy);
   $('btnApplyPrimary').disabled = !canApplyPrimary;
   const paymentsCount = getPaymentsToApplyCount();
+  const legacyMapBlocked = (mode === 'payments' && parseMeta && parseMeta.mode === 'field-map' && !$('optAllowLegacyMap').checked);
   $('btnApplyPayments').textContent = 'Применить: добавить ' + paymentsCount + ' платежей';
-  $('btnApplyPayments').disabled = !(mode==='payments' && parsed && canWrite && paymentsCount>0 && !importApplyBusy);
+  $('btnApplyPayments').disabled = !(mode==='payments' && parsed && canWrite && paymentsCount>0 && !importApplyBusy && !legacyMapBlocked);
+  if (legacyMapBlocked){
+    $('errorsBox').innerHTML = $('errorsBox').innerHTML + '<br><span class="danger">Импорт заблокирован: файл распознан через legacy field-map. Включите разрешение вручную после проверки предпросмотра.</span>';
+  }
   $('primarySettings').style.display = mode==='primary' ? 'flex' : 'none';
   $('paymentsSettings').style.display = mode==='payments' ? 'flex' : 'none';
   $('optAllowSquareUpdate').disabled = mode!=='primary';
@@ -1757,8 +1799,34 @@ async function applyPayments(){
       const year = normStr(pay.year) || extractYearFromAny(pay.periodRaw) || extractYearFromAny(pay.paidDateRaw) || normStr(row.rowYear) || parseMeta.workbookYear || (per ? per.period.slice(0,4) : '') || String(new Date().getFullYear());
       const month = pad2(pay.month || (per ? per.period.slice(5,7) : ''));
       if (!/^\d{4}$/.test(year) || !/^\d{2}$/.test(month)) continue;
-      const paidDateDisplay = normalizePaidDate(pay.paidDateRaw) || ('01.' + month + '.' + year);
-      const paymentDate = toIsoDateFromDisplayDate(paidDateDisplay) || (year + '-' + month + '-01');
+      const paidDateDisplay = normalizePaidDateStrict(pay.paidDateRaw);
+      if (!paidDateDisplay){
+        console.error("[import_xls][fatal] missing exact payment date", {
+          excelRow: row.excelRow,
+          year: year,
+          month: month
+        });
+
+        showFatal(
+          "Импорт остановлен: в файле есть платежи без точной даты. " +
+          "Исправьте файл и повторите загрузку."
+        );
+
+        return;
+      }
+      const paymentDate = toIsoDateFromDisplayDate(paidDateDisplay);
+      if (!paymentDate){
+        console.error("[import_xls][fatal] invalid payment date", {
+          excelRow: row.excelRow,
+          paidDateDisplay: paidDateDisplay
+        });
+
+        showFatal(
+          "Импорт остановлен: обнаружена некорректная дата платежа."
+        );
+
+        return;
+      }
       const paymentPeriod = year + '-' + month;
       const previewRow = evaluatePaymentsRow(db, row);
       if (!previewRow || previewRow.status==='ERROR') continue;
@@ -1943,6 +2011,7 @@ $('previewBody').addEventListener('click', function(ev){
   $('fileInput').addEventListener('change', function(){ setButtons(); });
   $('optAllowCreate').addEventListener('change', function(){ renderPreview(); });
   $('optAllowSquareUpdate').addEventListener('change', function(){ renderPreview(); });
+  $('optAllowLegacyMap').addEventListener('change', function(){ renderPreview(); });
 
   $('btnModePrimary').addEventListener('click', function(){ mode='primary'; buildPreview(); });
   $('btnModePayments').addEventListener('click', function(){ if (!canEnterPaymentsMode()) return; mode='payments'; buildPreview(); });
