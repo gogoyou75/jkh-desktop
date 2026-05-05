@@ -1115,6 +1115,19 @@ function paymentPairsCount(row){
   }).length;
 }
 
+function normalizeHeaderIndex(v){
+  if (v === null || v === undefined) return null;
+
+  if (typeof v === 'string'){
+    v = v.trim();
+  }
+
+  const num = Number(v);
+  if (!Number.isFinite(num)) return null;
+
+  return Math.floor(num);
+}
+
 function parseSheetToRows(sheet, fileName, sheetName){
   aoa = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '' });
   parseMeta = { mode:'none', indexRowIndex:-1, fieldMapStatus:null, paymentGroups:[], workbookYear:'', headerDetect:null, customer2009FieldMap:null };
