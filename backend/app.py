@@ -280,7 +280,7 @@ ROW_STATUSES = {
 IMPORT_ALLOWED_TRANSITIONS = {
     "parse": {"uploaded", "failed"},
     "validate": {"parsed", "validated"},
-    "apply": {"ready_to_apply", "validated"},
+    "apply": {"ready_to_apply"},
 }
 
 IMPORT_REQUIRED_COLUMNS = {"account_uid", "account_number", "payment_date", "payment_period", "amount", "source_index"}
@@ -1389,7 +1389,24 @@ def import_payments_apply(batch_id):
     if transition_err:
         return transition_err
 
+    if batch.rows_invalid > 0:
+        return jsonify(
+            ok=False,
+            error="invalid_rows_present",
+            details={
+                "rows_invalid": batch.rows_invalid,
+                "message": "Импорт невозможен: в батче есть строки с ошибками. Исправьте их и повторите валидацию.",
+            },
+        ), 400
+
     rows = ImportBatchRow.query.filter_by(batch_id=batch.id).order_by(ImportBatchRow.row_no.asc()).all()
+    not_ready = [r for r in rows if r.status != "ready"]
+    if not_ready:
+        return jsonify(
+            ok=False,
+            error="non_ready_rows_present",
+            details={"count": len(not_ready)},
+        ), 400
     applied_count = skipped_count = duplicate_count = conflict_count = failed_count = 0
     sources_map = _load_owner_sources(batch.owner_id)
     try:

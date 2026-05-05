@@ -82,3 +82,4 @@
 - Не переписывать calc_engine без отдельного ТЗ.
 - Не делать массовый refactor import_xls без серверной транзакционной схемы.
 - Не переносить долги при split/merge без отдельного финансового ТЗ.
+*| XX | Import Backend | apply мог выполняться при наличии invalid строк | DONE | P0 | Запрещён запуск apply без полной валидации | app.py / LOGIC_SPEC / CHANGELOG |
