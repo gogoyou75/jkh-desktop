@@ -145,6 +145,19 @@ function normNum(v){
   return Number.isFinite(n) ? n : NaN;
 }
 function toFio(fam,name,otch){ return [fam,name,otch].map(normStr).filter(Boolean).join(' '); }
+function normalizeHeaderIndex(v){
+  if (v === null || v === undefined) return null;
+
+  if (typeof v === 'string'){
+    v = v.trim();
+  }
+
+  const num = Number(v);
+
+  if (!Number.isFinite(num)) return null;
+
+  return Math.floor(num);
+}
 function asSquare(v){ return Number.isFinite(v) ? v : ''; }
 function genUID(){ return 'UID_' + String(Date.now()) + '_' + String(Math.floor(Math.random()*10000)).padStart(4,'0'); }
 function genTempRegnum(){ return 'TEMP-' + String(Date.now()) + '-' + String(Math.floor(Math.random()*10000)).padStart(4,'0'); }
@@ -1124,16 +1137,25 @@ function parseSheetToRows(sheet, fileName, sheetName){
 
   function parseStrictCustomer2009Rows(){
     const indexRow = aoa[14] || [];
-    const fields = [];
-    for (let i=0;i<indexRow.length;i++){
-      const n = Number(normStr(indexRow[i]));
-      if (Number.isFinite(n)) fields.push(n);
+    const rawRowValues = indexRow;
+    const normalized = rawRowValues.map(normalizeHeaderIndex);
+    console.log("[CUSTOMER_2009][header]", normalized);
+
+    const missingIndexes = [];
+    for (let i = 0; i <= 77; i++){
+      if (normalized[i] !== i){
+        missingIndexes.push(i);
+      }
     }
-    const hasAllFields = fields.length >= 78 && fields.slice(0, 78).every(function(v, idx){ return v === idx; });
-    const hasCustomer2009Shape = fields.includes(0) && fields.includes(77);
+    const hasAllFields = missingIndexes.length === 0;
+    const hasCustomer2009Shape = normalized.includes(0) && normalized.includes(77);
     if (!hasAllFields){
       if (hasCustomer2009Shape){
-        return { ok:false, msg:'Шаблон CUSTOMER_2009 повреждён: строка 15 должна содержать поля 0–77.', customerLike:true };
+        return {
+          ok:false,
+          msg:'Строка 15 не соответствует карте 0–77. Проверьте, что в строке нет пустых ячеек и значения идут подряд от 0 до 77. Не найдены номера: ' + missingIndexes.join(', '),
+          customerLike:true
+        };
       }
       return null;
     }
