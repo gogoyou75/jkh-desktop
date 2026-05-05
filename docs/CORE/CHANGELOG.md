@@ -163,6 +163,11 @@ rg -n "splitPremise|premise-transform\]\[split|type: ['\"]split" web LOGIC_SPEC.
 Распределение задолженности по площади, долям или ручным суммам не входит в v1. Это отдельный будущий этап.
 
 
+## 2026-05-05 — Payments: консистентность CRITICAL-комментариев
+
+- Обновлены оставшиеся CRITICAL-комментарии в calc_engine.js и storage.js
+- Канон payments_<uid> теперь единообразен во всей системе
+
 ## 2026-05-05 — CalcEngine: запрет ставки задним числом
 
 - Исправлено поведение `rateOnDate()` в `web/calc_engine.js`.
