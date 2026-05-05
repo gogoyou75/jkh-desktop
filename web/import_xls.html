@@ -1086,7 +1086,7 @@ function migrateKeyToUID(db, oldKey, newUid){
 }
 
 let WB=null, aoa=null, headerRowIndex=-1, payPairs=[], dataRows=[];
-let parseMeta={ mode:'none', indexRowIndex:-1, fieldMapStatus:null, paymentGroups:[], workbookYear:'', headerDetect:null };
+let parseMeta={ mode:'none', indexRowIndex:-1, fieldMapStatus:null, paymentGroups:[], workbookYear:'', headerDetect:null, customer2009FieldMap:null };
 let mode='primary';
 let primaryApplied=false;
 let primaryBlocked=false;
@@ -1117,26 +1117,37 @@ function paymentPairsCount(row){
 
 function parseSheetToRows(sheet, fileName, sheetName){
   aoa = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '' });
-  parseMeta = { mode:'none', indexRowIndex:-1, fieldMapStatus:null, paymentGroups:[], workbookYear:'', headerDetect:null };
+  parseMeta = { mode:'none', indexRowIndex:-1, fieldMapStatus:null, paymentGroups:[], workbookYear:'', headerDetect:null, customer2009FieldMap:null };
 
   const workbookYear = detectWorkbookYear(aoa, fileName, sheetName);
   const strictCustomerYear = '2009';
 
   function parseStrictCustomer2009Rows(){
-    const indexRow = aoa[14] || [];
-    const fields = [];
-    for (let i=0;i<indexRow.length;i++){
-      const n = Number(normStr(indexRow[i]));
-      if (Number.isFinite(n)) fields.push(n);
+    const rawRowValues = aoa[14] || [];
+    const fieldMap = {};
+    let duplicateIndexes = [];
+    for (let c=0; c<rawRowValues.length; c++){
+      const idx = normalizeHeaderIndex(rawRowValues[c]);
+      if (idx === null) continue;
+      if (idx < 0 || idx > 77) continue;
+      if (Object.prototype.hasOwnProperty.call(fieldMap, idx)) duplicateIndexes.push(idx);
+      fieldMap[idx] = c;
     }
-    const hasAllFields = fields.length >= 78 && fields.slice(0, 78).every(function(v, idx){ return v === idx; });
-    const hasCustomer2009Shape = fields.includes(0) && fields.includes(77);
-    if (!hasAllFields){
+    const hasCustomer2009Shape = Object.prototype.hasOwnProperty.call(fieldMap, 0) && Object.prototype.hasOwnProperty.call(fieldMap, 77);
+    if (duplicateIndexes.length){
+      return { ok:false, msg:'Строка 15 содержит дубли номеров карты 0–77: ' + duplicateIndexes.join(', ') + '.', customerLike:hasCustomer2009Shape };
+    }
+    const missingIndexes = [];
+    for (let i=0; i<=77; i++){
+      if (!Object.prototype.hasOwnProperty.call(fieldMap, i)) missingIndexes.push(i);
+    }
+    if (missingIndexes.length){
       if (hasCustomer2009Shape){
-        return { ok:false, msg:'Шаблон CUSTOMER_2009 повреждён: строка 15 должна содержать поля 0–77.', customerLike:true };
+        return { ok:false, msg:'Строка 15 не содержит все поля карты 0–77. Не найдены номера: ' + missingIndexes.join(', '), customerLike:true };
       }
       return null;
     }
+    console.log('[CUSTOMER_2009][fieldMap]', fieldMap);
     const rows = [];
     for (let r=15; r<aoa.length; r++){
       const line = aoa[r] || [];
@@ -1145,12 +1156,12 @@ function parseSheetToRows(sheet, fileName, sheetName){
       for (let m=0; m<12; m++){
         const base = 6 + (m * 6);
         for (let src=0; src<3; src++){
-          const sumCol = base + (src * 2);
-          const dateCol = sumCol + 1;
+          const sumField = base + (src * 2);
+          const dateField = sumField + 1;
           payments.push({
-            amount: line[sumCol],
+            amount: line[fieldMap[sumField]],
             periodRaw: strictCustomerYear + '-' + pad2(m + 1),
-            paidDateRaw: line[dateCol],
+            paidDateRaw: line[fieldMap[dateField]],
             sourceIndex: src + 1,
             sourceName: sourceNameByIndex(src + 1),
             year: strictCustomerYear,
@@ -1160,18 +1171,18 @@ function parseSheetToRows(sheet, fileName, sheetName){
       }
       rows.push({
         excelRow: r + 1,
-        uid: normStr(line[0]),
-        ls: normStr(line[1]),
-        fam: normStr(line[2]),
-        name: normStr(line[3]),
-        otch: normStr(line[4]),
-        square: normNum(line[5]),
-        squareRaw: line[5],
+        uid: normStr(line[fieldMap[0]]),
+        ls: normStr(line[fieldMap[1]]),
+        fam: normStr(line[fieldMap[2]]),
+        name: normStr(line[fieldMap[3]]),
+        otch: normStr(line[fieldMap[4]]),
+        square: normNum(line[fieldMap[5]]),
+        squareRaw: line[fieldMap[5]],
         rowYear: strictCustomerYear,
         payments: payments
       });
     }
-    return { ok:true, rows:rows };
+    return { ok:true, rows:rows, fieldMap:fieldMap };
   }
 
   const customer2009 = parseStrictCustomer2009Rows();
@@ -1182,7 +1193,8 @@ function parseSheetToRows(sheet, fileName, sheetName){
       fieldMapStatus:null,
       paymentGroups:[],
       workbookYear:strictCustomerYear,
-      headerDetect:null
+      headerDetect:null,
+      customer2009FieldMap: customer2009.fieldMap
     };
     return { ok:true, rows:customer2009.rows };
   }
@@ -1668,7 +1680,7 @@ function renderPreview(){
     const dbg = Array.isArray(hd.debug) ? hd.debug : [];
     for (let i=0;i<dbg.length;i++) diag += '<br><span class="mono">' + dbg[i] + '</span>';
   } else if (parseMeta.mode === 'strict-template-customer-2009'){
-    diag += '<br><span class="ok">Распознан строгий шаблон CUSTOMER_2009. Год: 2009. Импорт разрешён.</span>';
+    diag += '<br><span class="ok">Распознан CUSTOMER_2009: карта 0–77 найдена, рабочие поля читаются по служебной строке 15.</span>';
     diag += '<br><span class="mono">Служебная строка: 15; карта полей: 0–77.</span>';
   }
   $('errorsBox').innerHTML = diag;
