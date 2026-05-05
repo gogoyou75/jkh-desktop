@@ -1128,6 +1128,27 @@ function normalizeHeaderIndex(v){
   return Math.floor(num);
 }
 
+function findCustomer2009HeaderRow(rows){
+  for (let r = 0; r < Math.min(rows.length, 50); r++){
+    const row = rows[r];
+    if (!row) continue;
+
+    let count = 0;
+
+    for (let c = 0; c < row.length; c++){
+      const v = normalizeHeaderIndex(row[c]);
+      if (v !== null && v >= 0 && v <= 77){
+        count++;
+      }
+    }
+
+    if (count > 30){
+      return r;
+    }
+  }
+  return -1;
+}
+
 function parseSheetToRows(sheet, fileName, sheetName){
   aoa = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '' });
   parseMeta = { mode:'none', indexRowIndex:-1, fieldMapStatus:null, paymentGroups:[], workbookYear:'', headerDetect:null, customer2009FieldMap:null };
@@ -1136,7 +1157,16 @@ function parseSheetToRows(sheet, fileName, sheetName){
   const strictCustomerYear = '2009';
 
   function parseStrictCustomer2009Rows(){
-    const rawRowValues = aoa[14] || [];
+    const headerRowIndex = findCustomer2009HeaderRow(aoa);
+
+    if (headerRowIndex === -1){
+      showError("Не найдена служебная строка карты 0–77");
+      return;
+    }
+
+    console.log('[CUSTOMER_2009][headerRowIndex]', headerRowIndex);
+
+    const rawRowValues = aoa[headerRowIndex] || [];
     const fieldMap = {};
     let duplicateIndexes = [];
     for (let c=0; c<rawRowValues.length; c++){
@@ -1162,7 +1192,7 @@ function parseSheetToRows(sheet, fileName, sheetName){
     }
     console.log('[CUSTOMER_2009][fieldMap]', fieldMap);
     const rows = [];
-    for (let r=15; r<aoa.length; r++){
+    for (let r=headerRowIndex + 1; r<aoa.length; r++){
       const line = aoa[r] || [];
       if (line.every(function(c){ return normStr(c)===''; })) continue;
       const payments = [];
@@ -1195,14 +1225,14 @@ function parseSheetToRows(sheet, fileName, sheetName){
         payments: payments
       });
     }
-    return { ok:true, rows:rows, fieldMap:fieldMap };
+    return { ok:true, rows:rows, fieldMap:fieldMap, headerRowIndex:headerRowIndex };
   }
 
   const customer2009 = parseStrictCustomer2009Rows();
   if (customer2009 && customer2009.ok){
     parseMeta = {
       mode:'strict-template-customer-2009',
-      indexRowIndex:14,
+      indexRowIndex:customer2009.headerRowIndex,
       fieldMapStatus:null,
       paymentGroups:[],
       workbookYear:strictCustomerYear,
