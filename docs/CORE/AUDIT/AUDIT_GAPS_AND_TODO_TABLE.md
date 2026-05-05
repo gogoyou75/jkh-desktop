@@ -65,6 +65,7 @@
 *| 42 | Import Backend | apply мог выполняться при наличии invalid / non-ready строк | DONE | P0 | Запрещён запуск apply без полной валидации: apply доступен только из ready_to_apply, все строки должны быть ready | app.py / backend/tests/test_import_payments.py / LOGIC_SPEC / CHANGELOG |
 *| 43 | Import Contract | Frontend и backend имели разные правила нормализации платежей | DONE | P0 | Введён единый контракт upload_rows: UID, ЛС, ISO date, YYYY-MM period, amount number, source_index | import_xls.html / app.py / LOGIC_SPEC / CHANGELOG |
 *| 44 | Import Audit | Отсутствовал полный audit log по батчу | DONE | P0 | Добавлен batch-level и row-level audit log + summary endpoint | app.py / LOGIC_SPEC / CHANGELOG |
+*| 45 | Import Rollback | rollback не гарантировал консистентность при сбое | DONE | P0 | Убран flush, усилен rollback, добавлен error audit log | app.py / LOGIC_SPEC / CHANGELOG |
 ---
 
 ## Ближайший порядок работ
@@ -84,4 +85,3 @@
 - Не переписывать calc_engine без отдельного ТЗ.
 - Не делать массовый refactor import_xls без серверной транзакционной схемы.
 - Не переносить долги при split/merge без отдельного финансового ТЗ.
-*| XX | Import Backend | apply мог выполняться при наличии invalid строк | DONE | P0 | Запрещён запуск apply без полной валидации | app.py / LOGIC_SPEC / CHANGELOG |

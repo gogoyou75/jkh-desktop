@@ -1,5 +1,13 @@
 # CHANGELOG
 
+## 2026-05-05 — Import: усиление rollback
+
+- убран flush внутри apply
+- гарантирована атомарность транзакции
+- добавлен audit log при ошибке
+- В audit log при ошибке теперь фиксируется строка, на которой произошёл сбой
+- запрещён повторный apply failed batch
+
 ## 2026-05-05 — Import: полный audit log
 
 - Добавлен batch-level audit log
