@@ -61,6 +61,7 @@
 *| 38 | Refinancing | Нет истории изменения ставок | FEATURE | P0 | Добавить audit log ставок | backend/future TASK |
 *| 39 | Refinancing | Нет проверки “дыр” до первой ставки | CODE-FIX | P0 | Запретить расчёт до первой ставки | calc_engine.js / refinancing |
 *| 40 | Docs | Старые документы содержат конфликтующие записи | ARCH-RISK | P0 | Вести DOCS_INVENTORY и переносить смысл в CORE | docs/0_CORE/DOCS_INVENTORY.md |
+*| 41 | Import Backend | Сервер записывал платежи в payments_<LS> вместо payments_<uid> | DONE | P0 | Исправлено в app.py (apply endpoint) | app.py / LOGIC_SPEC / CHANGELOG |
 
 ---
 
