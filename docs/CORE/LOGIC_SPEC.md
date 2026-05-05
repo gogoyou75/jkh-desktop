@@ -1170,3 +1170,33 @@ Split v1.9.1 — следующий крупный этап после `UID-only
 - `PAYMENT_PERIOD_INVALID`
 - `AMOUNT_INVALID`
 - `SOURCE_INDEX_INVALID`
+
+
+
+## Import Audit Log
+
+### Batch-level
+Для каждого импорта платежей в `import_batches` фиксируются поля:
+- `rows_total`, `rows_valid`, `rows_invalid`, `rows_applied`, `rows_skipped`;
+- `started_at`, `finished_at`;
+- `file_name`, `uploaded_by`;
+- `status`, `error_message`.
+
+### Row-level
+Для каждой строки импорта создаётся запись в `payment_audit_log` с обязательной привязкой:
+- `batch_id`;
+- `row_id`;
+- `account_uid`;
+- `payment_date`;
+- `amount`;
+- `result`.
+
+Допустимые значения `result`:
+- `APPLIED`;
+- `DUPLICATE`;
+- `CONFLICT`;
+- `SKIPPED`;
+- `ERROR`.
+
+### Summary endpoint
+Сервер предоставляет `GET /api/import/<batch_id>/summary`, который возвращает итоговый статус батча и агрегированные счётчики импорта.
