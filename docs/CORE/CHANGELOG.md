@@ -200,3 +200,9 @@ rg -n "splitPremise|premise-transform\]\[split|type: ['\"]split" web LOGIC_SPEC.
 - Обновлены CRITICAL-комментарии: payments_<LS> заменены на payments_<uid>
 - Добавлено явное указание legacy-статуса LS
 - Логика работы с платежами НЕ изменялась
+
+## 2026-05-05 — Import backend: строгая атомарность apply
+
+- apply теперь доступен только при status = ready_to_apply
+- запрещён запуск apply при наличии invalid строк
+- гарантирована атомарность применения батча

@@ -36,10 +36,13 @@ class ImportHelpersTest(unittest.TestCase):
             payload, code = res
             self.assertEqual(code, 409)
 
-    def test_state_machine_allows_apply_on_validated_for_partial_apply(self):
+    def test_state_machine_forbids_apply_on_validated_for_partial_apply(self):
         with app_module.app.app_context():
             res = app_module._ensure_batch_transition(DummyBatch("validated"), "apply")
-            self.assertIsNone(res)
+            self.assertIsNotNone(res)
+            payload, code = res
+            self.assertEqual(code, 409)
+            self.assertEqual(payload.json.get("error"), "state_transition_forbidden")
 
     def test_header_normalization_maps_aliases(self):
         header = ["UID", "Дата оплаты", "Период", "Сумма оплаты", "Источник платежа"]
@@ -149,6 +152,7 @@ class ImportHelpersTest(unittest.TestCase):
                 self.finished_at = None
                 self.uploaded_at = None
                 self.upload_blob = b""
+                self.rows_invalid = 0
 
         class DummyRow:
             def __init__(self):
