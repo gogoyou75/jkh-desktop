@@ -1315,8 +1315,11 @@ def import_payments_validate(batch_id):
                     r.reason_text = "Дубликат в текущем батче"
                     duplicate += 1
                 else:
-                    key = f"payments_{r.account_number}"
+                    key = f"payments_{r.account_uid}"
+                    legacy_key = f"payments_{r.account_number}"
                     kv = KVStore.query.filter_by(owner=batch.owner_id, k=key).first()
+                    if not kv:
+                        kv = KVStore.query.filter_by(owner=batch.owner_id, k=legacy_key).first()
                     ledger = []
                     if kv and kv.v:
                         try:
@@ -1420,7 +1423,8 @@ def import_payments_apply(batch_id):
             normalized_source_index = normalize_source_index(r.source_index)
             fingerprint = payment_fingerprint(normalized_uid, normalized_paid_date, normalized_amount)
 
-            key = f"payments_{normalized_account_number}"
+            key = f"payments_{normalized_uid}"
+            legacy_key = f"payments_{normalized_account_number}"
             existing_fingerprint = ImportAppliedFingerprint.query.filter_by(
                 owner_id=batch.owner_id,
                 import_type="payments",
@@ -1458,10 +1462,15 @@ def import_payments_apply(batch_id):
             db.session.flush()
 
             kv = KVStore.query.filter_by(owner=batch.owner_id, k=key).with_for_update().first()
+            legacy_kv = None
             ledger = []
-            if kv and kv.v:
+            source_kv = kv
+            if not source_kv:
+                legacy_kv = KVStore.query.filter_by(owner=batch.owner_id, k=legacy_key).first()
+                source_kv = legacy_kv
+            if source_kv and source_kv.v:
                 try:
-                    ledger = json.loads(kv.v)
+                    ledger = json.loads(source_kv.v)
                     if not isinstance(ledger, list):
                         ledger = []
                 except Exception:
