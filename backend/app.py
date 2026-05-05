@@ -1416,6 +1416,15 @@ def import_payments_apply(batch_id):
     if transition_err:
         return transition_err
 
+    if batch.status == "failed":
+        return jsonify(
+            ok=False,
+            error="batch_failed_restart_required",
+            details={
+                "message": "Батч завершился с ошибкой. Требуется повторная загрузка."
+            }
+        ), 400
+
     if batch.rows_invalid > 0:
         return jsonify(
             ok=False,
@@ -1503,7 +1512,6 @@ def import_payments_apply(batch_id):
                 batch_id=batch.id,
             )
             db.session.add(fingerprint_row)
-            db.session.flush()
 
             kv = KVStore.query.filter_by(owner=batch.owner_id, k=key).with_for_update().first()
             legacy_kv = None
@@ -1579,21 +1587,46 @@ def import_payments_apply(batch_id):
         if batch.uploaded_at and app.config["IMPORT_UPLOAD_BLOB_TTL_DAYS"] <= 0:
             batch.upload_blob = b""
         db.session.commit()
-    except IntegrityError:
+    except IntegrityError as e:
         db.session.rollback()
         batch = ImportBatch.query.filter_by(id=batch.id).first()
-        batch.status = "failed"
-        batch.finished_at = datetime.utcnow()
-        db.session.commit()
+        if batch:
+            batch.status = "failed"
+            batch.finished_at = datetime.utcnow()
+            batch.error_message = "fingerprint_conflict"
+            db.session.execute(
+                text("UPDATE import_rows SET status = 'failed' WHERE batch_id = :batch_id"),
+                {"batch_id": batch.id},
+            )
+            db.session.add(PaymentAuditLog(
+                owner_id=batch.owner_id,
+                batch_id=batch.id,
+                action="FAILED",
+                status="FAILED",
+                details_json=json.dumps({"error": str(e)}, ensure_ascii=False),
+            ))
+            db.session.commit()
         failed_count = 1
         return jsonify(ok=False, error="apply_failed", details="fingerprint_conflict"), 500
     except Exception as ex:
         db.session.rollback()
         batch = ImportBatch.query.filter_by(id=batch.id).first()
-        batch.status = "failed"
-        batch.finished_at = datetime.utcnow()
-        batch.error_message = str(ex)
-        db.session.commit()
+        if batch:
+            batch.status = "failed"
+            batch.finished_at = datetime.utcnow()
+            batch.error_message = str(ex)
+            db.session.execute(
+                text("UPDATE import_rows SET status = 'failed' WHERE batch_id = :batch_id"),
+                {"batch_id": batch.id},
+            )
+            db.session.add(PaymentAuditLog(
+                owner_id=batch.owner_id,
+                batch_id=batch.id,
+                action="FAILED",
+                status="FAILED",
+                details_json=json.dumps({"error": str(ex)}, ensure_ascii=False),
+            ))
+            db.session.commit()
         failed_count = 1
         return jsonify(ok=False, error="apply_failed", details=str(ex)), 500
 
