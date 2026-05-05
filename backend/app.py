@@ -601,6 +601,19 @@ def _parse_header_map(values):
     return out
 
 
+def _parse_strict_header_map(values):
+    out = {}
+    for i, v in enumerate(values):
+        key = _norm_text(v).lower()
+        if not key:
+            continue
+        normalized = re.sub(r"[^\wа-яА-ЯёЁ]+", "_", key, flags=re.UNICODE)
+        normalized = re.sub(r"_+", "_", normalized).strip("_")
+        if normalized in IMPORT_REQUIRED_COLUMNS:
+            out[normalized] = i
+    return out
+
+
 def _ensure_batch_transition(batch: ImportBatch, operation: str):
     allowed = IMPORT_ALLOWED_TRANSITIONS.get(operation, set())
     if batch.status not in allowed:
@@ -1121,7 +1134,7 @@ def import_payments_parse(batch_id):
         values = list(ws.iter_rows(values_only=True))
         if not values:
             continue
-        header_map = _parse_header_map(values[0])
+        header_map = _parse_strict_header_map(values[0])
         missing = sorted(IMPORT_REQUIRED_COLUMNS.difference(set(header_map.keys())))
         if missing:
             missing_columns.update(missing)
@@ -1131,13 +1144,13 @@ def import_payments_parse(batch_id):
             if all(_norm_text(v) == "" for v in line if v is not None):
                 continue
             row_no += 1
-            account_uid = _norm_text(_find_cell(header_map, line, "account_uid", "uid", "лс", "ls"))
-            abonent_id = _norm_text(_find_cell(header_map, line, "abonent_id", "абонент"))
-            account_number = _norm_text(_find_cell(header_map, line, "account_number", "лицевой счет", "лицевой_счет"))
-            payment_date = _norm_date(_find_cell(header_map, line, "payment_date", "paid_date", "дата"))
-            payment_period = _norm_period(_find_cell(header_map, line, "payment_period", "period", "период"))
-            amount = _norm_amount(_find_cell(header_map, line, "amount", "sum", "сумма"))
-            src_index_raw = _find_cell(header_map, line, "source_index", "source")
+            account_uid = _norm_text(_find_cell(header_map, line, "account_uid"))
+            abonent_id = _norm_text(_find_cell(header_map, line, "abonent_id"))
+            account_number = _norm_text(_find_cell(header_map, line, "account_number"))
+            payment_date = _norm_date(_find_cell(header_map, line, "payment_date"))
+            payment_period = _norm_period(_find_cell(header_map, line, "payment_period"))
+            amount = _norm_amount(_find_cell(header_map, line, "amount"))
+            src_index_raw = _find_cell(header_map, line, "source_index")
             try:
                 source_index = int(src_index_raw) if src_index_raw is not None and _norm_text(src_index_raw) != "" else None
             except Exception:
