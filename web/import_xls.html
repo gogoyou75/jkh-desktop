@@ -260,6 +260,39 @@ function toIsoDateFromDisplayDate(v){
   if (m) return s;
   return '';
 }
+function makeContractError(code){
+  const err = new Error(code);
+  err.code = code;
+  return err;
+}
+function buildServerPaymentRow(row, pay, ab){
+  const accountUid = normStr((ab && ab.uid) || row.uid);
+  if (!accountUid) throw makeContractError('ACCOUNT_UID_REQUIRED');
+  const accountNumber = normStr((ab && ab.id) || row.ls);
+  if (!accountNumber) throw makeContractError('ACCOUNT_NUMBER_REQUIRED');
+
+  const paidDateDisplay = normalizePaidDateStrict(pay && pay.paidDateRaw);
+  if (!normStr(pay && pay.paidDateRaw)) throw makeContractError('PAYMENT_DATE_REQUIRED');
+  if (!paidDateDisplay) throw makeContractError('PAYMENT_DATE_INVALID');
+  const paymentDate = toIsoDateFromDisplayDate(paidDateDisplay);
+  if (!paymentDate || !/^\d{4}-\d{2}-\d{2}$/.test(paymentDate)) throw makeContractError('PAYMENT_DATE_INVALID');
+
+  const per = normalizePeriod(pay && pay.periodRaw);
+  const year = normStr(pay && pay.year) || (per ? per.period.slice(0,4) : '');
+  const month = pad2((pay && pay.month) || (per ? per.period.slice(5,7) : ''));
+  if (!year || !month) throw makeContractError('PAYMENT_PERIOD_REQUIRED');
+  if (!/^\d{4}$/.test(year) || !/^\d{2}$/.test(month)) throw makeContractError('PAYMENT_PERIOD_INVALID');
+  const paymentPeriod = year + '-' + month;
+  if (!/^\d{4}-\d{2}$/.test(paymentPeriod)) throw makeContractError('PAYMENT_PERIOD_INVALID');
+
+  const amount = normNum(pay && pay.amount);
+  if (!Number.isFinite(amount) || amount <= 0) throw makeContractError('AMOUNT_INVALID');
+
+  const sourceIndex = Number(pay && pay.sourceIndex);
+  if (!Number.isInteger(sourceIndex) || sourceIndex < 1) throw makeContractError('SOURCE_INDEX_INVALID');
+
+  return { account_uid: accountUid, account_number: accountNumber, payment_date: paymentDate, payment_period: paymentPeriod, amount: amount, source_index: sourceIndex };
+}
 
 function canWriteOrExplain(){
   try{ if (window.Data && typeof Data.ensureWriteOrExplain === 'function') return Data.ensureWriteOrExplain(); }catch(e){}
@@ -1783,6 +1816,16 @@ async function applyPayments(){
   if (!db || !db.abonents){ setImportStatus('База абонентов не загружена.', 'err'); setImportBusy(false); return; }
 
   const rows = [];
+  const contractMessages = {
+    ACCOUNT_UID_REQUIRED: 'Импорт остановлен: отсутствует UID (account_uid).',
+    ACCOUNT_NUMBER_REQUIRED: 'Импорт остановлен: отсутствует лицевой счёт (account_number).',
+    PAYMENT_DATE_REQUIRED: 'Импорт остановлен: отсутствует дата платежа.',
+    PAYMENT_DATE_INVALID: 'Импорт остановлен: некорректная дата платежа (требуется YYYY-MM-DD).',
+    PAYMENT_PERIOD_REQUIRED: 'Импорт остановлен: отсутствует период платежа.',
+    PAYMENT_PERIOD_INVALID: 'Импорт остановлен: некорректный период платежа (требуется YYYY-MM).',
+    AMOUNT_INVALID: 'Импорт остановлен: некорректная сумма платежа.',
+    SOURCE_INDEX_INVALID: 'Импорт остановлен: некорректный source_index (целое число >= 1).'
+  };
   for (let i=0;i<dataRows.length;i++){
     const row = dataRows[i];
     const uid = normStr(row.uid);
@@ -1793,50 +1836,17 @@ async function applyPayments(){
 
     for (let p=0;p<(row.payments || []).length;p++){
       const pay = row.payments[p];
-      const amountNum = normNum(pay.amount);
-      if (!Number.isFinite(amountNum) || amountNum <= 0) continue;
-      const per = normalizePeriod(pay.periodRaw);
-      const year = normStr(pay.year) || extractYearFromAny(pay.periodRaw) || extractYearFromAny(pay.paidDateRaw) || normStr(row.rowYear) || parseMeta.workbookYear || (per ? per.period.slice(0,4) : '') || String(new Date().getFullYear());
-      const month = pad2(pay.month || (per ? per.period.slice(5,7) : ''));
-      if (!/^\d{4}$/.test(year) || !/^\d{2}$/.test(month)) continue;
-      const paidDateDisplay = normalizePaidDateStrict(pay.paidDateRaw);
-      if (!paidDateDisplay){
-        console.error("[import_xls][fatal] missing exact payment date", {
-          excelRow: row.excelRow,
-          year: year,
-          month: month
-        });
-
-        showFatal(
-          "Импорт остановлен: в файле есть платежи без точной даты. " +
-          "Исправьте файл и повторите загрузку."
-        );
-
-        return;
-      }
-      const paymentDate = toIsoDateFromDisplayDate(paidDateDisplay);
-      if (!paymentDate){
-        console.error("[import_xls][fatal] invalid payment date", {
-          excelRow: row.excelRow,
-          paidDateDisplay: paidDateDisplay
-        });
-
-        showFatal(
-          "Импорт остановлен: обнаружена некорректная дата платежа."
-        );
-
-        return;
-      }
-      const paymentPeriod = year + '-' + month;
       const previewRow = evaluatePaymentsRow(db, row);
       if (!previewRow || previewRow.status==='ERROR') continue;
       const paymentUid = normStr(ab && ab.uid ? ab.uid : row.uid);
-      if (!paymentUid){
-        setImportStatus('Для импорта платежей нужен UID.', 'err');
-        continue;
-      }
+      if (!paymentUid){ setImportStatus('Для импорта платежей нужен UID.', 'err'); return; }
       const existing = getPaymentsByUid(paymentUid);
       const isDup = existing.some(function(x){
+        const per = normalizePeriod(pay.periodRaw);
+        const year = normStr(pay.year) || (per ? per.period.slice(0,4) : '');
+        const month = pad2(pay.month || (per ? per.period.slice(5,7) : ''));
+        const amountNum = normNum(pay.amount);
+        const paidDateDisplay = normalizePaidDateStrict(pay.paidDateRaw);
         const ym = getLedgerYearMonth(x);
         const paid = getLedgerPaidAmount(x);
         return ym && ym.year===year && ym.month===month && getLedgerPaidDate(x)===paidDateDisplay && paid===amountNum;
@@ -1847,14 +1857,14 @@ async function applyPayments(){
         return ym && ym.year===year && ym.month===month && getLedgerPaidDate(x)===paidDateDisplay && Number.isFinite(paid) && paid!==amountNum;
       });
       if (isDup || isConflict) continue;
-      rows.push({
-        account_uid: accountUid,
-        account_number: accountNumber,
-        payment_date: paymentDate,
-        payment_period: paymentPeriod,
-        amount: amountNum,
-        source_index: Number(pay.sourceIndex || 1)
-      });
+      try{
+        rows.push(buildServerPaymentRow(row, pay, ab));
+      }catch(e){
+        const code = normStr(e && e.code) || 'UNKNOWN';
+        const msg = contractMessages[code] || ('Импорт остановлен: ошибка контракта ' + code + '.');
+        setImportStatus(msg, 'err');
+        return;
+      }
     }
   }
 
