@@ -1445,11 +1445,13 @@ def import_payments_apply(batch_id):
         ), 400
     applied_count = skipped_count = duplicate_count = conflict_count = failed_count = 0
     sources_map = _load_owner_sources(batch.owner_id)
+    current_row_id = None
     try:
         batch.status = "applying"
         db.session.flush()
 
         for r in rows:
+            current_row_id = r.id
             if r.status != "ready":
                 action = r.reason_code or "SKIPPED"
                 if r.reason_code == "DUPLICATE":
@@ -1624,7 +1626,7 @@ def import_payments_apply(batch_id):
                 batch_id=batch.id,
                 action="FAILED",
                 status="FAILED",
-                details_json=json.dumps({"error": str(ex)}, ensure_ascii=False),
+                details_json=json.dumps({"error": str(ex), "row_id": current_row_id}, ensure_ascii=False),
             ))
             db.session.commit()
         failed_count = 1
