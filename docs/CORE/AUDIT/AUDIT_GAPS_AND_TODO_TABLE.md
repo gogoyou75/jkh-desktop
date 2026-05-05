@@ -47,7 +47,7 @@
 *| 24 | Requisites | Нет истории изменений реквизитов | FEATURE | P2 | Добавить audit log | backend/future TASK |
 *| 25 | Requisites | Правило одного default signer не было зафиксировано | DONE | P1 | Перенесено в LOGIC_SPEC v1.9.2 (раздел Requisites / подписанты) | LOGIC_SPEC / TRACEABILITY / CHANGELOG (аудит 2026-05-04) |
 *| 26 | Import XLS | Импорт угадывает структуру Excel | ARCH-RISK | P0 | Ввести строгий контракт шаблона, auto-detect только для preview | IMPORT_CANON / future TASK |
-*| 27 | Import XLS | fallback даты платежа на `01.MM.YYYY` опасен | CODE-FIX | P0 | Запретить запись без точной даты или помечать как guessed с блокировкой | import_xls.html / server import |
+*| 27 | Import XLS | fallback даты платежа на `01.MM.YYYY` запрещён для применения платежей | DONE | P0 | Исправлено в import_xls.html: платеж без точной даты блокируется, период не используется как дата оплаты | import_xls.html / LOGIC_SPEC / CHANGELOG (аудит 2026-05-04) |
 *| 28 | Import XLS | Часть логики импорта клиентская, часть серверная | ARCH-RISK | P0 | Перенести применение платежей и конфликтов на сервер | future TASK |
 *| 29 | Import XLS | Нужен полноценный audit log импорта | FEATURE | P0 | Логировать batch/row/result | backend import |
 *| 30 | Import XLS | Rollback не гарантирован полностью | ARCH-RISK | P0 | Сделать транзакционный apply на сервере | backend import |
