@@ -1801,20 +1801,31 @@ async function applyPayments(){
       if (!/^\d{4}$/.test(year) || !/^\d{2}$/.test(month)) continue;
       const paidDateDisplay = normalizePaidDateStrict(pay.paidDateRaw);
       if (!paidDateDisplay){
-        console.warn('[import_xls][payment-date] blocked missing exact date', {
+        console.error("[import_xls][fatal] missing exact payment date", {
           excelRow: row.excelRow,
           year: year,
           month: month
         });
-        continue;
+
+        showFatal(
+          "Импорт остановлен: в файле есть платежи без точной даты. " +
+          "Исправьте файл и повторите загрузку."
+        );
+
+        return;
       }
       const paymentDate = toIsoDateFromDisplayDate(paidDateDisplay);
       if (!paymentDate){
-        console.warn('[import_xls][payment-date] blocked invalid date', {
+        console.error("[import_xls][fatal] invalid payment date", {
           excelRow: row.excelRow,
           paidDateDisplay: paidDateDisplay
         });
-        continue;
+
+        showFatal(
+          "Импорт остановлен: обнаружена некорректная дата платежа."
+        );
+
+        return;
       }
       const paymentPeriod = year + '-' + month;
       const previewRow = evaluatePaymentsRow(db, row);
