@@ -95,6 +95,11 @@ class ImportBatch(db.Model):
     rows_invalid = db.Column(db.Integer, nullable=False, default=0)
     rows_duplicate = db.Column(db.Integer, nullable=False, default=0)
     rows_applied = db.Column(db.Integer, nullable=False, default=0)
+    rows_skipped = db.Column(db.Integer, nullable=False, default=0)
+
+    file_name = db.Column(db.String(255), nullable=False, default="")
+    uploaded_by = db.Column(db.String(64), nullable=False, default="")
+    error_message = db.Column(db.Text, nullable=False, default="")
 
     status = db.Column(db.String(32), nullable=False, default="uploaded", index=True)
 
@@ -534,6 +539,10 @@ def _batch_payload(batch: ImportBatch):
         "rows_invalid": batch.rows_invalid,
         "rows_duplicate": batch.rows_duplicate,
         "rows_applied": batch.rows_applied,
+        "rows_skipped": batch.rows_skipped,
+        "file_name": batch.file_name,
+        "uploaded_by": batch.uploaded_by,
+        "error_message": batch.error_message,
         "uploaded_at": int(batch.uploaded_at.timestamp() * 1000) if batch.uploaded_at else 0,
     }
 
@@ -1010,6 +1019,8 @@ def import_payments_upload_rows():
         status="parsed",
         uploaded_at=datetime.utcnow(),
         started_at=datetime.utcnow(),
+        file_name=_norm_text(data.get("file_name")) or "payments_rows.json",
+        uploaded_by=user.id,
         notes=(
             (_norm_text(data.get("notes")) + "\n") if _norm_text(data.get("notes")) else ""
         ) + "source=upload_rows",
@@ -1072,6 +1083,7 @@ def import_payments_upload_rows():
 
     db.session.bulk_save_objects(parsed_rows)
     batch.rows_total = row_no
+    batch.started_at = datetime.utcnow()
     db.session.commit()
     return jsonify(ok=True, batch=_batch_payload(batch), parsed_rows=row_no)
 
@@ -1096,6 +1108,7 @@ def import_payments_parse(batch_id):
     except Exception as ex:
         batch.status = "failed"
         batch.finished_at = datetime.utcnow()
+        batch.error_message = "fingerprint_conflict"
         db.session.commit()
         return jsonify(ok=False, error="parse_failed", details=str(ex)), 400
 
@@ -1442,7 +1455,7 @@ def import_payments_apply(batch_id):
                     row_id=r.id,
                     action=action,
                     status="SKIPPED",
-                    details_json=json.dumps({"reason_code": r.reason_code, "reason_text": r.reason_text}, ensure_ascii=False),
+                    details_json=json.dumps({"account_uid": r.account_uid, "payment_date": r.paid_date or r.payment_date, "amount": r.amount, "result": "SKIPPED", "reason_code": r.reason_code, "reason_text": r.reason_text}, ensure_ascii=False),
                 ))
                 continue
 
@@ -1473,7 +1486,7 @@ def import_payments_apply(batch_id):
                     row_id=r.id,
                     action="DUPLICATE",
                     status="SKIPPED",
-                    details_json=json.dumps({"reason_code": r.reason_code, "fingerprint": fingerprint}, ensure_ascii=False),
+                    details_json=json.dumps({"account_uid": normalized_uid, "payment_date": normalized_paid_date, "amount": normalized_amount, "result": "DUPLICATE", "reason_code": r.reason_code, "fingerprint": fingerprint}, ensure_ascii=False),
                 ))
                 continue
 
@@ -1552,13 +1565,15 @@ def import_payments_apply(batch_id):
                 owner_id=batch.owner_id,
                 batch_id=batch.id,
                 row_id=r.id,
-                action="NEW_PAYMENT",
+                action="APPLIED",
                 status="APPLIED",
-                details_json=json.dumps({"payment_id": payment_id, "fingerprint": fingerprint}, ensure_ascii=False),
+                details_json=json.dumps({"account_uid": normalized_uid, "payment_date": normalized_paid_date, "amount": normalized_amount, "result": "APPLIED", "payment_id": payment_id, "fingerprint": fingerprint}, ensure_ascii=False),
             ))
             applied_count += 1
 
         batch.rows_applied = applied_count
+        batch.rows_skipped = duplicate_count + conflict_count + skipped_count
+        batch.error_message = ""
         batch.status = "applied"
         batch.finished_at = datetime.utcnow()
         if batch.uploaded_at and app.config["IMPORT_UPLOAD_BLOB_TTL_DAYS"] <= 0:
@@ -1577,6 +1592,7 @@ def import_payments_apply(batch_id):
         batch = ImportBatch.query.filter_by(id=batch.id).first()
         batch.status = "failed"
         batch.finished_at = datetime.utcnow()
+        batch.error_message = str(ex)
         db.session.commit()
         failed_count = 1
         return jsonify(ok=False, error="apply_failed", details=str(ex)), 500
@@ -1602,6 +1618,34 @@ def import_payments_batches():
         q = q.filter_by(owner_id=owner)
     items = q.order_by(ImportBatch.uploaded_at.desc()).limit(200).all()
     return jsonify(ok=True, batches=[_batch_payload(x) for x in items])
+
+
+@app.get("/api/import/<int:batch_id>/summary")
+def import_payments_summary(batch_id):
+    user, err = _require_user()
+    if err:
+        return err
+    batch = ImportBatch.query.filter_by(id=batch_id).first()
+    if not batch:
+        return _json_error("batch_not_found", 404)
+    if user.role != "admin" and batch.owner_id != user.id:
+        return _json_error("forbidden", 403)
+
+    return jsonify(
+        ok=True,
+        summary={
+            "batch_id": batch.id,
+            "status": batch.status,
+            "file_name": batch.file_name or batch.original_filename,
+            "rows_total": batch.rows_total,
+            "rows_valid": batch.rows_valid,
+            "rows_invalid": batch.rows_invalid,
+            "rows_applied": batch.rows_applied,
+            "rows_skipped": batch.rows_skipped,
+            "started_at": batch.started_at.isoformat() + "Z" if batch.started_at else None,
+            "finished_at": batch.finished_at.isoformat() + "Z" if batch.finished_at else None,
+        },
+    )
 
 
 @app.get("/api/import/<int:batch_id>/errors")

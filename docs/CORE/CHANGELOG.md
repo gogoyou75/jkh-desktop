@@ -1,5 +1,12 @@
 # CHANGELOG
 
+## 2026-05-05 — Import: полный audit log
+
+- Добавлен batch-level audit log
+- Добавлены агрегированные показатели импорта
+- Добавлен endpoint /api/import/<id>/summary
+- Усилен row-level audit log
+
 ## 2026-05-05 — Import XLS: единый frontend/backend контракт
 
 - Зафиксирован единый JSON-контракт для /api/import/payments/upload_rows.
