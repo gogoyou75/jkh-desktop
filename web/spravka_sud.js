@@ -320,6 +320,17 @@
         return;
       }
 
+      window.JKHCalcEngine.onMissingRate = function(info){
+        console.error("[spravka_sud] missing rate detected", info);
+
+        showFatal(
+          "Невозможно построить справку: отсутствует ставка рефинансирования для части периода. " +
+          "Проверьте даты начислений и таблицу ставок."
+        );
+
+        throw new Error("MISSING_REQUIRED_RATE");
+      };
+
       const ctx = getContext();
       if (!ctx.abonentId) {
         showFatal("Не передан параметр abonent в URL.");
@@ -478,7 +489,13 @@
         });
       }
 
-      const viewRows = eng.buildCourtViewRows(baseRows, period);
+      let viewRows;
+      try {
+        viewRows = eng.buildCourtViewRows(baseRows, period);
+      } catch (e) {
+        console.error("[spravka_sud] buildCourtViewRows failed", e);
+        return;
+      }
       const tbody = $("debtRows");
       if (!tbody) return;
       tbody.innerHTML = "";
@@ -553,9 +570,22 @@
         });
       }
 
-      const finalTotals = eng.calcTotalsAsOfAdjusted(baseRows, asOfFinal, {
-        abonentId: ctx.abonentId, applyAdvanceOffset: true, allowNegativePrincipal: true
-      });
+      let finalTotals;
+      try {
+        finalTotals = eng.calcTotalsAsOfAdjusted(baseRows, asOfFinal, {
+          abonentId: ctx.abonentId,
+          applyAdvanceOffset: true,
+          allowNegativePrincipal: true
+        });
+      } catch (e) {
+        console.error("[spravka_sud] calcTotals failed", e);
+        return;
+      }
+
+      if (!Number.isFinite(finalTotals.total)) {
+        showFatal("Ошибка расчёта: отсутствуют необходимые данные для вычисления задолженности.");
+        return;
+      }
 
       setText("sumAccrued", moneyDot(sumAccrued));
       setText("sumPaid", moneyDot(sumPaid));

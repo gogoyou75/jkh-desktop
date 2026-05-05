@@ -289,18 +289,34 @@
 
 
   function rateOnDate(d, rates){
-    const t = d.getTime();
-    if (!Array.isArray(rates) || rates.length === 0) return null;
-    let cur = null;
-    for (const r of rates){
-      if (!r || !r.from || !r.from.getTime) continue;
-      if (r.from.getTime() <= t) cur = r.rate;
-      else break;
-    }
-    // ✅ CANON safety: if date earlier than first rate, use the first known rate
-    if (cur == null && rates[0] && rates[0].rate != null) return rates[0].rate;
-    return cur;
+  const t = d && d.getTime ? d.getTime() : NaN;
+  if (!Number.isFinite(t)) return null;
+  if (!Array.isArray(rates) || rates.length === 0) return null;
+
+  const first = rates.find(function(r){
+    return r && r.from && r.from.getTime && Number.isFinite(r.rate);
+  });
+
+  if (!first) return null;
+
+  if (t < first.from.getTime()){
+    console.error("[calc_engine][ref_rates] date before first available rate", {
+      date: toISODateString(d),
+      firstRateDate: toISODateString(first.from),
+      reason: "DATE_BEFORE_FIRST_RATE"
+    });
+    return null;
   }
+
+  let cur = null;
+  for (const r of rates){
+    if (!r || !r.from || !r.from.getTime) continue;
+    if (r.from.getTime() <= t) cur = r.rate;
+    else break;
+  }
+
+  return cur;
+}
 
 
   function capRateUntil2027(dateObj, rate){
@@ -666,9 +682,24 @@
           const denom = (overdueIndex <= 90) ? 300 : 130;
           const rawRate = rateOnDate(day, rates);
           if (!Number.isFinite(rawRate)) {
-            console.error("[calc_engine] missing rate for date", day);
-            continue; // пропускаем день
+            const msg = "[calc_engine][ref_rates] missing required rate for penalty date";
+            console.error(msg, {
+              date: toISODateString(day),
+              reason: "MISSING_REQUIRED_RATE"
+            });
+
+            if (window.JKHCalcEngine && typeof window.JKHCalcEngine.onMissingRate === "function"){
+              try{
+                window.JKHCalcEngine.onMissingRate({
+                  date: toISODateString(day),
+                  reason: "MISSING_REQUIRED_RATE"
+                });
+              }catch(e){}
+            }
+
+            return NaN;
           }
+
           // CRITICAL: применяем ограничение ставки до 01.01.2027 перед расчётом пени.
           const rate = capRateUntil2027(day, rawRate);
           penalty += principal * (rate / 100) / denom;
