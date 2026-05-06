@@ -54,6 +54,21 @@
 - **Backend / серверная БД** — источник истины.
 - **Frontend / localStorage** — рабочий кэш, офлайн-копия и транспортный слой.
 
+### 2.1.1. Обязательные миграции схемы БД
+Любое изменение backend-моделей БД, включая добавление колонок в SQLAlchemy-модели, должно сопровождаться явной миграцией схемы БД и deploy-проверкой структуры таблиц.
+
+Для `import_batches` после добавления audit-полей обязательна миграция:
+
+```sql
+ALTER TABLE import_batches
+ADD COLUMN rows_skipped INT NOT NULL DEFAULT 0,
+ADD COLUMN file_name VARCHAR(255) NULL,
+ADD COLUMN uploaded_by VARCHAR(255) NULL,
+ADD COLUMN error_message TEXT NULL;
+```
+
+После backend-deploy необходимо выполнить `DESCRIBE import_batches;` и сверить наличие колонок `rows_skipped`, `file_name`, `uploaded_by`, `error_message`.
+
 ### 2.2. Синхронизация
 После логина и при явной загрузке с сервера клиент должен иметь возможность получить **полный набор данных owner**.
 
