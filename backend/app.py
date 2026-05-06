@@ -12,7 +12,7 @@ from datetime import datetime, date
 from flask import Flask, jsonify, request, session, Response
 from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy import text
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from werkzeug.security import generate_password_hash, check_password_hash
 from openpyxl import load_workbook, Workbook
 
@@ -36,6 +36,21 @@ app.config["IMPORT_MAX_UPLOAD_BYTES"] = int(os.getenv("IMPORT_MAX_UPLOAD_BYTES",
 app.config["IMPORT_UPLOAD_BLOB_TTL_DAYS"] = int(os.getenv("IMPORT_UPLOAD_BLOB_TTL_DAYS", "14"))
 
 db = SQLAlchemy(app)
+
+IMPORT_BATCH_CRITICAL_COLUMNS = (
+    "rows_skipped",
+    "file_name",
+    "uploaded_by",
+    "error_message",
+)
+
+IMPORT_BATCH_AUDIT_FIELDS_MIGRATION_SQL = (
+    "ALTER TABLE import_batches "
+    "ADD COLUMN rows_skipped INT NOT NULL DEFAULT 0, "
+    "ADD COLUMN file_name VARCHAR(255) NULL, "
+    "ADD COLUMN uploaded_by VARCHAR(255) NULL, "
+    "ADD COLUMN error_message TEXT NULL;"
+)
 
 
 class User(db.Model):
@@ -724,9 +739,74 @@ def _row_human_error_payload(r: ImportBatchRow):
     }
 
 
+def _import_batches_schema_status():
+    try:
+        rows = db.session.execute(text("DESCRIBE import_batches")).all()
+    except SQLAlchemyError as exc:
+        db.session.rollback()
+        app.logger.error(
+            "Import DB schema check failed for import_batches. Run initdb/migrations before import. error=%s",
+            exc,
+        )
+        return {
+            "ok": False,
+            "error": "import_batches_schema_check_failed",
+            "missing_columns": list(IMPORT_BATCH_CRITICAL_COLUMNS),
+            "migration_sql": IMPORT_BATCH_AUDIT_FIELDS_MIGRATION_SQL,
+        }
+
+    existing = {row[0] for row in rows}
+    missing = [col for col in IMPORT_BATCH_CRITICAL_COLUMNS if col not in existing]
+    if missing:
+        app.logger.error(
+            "Import DB schema mismatch: import_batches is missing critical columns %s. Required migration: %s",
+            ", ".join(missing),
+            IMPORT_BATCH_AUDIT_FIELDS_MIGRATION_SQL,
+        )
+    return {
+        "ok": not missing,
+        "error": "import_batches_missing_columns" if missing else "",
+        "missing_columns": missing,
+        "migration_sql": IMPORT_BATCH_AUDIT_FIELDS_MIGRATION_SQL if missing else "",
+    }
+
+
+def _import_schema_error_response():
+    schema = _import_batches_schema_status()
+    if schema["ok"]:
+        return None
+    return jsonify(
+        ok=False,
+        error=schema["error"],
+        details={
+            "table": "import_batches",
+            "missing_columns": schema["missing_columns"],
+            "migration_sql": schema["migration_sql"],
+        },
+    ), 503
+
+
+@app.before_request
+def _guard_import_batches_schema():
+    if request.path.startswith("/api/import"):
+        return _import_schema_error_response()
+    return None
+
+
 @app.get("/health")
 def health():
-    return jsonify(status="ok")
+    schema = _import_batches_schema_status()
+    status = "ok" if schema["ok"] else "degraded"
+    code = 200 if schema["ok"] else 503
+    return jsonify(
+        status=status,
+        checks={
+            "import_batches_schema": {
+                "ok": schema["ok"],
+                "missing_columns": schema["missing_columns"],
+            },
+        },
+    ), code
 
 
 @app.get("/")

@@ -1,5 +1,11 @@
 # CHANGELOG
 
+## 2026-05-06 — Import DB: добавлены audit-поля import_batches
+
+- Добавлена обязательная миграция `import_batches` для audit-полей `rows_skipped`, `file_name`, `uploaded_by`, `error_message`.
+- Зафиксирована deploy-проверка `DESCRIBE import_batches;` после backend-обновлений моделей БД.
+- Backend import теперь проверяет критичные колонки `import_batches` перед import endpoints и возвращает понятную ошибку схемы вместо HTTP 500.
+
 ## 2026-05-06 — Import XLS: восстановление сценария оператора
 
 - Сохраняются настройки импорта при переходах со страницы импорта.
