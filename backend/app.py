@@ -1529,7 +1529,8 @@ def import_payments_apply(batch_id):
         ), 400
 
     rows = ImportBatchRow.query.filter_by(batch_id=batch.id).order_by(ImportBatchRow.row_no.asc()).all()
-    not_ready = [r for r in rows if r.status != "ready"]
+    applicable_statuses = {"ready", "duplicate"}
+    not_ready = [r for r in rows if r.status not in applicable_statuses]
     if not_ready:
         return jsonify(
             ok=False,
