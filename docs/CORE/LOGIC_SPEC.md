@@ -1174,8 +1174,8 @@ Split v1.9.1 — следующий крупный этап после `UID-only
 - `payment_period` на сервер отправляется только в `YYYY-MM`;
 - `source_index` обязателен, целое число `>= 1`;
 - backend дополнительно проверяет, что `source_index` существует в `payment_sources_v1`;
-- fingerprint платежа строится по `account_uid + payment_date + amount`;
-- одинаковый платёж не применяется повторно: повторный импорт строки с тем же `account_uid`, `payment_date` и `amount` должен быть помечен как `DUPLICATE`/`SKIPPED` и не должен создавать вторую запись в `payments_<uid>`;
+- fingerprint платежа строится по `account_uid + payment_date + amount + source_index`;
+- одинаковый платёж не применяется повторно: повторный импорт строки с тем же `account_uid`, `payment_date`, `amount` и `source_index` должен быть помечен как `DUPLICATE`/`SKIPPED` и не должен создавать вторую запись в `payments_<uid>`;
 - backend является главным валидатором, но frontend не должен отправлять строку вне контракта.
 
 Коды ошибок контракта:

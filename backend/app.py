@@ -491,20 +491,22 @@ def to_ledger_paid_date(paid_date_iso: str) -> str:
     return d.strftime("%d.%m.%Y")
 
 
-def payment_fingerprint(account_uid, paid_date, amount):
+def payment_fingerprint(account_uid, paid_date, amount, source_index):
     uid_norm = normalize_uid(account_uid)
     paid_date_norm = normalize_paid_date(paid_date)
     amount_norm = normalize_amount(amount)
+    source_index_norm = normalize_source_index(source_index)
     raw = "|".join([
         uid_norm,
         paid_date_norm,
         amount_norm,
+        str(source_index_norm),
     ])
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
 def build_payment_fingerprint(owner_id, account_uid, account_number, paid_date, amount, source_index, payment_period):
-    return payment_fingerprint(account_uid, paid_date, amount)
+    return payment_fingerprint(account_uid, paid_date, amount, source_index)
 
 
 def _classify_payment(account_uid, paid_date, amount, ledger_items):
@@ -524,6 +526,34 @@ def _classify_payment(account_uid, paid_date, amount, ledger_items):
 
         item_amount = _norm_amount(item.get("paid"))
         if item_amount == amount_norm:
+            return "DUPLICATE"
+        return "CONFLICT"
+    return "NEW_PAYMENT"
+
+
+def _classify_import_payment(account_uid, paid_date, amount, fingerprint, ledger_items):
+    paid_date_norm = normalize_paid_date(paid_date)
+    amount_norm = normalize_amount(amount)
+    account_uid_norm = normalize_uid(account_uid)
+    fingerprint_norm = _norm_text(fingerprint)
+    for item in ledger_items:
+        item_date = _norm_date(item.get("paid_date"))
+        if not item_date or item_date != paid_date_norm:
+            continue
+
+        item_uid = _norm_text(item.get("uid"))
+        if item_uid and item_uid != account_uid_norm:
+            continue
+
+        item_amount = _norm_amount(item.get("paid"))
+        if item_amount is None:
+            continue
+        if item_amount == amount_norm:
+            item_fingerprint = _norm_text(item.get("fingerprint"))
+            if item_fingerprint:
+                if item_fingerprint == fingerprint_norm:
+                    return "DUPLICATE"
+                continue
             return "DUPLICATE"
         return "CONFLICT"
     return "NEW_PAYMENT"
@@ -1448,7 +1478,7 @@ def import_payments_validate(batch_id):
                         except Exception:
                             ledger = []
 
-                    classification = _classify_payment(r.account_uid, r.paid_date, r.amount, ledger)
+                    classification = _classify_import_payment(r.account_uid, r.paid_date, r.amount, r.fingerprint, ledger)
                     if classification == "NEW_PAYMENT":
                         seen.add(r.fingerprint)
                         seen_uid_date[uid_date_key] = r.amount
@@ -1560,7 +1590,7 @@ def import_payments_apply(batch_id):
                     row_id=r.id,
                     action=action,
                     status="SKIPPED",
-                    details_json=json.dumps({"account_uid": r.account_uid, "payment_date": r.paid_date or r.payment_date, "amount": r.amount, "result": "SKIPPED", "reason_code": r.reason_code, "reason_text": r.reason_text}, ensure_ascii=False),
+                    details_json=json.dumps({"account_uid": r.account_uid, "payment_date": r.paid_date or r.payment_date, "amount": r.amount, "source_index": r.source_index, "result": "SKIPPED", "reason_code": r.reason_code, "reason_text": r.reason_text, "fingerprint": r.fingerprint}, ensure_ascii=False),
                 ))
                 continue
 
@@ -1570,7 +1600,7 @@ def import_payments_apply(batch_id):
             normalized_period = normalize_payment_period(r.payment_period)
             normalized_amount = normalize_amount(r.amount)
             normalized_source_index = normalize_source_index(r.source_index)
-            fingerprint = payment_fingerprint(normalized_uid, normalized_paid_date, normalized_amount)
+            fingerprint = payment_fingerprint(normalized_uid, normalized_paid_date, normalized_amount, normalized_source_index)
 
             key = f"payments_{normalized_uid}"
             legacy_key = f"payments_{normalized_account_number}"
@@ -1591,7 +1621,7 @@ def import_payments_apply(batch_id):
                     row_id=r.id,
                     action="DUPLICATE",
                     status="SKIPPED",
-                    details_json=json.dumps({"account_uid": normalized_uid, "payment_date": normalized_paid_date, "amount": normalized_amount, "result": "DUPLICATE", "reason_code": r.reason_code, "fingerprint": fingerprint}, ensure_ascii=False),
+                    details_json=json.dumps({"account_uid": normalized_uid, "payment_date": normalized_paid_date, "amount": normalized_amount, "source_index": normalized_source_index, "result": "DUPLICATE", "reason_code": r.reason_code, "fingerprint": fingerprint}, ensure_ascii=False),
                 ))
                 continue
 
@@ -1671,7 +1701,7 @@ def import_payments_apply(batch_id):
                 row_id=r.id,
                 action="APPLIED",
                 status="APPLIED",
-                details_json=json.dumps({"account_uid": normalized_uid, "payment_date": normalized_paid_date, "amount": normalized_amount, "result": "APPLIED", "payment_id": payment_id, "fingerprint": fingerprint}, ensure_ascii=False),
+                details_json=json.dumps({"account_uid": normalized_uid, "payment_date": normalized_paid_date, "amount": normalized_amount, "source_index": normalized_source_index, "result": "APPLIED", "payment_id": payment_id, "fingerprint": fingerprint}, ensure_ascii=False),
             ))
             applied_count += 1
 
