@@ -256,6 +256,34 @@ function toIsoDateFromDisplayDate(v){
   if (m) return s;
   return '';
 }
+function getAbonentStartDate(ab){
+  return normStr(
+    (ab && ab.calcStartDate) ||
+    (ab && ab.dateFrom) ||
+    (ab && ab.registrationDate) ||
+    (ab && ab.regDate) ||
+    (ab && ab.startDate) ||
+    ''
+  );
+}
+
+function getYearMonthFromDateISO(dateStr){
+  const s = normStr(dateStr);
+  const m = s.match(/^(\d{4})-(\d{2})-\d{2}$/);
+  if (!m) return '';
+  return m[1] + '-' + m[2];
+}
+
+function isPaymentBeforeAbonentStart(ab, paymentPeriod){
+  const startDate = getAbonentStartDate(ab);
+  const startYm = getYearMonthFromDateISO(startDate);
+  const payYm = normStr(paymentPeriod);
+
+  if (!startYm || !/^\d{4}-\d{2}$/.test(payYm)) return false;
+
+  return payYm < startYm;
+}
+
 function makeContractError(code){
   const err = new Error(code);
   err.code = code;
@@ -1086,7 +1114,7 @@ function migrateKeyToUID(db, oldKey, newUid){
 }
 
 let WB=null, aoa=null, headerRowIndex=-1, payPairs=[], dataRows=[];
-let parseMeta={ mode:'none', indexRowIndex:-1, fieldMapStatus:null, paymentGroups:[], workbookYear:'', headerDetect:null };
+let parseMeta={ mode:'none', indexRowIndex:-1, fieldMapStatus:null, paymentGroups:[], workbookYear:'', headerDetect:null, customer2009FieldMap:null };
 let mode='primary';
 let primaryApplied=false;
 let primaryBlocked=false;
@@ -1115,11 +1143,158 @@ function paymentPairsCount(row){
   }).length;
 }
 
+function normalizeHeaderIndex(v){
+  if (v === null || v === undefined) return null;
+
+  if (typeof v === 'string'){
+    v = v.trim();
+    if (v === '') return null;
+  }
+
+  const num = Number(v);
+  if (!Number.isFinite(num)) return null;
+
+  return Math.floor(num);
+}
+
+function findCustomer2009HeaderRow(rows){
+  let bestRow = -1;
+  let bestScore = -1;
+
+  for (let r = 0; r < Math.min(rows.length, 50); r++){
+    const row = rows[r];
+    if (!row) continue;
+
+    const seen = {};
+    let totalNumeric = 0;
+    let duplicates = 0;
+
+    for (let c = 0; c < row.length; c++){
+      const v = normalizeHeaderIndex(row[c]);
+      if (v === null || v < 0 || v > 77) continue;
+
+      totalNumeric++;
+
+      if (Object.prototype.hasOwnProperty.call(seen, v)){
+        duplicates++;
+      } else {
+        seen[v] = true;
+      }
+    }
+
+    const uniqueCount = Object.keys(seen).length;
+
+    const hasBase = [0,1,2,3,4,5].every(function(n){
+      return Object.prototype.hasOwnProperty.call(seen, n);
+    });
+
+    const hasPayments =
+      Object.prototype.hasOwnProperty.call(seen, 6) &&
+      Object.prototype.hasOwnProperty.call(seen, 7) &&
+      Object.prototype.hasOwnProperty.call(seen, 72) &&
+      Object.prototype.hasOwnProperty.call(seen, 77);
+
+    const score = uniqueCount * 10 + (hasBase ? 100 : 0) + (hasPayments ? 100 : 0) - duplicates;
+
+    if (uniqueCount >= 50 && hasBase && hasPayments && score > bestScore){
+      bestScore = score;
+      bestRow = r;
+    }
+  }
+
+  return bestRow;
+}
+
 function parseSheetToRows(sheet, fileName, sheetName){
   aoa = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '' });
-  parseMeta = { mode:'none', indexRowIndex:-1, fieldMapStatus:null, paymentGroups:[], workbookYear:'', headerDetect:null };
+  parseMeta = { mode:'none', indexRowIndex:-1, fieldMapStatus:null, paymentGroups:[], workbookYear:'', headerDetect:null, customer2009FieldMap:null };
 
   const workbookYear = detectWorkbookYear(aoa, fileName, sheetName);
+  const strictCustomerYear = '2009';
+
+  function parseStrictCustomer2009Rows(){
+    const headerRowIndex = findCustomer2009HeaderRow(aoa);
+    console.log('[CUSTOMER_2009][selectedHeaderRow]', headerRowIndex);
+    if (headerRowIndex < 0) return null;
+
+    const rawRowValues = aoa[headerRowIndex] || [];
+    const fieldMap = {};
+    let duplicateIndexes = [];
+    for (let c=0; c<rawRowValues.length; c++){
+      const idx = normalizeHeaderIndex(rawRowValues[c]);
+      if (idx === null) continue;
+      if (idx < 0 || idx > 77) continue;
+      if (Object.prototype.hasOwnProperty.call(fieldMap, idx)) duplicateIndexes.push(idx);
+      fieldMap[idx] = c;
+    }
+    const hasCustomer2009Shape = Object.prototype.hasOwnProperty.call(fieldMap, 0) && Object.prototype.hasOwnProperty.call(fieldMap, 77);
+    if (duplicateIndexes.length){
+      return { ok:false, msg:'Служебная строка содержит дубли номеров карты 0–77: ' + duplicateIndexes.join(', ') + '.', customerLike:hasCustomer2009Shape };
+    }
+    const missingIndexes = [];
+    for (let i=0; i<=77; i++){
+      if (!Object.prototype.hasOwnProperty.call(fieldMap, i)) missingIndexes.push(i);
+    }
+    if (missingIndexes.length){
+      if (hasCustomer2009Shape){
+        return { ok:false, msg:'Служебная строка не содержит все поля карты 0–77. Не найдены номера: ' + missingIndexes.join(', '), customerLike:true };
+      }
+      return null;
+    }
+    console.log('[CUSTOMER_2009][fieldMap]', fieldMap);
+    const rows = [];
+    for (let r=headerRowIndex + 1; r<aoa.length; r++){
+      const line = aoa[r] || [];
+      if (line.every(function(c){ return normStr(c)===''; })) continue;
+      const payments = [];
+      for (let m=0; m<12; m++){
+        const base = 6 + (m * 6);
+        for (let src=0; src<3; src++){
+          const sumField = base + (src * 2);
+          const dateField = sumField + 1;
+          payments.push({
+            amount: line[fieldMap[sumField]],
+            periodRaw: strictCustomerYear + '-' + pad2(m + 1),
+            paidDateRaw: line[fieldMap[dateField]],
+            sourceIndex: src + 1,
+            sourceName: sourceNameByIndex(src + 1),
+            year: strictCustomerYear,
+            month: pad2(m + 1)
+          });
+        }
+      }
+      rows.push({
+        excelRow: r + 1,
+        uid: normStr(line[fieldMap[0]]),
+        ls: normStr(line[fieldMap[1]]),
+        fam: normStr(line[fieldMap[2]]),
+        name: normStr(line[fieldMap[3]]),
+        otch: normStr(line[fieldMap[4]]),
+        square: normNum(line[fieldMap[5]]),
+        squareRaw: line[fieldMap[5]],
+        rowYear: strictCustomerYear,
+        payments: payments
+      });
+    }
+    return { ok:true, rows:rows, fieldMap:fieldMap, headerRowIndex:headerRowIndex };
+  }
+
+  const customer2009 = parseStrictCustomer2009Rows();
+  if (customer2009 && customer2009.ok){
+    parseMeta = {
+      mode:'strict-template-customer-2009',
+      indexRowIndex:customer2009.headerRowIndex,
+      fieldMapStatus:null,
+      paymentGroups:[],
+      workbookYear:strictCustomerYear,
+      headerDetect:null,
+      customer2009FieldMap: customer2009.fieldMap
+    };
+    return { ok:true, rows:customer2009.rows };
+  }
+  if (customer2009 && customer2009.customerLike){
+    return { ok:false, msg:customer2009.msg };
+  }
 
   // =========================================================
   // 1) СНАЧАЛА ПЫТАЕМСЯ РАЗОБРАТЬ ФАЙЛ НОВЫМ AUTO-DETECT
@@ -1253,8 +1428,16 @@ function parseSheetToRows(sheet, fileName, sheetName){
     if (mapped && mapped.ok){
       headerRowIndex = indexRowIndex;
       payPairs = [];
+
+      const hasOwn = function(n){
+        return Object.prototype.hasOwnProperty.call(fieldMap, n);
+      };
+      const isCustomer2009 = headerRowIndex !== -1 &&
+        hasOwn(0) && hasOwn(1) && hasOwn(2) && hasOwn(3) && hasOwn(4) && hasOwn(5) &&
+        hasOwn(6) && hasOwn(7) && hasOwn(72) && hasOwn(77);
+
       parseMeta = {
-        mode:'field-map',
+        mode: isCustomer2009 ? 'strict-template-customer-2009' : 'field-map',
         indexRowIndex:indexRowIndex,
         workbookYear: workbookYear,
         paymentGroups: mapped.paymentGroups || [],
@@ -1264,7 +1447,9 @@ function parseSheetToRows(sheet, fileName, sheetName){
           dataStartRow:-1,
           detectedColumns:{},
           confidence:0,
-          debug:[
+          debug: isCustomer2009 ? [
+            'CUSTOMER_2009 распознан по служебной строке field-map.'
+          ] : [
             'Auto-detect не использован: ' + (autoDetectFailReason || 'неизвестная причина'),
             autoDetectDebugText ? ('Auto-detect debug: ' + autoDetectDebugText) : '',
             'Включён fallback на field-map.'
@@ -1276,6 +1461,7 @@ function parseSheetToRows(sheet, fileName, sheetName){
           12:Number.isInteger(fieldMap[12])
         }
       };
+      console.log('[CUSTOMER_2009][mode]', parseMeta.mode);
       return mapped;
     }
   }
@@ -1354,8 +1540,20 @@ function evaluatePaymentsRow(db, row){
   const foundU = uid ? findAbonentByUid(db, uid) : null;
   const ab = foundU ? foundU.abonent : null;
 
-  if (!uid || !ab){
-    return { status:'ERROR', critical:true, details:['Для импорта платежей нужен UID. Сначала выполните шаг 1 — Первичка.'], conflicts:0, unresolved:0, adds:0, dups:0, found:paymentPairsCount(row), skipped:0 };
+  if (!uid){
+    return { status:'ERROR', critical:true, details:['Создайте абонента в программе и вставьте UID в Excel'], conflicts:0, unresolved:0, adds:0, dups:0, found:paymentPairsCount(row), skipped:0 };
+  }
+  if (!ab){
+    return { status:'ERROR', critical:true, details:['UID из Excel не найден в базе.'], conflicts:0, unresolved:0, adds:0, dups:0, found:paymentPairsCount(row), skipped:0 };
+  }
+  if (parseMeta.mode === 'strict-template-customer-2009'){
+    const lsExcel = normStr(row.ls);
+    const famExcel = normStr(row.fam);
+    const lsDb = normStr(ab.id);
+    const famDb = normStr(ab.fam || ab.surname || ab.last_name);
+    if ((lsExcel && lsDb && lsExcel !== lsDb) || (famExcel && famDb && famExcel !== famDb)){
+      return { status:'CONFLICT', critical:true, details:['Конфликт: UID найден, но ЛС/фамилия не совпадают. Строка не будет импортирована.'], conflicts:1, unresolved:1, adds:0, dups:0, found:paymentPairsCount(row), skipped:paymentPairsCount(row) };
+    }
   }
 
   const uidKey = normStr(ab.uid || row.uid);
@@ -1371,6 +1569,15 @@ function evaluatePaymentsRow(db, row){
     const year = normStr(p.year) || extractYearFromAny(p.periodRaw) || extractYearFromAny(p.paidDateRaw) || normStr(row.rowYear) || parseMeta.workbookYear || (per ? per.period.slice(0,4) : '') || String(new Date().getFullYear());
     const month = pad2(p.month || (per ? per.period.slice(5,7) : ''));
     if (!/^\d{4}$/.test(year) || !/^\d{2}$/.test(month)){ errs++; continue; }
+    const paymentPeriod = year + '-' + month;
+    if (isPaymentBeforeAbonentStart(ab, paymentPeriod)){
+      errs++;
+      details.push(
+        'Ошибка: платёж за ' + paymentPeriod +
+        ' раньше даты начала расчёта абонента (' + getAbonentStartDate(ab) + ').'
+      );
+      continue;
+    }
     const paidDate = normalizePaidDateStrict(p.paidDateRaw);
     if (!paidDate){
       errs++;
@@ -1586,6 +1793,9 @@ function renderPreview(){
       ((Array.isArray(payPairs) && payPairs.length>0) ? 'Платёжные колонки определены по заголовкам. Доступен только предпросмотр/диагностика, применение запрещено.' : 'Платёжные колонки не распознаны.') + '</span>';
     const dbg = Array.isArray(hd.debug) ? hd.debug : [];
     for (let i=0;i<dbg.length;i++) diag += '<br><span class="mono">' + dbg[i] + '</span>';
+  } else if (parseMeta.mode === 'strict-template-customer-2009'){
+    diag += '<br><span class="ok">Распознан CUSTOMER_2009: карта 0–77 найдена, рабочие поля читаются по служебной строке 15.</span>';
+    diag += '<br><span class="mono">Служебная строка: 15; карта полей: 0–77.</span>';
   }
   $('errorsBox').innerHTML = diag;
 
@@ -1595,10 +1805,11 @@ function renderPreview(){
 }
 
 function isStrictTemplateMode(){
-  return !!(parseMeta && parseMeta.mode === 'strict-template');
+  return !!(parseMeta && (parseMeta.mode === 'strict-template' || parseMeta.mode === 'strict-template-customer-2009'));
 }
 function isApplyBlockedByTemplateMode(){
-  return !!(parseMeta && dataRows.length > 0 && parseMeta.mode !== 'strict-template');
+  const allowed = parseMeta && (parseMeta.mode === 'strict-template' || parseMeta.mode === 'strict-template-customer-2009');
+  return !!(parseMeta && dataRows.length > 0 && !allowed);
 }
 function hasPrimaryCritical(){ return preview.some(r => r.critical && r.status==='ERROR'); }
 function hasPaymentsCritical(){ return preview.some(r => r.critical && r.status==='ERROR'); }
@@ -1846,17 +2057,26 @@ async function applyPayments(){
 
     for (let p=0;p<(row.payments || []).length;p++){
       const pay = row.payments[p];
+      const per = normalizePeriod(pay.periodRaw);
+      const year = normStr(pay.year) || (per ? per.period.slice(0,4) : '');
+      const month = pad2(pay.month || (per ? per.period.slice(5,7) : ''));
+      const amountNum = normNum(pay.amount);
+      const paidDateDisplay = normalizePaidDateStrict(pay.paidDateRaw);
+      const paymentPeriod = year + '-' + month;
+      if (isPaymentBeforeAbonentStart(ab, paymentPeriod)){
+        setImportStatus(
+          'Импорт остановлен: платёж за ' + paymentPeriod +
+          ' раньше даты начала расчёта абонента (' + getAbonentStartDate(ab) + ').',
+          'err'
+        );
+        return;
+      }
       const previewRow = evaluatePaymentsRow(db, row);
       if (!previewRow || previewRow.status==='ERROR') continue;
       const paymentUid = normStr(ab && ab.uid ? ab.uid : row.uid);
       if (!paymentUid){ setImportStatus('Для импорта платежей нужен UID.', 'err'); return; }
       const existing = getPaymentsByUid(paymentUid);
       const isDup = existing.some(function(x){
-        const per = normalizePeriod(pay.periodRaw);
-        const year = normStr(pay.year) || (per ? per.period.slice(0,4) : '');
-        const month = pad2(pay.month || (per ? per.period.slice(5,7) : ''));
-        const amountNum = normNum(pay.amount);
-        const paidDateDisplay = normalizePaidDateStrict(pay.paidDateRaw);
         const ym = getLedgerYearMonth(x);
         const paid = getLedgerPaidAmount(x);
         return ym && ym.year===year && ym.month===month && getLedgerPaidDate(x)===paidDateDisplay && paid===amountNum;
@@ -1867,6 +2087,14 @@ async function applyPayments(){
         return ym && ym.year===year && ym.month===month && getLedgerPaidDate(x)===paidDateDisplay && Number.isFinite(paid) && paid!==amountNum;
       });
       if (isDup || isConflict) continue;
+      if (isPaymentBeforeAbonentStart(ab, paymentPeriod)){
+        setImportStatus(
+          'Импорт остановлен: платёж за ' + paymentPeriod +
+          ' раньше даты начала расчёта абонента (' + getAbonentStartDate(ab) + ').',
+          'err'
+        );
+        return;
+      }
       try{
         rows.push(buildServerPaymentRow(row, pay, ab));
       }catch(e){

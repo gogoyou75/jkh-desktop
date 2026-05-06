@@ -66,6 +66,7 @@
 *| 43 | Import Contract | Frontend и backend имели разные правила нормализации платежей | DONE | P0 | Введён единый контракт upload_rows: UID, ЛС, ISO date, YYYY-MM period, amount number, source_index | import_xls.html / app.py / LOGIC_SPEC / CHANGELOG |
 *| 44 | Import Audit | Отсутствовал полный audit log по батчу | DONE | P0 | Добавлен batch-level и row-level audit log + summary endpoint | app.py / LOGIC_SPEC / CHANGELOG |
 *| 45 | Import Rollback | rollback не гарантировал консистентность при сбое | DONE | P0 | Убран flush, усилен rollback, добавлен error audit log | app.py / LOGIC_SPEC / CHANGELOG |
+*| 46 | Import XLS | Добавлена поддержка строгого шаблона CUSTOMER_2009 по карте 0–77 | DONE | P0 | Шаблон заказчика 2009 читается как strict-template-customer-2009 без auto-detect | import_xls.html / LOGIC_SPEC / CHANGELOG |
 ---
 
 ## Ближайший порядок работ
