@@ -1,5 +1,11 @@
 # CHANGELOG
 
+## 2026-05-06 — Import E2E tests
+
+- Добавлены сквозные тесты импорта платежей.
+- Проверка позитивного и негативного сценария.
+- Добавлен тест schema guard.
+
 ## 2026-05-06 — Import DB: добавлены audit-поля import_batches
 
 - Добавлена обязательная миграция `import_batches` для audit-полей `rows_skipped`, `file_name`, `uploaded_by`, `error_message`.

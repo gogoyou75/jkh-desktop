@@ -3,6 +3,8 @@ import sys
 import unittest
 from unittest.mock import patch
 import json
+import tempfile
+from sqlalchemy import create_engine
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 import app as app_module
@@ -340,6 +342,182 @@ class ImportHelpersTest(unittest.TestCase):
 
         self.assertTrue(result["uid_found"])
         self.assertEqual(len(result["matches"]), 1)
+
+
+class ImportPaymentsE2ETest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls._db_file = tempfile.NamedTemporaryFile(prefix="jkh_import_e2e_", suffix=".sqlite", delete=False)
+        cls._db_file.close()
+        app_module.app.config["TESTING"] = True
+        app_module.app.config["SQLALCHEMY_DATABASE_URI"] = f"sqlite:///{cls._db_file.name}"
+        with app_module.app.app_context():
+            app_module.db.session.remove()
+            engines = app_module.app.extensions["sqlalchemy"].engines
+            for engine in list(engines.values()):
+                engine.dispose()
+            engines[None] = create_engine(app_module.app.config["SQLALCHEMY_DATABASE_URI"])
+
+    @classmethod
+    def tearDownClass(cls):
+        try:
+            os.unlink(cls._db_file.name)
+        except OSError:
+            pass
+
+    def setUp(self):
+        self.owner_id = "owner-import-e2e"
+        self.account_uid = "uid_customer_2009_e2e"
+        self.account_number = "2009001"
+        self.client = app_module.app.test_client()
+        with app_module.app.app_context():
+            app_module.db.drop_all()
+            app_module.db.create_all()
+            app_module.db.session.execute(app_module.text("DROP TABLE import_applied_fingerprints"))
+            app_module.db.session.execute(app_module.text("""
+                CREATE TABLE import_applied_fingerprints (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    owner_id VARCHAR(191) NOT NULL,
+                    import_type VARCHAR(32) NOT NULL DEFAULT 'payments',
+                    fingerprint VARCHAR(255) NOT NULL,
+                    account_uid VARCHAR(191),
+                    account_number VARCHAR(191),
+                    payment_period VARCHAR(7),
+                    paid_date DATE,
+                    amount NUMERIC(12, 2) NOT NULL,
+                    source_index INTEGER NOT NULL DEFAULT 1,
+                    payment_id VARCHAR(64) NOT NULL DEFAULT '',
+                    batch_id BIGINT,
+                    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    CONSTRAINT uq_owner_import_fp UNIQUE (owner_id, import_type, fingerprint)
+                )
+            """))
+            app_module.db.session.execute(app_module.text("DROP TABLE payment_audit_log"))
+            app_module.db.session.execute(app_module.text("""
+                CREATE TABLE payment_audit_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    owner_id VARCHAR(128) NOT NULL,
+                    batch_id INTEGER NOT NULL,
+                    row_id INTEGER,
+                    action VARCHAR(32) NOT NULL,
+                    status VARCHAR(32) NOT NULL,
+                    details_json TEXT NOT NULL DEFAULT '{}',
+                    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+            """))
+            app_module.db.session.add(app_module.User(
+                id=self.owner_id,
+                email="import-e2e@example.test",
+                password_hash="not-used",
+                role="user",
+                display_name="Import E2E",
+            ))
+            app_module.db.session.add(app_module.KVStore(
+                owner=self.owner_id,
+                k="payment_sources_v1",
+                v=json.dumps(["CUSTOMER_2009"], ensure_ascii=False),
+            ))
+            app_module.db.session.add(app_module.KVStore(
+                owner=self.owner_id,
+                k="abonents_db_v1",
+                v=json.dumps({
+                    "abonents": {
+                        self.account_number: {
+                            "uid": self.account_uid,
+                            "id": self.account_number,
+                            "calcStartDate": "2025-01-01",
+                        }
+                    }
+                }, ensure_ascii=False),
+            ))
+            app_module.db.session.commit()
+        with self.client.session_transaction() as sess:
+            sess["user_id"] = self.owner_id
+
+    def tearDown(self):
+        with app_module.app.app_context():
+            app_module.db.session.remove()
+            app_module.db.drop_all()
+
+    def _upload_rows(self, payment_period="2026-01", include_account_number=True):
+        row = {
+            "account_uid": self.account_uid,
+            "payment_date": "2026-01-15",
+            "payment_period": payment_period,
+            "amount": 1000,
+            "source_index": 1,
+        }
+        if include_account_number:
+            row["account_number"] = self.account_number
+        return self.client.post("/api/import/payments/upload_rows", json={"rows": [row]})
+
+    def test_upload_rows_validate_apply_writes_payment_to_uid_ledger(self):
+        with patch.object(app_module, "_import_schema_error_response", return_value=None):
+            upload_resp = self._upload_rows()
+            self.assertEqual(upload_resp.status_code, 200)
+            batch_id = upload_resp.json["batch"]["id"]
+
+            validate_resp = self.client.post(f"/api/import/{batch_id}/validate")
+            self.assertEqual(validate_resp.status_code, 200)
+
+            apply_resp = self.client.post(f"/api/import/{batch_id}/apply")
+            self.assertEqual(apply_resp.status_code, 200)
+            self.assertEqual(apply_resp.json["batch"]["status"], "applied")
+            self.assertEqual(apply_resp.json["batch"]["rows_applied"], 1)
+
+        with app_module.app.app_context():
+            batch = app_module.ImportBatch.query.filter_by(id=batch_id).first()
+            self.assertIsNotNone(batch)
+            self.assertEqual(batch.status, "applied")
+            self.assertEqual(batch.rows_applied, 1)
+            kv = app_module.KVStore.query.filter_by(
+                owner=self.owner_id,
+                k=f"payments_{self.account_uid}",
+            ).first()
+            self.assertIsNotNone(kv)
+            ledger = json.loads(kv.v)
+
+        self.assertEqual(len(ledger), 1)
+        self.assertEqual(ledger[0]["uid"], self.account_uid)
+        self.assertEqual(ledger[0]["paid"], 1000.0)
+        self.assertEqual(ledger[0]["paid_date"], "15.01.2026")
+        self.assertEqual(ledger[0]["payment_period"], "2026-01")
+
+    def test_upload_rows_with_2009_period_does_not_apply_invalid_batch(self):
+        with patch.object(app_module, "_import_schema_error_response", return_value=None):
+            upload_resp = self._upload_rows(payment_period="2009-01", include_account_number=False)
+            self.assertEqual(upload_resp.status_code, 200)
+            batch_id = upload_resp.json["batch"]["id"]
+
+            validate_resp = self.client.post(f"/api/import/{batch_id}/validate")
+            self.assertEqual(validate_resp.status_code, 200)
+            self.assertGreater(validate_resp.json["batch"]["rows_invalid"], 0)
+            self.assertNotEqual(validate_resp.json["batch"]["status"], "applied")
+
+        with app_module.app.app_context():
+            batch = app_module.ImportBatch.query.filter_by(id=batch_id).first()
+            self.assertIsNotNone(batch)
+            self.assertNotEqual(batch.status, "applied")
+            self.assertEqual(batch.rows_applied, 0)
+            kv = app_module.KVStore.query.filter_by(
+                owner=self.owner_id,
+                k=f"payments_{self.account_uid}",
+            ).first()
+            self.assertIsNone(kv)
+
+    def test_upload_rows_returns_503_when_import_batch_schema_is_missing_rows_skipped(self):
+        schema_status = {
+            "ok": False,
+            "error": "import_batches_missing_columns",
+            "missing_columns": ["rows_skipped"],
+            "migration_sql": "migration required: ALTER TABLE import_batches ADD COLUMN rows_skipped INT NOT NULL DEFAULT 0",
+        }
+        with patch.object(app_module, "_import_batches_schema_status", return_value=schema_status):
+            resp = self._upload_rows()
+
+        self.assertEqual(resp.status_code, 503)
+        body = resp.get_data(as_text=True).lower()
+        self.assertTrue("schema mismatch" in body or "migration required" in body)
 
 
 if __name__ == "__main__":
