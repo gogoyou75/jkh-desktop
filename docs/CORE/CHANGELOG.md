@@ -1,5 +1,11 @@
 # CHANGELOG
 
+## 2026-05-06 — Import: idempotency duplicate protection
+
+- Повторный импорт одинакового платежа не создаёт дубль в `payments_<uid>`.
+- Duplicate/skipped строки фиксируются в audit log.
+- Добавлены тесты защиты duplicate/idempotency.
+
 ## 2026-05-06 — Import E2E tests
 
 - Добавлены сквозные тесты импорта платежей.

@@ -70,6 +70,7 @@
 *| 47 | Import UX | После создания абонента/изменения площади терялись настройки и сбивался сценарий оператора | DONE | P1 | Сохранены draft/resume опции, добавлены подсказки, проверена кнопка платежей | import_xls.html / premises / LOGIC_SPEC / CHANGELOG |
 *| 48 | Import DB Migration | Backend ожидал новые поля import_batches, но MySQL-схема не была обновлена | DONE | P0 | Добавлена миграция и deploy-check | LOGIC_SPEC / CHANGELOG / DEPLOY |
 *| 49 | Import E2E | Нет сквозной проверки импорта frontend→backend→DB | DONE | P1 | Добавлены E2E тесты импорта | tests / CHANGELOG |
+*| 50 | Import Idempotency | Нужна проверка защиты от повторного импорта платежей | DONE | P1 | Добавлены тесты duplicate/idempotency | tests / LOGIC_SPEC / CHANGELOG |
 ---
 
 ## Ближайший порядок работ

@@ -483,6 +483,53 @@ class ImportPaymentsE2ETest(unittest.TestCase):
         self.assertEqual(ledger[0]["paid_date"], "15.01.2026")
         self.assertEqual(ledger[0]["payment_period"], "2026-01")
 
+    def test_reupload_same_rows_skips_duplicate_without_second_ledger_payment(self):
+        with patch.object(app_module, "_import_schema_error_response", return_value=None):
+            first_upload_resp = self._upload_rows()
+            self.assertEqual(first_upload_resp.status_code, 200)
+            first_batch_id = first_upload_resp.json["batch"]["id"]
+
+            first_validate_resp = self.client.post(f"/api/import/{first_batch_id}/validate")
+            self.assertEqual(first_validate_resp.status_code, 200)
+
+            first_apply_resp = self.client.post(f"/api/import/{first_batch_id}/apply")
+            self.assertEqual(first_apply_resp.status_code, 200)
+            self.assertEqual(first_apply_resp.json["batch"]["rows_applied"], 1)
+
+            second_upload_resp = self._upload_rows()
+            self.assertEqual(second_upload_resp.status_code, 200)
+            second_batch_id = second_upload_resp.json["batch"]["id"]
+
+            second_validate_resp = self.client.post(f"/api/import/{second_batch_id}/validate")
+            self.assertEqual(second_validate_resp.status_code, 200)
+            self.assertEqual(second_validate_resp.json["batch"]["rows_duplicate"], 1)
+
+            second_apply_resp = self.client.post(f"/api/import/{second_batch_id}/apply")
+            self.assertEqual(second_apply_resp.status_code, 200)
+            self.assertEqual(second_apply_resp.json["batch"]["rows_applied"], 0)
+            self.assertEqual(second_apply_resp.json["batch"]["rows_skipped"], 1)
+            self.assertEqual(second_apply_resp.json["summary"]["duplicate_count"], 1)
+
+        with app_module.app.app_context():
+            ledger_row = app_module.KVStore.query.filter_by(
+                owner=self.owner_id,
+                k=f"payments_{self.account_uid}",
+            ).first()
+            self.assertIsNotNone(ledger_row)
+            ledger = json.loads(ledger_row.v)
+            self.assertEqual(len(ledger), 1)
+
+            audit_row = app_module.PaymentAuditLog.query.filter_by(
+                owner_id=self.owner_id,
+                batch_id=second_batch_id,
+                action="DUPLICATE",
+                status="SKIPPED",
+            ).first()
+            self.assertIsNotNone(audit_row)
+            details = json.loads(audit_row.details_json)
+            self.assertEqual(details["result"], "SKIPPED")
+            self.assertEqual(details["reason_code"], "DUPLICATE")
+
     def test_upload_rows_with_2009_period_does_not_apply_invalid_batch(self):
         with patch.object(app_module, "_import_schema_error_response", return_value=None):
             upload_resp = self._upload_rows(payment_period="2009-01", include_account_number=False)
