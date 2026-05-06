@@ -71,6 +71,7 @@
 *| 48 | Import DB Migration | Backend ожидал новые поля import_batches, но MySQL-схема не была обновлена | DONE | P0 | Добавлена миграция и deploy-check | LOGIC_SPEC / CHANGELOG / DEPLOY |
 *| 49 | Import E2E | Нет сквозной проверки импорта frontend→backend→DB | DONE | P1 | Добавлены E2E тесты импорта | tests / CHANGELOG |
 *| 50 | Import Idempotency | Нужна проверка защиты от повторного импорта платежей | DONE | P1 | Добавлены тесты duplicate/idempotency | tests / LOGIC_SPEC / CHANGELOG |
+*| 51 | Import Fingerprint | Возможны ложные дубли без source_index | DONE | P1 | Добавлен source_index в fingerprint | tests / LOGIC_SPEC / CHANGELOG |
 ---
 
 ## Ближайший порядок работ

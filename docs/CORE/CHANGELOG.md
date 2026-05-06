@@ -1,5 +1,11 @@
 # CHANGELOG
 
+## 2026-05-06 — Import: fingerprint extended with source_index
+
+- Fingerprint платежа расширен до `account_uid + payment_date + amount + source_index`.
+- Платежи с одинаковыми UID, датой и суммой, но разными `source_index`, больше не считаются дублями.
+- Audit log импорта платежей фиксирует `source_index` рядом с fingerprint.
+
 ## 2026-05-06 — Import: idempotency duplicate protection
 
 - Повторный импорт одинакового платежа не создаёт дубль в `payments_<uid>`.

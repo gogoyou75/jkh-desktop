@@ -103,14 +103,14 @@ class ImportHelpersTest(unittest.TestCase):
         )
         self.assertNotEqual(fp1, fp2)
 
-    def test_fingerprint_does_not_depend_on_period_or_source(self):
+    def test_fingerprint_depends_on_source_but_not_period(self):
         fp1 = app_module.build_payment_fingerprint(
             "owner1", "uid_1", "0001", "2025-02-10", "1500", 1, "2025-02"
         )
         fp2 = app_module.build_payment_fingerprint(
             "owner1", "uid_1", "0001", "2025-02-10", "1500", 99, "2025-03"
         )
-        self.assertEqual(fp1, fp2)
+        self.assertNotEqual(fp1, fp2)
 
     def test_classification_duplicate_same_uid_date_amount(self):
         ledger = [{"paid_date": "10.02.2025", "paid": 1500.0}]
@@ -143,7 +143,7 @@ class ImportHelpersTest(unittest.TestCase):
         account_number = "100500"
         paid_date = "2025-02-10"
         amount = "1500.00"
-        fingerprint = app_module.payment_fingerprint(account_uid, paid_date, amount)
+        fingerprint = app_module.payment_fingerprint(account_uid, paid_date, amount, 1)
 
         class DummyBatch:
             def __init__(self):
@@ -248,9 +248,11 @@ class ImportHelpersTest(unittest.TestCase):
             self.assertEqual(payload.json.get("error"), "state_transition_forbidden")
 
     def test_same_uploaded_file_fingerprints_match_and_will_be_treated_as_duplicate(self):
-        fp1 = app_module.payment_fingerprint("uid_1", "2025-02-10", "1500.00")
-        fp2 = app_module.payment_fingerprint("uid_1", "10.02.2025", "1500")
+        fp1 = app_module.payment_fingerprint("uid_1", "2025-02-10", "1500.00", 1)
+        fp2 = app_module.payment_fingerprint("uid_1", "10.02.2025", "1500", 1)
+        fp3 = app_module.payment_fingerprint("uid_1", "10.02.2025", "1500", 2)
         self.assertEqual(fp1, fp2)
+        self.assertNotEqual(fp1, fp3)
 
     def test_build_payment_fingerprint_requires_uid(self):
         with self.assertRaises(ValueError):
@@ -415,7 +417,7 @@ class ImportPaymentsE2ETest(unittest.TestCase):
             app_module.db.session.add(app_module.KVStore(
                 owner=self.owner_id,
                 k="payment_sources_v1",
-                v=json.dumps(["CUSTOMER_2009"], ensure_ascii=False),
+                v=json.dumps(["CUSTOMER_2009", "BANK"], ensure_ascii=False),
             ))
             app_module.db.session.add(app_module.KVStore(
                 owner=self.owner_id,
@@ -439,17 +441,19 @@ class ImportPaymentsE2ETest(unittest.TestCase):
             app_module.db.session.remove()
             app_module.db.drop_all()
 
-    def _upload_rows(self, payment_period="2026-01", include_account_number=True):
-        row = {
-            "account_uid": self.account_uid,
-            "payment_date": "2026-01-15",
-            "payment_period": payment_period,
-            "amount": 1000,
-            "source_index": 1,
-        }
+    def _upload_rows(self, payment_period="2026-01", include_account_number=True, rows=None):
+        if rows is None:
+            rows = [{
+                "account_uid": self.account_uid,
+                "payment_date": "2026-01-15",
+                "payment_period": payment_period,
+                "amount": 1000,
+                "source_index": 1,
+            }]
         if include_account_number:
-            row["account_number"] = self.account_number
-        return self.client.post("/api/import/payments/upload_rows", json={"rows": [row]})
+            for row in rows:
+                row.setdefault("account_number", self.account_number)
+        return self.client.post("/api/import/payments/upload_rows", json={"rows": rows})
 
     def test_upload_rows_validate_apply_writes_payment_to_uid_ledger(self):
         with patch.object(app_module, "_import_schema_error_response", return_value=None):
@@ -482,6 +486,48 @@ class ImportPaymentsE2ETest(unittest.TestCase):
         self.assertEqual(ledger[0]["paid"], 1000.0)
         self.assertEqual(ledger[0]["paid_date"], "15.01.2026")
         self.assertEqual(ledger[0]["payment_period"], "2026-01")
+
+
+    def test_same_uid_date_amount_with_different_source_indexes_applies_both_rows(self):
+        rows = [
+            {
+                "account_uid": self.account_uid,
+                "payment_date": "2026-01-15",
+                "payment_period": "2026-01",
+                "amount": 1000,
+                "source_index": 1,
+            },
+            {
+                "account_uid": self.account_uid,
+                "payment_date": "2026-01-15",
+                "payment_period": "2026-01",
+                "amount": 1000,
+                "source_index": 2,
+            },
+        ]
+        with patch.object(app_module, "_import_schema_error_response", return_value=None):
+            upload_resp = self._upload_rows(rows=rows)
+            self.assertEqual(upload_resp.status_code, 200)
+            batch_id = upload_resp.json["batch"]["id"]
+
+            validate_resp = self.client.post(f"/api/import/{batch_id}/validate")
+            self.assertEqual(validate_resp.status_code, 200)
+            self.assertEqual(validate_resp.json["batch"]["rows_duplicate"], 0)
+
+            apply_resp = self.client.post(f"/api/import/{batch_id}/apply")
+            self.assertEqual(apply_resp.status_code, 200)
+            self.assertEqual(apply_resp.json["batch"]["rows_applied"], 2)
+            self.assertEqual(apply_resp.json["summary"]["duplicate_count"], 0)
+
+        with app_module.app.app_context():
+            ledger_row = app_module.KVStore.query.filter_by(
+                owner=self.owner_id,
+                k=f"payments_{self.account_uid}",
+            ).first()
+            self.assertIsNotNone(ledger_row)
+            ledger = json.loads(ledger_row.v)
+            self.assertEqual(len(ledger), 2)
+            self.assertNotEqual(ledger[0]["fingerprint"], ledger[1]["fingerprint"])
 
     def test_reupload_same_rows_skips_duplicate_without_second_ledger_payment(self):
         with patch.object(app_module, "_import_schema_error_response", return_value=None):
