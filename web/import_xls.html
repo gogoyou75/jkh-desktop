@@ -1398,8 +1398,16 @@ function parseSheetToRows(sheet, fileName, sheetName){
     if (mapped && mapped.ok){
       headerRowIndex = indexRowIndex;
       payPairs = [];
+
+      const hasOwn = function(n){
+        return Object.prototype.hasOwnProperty.call(fieldMap, n);
+      };
+      const isCustomer2009 = headerRowIndex !== -1 &&
+        hasOwn(0) && hasOwn(1) && hasOwn(2) && hasOwn(3) && hasOwn(4) && hasOwn(5) &&
+        hasOwn(6) && hasOwn(7) && hasOwn(72) && hasOwn(77);
+
       parseMeta = {
-        mode:'field-map',
+        mode: isCustomer2009 ? 'strict-template-customer-2009' : 'field-map',
         indexRowIndex:indexRowIndex,
         workbookYear: workbookYear,
         paymentGroups: mapped.paymentGroups || [],
@@ -1409,7 +1417,9 @@ function parseSheetToRows(sheet, fileName, sheetName){
           dataStartRow:-1,
           detectedColumns:{},
           confidence:0,
-          debug:[
+          debug: isCustomer2009 ? [
+            'CUSTOMER_2009 распознан по служебной строке field-map.'
+          ] : [
             'Auto-detect не использован: ' + (autoDetectFailReason || 'неизвестная причина'),
             autoDetectDebugText ? ('Auto-detect debug: ' + autoDetectDebugText) : '',
             'Включён fallback на field-map.'
@@ -1421,6 +1431,7 @@ function parseSheetToRows(sheet, fileName, sheetName){
           12:Number.isInteger(fieldMap[12])
         }
       };
+      console.log('[CUSTOMER_2009][mode]', parseMeta.mode);
       return mapped;
     }
   }
