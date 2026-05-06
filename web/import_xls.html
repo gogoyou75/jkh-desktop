@@ -1120,6 +1120,7 @@ function normalizeHeaderIndex(v){
 
   if (typeof v === 'string'){
     v = v.trim();
+    if (v === '') return null;
   }
 
   const num = Number(v);
@@ -1185,6 +1186,7 @@ function parseSheetToRows(sheet, fileName, sheetName){
 
   function parseStrictCustomer2009Rows(){
     const headerRowIndex = findCustomer2009HeaderRow(aoa);
+    console.log('[CUSTOMER_2009][selectedHeaderRow]', headerRowIndex);
     if (headerRowIndex < 0) return null;
 
     const rawRowValues = aoa[headerRowIndex] || [];
