@@ -44,6 +44,11 @@
     .inline-status.ok{ background:#eaffea; }
     .inline-status.err{ background:#ffecec; }
     .inline-status.info{ background:#eef5ff; }
+    .inline-status.warn{ background:#fff6e5; }
+    .file-year-analysis{ display:none; border:1px solid #000; padding:8px; margin-top:8px; font-size:13px; }
+    .file-year-analysis.ok{ display:block; background:#eaffea; }
+    .file-year-analysis.warn{ display:block; background:#fff6e5; }
+    .file-year-analysis.err{ display:block; background:#ffecec; }
 
     .mono{ font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
     .pill{ display:inline-block; padding:1px 6px; border:1px solid #000; background:#fff; font-size:11px; }
@@ -98,6 +103,7 @@
       </div>
       <div class="hint" id="writeWarning"></div>
       <div id="importStatusBox" class="inline-status info">Готово к импорту.</div>
+      <div id="fileYearAnalysisBox" class="file-year-analysis"></div>
     </div>
 
     <div class="block">
@@ -449,6 +455,170 @@ function detectWorkbookYear(aoa, fileName, sheetName){
     }
   }
   return '';
+}
+
+function readFileYearFromA15(sheet) {
+  const cell = sheet && sheet['A15'];
+  const raw = cell ? cell.v : null;
+
+  if (raw === null || raw === undefined || String(raw).trim() === '') {
+    return null;
+  }
+
+  const year = Number(String(raw).trim());
+
+  if (!Number.isInteger(year) || year < 1900 || year > 2100) {
+    return null;
+  }
+
+  return year;
+}
+
+function getPaymentYearForValidation(row){
+  const s = normStr(row && row.paymentDate);
+  if (!s) return null;
+
+  let m = s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (m) return Number(m[1]);
+
+  m = s.match(/^(\d{2})\.(\d{2})\.(\d{4})$/);
+  if (m) return Number(m[3]);
+
+  return null;
+}
+
+function validatePaymentYears(paymentRows, fileYear) {
+  const result = {
+    fileYear,
+    status: 'ok',
+    totalPayments: 0,
+    sameYearCount: 0,
+    neighborYearCount: 0,
+    invalidYearCount: 0,
+    warnings: [],
+    errors: []
+  };
+
+  for (const row of paymentRows || []) {
+    if (!row.paymentDate) continue;
+
+    const paymentYear = getPaymentYearForValidation(row);
+    if (!Number.isInteger(paymentYear)) continue;
+
+    result.totalPayments++;
+
+    const diff = Math.abs(paymentYear - fileYear);
+
+    if (diff === 0) {
+      result.sameYearCount++;
+    } else if (diff === 1) {
+      result.neighborYearCount++;
+      result.warnings.push(row);
+    } else {
+      result.invalidYearCount++;
+      result.errors.push(row);
+    }
+  }
+
+  if (result.invalidYearCount > 0) {
+    result.status = 'error';
+  } else if (result.neighborYearCount > 0) {
+    result.status = 'warning';
+  }
+
+  return result;
+}
+
+function collectPaymentRowsForYearValidation(rows){
+  const list = [];
+  for (let i=0;i<(rows || []).length;i++){
+    const row = rows[i] || {};
+    const payments = Array.isArray(row.payments) ? row.payments : [];
+    for (let p=0;p<payments.length;p++){
+      const pay = payments[p] || {};
+      const amount = normNum(pay.amount);
+      if (!Number.isFinite(amount) || amount <= 0) continue;
+
+      const paidDateDisplay = normalizePaidDateStrict(pay.paidDateRaw);
+      if (!paidDateDisplay) continue;
+
+      const paymentDate = toIsoDateFromDisplayDate(paidDateDisplay);
+      if (!paymentDate) continue;
+
+      list.push({
+        excelRow: row.excelRow,
+        paymentDate: paymentDate,
+        paidDateRaw: pay.paidDateRaw,
+        sourceIndex: pay.sourceIndex,
+        amount: pay.amount
+      });
+    }
+  }
+  return list;
+}
+
+function setFileYearAnalysis(result, fileName, errorMessage){
+  const box = $('fileYearAnalysisBox');
+  if (!box) return;
+
+  const file = normStr(fileName) || '—';
+  const hasResult = !!(result && Number.isInteger(result.fileYear));
+  const cls = errorMessage || (result && result.status === 'error') ? 'err' : ((result && result.status === 'warning') ? 'warn' : 'ok');
+  box.className = 'file-year-analysis ' + cls;
+
+  if (errorMessage){
+    box.innerHTML = '<b>=== Анализ файла ===</b><br>' +
+      'Файл: ' + escHtml(file) + '<br>' +
+      'Год (A15): —<br><br>' +
+      '<span class="danger">' + escHtml(errorMessage) + '</span><br>' +
+      '<span class="danger">Импорт заблокирован</span>';
+    return;
+  }
+
+  if (!hasResult){
+    box.className = 'file-year-analysis';
+    box.innerHTML = '';
+    return;
+  }
+
+  let html = '<b>=== Анализ файла ===</b><br>' +
+    'Файл: ' + escHtml(file) + '<br>' +
+    'Год (A15): ' + result.fileYear + '<br><br>' +
+    'Всего оплат: ' + result.totalPayments + '<br>' +
+    'В рамках года: ' + result.sameYearCount + '<br>' +
+    'Соседний год: ' + result.neighborYearCount + '<br>' +
+    'Ошибки: ' + result.invalidYearCount + '<br><br>' +
+    'Год определён: ' + result.fileYear + '<br>';
+
+  if (result.status === 'error'){
+    html += '<span class="danger">Обнаружены некорректные даты оплат</span><br>' +
+      '<span class="danger">Импорт заблокирован</span>';
+    const examples = (result.errors || []).slice(0, 10);
+    if (examples.length){
+      html += '<br><br>Примеры:';
+      for (let i=0;i<examples.length;i++){
+        const year = getPaymentYearForValidation(examples[i]);
+        html += '<br>Строка ' + escHtml(examples[i].excelRow) + ' → ' + escHtml(year || '—');
+      }
+    }
+  } else if (result.status === 'warning'){
+    html += '<span class="status-warn">Найдены оплаты соседнего года</span><br>' +
+      '<span class="ok">Критических ошибок нет</span>';
+  } else {
+    html += '<span class="ok">Критических ошибок нет</span>';
+  }
+
+  box.innerHTML = html;
+}
+
+function clearFileYearAnalysis(){
+  fileYearValidation = null;
+  fileYearBlockReason = '';
+  const box = $('fileYearAnalysisBox');
+  if (box){
+    box.className = 'file-year-analysis';
+    box.innerHTML = '';
+  }
 }
 function extractMonthlyPaymentGroups(fieldMap){
   const groups = [];
@@ -1137,6 +1307,8 @@ let restoredFromDraft=false;
 let serverPaymentBatchId = 0;
 let serverPaymentRows = [];
 let importApplyBusy = false;
+let fileYearValidation = null;
+let fileYearBlockReason = '';
 
 async function apiJson(url, options){
   const res = await fetch(url, Object.assign({ credentials:'include' }, options || {}));
@@ -1831,8 +2003,12 @@ function hasRowsWithUid(){
 }
 function canEnterPaymentsMode(){
   const parsed = dataRows.length > 0;
-  return parsed && (primaryApplied || hasRowsWithUid());
+  return parsed && !isImportBlockedByFileYear() && (primaryApplied || hasRowsWithUid());
 }
+function isImportBlockedByFileYear(){
+  return !!(fileYearBlockReason || (fileYearValidation && fileYearValidation.status === 'error'));
+}
+
 function hasPaymentsReadyRows(){
   if (serverPaymentBatchId){
     const rows = Array.isArray(serverPaymentRows) ? serverPaymentRows : [];
@@ -1883,20 +2059,22 @@ function setButtons(){
 
   const canWrite = canWriteOrExplain();
   const parsed = dataRows.length > 0;
+  const fileYearBlocked = isImportBlockedByFileYear();
 
-  $('btnModePayments').disabled = !canEnterPaymentsMode() || importApplyBusy;
-  const canApplyPrimary = (mode==='primary' && parsed && canWrite && !primaryBlocked && !importApplyBusy && !isApplyBlockedByTemplateMode());
+  $('btnModePayments').disabled = !canEnterPaymentsMode() || importApplyBusy || fileYearBlocked;
+  const canApplyPrimary = (mode==='primary' && parsed && canWrite && !primaryBlocked && !importApplyBusy && !isApplyBlockedByTemplateMode() && !fileYearBlocked);
   $('btnApplyPrimary').disabled = !canApplyPrimary;
   const paymentsCount = getPaymentsToApplyCount();
   const templateModeBlocked = isApplyBlockedByTemplateMode();
   $('btnApplyPayments').textContent = 'Применить: добавить ' + paymentsCount + ' платежей';
-  $('btnApplyPayments').disabled = !(mode==='payments' && parsed && canWrite && paymentsCount>0 && !importApplyBusy && !templateModeBlocked);
+  $('btnApplyPayments').disabled = !(mode==='payments' && parsed && canWrite && paymentsCount>0 && !importApplyBusy && !templateModeBlocked && !fileYearBlocked);
   console.log('[import_xls][buttons]', {
     mode,
     parseMode: parseMeta && parseMeta.mode,
     paymentsCount,
     templateModeBlocked,
-    canEnterPayments: canEnterPaymentsMode()
+    canEnterPayments: canEnterPaymentsMode(),
+    fileYearBlocked: fileYearBlocked
   });
   if (templateModeBlocked){
     $('errorsBox').innerHTML = $('errorsBox').innerHTML + '<br><span class="danger">Файл распознан не по строгому шаблону. Импорт запрещён. Используйте утверждённый шаблон.</span>';
@@ -1920,6 +2098,7 @@ function clearRuntimeState(){
   currentFileName='';
   restoredFromDraft=false;
   parseMeta={ mode:'none', indexRowIndex:-1, fieldMapStatus:null, paymentGroups:[], workbookYear:'', headerDetect:null };
+  clearFileYearAnalysis();
 }
 function resetPreview(){
   clearRuntimeState();
@@ -1936,6 +2115,7 @@ function resetPreview(){
 
 async function onParse(){
   $('writeWarning').innerHTML = '';
+  clearFileYearAnalysis();
   refreshWho();
 
   const file = $('fileInput').files[0];
@@ -1954,13 +2134,34 @@ async function onParse(){
   if (!WB.SheetNames || !WB.SheetNames.length){ setImportStatus('В книге нет листов.', 'err'); return; }
 
   const firstSheetName = WB.SheetNames[0];
-  const res = parseSheetToRows(WB.Sheets[firstSheetName], parsedFileName, firstSheetName);
+  const sheet = WB.Sheets[firstSheetName];
+  const fileYear = readFileYearFromA15(sheet);
+  if (fileYear === null){
+    clearRuntimeState();
+    currentFileName = parsedFileName;
+    fileYearBlockReason = 'Ошибка: не указан год в A15';
+    setFileYearAnalysis(null, parsedFileName, fileYearBlockReason);
+    setImportStatus(fileYearBlockReason + '. Импорт заблокирован.', 'err');
+    $('summaryLine').textContent = 'Импорт заблокирован: не указан год в A15';
+    $('errorsBox').innerHTML = '<span class="danger">Ошибка: не указан год в A15</span>';
+    $('previewBody').innerHTML = '<tr><td colspan="7" class="small danger">Импорт заблокирован: не указан год в A15</td></tr>';
+    updateRestoredFileInfo();
+    updateStateLine();
+    setButtons();
+    return;
+  }
+
+  const res = parseSheetToRows(sheet, parsedFileName, firstSheetName);
   if (!res.ok){
     setImportStatus('Не удалось построить предпросмотр: ' + res.msg, 'err');
     return;
   }
 
   dataRows = res.rows;
+  const paymentRowsForYear = collectPaymentRowsForYearValidation(dataRows);
+  fileYearValidation = validatePaymentYears(paymentRowsForYear, fileYear);
+  fileYearBlockReason = fileYearValidation.invalidYearCount > 0 ? 'Обнаружены некорректные даты оплат' : '';
+  setFileYearAnalysis(fileYearValidation, parsedFileName, '');
   serverPaymentBatchId = 0;
   serverPaymentRows = [];
   primaryApplied = false;
@@ -1975,6 +2176,7 @@ async function onParse(){
 
 async function applyPrimary(){
   if (importApplyBusy) return;
+  if (isImportBlockedByFileYear()){ setImportStatus((fileYearBlockReason || 'Импорт заблокирован проверкой года A15') + '.', 'err'); setButtons(); return; }
   if (!canWriteOrExplain()) return setButtons();
   setImportBusy(true, 'Идёт запись на сервер... Не закрывайте страницу.');
 
@@ -2049,6 +2251,7 @@ async function applyPrimary(){
 
 async function applyPayments(){
   if (importApplyBusy) return;
+  if (isImportBlockedByFileYear()){ setImportStatus((fileYearBlockReason || 'Импорт заблокирован проверкой года A15') + '.', 'err'); setButtons(); return; }
   setImportBusy(true, "Идёт запись на сервер... Не закрывайте страницу.");
   const db = getDB();
   if (!db || !db.abonents){ setImportStatus('База абонентов не загружена.', 'err'); setImportBusy(false); return; }
