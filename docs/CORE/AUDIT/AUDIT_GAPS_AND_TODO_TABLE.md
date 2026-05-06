@@ -67,6 +67,7 @@
 *| 44 | Import Audit | Отсутствовал полный audit log по батчу | DONE | P0 | Добавлен batch-level и row-level audit log + summary endpoint | app.py / LOGIC_SPEC / CHANGELOG |
 *| 45 | Import Rollback | rollback не гарантировал консистентность при сбое | DONE | P0 | Убран flush, усилен rollback, добавлен error audit log | app.py / LOGIC_SPEC / CHANGELOG |
 *| 46 | Import XLS | Добавлена поддержка строгого шаблона CUSTOMER_2009 по карте 0–77 | DONE | P0 | Шаблон заказчика 2009 читается как strict-template-customer-2009 без auto-detect | import_xls.html / LOGIC_SPEC / CHANGELOG |
+*| 47 | Import UX | После создания абонента/изменения площади терялись настройки и сбивался сценарий оператора | DONE | P1 | Сохранены draft/resume опции, добавлены подсказки, проверена кнопка платежей | import_xls.html / premises / LOGIC_SPEC / CHANGELOG |
 ---
 
 ## Ближайший порядок работ
