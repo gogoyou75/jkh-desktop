@@ -256,6 +256,34 @@ function toIsoDateFromDisplayDate(v){
   if (m) return s;
   return '';
 }
+function getAbonentStartDate(ab){
+  return normStr(
+    (ab && ab.calcStartDate) ||
+    (ab && ab.dateFrom) ||
+    (ab && ab.registrationDate) ||
+    (ab && ab.regDate) ||
+    (ab && ab.startDate) ||
+    ''
+  );
+}
+
+function getYearMonthFromDateISO(dateStr){
+  const s = normStr(dateStr);
+  const m = s.match(/^(\d{4})-(\d{2})-\d{2}$/);
+  if (!m) return '';
+  return m[1] + '-' + m[2];
+}
+
+function isPaymentBeforeAbonentStart(ab, paymentPeriod){
+  const startDate = getAbonentStartDate(ab);
+  const startYm = getYearMonthFromDateISO(startDate);
+  const payYm = normStr(paymentPeriod);
+
+  if (!startYm || !/^\d{4}-\d{2}$/.test(payYm)) return false;
+
+  return payYm < startYm;
+}
+
 function makeContractError(code){
   const err = new Error(code);
   err.code = code;
@@ -1541,6 +1569,15 @@ function evaluatePaymentsRow(db, row){
     const year = normStr(p.year) || extractYearFromAny(p.periodRaw) || extractYearFromAny(p.paidDateRaw) || normStr(row.rowYear) || parseMeta.workbookYear || (per ? per.period.slice(0,4) : '') || String(new Date().getFullYear());
     const month = pad2(p.month || (per ? per.period.slice(5,7) : ''));
     if (!/^\d{4}$/.test(year) || !/^\d{2}$/.test(month)){ errs++; continue; }
+    const paymentPeriod = year + '-' + month;
+    if (isPaymentBeforeAbonentStart(ab, paymentPeriod)){
+      errs++;
+      details.push(
+        'Ошибка: платёж за ' + paymentPeriod +
+        ' раньше даты начала расчёта абонента (' + getAbonentStartDate(ab) + ').'
+      );
+      continue;
+    }
     const paidDate = normalizePaidDateStrict(p.paidDateRaw);
     if (!paidDate){
       errs++;
@@ -2020,17 +2057,26 @@ async function applyPayments(){
 
     for (let p=0;p<(row.payments || []).length;p++){
       const pay = row.payments[p];
+      const per = normalizePeriod(pay.periodRaw);
+      const year = normStr(pay.year) || (per ? per.period.slice(0,4) : '');
+      const month = pad2(pay.month || (per ? per.period.slice(5,7) : ''));
+      const amountNum = normNum(pay.amount);
+      const paidDateDisplay = normalizePaidDateStrict(pay.paidDateRaw);
+      const paymentPeriod = year + '-' + month;
+      if (isPaymentBeforeAbonentStart(ab, paymentPeriod)){
+        setImportStatus(
+          'Импорт остановлен: платёж за ' + paymentPeriod +
+          ' раньше даты начала расчёта абонента (' + getAbonentStartDate(ab) + ').',
+          'err'
+        );
+        return;
+      }
       const previewRow = evaluatePaymentsRow(db, row);
       if (!previewRow || previewRow.status==='ERROR') continue;
       const paymentUid = normStr(ab && ab.uid ? ab.uid : row.uid);
       if (!paymentUid){ setImportStatus('Для импорта платежей нужен UID.', 'err'); return; }
       const existing = getPaymentsByUid(paymentUid);
       const isDup = existing.some(function(x){
-        const per = normalizePeriod(pay.periodRaw);
-        const year = normStr(pay.year) || (per ? per.period.slice(0,4) : '');
-        const month = pad2(pay.month || (per ? per.period.slice(5,7) : ''));
-        const amountNum = normNum(pay.amount);
-        const paidDateDisplay = normalizePaidDateStrict(pay.paidDateRaw);
         const ym = getLedgerYearMonth(x);
         const paid = getLedgerPaidAmount(x);
         return ym && ym.year===year && ym.month===month && getLedgerPaidDate(x)===paidDateDisplay && paid===amountNum;
@@ -2041,6 +2087,14 @@ async function applyPayments(){
         return ym && ym.year===year && ym.month===month && getLedgerPaidDate(x)===paidDateDisplay && Number.isFinite(paid) && paid!==amountNum;
       });
       if (isDup || isConflict) continue;
+      if (isPaymentBeforeAbonentStart(ab, paymentPeriod)){
+        setImportStatus(
+          'Импорт остановлен: платёж за ' + paymentPeriod +
+          ' раньше даты начала расчёта абонента (' + getAbonentStartDate(ab) + ').',
+          'err'
+        );
+        return;
+      }
       try{
         rows.push(buildServerPaymentRow(row, pay, ab));
       }catch(e){

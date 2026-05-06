@@ -1,5 +1,11 @@
 # CHANGELOG
 
+## 2026-05-06 — Import: проверка хронологии платежей
+
+- Запрещён импорт платежей раньше даты начала абонента.
+- Добавлена валидация payment_period < calcStartDate.
+- Исправлен ReferenceError year is not defined.
+
 ## 2026-05-05 — Import XLS: поддержка CUSTOMER_2009
 
 - Добавлен строгий режим strict-template-customer-2009.
