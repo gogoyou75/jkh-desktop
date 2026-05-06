@@ -597,7 +597,13 @@ function findAbonentByUid(db, uid){
 }
 function saveImportResumeState(payload){
   if (!window.JKHStore || !JKHStore.setJSON) return;
-  try{ JKHStore.setJSON('import_xls_resume_v1', payload || {}, null); }catch(e){}
+  try{
+    const next = payload || {};
+    next.allowCreate = !!$('optAllowCreate').checked;
+    next.allowSquareUpdate = !!$('optAllowSquareUpdate').checked;
+    next.parseMeta = parseMeta || null;
+    JKHStore.setJSON('import_xls_resume_v1', next, null);
+  }catch(e){}
 }
 function loadImportResumeState(){
   if (!window.JKHStore || !JKHStore.getJSON) return null;
@@ -616,6 +622,9 @@ function saveImportDraftState(){
       primaryApplied: !!primaryApplied,
       primaryBlocked: !!primaryBlocked,
       conflictDecision: conflictDecision || {},
+      allowCreate: !!$('optAllowCreate').checked,
+      allowSquareUpdate: !!$('optAllowSquareUpdate').checked,
+      parseMeta: parseMeta || null,
       ownerId: getCurrentOwnerId(),
       fileName: normStr(currentFileName),
       savedAt: new Date().toISOString()
@@ -659,6 +668,9 @@ function tryResumeFromHash(){
     mode = resume.mode === 'payments' ? 'payments' : 'primary';
     conflictDecision = resume.conflictDecision || {};
   }
+  if (resume.parseMeta && typeof resume.parseMeta === 'object') parseMeta = resume.parseMeta;
+  if (typeof resume.allowCreate !== 'undefined') $('optAllowCreate').checked = !!resume.allowCreate;
+  if (typeof resume.allowSquareUpdate !== 'undefined') $('optAllowSquareUpdate').checked = !!resume.allowSquareUpdate;
 
   const db = getDB();
   const target = Number(resume.targetExcelRow) || 0;
@@ -1494,20 +1506,18 @@ function evaluatePrimaryRow(db, row){
     status='ERROR'; critical=true; messages.push('Ошибки: "Общая площадь" должна быть числом > 0.');
   }
 
-  if (found.type === 'UID_MISSING' || found.type === 'NO_ID' || found.type === 'AMBIG'){
+  if (normStr(row.createdUid) && !normStr(row.uid)){
+    status='WARNING_CREATED';
+    critical=false;
+    messages.push('Абонент создан. Скопируйте UID в Excel и перезагрузите файл.');
+    messages.push('UID: ' + row.createdUid);
+    action = { type:'COPY_UID', uid: row.createdUid };
+  } else if (found.type === 'UID_MISSING' || found.type === 'NO_ID' || found.type === 'AMBIG'){
     status='ERROR'; critical=true; messages.push(found.msg);
   } else if (found.type === 'NOT_FOUND'){
-    if (normStr(row.createdUid)){
-      status='WARNING_CREATED';
-      critical=false;
-      messages.push('Абонент создан в базе. Внесите UID в Excel и перезагрузите файл.');
-      messages.push('UID: ' + row.createdUid);
-      action = { type:'COPY_UID', uid: row.createdUid };
-    } else {
-      status='ERROR'; critical=true; messages.push(found.msg);
-      if (!normStr(row.uid)) action = { type:'ADD_ABONENT' };
-      if (!normStr(row.ls) || !normStr(row.fam)) messages.push('Для создания нужны непустые ФИО/ЛС.');
-    }
+    status='ERROR'; critical=true; messages.push(found.msg);
+    if (!normStr(row.uid)) action = { type:'ADD_ABONENT' };
+    if (!normStr(row.ls) || !normStr(row.fam)) messages.push('Для создания нужны непустые ФИО/ЛС.');
   } else if (found.type === 'FOUND_BY_LS_FAM'){
     status='UPDATED';
     warnings.push('Абонент найден по ЛС/Фамилии. UID будет присвоен при применении первички.');
@@ -1524,7 +1534,7 @@ function evaluatePrimaryRow(db, row){
         warnings.push('Площадь будет обновлена: было ' + dbSq + ', станет ' + row.square + '.');
       }
       if (premise){
-        action = action || { type:'OPEN_PREMISE', regnum: reg };
+        action = action || { type:'OPEN_PREMISE', regnum: reg, excelSquare: row.square, excelRow: row.excelRow };
       }
     }
   }
@@ -1704,7 +1714,7 @@ function renderPreview(){
       actionsHTML += '<button class="action-btn" data-act="copy_uid" data-uid="' + escHtml(r.action.uid || '') + '">Скопировать UID</button>';
     }
     if (mode==='primary' && r.action && r.action.type==='OPEN_PREMISE'){
-      actionsHTML += '<button class="action-btn" data-act="open_premise" data-regnum="' + escHtml(r.action.regnum || '') + '">Открыть квартиру для изменения площади</button>';
+      actionsHTML += '<button class="action-btn" data-act="open_premise" data-regnum="' + escHtml(r.action.regnum || '') + '" data-excelsquare="' + escHtml(r.action.excelSquare || '') + '" data-excelrow="' + escHtml(r.action.excelRow || '') + '">Открыть квартиру для изменения площади</button>';
     }
 
     if (mode==='payments' && r.status==='CONFLICT'){
@@ -1881,6 +1891,13 @@ function setButtons(){
   const templateModeBlocked = isApplyBlockedByTemplateMode();
   $('btnApplyPayments').textContent = 'Применить: добавить ' + paymentsCount + ' платежей';
   $('btnApplyPayments').disabled = !(mode==='payments' && parsed && canWrite && paymentsCount>0 && !importApplyBusy && !templateModeBlocked);
+  console.log('[import_xls][buttons]', {
+    mode,
+    parseMode: parseMeta && parseMeta.mode,
+    paymentsCount,
+    templateModeBlocked,
+    canEnterPayments: canEnterPaymentsMode()
+  });
   if (templateModeBlocked){
     $('errorsBox').innerHTML = $('errorsBox').innerHTML + '<br><span class="danger">Файл распознан не по строгому шаблону. Импорт запрещён. Используйте утверждённый шаблон.</span>';
   }
@@ -2222,7 +2239,21 @@ $('previewBody').addEventListener('click', function(ev){
   if (act === 'open_premise'){
     const reg = normStr(btn.getAttribute('data-regnum'));
     if (!reg) return;
-    location.href = 'premises.html?regnum=' + encodeURIComponent(reg);
+    const row = dataRows.find(function(x){ return String(x.excelRow) === String(btn.getAttribute('data-excelrow')); }) || {};
+    saveImportResumeState({
+      dataRows: dataRows,
+      primaryApplied: primaryApplied,
+      primaryBlocked: primaryBlocked,
+      mode: mode,
+      conflictDecision: conflictDecision,
+      targetExcelRow: Number(btn.getAttribute('data-excelrow')) || 0
+    });
+    saveImportDraftState();
+    location.href =
+      'premises.html?regnum=' + encodeURIComponent(reg) +
+      '&from=import' +
+      '&excelSquare=' + encodeURIComponent(row.square || btn.getAttribute('data-excelsquare') || '') +
+      '&excelRow=' + encodeURIComponent(row.excelRow || btn.getAttribute('data-excelrow') || '');
     return;
   }
 
@@ -2248,6 +2279,9 @@ $('previewBody').addEventListener('click', function(ev){
       primaryApplied = !!draft.primaryApplied;
       primaryBlocked = !!draft.primaryBlocked;
       conflictDecision = draft.conflictDecision || {};
+      if (typeof draft.allowCreate !== 'undefined') $('optAllowCreate').checked = !!draft.allowCreate;
+      if (typeof draft.allowSquareUpdate !== 'undefined') $('optAllowSquareUpdate').checked = !!draft.allowSquareUpdate;
+      if (draft.parseMeta && typeof draft.parseMeta === 'object') parseMeta = draft.parseMeta;
       currentFileName = normStr(draft.fileName);
       restoredFromDraft = true;
       buildPreview();
@@ -2257,8 +2291,8 @@ $('previewBody').addEventListener('click', function(ev){
   tryResumeFromHash();
 
   $('fileInput').addEventListener('change', function(){ setButtons(); });
-  $('optAllowCreate').addEventListener('change', function(){ renderPreview(); });
-  $('optAllowSquareUpdate').addEventListener('change', function(){ renderPreview(); });
+  $('optAllowCreate').addEventListener('change', function(){ renderPreview(); saveImportDraftState(); });
+  $('optAllowSquareUpdate').addEventListener('change', function(){ renderPreview(); saveImportDraftState(); });
 
   $('btnModePrimary').addEventListener('click', function(){ mode='primary'; buildPreview(); });
   $('btnModePayments').addEventListener('click', function(){ if (!canEnterPaymentsMode()) return; mode='payments'; buildPreview(); });

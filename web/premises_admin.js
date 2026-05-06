@@ -632,6 +632,7 @@ window.PremisesAdmin = (function () {
     const BUSY_NAVIGATION_MESSAGE = 'Сохранение на сервер… не переходите на другую страницу.';
     let state = { editingRegnum: null, busy: false };
     let navigationGuardsBound = false;
+    let importOpenContext = null;
 
     function setBusyUI(isBusy) {
         state.busy = !!isBusy;
@@ -940,6 +941,35 @@ window.PremisesAdmin = (function () {
         window.location.href = `new_abonent.html?regnum=${encodeURIComponent(r)}`;
     }
 
+    function readImportOpenContext() {
+        try {
+            const params = new URLSearchParams(window.location.search || '');
+            if (String(params.get('from') || '').trim() !== 'import') return null;
+            return {
+                regnum: String(params.get('regnum') || '').trim(),
+                excelSquare: String(params.get('excelSquare') || '').trim(),
+                excelRow: String(params.get('excelRow') || '').trim()
+            };
+        } catch (e) {
+            return null;
+        }
+    }
+
+    function renderImportOpenWarning(premise) {
+        if (!importOpenContext) return;
+        const p = premise || (importOpenContext.regnum ? window.AbonentsDB?.premises?.[importOpenContext.regnum] : null);
+        const dbSquare = (p?.square ?? '') === '' ? '—' : String(p.square);
+        const excelSquare = importOpenContext.excelSquare || '—';
+        const rowPart = importOpenContext.excelRow ? ' Строка Excel: ' + importOpenContext.excelRow + '.' : '';
+        setWarn(
+            'Эта квартира открыта из импорта Excel.' + rowPart +
+            ' Площадь в Excel: ' + excelSquare +
+            '. Текущая площадь в базе: ' + dbSquare +
+            '. При необходимости измените площадь вручную.',
+            false
+        );
+    }
+
     function readForm() {
         syncHouseModelFromUi();
         const regnum = normRegnum(q('p_regnum').value);
@@ -974,7 +1004,8 @@ window.PremisesAdmin = (function () {
         setRegnumHint('Если regnum неизвестен — поставь галочку, создадим временный.');
         const cb = q('btnCreateAbonentFromPremise');
         if (cb) cb.style.display = 'none';
-        setWarn('', true);
+        if (importOpenContext) renderImportOpenWarning(null);
+        else setWarn('', true);
         renderDupHints();
         refreshAddressDatalists(); // ✅ обновим подсказки
     }
@@ -1011,7 +1042,8 @@ window.PremisesAdmin = (function () {
         fillForm(p);
         const cb = q('btnCreateAbonentFromPremise');
         if (cb) cb.style.display = '';
-        setWarn('', true);
+        if (importOpenContext && (!importOpenContext.regnum || String(importOpenContext.regnum) === String(regnum))) renderImportOpenWarning(p);
+        else setWarn('', true);
         renderDupHints();
         refreshAddressDatalists(); // ✅ обновим подсказки
         window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -1452,8 +1484,16 @@ function onSave() {
         }
 
         bind();
+        importOpenContext = readImportOpenContext();
         setFormModeAdd();
         renderTable();
+        if (importOpenContext && importOpenContext.regnum) {
+            if (window.AbonentsDB?.premises?.[importOpenContext.regnum]) {
+                setFormModeEdit(importOpenContext.regnum);
+            } else {
+                setWarn('Квартира из импорта не найдена по regnum: ' + importOpenContext.regnum, false);
+            }
+        }
 
         // ✅ первичная загрузка подсказок
         refreshAddressDatalists();
