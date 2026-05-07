@@ -1301,7 +1301,7 @@ function abonentMatchesExcelRow(abonent, row, requireUid){
   return { ok:true, reason:'OK' };
 }
 
-function logImportPremiseOpenCheck(row, regnum, result){
+function logImportPremiseOpenCheck(row, regnum, result, reason){
   try {
     console.log('[import_xls][premise-open-check]', {
       excelRow: row && row.excelRow,
@@ -1309,9 +1309,44 @@ function logImportPremiseOpenCheck(row, regnum, result){
       ls: normStr(row && row.ls),
       fam: normStr(row && row.fam),
       regnum: normStr(regnum),
-      result: result
+      result: result,
+      reason: reason || ''
     });
   } catch (e) {}
+}
+
+const PREMISE_OPEN_BLOCK_MESSAGE = 'Нельзя открыть квартиру: UID/ЛС/ФИО строки Excel не соответствует активной квартире в базе. Защита от изменения чужой квартиры.';
+
+function activeLinkForRegnumImport(db, regnum){
+  const r = normStr(regnum);
+  if (!r || !db || !Array.isArray(db.links)) return null;
+  for (let i=0;i<db.links.length;i++){
+    const l = db.links[i];
+    if (normStr(l && l.regnum) === r && !normStr(l && l.dateTo)) return l;
+  }
+  return null;
+}
+
+function verifyPremiseOpenContext(db, row, abonentHit, regnum){
+  const reg = normStr(regnum);
+  const uid = normStr(row && row.uid);
+  if (!db) return { ok:false, reason:'NO_DB' };
+  if (!uid) return { ok:false, reason:'NO_UID' };
+  const uidHit = findAbonentByUid(db, uid);
+  if (!uidHit || !uidHit.abonent) return { ok:false, reason:'UID_NOT_FOUND' };
+  const abonent = uidHit.abonent;
+  const match = abonentMatchesExcelRow(abonent, row, true);
+  if (!match.ok) return { ok:false, reason:match.reason + '_MISMATCH' };
+  if (abonentHit && abonentHit.abonent && abonentHit.abonent !== abonent) return { ok:false, reason:'ABONENT_CONTEXT_MISMATCH' };
+  if (!reg) return { ok:false, reason:'NO_REGNUM' };
+  if (!db.premises || !db.premises[reg]) return { ok:false, reason:'PREMISE_NOT_FOUND' };
+  const link = activeLinkForRegnumImport(db, reg);
+  if (!link) return { ok:false, reason:'ACTIVE_LINK_NOT_FOUND' };
+  const linkAbonentId = normStr(link.abonentId);
+  const abonentKey = normStr(uidHit.key);
+  const abonentLs = normStr(abonent.id);
+  if (linkAbonentId !== abonentKey && linkAbonentId !== abonentLs) return { ok:false, reason:'ACTIVE_LINK_ABONENT_MISMATCH' };
+  return { ok:true, reason:'OK', abonent:abonent, key:uidHit.key, premise:db.premises[reg], link:link };
 }
 
 function findAbonentByRules(db, row){
@@ -1768,8 +1803,13 @@ function evaluatePrimaryRow(db, row){
         warnings.push('Площадь будет обновлена: было ' + dbSq + ', станет ' + row.square + '.');
       }
       if (premise && found.type !== 'UID_MISMATCH'){
-        logImportPremiseOpenCheck(row, reg, 'ALLOW');
-        action = action || { type:'OPEN_PREMISE', regnum: reg, excelSquare: row.square, excelRow: row.excelRow, uid: normStr(row.uid), ls: normStr(row.ls), fam: normStr(row.fam) };
+        const openCheck = verifyPremiseOpenContext(db, row, found, reg);
+        logImportPremiseOpenCheck(row, reg, openCheck.ok ? 'ALLOW' : 'BLOCK', openCheck.reason);
+        if (openCheck.ok){
+          action = action || { type:'OPEN_PREMISE', regnum: reg, excelSquare: row.square, excelRow: row.excelRow, uid: normStr(row.uid), ls: normStr(row.ls), fam: normStr(row.fam) };
+        } else {
+          status='ERROR'; critical=true; messages.push(PREMISE_OPEN_BLOCK_MESSAGE);
+        }
       }
     }
   }
@@ -2550,16 +2590,16 @@ $('previewBody').addEventListener('click', function(ev){
     });
     saveImportDraftState();
     const found = findAbonentByRules(getDB(), row);
-    const match = found && found.abonent ? abonentMatchesExcelRow(found.abonent, row, !!normStr(row.uid)) : { ok:false, reason:'NOT_FOUND' };
-    if (!found || found.type === 'UID_MISMATCH' || !match.ok){
-      logImportPremiseOpenCheck(row, reg, 'OPEN_BLOCK_' + ((found && found.mismatchReason) || match.reason || 'MISMATCH'));
-      setImportStatus(UID_MISMATCH_MESSAGE, 'err');
+    const openCheck = verifyPremiseOpenContext(getDB(), row, found, reg);
+    if (!openCheck.ok){
+      logImportPremiseOpenCheck(row, reg, 'OPEN_BLOCK', openCheck.reason);
+      setImportStatus(PREMISE_OPEN_BLOCK_MESSAGE, 'err');
       return;
     }
-    logImportPremiseOpenCheck(row, reg, 'OPEN_ALLOW');
+    logImportPremiseOpenCheck(row, reg, 'OPEN_ALLOW', 'OK');
     location.href =
-      'premises.html?regnum=' + encodeURIComponent(reg) +
-      '&from=import' +
+      'premises.html?from=import' +
+      '&regnum=' + encodeURIComponent(reg) +
       '&uid=' + encodeURIComponent(normStr(row.uid || btn.getAttribute('data-uid') || '')) +
       '&ls=' + encodeURIComponent(normStr(row.ls || btn.getAttribute('data-ls') || '')) +
       '&fam=' + encodeURIComponent(normStr(row.fam || btn.getAttribute('data-fam') || '')) +
