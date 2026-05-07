@@ -473,6 +473,16 @@ function readFileYearFromA15(sheet) {
 
   return year;
 }
+function getFileYearA15Error(sheet) {
+  const cell = sheet && sheet['A15'];
+  const raw = cell ? cell.v : null;
+
+  if (raw === null || raw === undefined || String(raw).trim() === '') {
+    return 'Ошибка: не указан год в A15';
+  }
+
+  return 'Ошибка: некорректный год в A15';
+}
 
 function getPaymentYearForValidation(row){
   const s = normStr(row && row.paymentDate);
@@ -772,6 +782,9 @@ function saveImportResumeState(payload){
     next.allowCreate = !!$('optAllowCreate').checked;
     next.allowSquareUpdate = !!$('optAllowSquareUpdate').checked;
     next.parseMeta = parseMeta || null;
+    next.fileYearValidation = fileYearValidation || null;
+    next.fileYearBlockReason = fileYearBlockReason || '';
+    next.fileName = normStr(currentFileName);
     JKHStore.setJSON('import_xls_resume_v1', next, null);
   }catch(e){}
 }
@@ -795,6 +808,8 @@ function saveImportDraftState(){
       allowCreate: !!$('optAllowCreate').checked,
       allowSquareUpdate: !!$('optAllowSquareUpdate').checked,
       parseMeta: parseMeta || null,
+      fileYearValidation: fileYearValidation || null,
+      fileYearBlockReason: fileYearBlockReason || '',
       ownerId: getCurrentOwnerId(),
       fileName: normStr(currentFileName),
       savedAt: new Date().toISOString()
@@ -839,6 +854,14 @@ function tryResumeFromHash(){
     conflictDecision = resume.conflictDecision || {};
   }
   if (resume.parseMeta && typeof resume.parseMeta === 'object') parseMeta = resume.parseMeta;
+  if (resume.fileYearValidation && typeof resume.fileYearValidation === 'object') fileYearValidation = resume.fileYearValidation;
+  fileYearBlockReason = normStr(resume.fileYearBlockReason);
+  if (resume.fileName) currentFileName = normStr(resume.fileName);
+  if (!fileYearValidation && Array.isArray(dataRows) && dataRows.length){
+    fileYearBlockReason = 'Черновик устарел. Требуется повторная загрузка файла для проверки года.';
+  }
+  if (fileYearValidation) setFileYearAnalysis(fileYearValidation, currentFileName, '');
+  else if (fileYearBlockReason) setFileYearAnalysis(null, currentFileName, fileYearBlockReason);
   if (typeof resume.allowCreate !== 'undefined') $('optAllowCreate').checked = !!resume.allowCreate;
   if (typeof resume.allowSquareUpdate !== 'undefined') $('optAllowSquareUpdate').checked = !!resume.allowSquareUpdate;
 
@@ -1717,6 +1740,9 @@ function evaluatePrimaryRow(db, row){
 
 function evaluatePaymentsRow(db, row){
   const details = [];
+  if (row && row.paymentsImportStatus === 'applied'){
+    return { status:'APPLIED', critical:false, details:['Импорт выполнен: строка применена.'], conflicts:0, unresolved:0, adds:0, dups:0, found:paymentPairsCount(row), skipped:0 };
+  }
   let status='OK', critical=false;
   const uid = normStr(row.uid);
   const foundU = uid ? findAbonentByUid(db, uid) : null;
@@ -1859,8 +1885,8 @@ function buildPreview(){
   renderPreview();
 }
 
-function statusRU(s){ return ({OK:'ОК', ERROR:'ОШИБКА', UPDATED:'ПРЕДУПРЕЖДЕНИЕ', WARNING_CREATED:'СОЗДАН', SKIP_DUPLICATE:'ДУБЛИКАТ', CONFLICT:'КОНФЛИКТ'})[s] || s; }
-function statusClass(s){ return ({OK:'status-ok', ERROR:'status-err', UPDATED:'status-warn', WARNING_CREATED:'status-created', SKIP_DUPLICATE:'status-skip', CONFLICT:'status-conflict'})[s] || ''; }
+function statusRU(s){ return ({OK:'ОК', ERROR:'ОШИБКА', UPDATED:'ПРЕДУПРЕЖДЕНИЕ', WARNING_CREATED:'СОЗДАН', SKIP_DUPLICATE:'ДУБЛИКАТ', CONFLICT:'КОНФЛИКТ', APPLIED:'ПРИМЕНЕНО'})[s] || s; }
+function statusClass(s){ return ({OK:'status-ok', ERROR:'status-err', UPDATED:'status-warn', WARNING_CREATED:'status-created', SKIP_DUPLICATE:'status-skip', CONFLICT:'status-conflict', APPLIED:'status-ok'})[s] || ''; }
 
 function renderPreview(){
   const body = $('previewBody');
@@ -2036,6 +2062,7 @@ function getPaymentsToApplyCount(){
   if (!db || !db.abonents) return 0;
   let adds = 0;
   for (let i=0;i<dataRows.length;i++){
+    if (dataRows[i] && dataRows[i].paymentsImportStatus === 'applied') continue;
     const p = evaluatePaymentsRow(db, dataRows[i]);
     adds += Number(p.adds || 0);
   }
@@ -2086,7 +2113,11 @@ function setButtons(){
 
 function updateRestoredFileInfo(){
   const file = normStr(currentFileName);
-  $('restoredFileLine').textContent = (restoredFromDraft && file) ? ('Восстановлен предпросмотр из файла: ' + file) : '';
+  if (restoredFromDraft){
+    $('restoredFileLine').textContent = 'Предпросмотр восстановлен. Исходный файл не выбран, но можно продолжать работу.' + (file ? (' Файл: ' + file) : '');
+  } else {
+    $('restoredFileLine').textContent = '';
+  }
 }
 function clearRuntimeState(){
   preview=[];
@@ -2139,12 +2170,12 @@ async function onParse(){
   if (fileYear === null){
     clearRuntimeState();
     currentFileName = parsedFileName;
-    fileYearBlockReason = 'Ошибка: не указан год в A15';
+    fileYearBlockReason = getFileYearA15Error(sheet);
     setFileYearAnalysis(null, parsedFileName, fileYearBlockReason);
     setImportStatus(fileYearBlockReason + '. Импорт заблокирован.', 'err');
-    $('summaryLine').textContent = 'Импорт заблокирован: не указан год в A15';
-    $('errorsBox').innerHTML = '<span class="danger">Ошибка: не указан год в A15</span>';
-    $('previewBody').innerHTML = '<tr><td colspan="7" class="small danger">Импорт заблокирован: не указан год в A15</td></tr>';
+    $('summaryLine').textContent = 'Импорт заблокирован: проверка года A15 не пройдена';
+    $('errorsBox').innerHTML = '<span class="danger">' + escHtml(fileYearBlockReason) + '</span>';
+    $('previewBody').innerHTML = '<tr><td colspan="7" class="small danger">Импорт заблокирован: проверка года A15 не пройдена</td></tr>';
     updateRestoredFileInfo();
     updateStateLine();
     setButtons();
@@ -2257,6 +2288,7 @@ async function applyPayments(){
   if (!db || !db.abonents){ setImportStatus('База абонентов не загружена.', 'err'); setImportBusy(false); return; }
 
   const rows = [];
+  const appliedExcelRows = {};
   const contractMessages = {
     ACCOUNT_UID_REQUIRED: 'Импорт остановлен: отсутствует UID (account_uid).',
     ACCOUNT_NUMBER_REQUIRED: 'Импорт остановлен: отсутствует лицевой счёт (account_number).',
@@ -2317,6 +2349,7 @@ async function applyPayments(){
       }
       try{
         rows.push(buildServerPaymentRow(row, pay, ab));
+        appliedExcelRows[String(row.excelRow)] = true;
       }catch(e){
         const code = normStr(e && e.code) || 'UNKNOWN';
         const msg = contractMessages[code] || ('Импорт остановлен: ошибка контракта ' + code + '.');
@@ -2328,6 +2361,7 @@ async function applyPayments(){
 
   if (!rows.length){ setImportStatus('Нет платежей для добавления.', 'err'); return; }
 
+  let appliedCount = 0;
   try{
     const uploaded = await apiJson('/api/import/payments/upload_rows', {
       method:'POST',
@@ -2338,7 +2372,7 @@ async function applyPayments(){
     await apiJson('/api/import/' + serverPaymentBatchId + '/validate', { method:'POST' });
     const applied = await apiJson('/api/import/' + serverPaymentBatchId + '/apply', { method:'POST' });
     const s = applied.summary || {};
-    const appliedCount = Number(s.applied_count || 0);
+    appliedCount = Number(s.applied_count || 0);
     const skippedCount = Number(s.skipped_count || 0);
     const duplicateCount = Number(s.duplicate_count || 0);
     const conflictCount = Number(s.conflict_count || 0);
@@ -2381,15 +2415,26 @@ async function applyPayments(){
   } finally {
     setImportBusy(false);
   }
-  clearRuntimeState();
+  let appliedRowsCount = 0;
+  for (let i=0;i<dataRows.length;i++){
+    const key = String(dataRows[i] && dataRows[i].excelRow);
+    if (appliedExcelRows[key]){
+      dataRows[i].paymentsImportStatus = 'applied';
+      dataRows[i].paymentsAppliedAt = new Date().toISOString();
+      appliedRowsCount++;
+    }
+  }
   serverPaymentBatchId = 0;
   serverPaymentRows = [];
   clearImportResumeState();
-  clearImportDraftState();
-  $('summaryLine').textContent = 'Импорт завершён. Предпросмотр очищен';
-  $('errorsBox').innerHTML='';
-  $('uidHint').innerHTML='';
-  $('previewBody').innerHTML = '<tr><td colspan="7" class="small">Нет предпросмотра</td></tr>';
+  mode = 'payments';
+  buildPreview();
+  saveImportDraftState();
+  let remainingRows = 0;
+  for (let i=0;i<dataRows.length;i++){
+    if (!(dataRows[i] && dataRows[i].paymentsImportStatus === 'applied')) remainingRows++;
+  }
+  setImportStatus('Импорт выполнен. Добавлено: ' + appliedCount + '. Осталось: ' + remainingRows + '.', 'ok');
   updateRestoredFileInfo();
   updateStateLine();
   setButtons();
@@ -2486,8 +2531,18 @@ $('previewBody').addEventListener('click', function(ev){
       if (typeof draft.allowSquareUpdate !== 'undefined') $('optAllowSquareUpdate').checked = !!draft.allowSquareUpdate;
       if (draft.parseMeta && typeof draft.parseMeta === 'object') parseMeta = draft.parseMeta;
       currentFileName = normStr(draft.fileName);
+      if (draft.fileYearValidation && typeof draft.fileYearValidation === 'object'){
+        fileYearValidation = draft.fileYearValidation;
+        fileYearBlockReason = normStr(draft.fileYearBlockReason);
+        setFileYearAnalysis(fileYearValidation, currentFileName, '');
+      } else {
+        fileYearValidation = null;
+        fileYearBlockReason = 'Черновик устарел. Требуется повторная загрузка файла для проверки года.';
+        setFileYearAnalysis(null, currentFileName, fileYearBlockReason);
+      }
       restoredFromDraft = true;
       buildPreview();
+      setImportStatus(fileYearBlockReason || 'Предпросмотр восстановлен. Исходный файл не выбран, но можно продолжать работу.', fileYearBlockReason ? 'err' : 'info');
     }
   }
 
