@@ -1,5 +1,9 @@
 # CHANGELOG
 
+## 2026-05-07 — Import XLS: защита открытия квартиры по контексту
+
+- Добавлена защита от изменения площади чужой квартиры при переходе из Excel-импорта. Теперь regnum из URL проверяется по UID/ЛС/ФИО строки Excel.
+
 ## 2026-05-06 — Import: fingerprint extended with source_index
 
 - Fingerprint платежа расширен до `account_uid + payment_date + amount + source_index`.

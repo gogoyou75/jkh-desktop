@@ -633,6 +633,7 @@ window.PremisesAdmin = (function () {
     let state = { editingRegnum: null, busy: false };
     let navigationGuardsBound = false;
     let importOpenContext = null;
+    let importOpenContextBlocked = false;
 
     function setBusyUI(isBusy) {
         state.busy = !!isBusy;
@@ -947,6 +948,9 @@ window.PremisesAdmin = (function () {
             if (String(params.get('from') || '').trim() !== 'import') return null;
             return {
                 regnum: String(params.get('regnum') || '').trim(),
+                uid: String(params.get('uid') || '').trim(),
+                ls: String(params.get('ls') || '').trim(),
+                fam: String(params.get('fam') || '').trim(),
                 excelSquare: String(params.get('excelSquare') || '').trim(),
                 excelRow: String(params.get('excelRow') || '').trim()
             };
@@ -955,18 +959,54 @@ window.PremisesAdmin = (function () {
         }
     }
 
+    function getImportContextBlockedMessage() {
+        return 'Открытие квартиры из импорта заблокировано: regnum не соответствует UID/ЛС/ФИО строки Excel. Это защита от изменения чужой квартиры.';
+    }
+
+    function logPremisesImportContextCheck(ctx, result, reason) {
+        try {
+            console.log('[premises][import-context-check]', {
+                regnum: normStr(ctx && ctx.regnum),
+                uid: normStr(ctx && ctx.uid),
+                ls: normStr(ctx && ctx.ls),
+                fam: normStr(ctx && ctx.fam),
+                result: result,
+                reason: reason || ''
+            });
+        } catch (e) {}
+    }
+
+    function checkImportOpenContext(ctx) {
+        const c = ctx || importOpenContext;
+        const db = window.AbonentsDB || {};
+        const reg = normStr(c && c.regnum);
+        if (!c) return { ok:true, reason:'NO_CONTEXT' };
+        if (!reg) return { ok:false, reason:'NO_REGNUM' };
+        const premise = db.premises && db.premises[reg];
+        if (!premise) return { ok:false, reason:'PREMISE_NOT_FOUND' };
+        const link = activeLinkForRegnum(db, reg);
+        if (!link) return { ok:false, reason:'ACTIVE_LINK_NOT_FOUND' };
+        const abonentId = normStr(link.abonentId);
+        const abonent = db.abonents && db.abonents[abonentId];
+        if (!abonent) return { ok:false, reason:'ABONENT_NOT_FOUND' };
+        if (normStr(c.uid) && normStr(abonent.uid) !== normStr(c.uid)) return { ok:false, reason:'UID_MISMATCH' };
+        if (normStr(c.ls) && normStr(abonent.id) !== normStr(c.ls)) return { ok:false, reason:'LS_MISMATCH' };
+        if (normStr(c.fam) && normStr(abonent.fam).toLowerCase() !== normStr(c.fam).toLowerCase()) return { ok:false, reason:'FAM_MISMATCH' };
+        return { ok:true, reason:'OK', premise:premise, link:link, abonent:abonent };
+    }
+
     function renderImportOpenWarning(premise) {
         if (!importOpenContext) return;
         const p = premise || (importOpenContext.regnum ? window.AbonentsDB?.premises?.[importOpenContext.regnum] : null);
         const dbSquare = (p?.square ?? '') === '' ? '—' : String(p.square);
         const excelSquare = importOpenContext.excelSquare || '—';
-        const rowPart = importOpenContext.excelRow ? ' Строка Excel: ' + importOpenContext.excelRow + '.' : '';
         setWarn(
-            'Эта квартира открыта из импорта Excel.' + rowPart +
-            ' Площадь в Excel: ' + excelSquare +
-            '. Текущая площадь в базе: ' + dbSquare +
-            '. При необходимости измените площадь вручную.',
-            false
+            'Квартира открыта из импорта Excel. Строка Excel: ' + (importOpenContext.excelRow || '—') +
+            '. UID: ' + (importOpenContext.uid || '—') +
+            '. ЛС: ' + (importOpenContext.ls || '—') +
+            '. Площадь в Excel: ' + excelSquare +
+            '. Текущая площадь в базе: ' + dbSquare + '.',
+            true
         );
     }
 
@@ -990,7 +1030,8 @@ window.PremisesAdmin = (function () {
         if (!el) return;
         el.textContent = msg || '';
         el.style.display = msg ? 'block' : 'none';
-        el.style.borderColor = isOk ? '#0a0' : '#000';
+        el.style.borderColor = isOk ? '#0a0' : '#b00020';
+        el.style.color = isOk ? '#0b6b0b' : '#b00020';
     }
 
     function setFormModeAdd() {
@@ -1004,7 +1045,8 @@ window.PremisesAdmin = (function () {
         setRegnumHint('Если regnum неизвестен — поставь галочку, создадим временный.');
         const cb = q('btnCreateAbonentFromPremise');
         if (cb) cb.style.display = 'none';
-        if (importOpenContext) renderImportOpenWarning(null);
+        if (importOpenContext && importOpenContextBlocked) setWarn(getImportContextBlockedMessage(), false);
+        else if (importOpenContext) renderImportOpenWarning(null);
         else setWarn('', true);
         renderDupHints();
         refreshAddressDatalists(); // ✅ обновим подсказки
@@ -1026,6 +1068,16 @@ window.PremisesAdmin = (function () {
 
     function setFormModeEdit(regnum) {
         const db = window.AbonentsDB;
+        if (importOpenContext) {
+            const ctxCheck = checkImportOpenContext(importOpenContext);
+            logPremisesImportContextCheck(importOpenContext, ctxCheck.ok ? 'ALLOW' : 'BLOCK', ctxCheck.reason);
+            if (!ctxCheck.ok || String(importOpenContext.regnum || '') !== String(regnum || '')) {
+                importOpenContextBlocked = true;
+                setFormModeAdd();
+                setWarn(getImportContextBlockedMessage(), false);
+                return;
+            }
+        }
         const p = db?.premises?.[regnum];
         state.editingRegnum = regnum;
         q('premFormTitle').textContent = 'Редактировать квартиру (объект)';
@@ -1229,6 +1281,17 @@ function onSave() {
 
         const db = window.AbonentsDB;
         const f = readForm();
+
+        if (importOpenContext) {
+            const ctxCheck = checkImportOpenContext(importOpenContext);
+            const editMatches = state.editingRegnum && String(state.editingRegnum) === String(importOpenContext.regnum || '');
+            logPremisesImportContextCheck(importOpenContext, (ctxCheck.ok && editMatches) ? 'ALLOW_SAVE' : 'BLOCK_SAVE', ctxCheck.ok ? (editMatches ? 'OK' : 'EDIT_REGNUM_MISMATCH') : ctxCheck.reason);
+            if (!ctxCheck.ok || !editMatches) {
+                importOpenContextBlocked = true;
+                setWarn(getImportContextBlockedMessage(), false);
+                return;
+            }
+        }
 
         // regnum может быть неизвестен только на этапе создания (ставим галочку)
         const isUnknown = !!f.regnumUnknown;
@@ -1488,10 +1551,13 @@ function onSave() {
         setFormModeAdd();
         renderTable();
         if (importOpenContext && importOpenContext.regnum) {
-            if (window.AbonentsDB?.premises?.[importOpenContext.regnum]) {
+            const ctxCheck = checkImportOpenContext(importOpenContext);
+            logPremisesImportContextCheck(importOpenContext, ctxCheck.ok ? 'ALLOW' : 'BLOCK', ctxCheck.reason);
+            if (ctxCheck.ok) {
                 setFormModeEdit(importOpenContext.regnum);
             } else {
-                setWarn('Квартира из импорта не найдена по regnum: ' + importOpenContext.regnum, false);
+                importOpenContextBlocked = true;
+                setWarn(getImportContextBlockedMessage(), false);
             }
         }
 

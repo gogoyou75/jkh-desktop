@@ -1283,11 +1283,50 @@ function createAbonentMinimal(db, desiredUid, ls, fam, name, otch, square){
   return { ok:true, uid: uid, abonent: db.abonents[lsKey] };
 }
 
+const UID_MISMATCH_MESSAGE = 'UID найден в базе, но не совпадает с ЛС/ФИО строки Excel. Возможно, в Excel указан чужой UID. Исправьте UID в Excel или проверьте абонента вручную.';
+
+function abonentMatchesExcelRow(abonent, row, requireUid){
+  if (!abonent || !row) return { ok:false, reason:'NO_ABONENT' };
+  const uidExcel = normStr(row.uid);
+  const uidDb = normStr(abonent.uid);
+  if (requireUid && uidExcel && uidDb !== uidExcel) return { ok:false, reason:'UID' };
+  const lsExcel = normStr(row.ls);
+  if (lsExcel && normStr(abonent.id) !== lsExcel) return { ok:false, reason:'LS' };
+  const famExcel = normStr(row.fam).toLowerCase();
+  if (famExcel && normStr(abonent.fam).toLowerCase() !== famExcel) return { ok:false, reason:'FAM' };
+  const nameExcel = normStr(row.name).toLowerCase();
+  if (nameExcel && normStr(abonent.name).toLowerCase() !== nameExcel) return { ok:false, reason:'NAME' };
+  const otchExcel = normStr(row.otch).toLowerCase();
+  if (otchExcel && normStr(abonent.otch).toLowerCase() !== otchExcel) return { ok:false, reason:'OTCH' };
+  return { ok:true, reason:'OK' };
+}
+
+function logImportPremiseOpenCheck(row, regnum, result){
+  try {
+    console.log('[import_xls][premise-open-check]', {
+      excelRow: row && row.excelRow,
+      uid: normStr(row && row.uid),
+      ls: normStr(row && row.ls),
+      fam: normStr(row && row.fam),
+      regnum: normStr(regnum),
+      result: result
+    });
+  } catch (e) {}
+}
+
 function findAbonentByRules(db, row){
   const uid = normStr(row.uid), ls = normStr(row.ls), fam = normStr(row.fam);
   if (uid){
     const foundU = findAbonentByUid(db, uid);
-    if (foundU && foundU.abonent) return { type:'UID_OK', key:foundU.key, abonent:foundU.abonent, uid: normStr(foundU.abonent.uid || uid) };
+    if (foundU && foundU.abonent){
+      const match = abonentMatchesExcelRow(foundU.abonent, row, true);
+      if (!match.ok){
+        const reg = normStr(foundU.abonent.premiseRegnum || foundU.abonent.regnum);
+        logImportPremiseOpenCheck(row, reg, 'UID_MISMATCH_' + match.reason);
+        return { type:'UID_MISMATCH', msg:UID_MISMATCH_MESSAGE, key:foundU.key, abonent:foundU.abonent, uid: normStr(foundU.abonent.uid || uid), mismatchReason:match.reason };
+      }
+      return { type:'UID_OK', key:foundU.key, abonent:foundU.abonent, uid: normStr(foundU.abonent.uid || uid) };
+    }
     return { type:'UID_MISSING', msg:'UID из Excel не найден в базе. Нельзя применить первичку.' };
   }
   if (!ls || !fam) return { type:'NO_ID', msg:'Нет ЛС/Фамилии — идентификация невозможна.' };
@@ -1707,7 +1746,7 @@ function evaluatePrimaryRow(db, row){
     messages.push('Абонент создан. Скопируйте UID в Excel и перезагрузите файл.');
     messages.push('UID: ' + row.createdUid);
     action = { type:'COPY_UID', uid: row.createdUid };
-  } else if (found.type === 'UID_MISSING' || found.type === 'NO_ID' || found.type === 'AMBIG'){
+  } else if (found.type === 'UID_MISMATCH' || found.type === 'UID_MISSING' || found.type === 'NO_ID' || found.type === 'AMBIG'){
     status='ERROR'; critical=true; messages.push(found.msg);
   } else if (found.type === 'NOT_FOUND'){
     status='ERROR'; critical=true; messages.push(found.msg);
@@ -1728,8 +1767,9 @@ function evaluatePrimaryRow(db, row){
       if ($('optAllowSquareUpdate').checked && mode==='primary' && premise){
         warnings.push('Площадь будет обновлена: было ' + dbSq + ', станет ' + row.square + '.');
       }
-      if (premise){
-        action = action || { type:'OPEN_PREMISE', regnum: reg, excelSquare: row.square, excelRow: row.excelRow };
+      if (premise && found.type !== 'UID_MISMATCH'){
+        logImportPremiseOpenCheck(row, reg, 'ALLOW');
+        action = action || { type:'OPEN_PREMISE', regnum: reg, excelSquare: row.square, excelRow: row.excelRow, uid: normStr(row.uid), ls: normStr(row.ls), fam: normStr(row.fam) };
       }
     }
   }
@@ -1753,6 +1793,10 @@ function evaluatePaymentsRow(db, row){
   }
   if (!ab){
     return { status:'ERROR', critical:true, details:['UID из Excel не найден в базе.'], conflicts:0, unresolved:0, adds:0, dups:0, found:paymentPairsCount(row), skipped:0 };
+  }
+  const primaryFoundForPayment = findAbonentByRules(db, row);
+  if (primaryFoundForPayment && primaryFoundForPayment.type === 'UID_MISMATCH'){
+    return { status:'ERROR', critical:true, details:[primaryFoundForPayment.msg], conflicts:0, unresolved:1, adds:0, dups:0, found:paymentPairsCount(row), skipped:paymentPairsCount(row) };
   }
   if (parseMeta.mode === 'strict-template-customer-2009'){
     const lsExcel = normStr(row.ls);
@@ -1912,7 +1956,7 @@ function renderPreview(){
       actionsHTML += '<button class="action-btn" data-act="copy_uid" data-uid="' + escHtml(r.action.uid || '') + '">Скопировать UID</button>';
     }
     if (mode==='primary' && r.action && r.action.type==='OPEN_PREMISE'){
-      actionsHTML += '<button class="action-btn" data-act="open_premise" data-regnum="' + escHtml(r.action.regnum || '') + '" data-excelsquare="' + escHtml(r.action.excelSquare || '') + '" data-excelrow="' + escHtml(r.action.excelRow || '') + '">Открыть квартиру для изменения площади</button>';
+      actionsHTML += '<button class="action-btn" data-act="open_premise" data-regnum="' + escHtml(r.action.regnum || '') + '" data-uid="' + escHtml(r.action.uid || '') + '" data-ls="' + escHtml(r.action.ls || '') + '" data-fam="' + escHtml(r.action.fam || '') + '" data-excelsquare="' + escHtml(r.action.excelSquare || '') + '" data-excelrow="' + escHtml(r.action.excelRow || '') + '">Открыть квартиру для изменения площади</button>';
     }
 
     if (mode==='payments' && r.status==='CONFLICT'){
@@ -2216,7 +2260,7 @@ async function applyPrimary(){
 
   mode='primary';
   buildPreview();
-  if (primaryBlocked){ setImportStatus('Шаг 1 заблокирован: есть критические ошибки первички.', 'err'); return; }
+  if (primaryBlocked){ setImportStatus('Шаг 1 заблокирован: есть критические ошибки первички.', 'err'); setImportBusy(false); return; }
 
   const localSnapshot = { db: deepCloneJSONSafe(getDB()) };
 
@@ -2227,10 +2271,16 @@ async function applyPrimary(){
   for (let i=0;i<dataRows.length;i++){
     const row = dataRows[i];
     const found = findAbonentByRules(db, row);
-    if (found.type==='UID_MISSING' || found.type==='NO_ID' || found.type==='AMBIG' || found.type==='NOT_FOUND') continue;
+    if (found.type==='UID_MISMATCH' || found.type==='UID_MISSING' || found.type==='NO_ID' || found.type==='AMBIG' || found.type==='NOT_FOUND') continue;
     if (!Number.isFinite(row.square) || row.square<=0) continue;
 
     let a = found.abonent;
+    const applyMatch = abonentMatchesExcelRow(a, row, !!normStr(row.uid));
+    if (!applyMatch.ok){
+      logImportPremiseOpenCheck(row, normStr(a && (a.premiseRegnum || a.regnum)), 'APPLY_BLOCK_' + applyMatch.reason);
+      setImportStatus(UID_MISMATCH_MESSAGE, 'err');
+      continue;
+    }
 
     // Канон: ключуем по ЛС, UID — поле внутри записи.
     // Если UID не указан в Excel, но у абонента его ещё нет — генерируем (чтобы шаг 2 мог работать по UID).
@@ -2301,6 +2351,8 @@ async function applyPayments(){
   };
   for (let i=0;i<dataRows.length;i++){
     const row = dataRows[i];
+    const primaryFoundForPayment = findAbonentByRules(db, row);
+    if (primaryFoundForPayment && primaryFoundForPayment.type === 'UID_MISMATCH') continue;
     const uid = normStr(row.uid);
     const foundU = uid ? findAbonentByUid(db, uid) : null;
     const ab = foundU ? foundU.abonent : null;
@@ -2497,9 +2549,20 @@ $('previewBody').addEventListener('click', function(ev){
       targetExcelRow: Number(btn.getAttribute('data-excelrow')) || 0
     });
     saveImportDraftState();
+    const found = findAbonentByRules(getDB(), row);
+    const match = found && found.abonent ? abonentMatchesExcelRow(found.abonent, row, !!normStr(row.uid)) : { ok:false, reason:'NOT_FOUND' };
+    if (!found || found.type === 'UID_MISMATCH' || !match.ok){
+      logImportPremiseOpenCheck(row, reg, 'OPEN_BLOCK_' + ((found && found.mismatchReason) || match.reason || 'MISMATCH'));
+      setImportStatus(UID_MISMATCH_MESSAGE, 'err');
+      return;
+    }
+    logImportPremiseOpenCheck(row, reg, 'OPEN_ALLOW');
     location.href =
       'premises.html?regnum=' + encodeURIComponent(reg) +
       '&from=import' +
+      '&uid=' + encodeURIComponent(normStr(row.uid || btn.getAttribute('data-uid') || '')) +
+      '&ls=' + encodeURIComponent(normStr(row.ls || btn.getAttribute('data-ls') || '')) +
+      '&fam=' + encodeURIComponent(normStr(row.fam || btn.getAttribute('data-fam') || '')) +
       '&excelSquare=' + encodeURIComponent(row.square || btn.getAttribute('data-excelsquare') || '') +
       '&excelRow=' + encodeURIComponent(row.excelRow || btn.getAttribute('data-excelrow') || '');
     return;
