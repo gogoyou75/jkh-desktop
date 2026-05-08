@@ -66,6 +66,43 @@
   function logLedgerJsonInvalid(key, cause){
     console.error("[fatal][ledger-json-invalid]", { key: key || "", error: cause });
   }
+
+  const RATES_FATAL_MESSAGE = "Ставки рефинансирования отсутствуют или повреждены. Расчёт пени остановлен.";
+
+  function isRatesFatalError(e){
+    const code = String(e && e.code || "");
+    return code === "RATES_MISSING" || code === "RATES_JSON_INVALID" || code === "MISSING_REQUIRED_RATE";
+  }
+
+  function makeRatesFatalError(code, key, details){
+    const err = new Error(RATES_FATAL_MESSAGE);
+    err.code = code || "RATES_ERROR";
+    err.key = key || "";
+    err.details = details || {};
+    return err;
+  }
+
+  function logRatesFatal(err){
+    const code = String(err && err.code || "");
+    const tag = (code === "RATES_JSON_INVALID") ? "[fatal][rates-json-invalid]" :
+      (code === "MISSING_REQUIRED_RATE" ? "[fatal][missing-required-rate]" :
+      (code === "RATES_MISSING" ? "[fatal][rates-missing]" : "[fatal][rates-error]"));
+    console.error(tag, { code: code, key: err && err.key || "", details: err && err.details || {} });
+  }
+
+  function throwRatesFatal(code, key, details){
+    const err = makeRatesFatalError(code, key, details);
+    logRatesFatal(err);
+    throw err;
+  }
+
+  function renderRatesFatal(tbody){
+    try { alert(RATES_FATAL_MESSAGE); } catch (_) {}
+    if (tbody) {
+      tbody.innerHTML = '<tr><td colspan="20" style="color:#b00020;font-weight:700;">' + RATES_FATAL_MESSAGE + '</td></tr>';
+    }
+  }
+
   // ===========================
   // UI: сворачиваемые блоки месяца (ledger)
   // хранение состояния: `payments_ui_collapsed_<LS>` -> {"YYYY-MM": true/false}
@@ -1277,7 +1314,10 @@ function calcPenaltyForObligation(ob, asOf, excludes, rates){
       if (principal > 0.0000001 && overdueIndex > 30){
         const denom = (overdueIndex <= 90) ? 300 : 130;
         const rawRate = rateOnDate(day, rates);
-        const rate = Number.isFinite(rawRate) ? capRateUntil2027(day, rawRate) : 0;
+        if (!Number.isFinite(rawRate)) {
+          throwRatesFatal("MISSING_REQUIRED_RATE", "", { date: toISODateString(day), reason: "MISSING_REQUIRED_RATE" });
+        }
+        const rate = capRateUntil2027(day, rawRate);
         penalty += principal * (rate / 100) / denom;
       }
     }
@@ -1301,7 +1341,13 @@ function calcTotalsAsOf(rows, asOfDate){
       }
       return { principal: t.principal, penalty: t.penaltyDebt, total: t.total };
     }
-  } catch (e) { /* fallback to local calc */ }
+  } catch (e) {
+    if (isRatesFatalError(e)) {
+      logRatesFatal(e);
+      throw e;
+    }
+    /* fallback to local calc */
+  }
 
   const excludes = loadExcludes();
   const rates = loadRates();
@@ -1510,27 +1556,46 @@ function applyRunningTotals(viewRows) {
 
   function loadRates(){
     const key = isMoratoriumActive() ? REFI_KEY_MORA : REFI_KEY_NORMAL;
-    try{
-      const raw = storeGetRaw(key);
-      const arr = raw ? JSON.parse(raw) : [];
-      if (!Array.isArray(arr)) return [];
-      const parsed = arr
-        .map(x => ({
-          from: parseDMY(x.from),
-          rate: Number(String(x.rate ?? "").replace(",", "."))
-        }))
-        .filter(x => x.from && Number.isFinite(x.rate))
-        .sort((a,b)=>a.from-b.from);
-      return parsed;
-    }catch{
-      return [];
+    const raw = storeGetRaw(key);
+    if (raw === null || raw === undefined){
+      throwRatesFatal("RATES_MISSING", key, { reason: "RATES_KEY_MISSING" });
     }
+
+    let arr;
+    try{
+      arr = JSON.parse(raw);
+    }catch(e){
+      throwRatesFatal("RATES_JSON_INVALID", key, { reason: "RATES_JSON_PARSE_FAILED", error: e && e.message ? e.message : String(e) });
+    }
+
+    if (!Array.isArray(arr)){
+      throwRatesFatal("RATES_JSON_INVALID", key, { reason: "RATES_JSON_NOT_ARRAY" });
+    }
+
+    const parsed = arr
+      .map(x => ({
+        from: parseDMY(x.from),
+        rate: Number(String(x.rate ?? "").replace(",", "."))
+      }))
+      .filter(x => x.from && Number.isFinite(x.rate))
+      .sort((a,b)=>a.from-b.from);
+    return parsed;
   }
 
   function rateOnDate(d, rates){
-    const t = d.getTime();
+    const t = d && d.getTime ? d.getTime() : NaN;
+    if (!Number.isFinite(t)) return null;
+    if (!Array.isArray(rates) || rates.length === 0) return null;
+
+    const first = rates.find(function(r){
+      return r && r.from && r.from.getTime && Number.isFinite(r.rate);
+    });
+    if (!first) return null;
+    if (t < first.from.getTime()) return null;
+
     let cur = null;
     for (const r of rates){
+      if (!r || !r.from || !r.from.getTime) continue;
       if (r.from.getTime() <= t) cur = r.rate;
       else break;
     }
@@ -1596,7 +1661,10 @@ function applyRunningTotals(viewRows) {
         if (overdueIndex > 30){
           const denom = (overdueIndex <= 90) ? 300 : 130;
           const rawRate = rateOnDate(day, rates);
-          const rate = Number.isFinite(rawRate) ? capRateUntil2027(day, rawRate) : 0;
+          if (!Number.isFinite(rawRate)) {
+            throwRatesFatal("MISSING_REQUIRED_RATE", "", { date: toISODateString(day), reason: "MISSING_REQUIRED_RATE" });
+          }
+          const rate = capRateUntil2027(day, rawRate);
 
           penalty += debt * (rate / 100) / denom;
         }
@@ -1730,7 +1798,15 @@ function applyRunningTotals(viewRows) {
     });
 
     const view = applyCalcFilter(arr).slice();
-    applyRunningTotals(view);
+    try {
+      applyRunningTotals(view);
+    } catch (e) {
+      if (isRatesFatalError(e)) {
+        renderRatesFatal(tbody);
+        return;
+      }
+      throw e;
+    }
 
     // сопоставление id -> rowObj
     const byId = new Map(view.map(r => [String(r.id), r]));
@@ -1810,7 +1886,15 @@ function applyRunningTotals(viewRows) {
     });
 
     const view = applyCalcFilter(arr).slice();
-    applyRunningTotals(view);
+    try {
+      applyRunningTotals(view);
+    } catch (e) {
+      if (isRatesFatalError(e)) {
+        renderRatesFatal(tbody);
+        return;
+      }
+      throw e;
+    }
 
     // сортировка отображения — год/месяц (новые сверху),
     // внутри месяца: сначала строка начисления, ниже — оплаты (Excel и ручные)

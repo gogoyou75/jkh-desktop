@@ -77,6 +77,30 @@
     console.error("[fatal][ledger-json-invalid]", { key: key || "", error: cause });
   }
 
+  const RATES_FATAL_MESSAGE = "Ставки рефинансирования отсутствуют или повреждены. Расчёт пени остановлен.";
+
+  function makeRatesFatalError(code, key, details){
+    const err = new Error(RATES_FATAL_MESSAGE);
+    err.code = code || "RATES_ERROR";
+    err.key = key || "";
+    err.details = details || {};
+    return err;
+  }
+
+  function logRatesFatal(err){
+    const code = String(err && err.code || "");
+    const tag = (code === "RATES_JSON_INVALID") ? "[fatal][rates-json-invalid]" :
+      (code === "MISSING_REQUIRED_RATE" ? "[fatal][missing-required-rate]" :
+      (code === "RATES_MISSING" ? "[fatal][rates-missing]" : "[fatal][rates-error]"));
+    console.error(tag, { code: code, key: err && err.key || "", details: err && err.details || {} });
+  }
+
+  function throwRatesFatal(code, key, details){
+    const err = makeRatesFatalError(code, key, details);
+    logRatesFatal(err);
+    throw err;
+  }
+
   function storeGetRaw(key){
     if (!isDataReady()) return null;
     if (!(window.JKHStore && typeof window.JKHStore.getRaw === "function")) return null;
@@ -285,25 +309,35 @@
 
   function loadRates(abonentId){
     const key = isMoratoriumActive(abonentId) ? REFI_KEY_MORA : REFI_KEY_NORMAL;
+    const raw = storeGetRaw(key);
+    if (raw === null || raw === undefined){
+      throwRatesFatal("RATES_MISSING", key, { reason: "RATES_KEY_MISSING" });
+    }
+
+    let arr;
     try{
-      const raw = storeGetRaw(key);
-      const arr = raw ? JSON.parse(raw) : [];
-      if (!Array.isArray(arr) || arr.length === 0){
-        // CRITICAL: ставки рефинансирования = GLOBAL-справочник с сервера.
-        // Запрещено подставлять fallback-ставку: это может дать юридически неверный расчёт пени.
-        console.warn("[calc_engine][ref_rates] empty GLOBAL rates key=", key);
-        return [];
-      }
-      return arr.map(x => ({
-        from: parseDateAnyToDate(x.from ?? x.dateFrom ?? x.start ?? x.fromISO ?? x.from_iso),
-        rate: Number(String((x.rate ?? x.value ?? "")).replace(",", "."))
-      }))
-        .filter(x => x.from && x.from.getTime && Number.isFinite(x.rate))
-        .sort((a,b)=>a.from.getTime()-b.from.getTime());
+      arr = JSON.parse(raw);
     }catch(e){
-      console.warn("[calc_engine][ref_rates] failed to load GLOBAL rates key=", key, e);
+      throwRatesFatal("RATES_JSON_INVALID", key, { reason: "RATES_JSON_PARSE_FAILED", error: e && e.message ? e.message : String(e) });
+    }
+
+    if (!Array.isArray(arr)){
+      throwRatesFatal("RATES_JSON_INVALID", key, { reason: "RATES_JSON_NOT_ARRAY" });
+    }
+
+    if (arr.length === 0){
+      // CRITICAL: ставки рефинансирования = GLOBAL-справочник с сервера.
+      // Запрещено подставлять fallback-ставку: это может дать юридически неверный расчёт пени.
+      console.warn("[calc_engine][ref_rates] empty GLOBAL rates key=", key);
       return [];
     }
+
+    return arr.map(x => ({
+      from: parseDateAnyToDate(x.from ?? x.dateFrom ?? x.start ?? x.fromISO ?? x.from_iso),
+      rate: Number(String((x.rate ?? x.value ?? "")).replace(",", "."))
+    }))
+      .filter(x => x.from && x.from.getTime && Number.isFinite(x.rate))
+      .sort((a,b)=>a.from.getTime()-b.from.getTime());
   }
 
 
@@ -711,22 +745,20 @@
           const denom = (overdueIndex <= 90) ? 300 : 130;
           const rawRate = rateOnDate(day, rates);
           if (!Number.isFinite(rawRate)) {
-            const msg = "[calc_engine][ref_rates] missing required rate for penalty date";
-            console.error(msg, {
+            const err = makeRatesFatalError("MISSING_REQUIRED_RATE", "", {
               date: toISODateString(day),
               reason: "MISSING_REQUIRED_RATE"
             });
+            logRatesFatal(err);
 
             if (window.JKHCalcEngine && typeof window.JKHCalcEngine.onMissingRate === "function"){
-              try{
-                window.JKHCalcEngine.onMissingRate({
-                  date: toISODateString(day),
-                  reason: "MISSING_REQUIRED_RATE"
-                });
-              }catch(e){}
+              window.JKHCalcEngine.onMissingRate({
+                date: toISODateString(day),
+                reason: "MISSING_REQUIRED_RATE"
+              });
             }
 
-            return NaN;
+            throw err;
           }
 
           // CRITICAL: применяем ограничение ставки до 01.01.2027 перед расчётом пени.

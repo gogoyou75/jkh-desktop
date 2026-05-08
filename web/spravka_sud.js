@@ -304,6 +304,22 @@
     };
   }
 
+
+  const RATES_FATAL_MESSAGE = "Ставки рефинансирования отсутствуют или повреждены. Расчёт пени остановлен.";
+
+  function isRatesFatalError(e){
+    const code = String(e && e.code || "");
+    return code === "RATES_MISSING" || code === "RATES_JSON_INVALID" || code === "MISSING_REQUIRED_RATE";
+  }
+
+  function logRatesFatal(e){
+    const code = String(e && e.code || "");
+    const tag = (code === "RATES_JSON_INVALID") ? "[fatal][rates-json-invalid]" :
+      (code === "MISSING_REQUIRED_RATE" ? "[fatal][missing-required-rate]" :
+      (code === "RATES_MISSING" ? "[fatal][rates-missing]" : "[fatal][rates-error]"));
+    console.error(tag, { code: code, details: e && e.details || {} });
+  }
+
   function showFatal(msg, details){
     console.error("[spravka_sud] " + msg, details || {});
     alert(msg);
@@ -325,14 +341,11 @@
 
       const previousMissingRateHandler = window.JKHCalcEngine.onMissingRate;
       window.JKHCalcEngine.onMissingRate = function(info){
-        console.error("[spravka_sud] missing rate detected", info);
-
-        showFatal(
-          "Невозможно построить справку: отсутствует ставка рефинансирования для части периода. " +
-          "Проверьте даты начислений и таблицу ставок."
-        );
-
-        throw new Error("MISSING_REQUIRED_RATE");
+        const err = new Error(RATES_FATAL_MESSAGE);
+        err.code = "MISSING_REQUIRED_RATE";
+        err.details = info || {};
+        logRatesFatal(err);
+        throw err;
       };
 
       try {
@@ -508,6 +521,11 @@
           ) || {};
         }
       } catch (e) {
+        if (isRatesFatalError(e)) {
+          logRatesFatal(e);
+          showFatal(RATES_FATAL_MESSAGE);
+          return;
+        }
         penaltyBySourceMonth = {};
       }
 
@@ -568,6 +586,11 @@
           allowNegativePrincipal: true
         });
       } catch (e) {
+        if (isRatesFatalError(e)) {
+          logRatesFatal(e);
+          showFatal(RATES_FATAL_MESSAGE);
+          return;
+        }
         console.error("[spravka_sud] calcTotals failed", e);
         return;
       }
@@ -619,6 +642,13 @@
         jkhDataStatus: String((window.JKH_UI_STATE && window.JKH_UI_STATE.data && window.JKH_UI_STATE.data.status) || ""),
         ownerContext: ctx
       });
+      } catch (e) {
+        if (isRatesFatalError(e)) {
+          logRatesFatal(e);
+          showFatal(RATES_FATAL_MESSAGE);
+          return;
+        }
+        throw e;
       } finally {
         window.JKHCalcEngine.onMissingRate = previousMissingRateHandler;
       }
