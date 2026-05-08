@@ -323,6 +323,7 @@
         return;
       }
 
+      const previousMissingRateHandler = window.JKHCalcEngine.onMissingRate;
       window.JKHCalcEngine.onMissingRate = function(info){
         console.error("[spravka_sud] missing rate detected", info);
 
@@ -334,6 +335,7 @@
         throw new Error("MISSING_REQUIRED_RATE");
       };
 
+      try {
       const ctx = getContext();
       if (!ctx.abonentId) {
         showFatal("Не передан параметр abonent в URL.");
@@ -445,24 +447,9 @@
       const hasLedger = hasUsableLedgerRows(allRows);
       console.log('[spravka_sud][ledger-check] id=' + ctx.abonentId + ' len=' + allRows.length);
       if (!hasLedger) {
-        let recalcResult = { changed: false, reason: 'autoaccrual-unavailable' };
-        if (window.JKHAutoAccrual && typeof window.JKHAutoAccrual.recalcForAbonent === 'function') {
-          recalcResult = await window.JKHAutoAccrual.recalcForAbonent(ctx.abonentId);
-        }
-        console.log('[spravka_sud][autoaccrual] recalc result=', recalcResult);
-        if (recalcResult && recalcResult.changed === true && window.Data && typeof Data.flushDbToServer === 'function') {
-          try {
-            await Data.flushDbToServer();
-            console.log('[spravka_sud][autoaccrual] flush ok');
-          } catch (e) {
-            console.warn('[spravka_sud][autoaccrual] flush failed but continue', e);
-          }
-        }
-
-        allRowsRaw = safeJSON(paymentsKey, [], ctx.readOwner);
-        allRows = Array.isArray(allRowsRaw) ? allRowsRaw : [];
-
-        console.log('[spravka_sud][ledger-after-recalc] id=' + ctx.abonentId + ' len=' + allRows.length);
+        console.warn('[readonly][blocked-write-path]', { page: 'spravka_sud', abonentId: ctx.abonentId, reason: 'LEDGER_NOT_PREPARED' });
+        showFatal("Начисления не подготовлены. Сначала выполните пересчёт начислений.");
+        return;
       } else {
         console.log('[spravka_sud][autoaccrual] skipped existing ledger');
       }
@@ -632,6 +619,9 @@
         jkhDataStatus: String((window.JKH_UI_STATE && window.JKH_UI_STATE.data && window.JKH_UI_STATE.data.status) || ""),
         ownerContext: ctx
       });
+      } finally {
+        window.JKHCalcEngine.onMissingRate = previousMissingRateHandler;
+      }
     })();
   });
 })();

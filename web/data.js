@@ -546,7 +546,6 @@
   const stored = loadFromStorage();
   if (!_isAllMode()) window.JKH_DATA_READY = !!stored;
   window.AbonentsDB = stored ? mergePreferStored(BASE_DB, stored) : deepClone(BASE_DB);
-  normalizeDb(window.AbonentsDB);
 
   window.saveAbonentsDB = function () {
     if (!window.AbonentsDB) return;
@@ -1148,10 +1147,7 @@
 window.Data = Data;
 window.JKHBoot?.markReady?.('data');
 
-  // Если storage пустой — сохраним пустую структуру один раз
-  if (!stored) {
-    window.saveAbonentsDB();
-  }
+  // Read-only init: empty storage is not materialized until an explicit user save.
 
   // ============================================================
   // DEMO SEED: 1006 / 1008 (новая конфигурация)

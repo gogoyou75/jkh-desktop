@@ -364,14 +364,21 @@ function splitAccrualByOwnership(accr, year, month, history) {
   }
   // =========================
 
+  function showAbonentIdRequiredError() {
+    const msg = "Не передан параметр abonent в URL. Загрузка карточки платежей остановлена.";
+    try { console.warn("[readonly][blocked-write-path]", { page: "payment_table", reason: "MISSING_ABONENT_ID" }); } catch(e) {}
+    const tbody = qs("#paymentTableBody");
+    if (tbody) tbody.innerHTML = '<tr><td colspan="12" style="color:#b00000;font-weight:bold;">' + msg + '</td></tr>';
+    const box = qs("#paymentTableStatus") || qs("#paymentStatus") || qs("#paymentsStatus");
+    if (box) box.textContent = msg;
+  }
+
   function getAbonentId() {
     const p = new URLSearchParams(window.location.search);
-    const fromUrl = p.get("abonent");
+    const fromUrl = String(p.get("abonent") || "").trim();
     if (fromUrl) return fromUrl;
-
-    const db = window.AbonentsDB?.abonents || {};
-    const first = Object.keys(db)[0];
-    return first || "27";
+    showAbonentIdRequiredError();
+    return "";
   }
   function getAbonentTechnicalId() {
     const id = String(getAbonentId() || "");
@@ -711,23 +718,8 @@ function getOwnershipHistoryForPremise() {
     for (const c of candidates){
       if (Array.isArray(c)) return c;
     }
-    console.warn("[autoaccrual] не найдены тарифы: JKHStore или window.*");
-
-    // ✅ FALLBACK (чтобы начисления не были нулевыми на чистой базе):
-    // Если тарифы ещё нигде не сохранены (tariffs.html пока статическая),
-    // создаём минимальную таблицу по умолчанию.
-    // ВАЖНО: как только появится реальный CRUD тарифов — этот fallback просто не будет использоваться.
-    const defaults = [
-      { from: "2023-01-01", content: 35,   repair: 10 },
-      { from: "2024-01-01", content: 38.5, repair: 12 }
-    ];
-    try{
-      const ownerId = (window.JKHStore && typeof JKHStore.getOwnerId === "function") ? String(JKHStore.getOwnerId() || "").trim() : "";
-      const tariffsKey = ownerId ? ("tariffs_" + ownerId) : "tariffs_v1";
-      storeSetRaw(tariffsKey, JSON.stringify(defaults));
-      console.warn("[autoaccrual] тарифы не найдены — создал " + tariffsKey + " (defaults)");
-    }catch(e){ console.error(e); throw e; }
-    return defaults;
+    console.warn("[readonly][blocked-write-path]", { page: "payment_table", path: "loadTariffTable", reason: "TARIFFS_NOT_FOUND_NO_DEFAULT_CREATE" });
+    return [];
   }
 
 
@@ -1013,38 +1005,7 @@ for (const p of parts) {
       const arr = JSON.parse(raw);
       if (!Array.isArray(arr)) return [];
 
-      // Авто-миграция старых записей:
-      // - paid_date мог быть Excel serial (number/"45234") → конвертируем в ISO
-      // - source мог отсутствовать → ставим "Платёж 1" по умолчанию
-      let changed = false;
-      for (const r of arr) {
-        if (!r || typeof r !== 'object') continue;
-
-        // source default
-        if (!('source' in r) || String(r.source || '').trim() === '') {
-          r.source = 'Платёж 1';
-          changed = true;
-        }
-
-        // normalize paid_date to ISO if possible
-        const before = r.paid_date;
-        if (before !== null && before !== undefined && String(before).trim() !== '') {
-          const dt = parseDateAnyToDate(before);
-          if (dt) {
-            const iso = toISODateString(dt);
-            if (String(before) !== iso) {
-              r.paid_date = iso;
-              changed = true;
-            }
-          }
-        }
-      }
-
-      if (changed) {
-        try { normalizePaymentRows(arr); } catch(e) { console.error(e); throw e; }
-        storeSetRaw(key, JSON.stringify(arr));
-      }
-
+      // Read-only path: do not migrate rows, set source defaults, or normalize paid_date while reading.
       return arr;
     } catch {
       return [];
@@ -1740,22 +1701,7 @@ function applyRunningTotals(viewRows) {
 
     let arr = getPayments();
  
-    // автоначисление по тарифам/площади в рамках периода ответственности
-    // CRITICAL: если подключен внешний движок JKHAutoAccrual (autoaccrual_engine.js),
-    // используем ЕГО, чтобы работало пропорциональное начисление при смене тарифа внутри месяца.
-    try {
-      if (window.JKHAutoAccrual && typeof window.JKHAutoAccrual.recalcForAbonent === 'function') {
-        window.JKHAutoAccrual.recalcForAbonent(getAbonentId());
-        // движок сам пишет в JKHStore -> перечитываем
-        arr = getPayments();
-      } else {
-        if (ensureAutoAccruals(arr)) {
-          // на рендере НЕ flush-им: только локальный пересчёт для отображения
-          JKH_RecalcAbonentTotalDebtCard();
-        }
-      }
-    } catch(e) { console.error("autoaccrual failed", e); }
-
+    // Read-only render path: autoaccrual is not applied during view rendering.
 
     // то же приведение, что и в loadPaymentTable
     arr.forEach(r => {
@@ -1825,23 +1771,7 @@ function applyRunningTotals(viewRows) {
 
     let arr = getPayments();
 
-    // автоначисление по тарифам/площади в рамках периода ответственности (ЗАКОН НАЧИСЛЕНИЙ)
-    // CRITICAL: если подключен внешний движок JKHAutoAccrual (autoaccrual_engine.js),
-    // используем ЕГО, чтобы работало пропорциональное начисление при смене тарифа внутри месяца.
-    try {
-      if (window.JKHAutoAccrual && typeof window.JKHAutoAccrual.recalcForAbonent === 'function') {
-        window.JKHAutoAccrual.recalcForAbonent(getAbonentId());
-        // движок сам пишет в JKHStore -> перечитываем
-        arr = getPayments();
-      } else {
-        if (ensureAutoAccruals(arr)) {
-          // на загрузке/рендере НЕ flush-им: только локальный пересчёт
-        }
-      }
-    } catch (e) {
-      console.error('autoaccrual failed', e);
-    }
-
+    // Read-only load path: autoaccrual is not applied during page opening.
 
     // нормализуем даты + синхронизируем год/месяц
     arr.forEach(r => {
