@@ -439,6 +439,29 @@ def _norm_period(v):
     return None
 
 
+def _norm_upload_payment_period(v):
+    s = _norm_text(v)
+    if not s:
+        return None
+    m = re.match(r"^(\d{4})-(\d{2})$", s)
+    if not m:
+        return None
+    month = int(m.group(2))
+    if month < 1 or month > 12:
+        return None
+    return s
+
+
+def _raw_upload_payment_period_present(row):
+    try:
+        payload = json.loads(row.raw_payload_json or "{}")
+    except Exception:
+        payload = {}
+    if isinstance(payload, dict) and "payment_period" in payload:
+        return _norm_text(payload.get("payment_period")) != ""
+    return False
+
+
 def normalize_paid_date(v):
     value = _norm_date(v)
     if not value:
@@ -1177,7 +1200,7 @@ def import_payments_upload_rows():
         abonent_id = _norm_text(src.get("abonent_id"))
         account_number = _norm_text(src.get("account_number"))
         payment_date = _norm_iso_date(src.get("payment_date"))
-        payment_period = _norm_period(src.get("payment_period"))
+        payment_period = _norm_upload_payment_period(src.get("payment_period"))
         amount = _norm_amount(src.get("amount"))
         src_index_raw = src.get("source_index")
         try:
@@ -1385,8 +1408,8 @@ def import_payments_validate(batch_id):
             invalid += 1
         elif not r.payment_period:
             r.status = "invalid"
-            r.reason_code = "PAYMENT_PERIOD_INVALID"
-            r.reason_text = "Некорректный период платежа"
+            r.reason_code = "PAYMENT_PERIOD_INVALID" if _raw_upload_payment_period_present(r) else "PAYMENT_PERIOD_REQUIRED"
+            r.reason_text = "Не найден год/период платежа. Импорт строки остановлен, чтобы не записать платёж не в тот год."
             details["field"] = "payment_period"
             details["recommendation"] = "Проверьте период платежа, ожидается YYYY-MM."
             invalid += 1

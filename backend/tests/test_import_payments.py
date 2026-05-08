@@ -488,6 +488,43 @@ class ImportPaymentsE2ETest(unittest.TestCase):
         self.assertEqual(ledger[0]["payment_period"], "2026-01")
 
 
+    def test_upload_rows_missing_payment_period_is_invalid(self):
+        rows = [{
+            "account_uid": self.account_uid,
+            "payment_date": "2026-01-15",
+            "amount": 1000,
+            "source_index": 1,
+        }]
+        with patch.object(app_module, "_import_schema_error_response", return_value=None):
+            upload_resp = self._upload_rows(rows=rows)
+            self.assertEqual(upload_resp.status_code, 200)
+            batch_id = upload_resp.json["batch"]["id"]
+
+            validate_resp = self.client.post(f"/api/import/{batch_id}/validate")
+            self.assertEqual(validate_resp.status_code, 200)
+            self.assertEqual(validate_resp.json["batch"]["rows_invalid"], 1)
+
+        with app_module.app.app_context():
+            row = app_module.ImportBatchRow.query.filter_by(batch_id=batch_id).first()
+            self.assertEqual(row.status, "invalid")
+            self.assertEqual(row.reason_code, "PAYMENT_PERIOD_REQUIRED")
+
+    def test_upload_rows_non_iso_payment_period_is_invalid(self):
+        with patch.object(app_module, "_import_schema_error_response", return_value=None):
+            upload_resp = self._upload_rows(payment_period="01/2026")
+            self.assertEqual(upload_resp.status_code, 200)
+            batch_id = upload_resp.json["batch"]["id"]
+
+            validate_resp = self.client.post(f"/api/import/{batch_id}/validate")
+            self.assertEqual(validate_resp.status_code, 200)
+            self.assertEqual(validate_resp.json["batch"]["rows_invalid"], 1)
+
+        with app_module.app.app_context():
+            row = app_module.ImportBatchRow.query.filter_by(batch_id=batch_id).first()
+            self.assertEqual(row.status, "invalid")
+            self.assertEqual(row.reason_code, "PAYMENT_PERIOD_INVALID")
+
+
     def test_same_uid_date_amount_with_different_source_indexes_applies_both_rows(self):
         rows = [
             {
