@@ -907,12 +907,19 @@ function tryResumeFromHash(){
 
   const db = getDB();
   const target = Number(resume.targetExcelRow) || 0;
+  let resumedUid = normStr(resume.createdUid || resume.uid);
   if (db && db.abonents && target){
     const row = dataRows.find(x => Number(x.excelRow)===target);
     if (row){
-      const found = findAbonentByRules(db, row);
-      if (found && found.abonent){
-        row.createdUid = normStr(found.abonent.uid || "");
+      if (!resumedUid){
+        const found = findAbonentByRules(db, row);
+        if (found && found.abonent){
+          resumedUid = normStr(found.abonent.uid || "");
+        }
+      }
+      if (resumedUid){
+        row.createdUid = resumedUid;
+        row.uid = resumedUid;
       }
     }
   }
@@ -923,8 +930,12 @@ function tryResumeFromHash(){
   }
   if (target){
     const row = dataRows.find(function(x){ return Number(x.excelRow)===target; });
-    const uidTxt = row && row.createdUid ? (' UID: ' + row.createdUid + '.') : '';
-    setImportStatus('Абонент создан. Строка Excel #' + target + ' восстановлена. Можно продолжить импорт.' + uidTxt, 'ok');
+    const uid = normStr((row && (row.uid || row.createdUid)) || resumedUid);
+    if (uid){
+      setImportStatus('Абонент создан. Строка Excel: ' + target + '. UID: ' + uid + '. Можно продолжить импорт.', 'ok');
+    } else {
+      setImportStatus('Абонент создан. Строка Excel: ' + target + '. UID не найден — проверьте карточку абонента.', 'warn');
+    }
   }
   clearImportResumeState();
   history.replaceState(null, '', location.pathname + location.search);
@@ -2244,8 +2255,8 @@ function updateStateLine(){
 
 function setButtons(){
   const hasFile = !!$('fileInput').files && $('fileInput').files.length>0;
-  $('btnParse').disabled = !hasFile;
-  $('btnReset').disabled = !dataRows.length && !preview.length;
+  $('btnParse').disabled = !hasFile || importApplyBusy;
+  $('btnReset').disabled = importApplyBusy || (!dataRows.length && !preview.length);
 
   $('btnModePrimary').classList.toggle('active', mode==='primary');
   $('btnModePayments').classList.toggle('active', mode==='payments');
@@ -2254,6 +2265,7 @@ function setButtons(){
   const parsed = dataRows.length > 0;
   const fileYearBlocked = isImportBlockedByFileYear();
 
+  $('btnModePrimary').disabled = importApplyBusy;
   $('btnModePayments').disabled = !canEnterPaymentsMode() || importApplyBusy || fileYearBlocked;
   const canApplyPrimary = (mode==='primary' && parsed && canWrite && !primaryBlocked && !importApplyBusy && !isApplyBlockedByTemplateMode() && !fileYearBlocked);
   $('btnApplyPrimary').disabled = !canApplyPrimary;
@@ -2311,6 +2323,10 @@ function resetPreview(){
 }
 
 async function onParse(){
+  if (importApplyBusy) return;
+  setImportBusy(true, 'Чтение Excel…');
+  if (window.JKHBusy && typeof JKHBusy.show === 'function') JKHBusy.show('Чтение Excel…');
+  try{
   $('writeWarning').innerHTML = '';
   clearFileYearAnalysis();
   refreshWho();
@@ -2369,20 +2385,25 @@ async function onParse(){
   restoredFromDraft = false;
   buildPreview();
   saveImportDraftState();
+  } finally {
+    setImportBusy(false);
+    if (window.JKHBusy && typeof JKHBusy.hide === 'function') JKHBusy.hide();
+  }
 }
 
 async function applyPrimary(){
   if (importApplyBusy) return;
   if (isImportBlockedByFileYear()){ setImportStatus((fileYearBlockReason || 'Импорт заблокирован проверкой года A15') + '.', 'err'); setButtons(); return; }
   if (!canWriteOrExplain()) return setButtons();
-  setImportBusy(true, 'Идёт запись на сервер... Не закрывайте страницу.');
+  setImportBusy(true, 'Применение первички…');
+  if (window.JKHBusy && typeof JKHBusy.show === 'function') JKHBusy.show('Применение первички…');
 
   const db = getDB();
-  if (!db || !db.abonents){ setImportStatus('База абонентов не загружена.', 'err'); setImportBusy(false); return; }
+  if (!db || !db.abonents){ setImportStatus('База абонентов не загружена.', 'err'); setImportBusy(false); if (window.JKHBusy && typeof JKHBusy.hide === 'function') JKHBusy.hide(); return; }
 
   mode='primary';
   buildPreview();
-  if (primaryBlocked){ setImportStatus('Шаг 1 заблокирован: есть критические ошибки первички.', 'err'); setImportBusy(false); return; }
+  if (primaryBlocked){ setImportStatus('Шаг 1 заблокирован: есть критические ошибки первички.', 'err'); setImportBusy(false); if (window.JKHBusy && typeof JKHBusy.hide === 'function') JKHBusy.hide(); return; }
 
   const localSnapshot = { db: deepCloneJSONSafe(getDB()) };
 
@@ -2451,15 +2472,17 @@ async function applyPrimary(){
     await rollbackAfterFlushError(localSnapshot, { reason: 'import_apply_primary_flush_error', reload: true });
   } finally {
     setImportBusy(false);
+    if (window.JKHBusy && typeof JKHBusy.hide === 'function') JKHBusy.hide();
   }
 }
 
 async function applyPayments(){
   if (importApplyBusy) return;
   if (isImportBlockedByFileYear()){ setImportStatus((fileYearBlockReason || 'Импорт заблокирован проверкой года A15') + '.', 'err'); setButtons(); return; }
-  setImportBusy(true, "Идёт запись на сервер... Не закрывайте страницу.");
+  setImportBusy(true, 'Добавление платежей…');
+  if (window.JKHBusy && typeof JKHBusy.show === 'function') JKHBusy.show('Добавление платежей…');
   const db = getDB();
-  if (!db || !db.abonents){ setImportStatus('База абонентов не загружена.', 'err'); setImportBusy(false); return; }
+  if (!db || !db.abonents){ setImportStatus('База абонентов не загружена.', 'err'); setImportBusy(false); if (window.JKHBusy && typeof JKHBusy.hide === 'function') JKHBusy.hide(); return; }
 
   const rows = [];
   const appliedExcelRows = {};
@@ -2497,12 +2520,14 @@ async function applyPayments(){
           ' раньше даты начала расчёта абонента (' + getAbonentStartDate(ab) + ').',
           'err'
         );
+        setImportBusy(false);
+        if (window.JKHBusy && typeof JKHBusy.hide === 'function') JKHBusy.hide();
         return;
       }
       const previewRow = evaluatePaymentsRow(db, row);
       if (!previewRow || previewRow.status==='ERROR') continue;
       const paymentUid = normStr(ab && ab.uid ? ab.uid : row.uid);
-      if (!paymentUid){ setImportStatus('Для импорта платежей нужен UID.', 'err'); return; }
+      if (!paymentUid){ setImportStatus('Для импорта платежей нужен UID.', 'err'); setImportBusy(false); if (window.JKHBusy && typeof JKHBusy.hide === 'function') JKHBusy.hide(); return; }
       const existing = getPaymentsByUid(paymentUid);
       const isDup = existing.some(function(x){
         const ym = getLedgerYearMonth(x);
@@ -2521,6 +2546,8 @@ async function applyPayments(){
           ' раньше даты начала расчёта абонента (' + getAbonentStartDate(ab) + ').',
           'err'
         );
+        setImportBusy(false);
+        if (window.JKHBusy && typeof JKHBusy.hide === 'function') JKHBusy.hide();
         return;
       }
       try{
@@ -2530,12 +2557,14 @@ async function applyPayments(){
         const code = normStr(e && e.code) || 'UNKNOWN';
         const msg = contractMessages[code] || ('Импорт остановлен: ошибка контракта ' + code + '.');
         setImportStatus(msg, 'err');
+        setImportBusy(false);
+        if (window.JKHBusy && typeof JKHBusy.hide === 'function') JKHBusy.hide();
         return;
       }
     }
   }
 
-  if (!rows.length){ setImportStatus('Нет платежей для добавления.', 'err'); return; }
+  if (!rows.length){ setImportStatus('Нет платежей для добавления.', 'err'); setImportBusy(false); if (window.JKHBusy && typeof JKHBusy.hide === 'function') JKHBusy.hide(); return; }
 
   let appliedCount = 0;
   try{
@@ -2590,6 +2619,7 @@ async function applyPayments(){
     return;
   } finally {
     setImportBusy(false);
+    if (window.JKHBusy && typeof JKHBusy.hide === 'function') JKHBusy.hide();
   }
   let appliedRowsCount = 0;
   for (let i=0;i<dataRows.length;i++){
@@ -2632,8 +2662,13 @@ $('previewBody').addEventListener('click', function(ev){
     if (!normStr(row.ls) || !normStr(row.fam)){ setImportStatus('Нельзя создать абонента: пустые ЛС/ФИО.', 'err'); return; }
     if (!Number.isFinite(row.square) || row.square<=0){ setImportStatus('Нельзя создать абонента: "Общая площадь" должна быть > 0.', 'err'); return; }
 
+    if (window.JKHBusy && typeof JKHBusy.show === 'function') JKHBusy.show('Создание абонента…');
     const draftOK = saveDraftNewAbonent(row);
-    if (!draftOK){ setImportStatus('Не удалось сохранить draft для создания абонента.', 'err'); return; }
+    if (!draftOK){
+      if (window.JKHBusy && typeof JKHBusy.hide === 'function') JKHBusy.hide();
+      setImportStatus('Не удалось сохранить draft для создания абонента.', 'err');
+      return;
+    }
 
     saveImportResumeState({
       dataRows: dataRows,

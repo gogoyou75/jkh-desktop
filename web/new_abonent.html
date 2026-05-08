@@ -552,7 +552,19 @@ function safeReturnUrl(u){
   return s;
 }
 function goBackToImport(){
+  if (window.JKHBusy && typeof JKHBusy.show === 'function') JKHBusy.show('Возврат в импорт…');
   location.href = 'import_xls.html#resume=1';
+}
+function saveImportCreatedUid(uid){
+  if (!window.JKHStore || !JKHStore.getJSON || !JKHStore.setJSON) return;
+  const cleanUid = String(uid || '').trim();
+  if (!cleanUid) return;
+  try{
+    const resume = JKHStore.getJSON('import_xls_resume_v1', null, null) || {};
+    resume.createdUid = cleanUid;
+    resume.uid = cleanUid;
+    JKHStore.setJSON('import_xls_resume_v1', resume, null);
+  }catch(e){}
 }
 function isImportReturnScenario(){
   const src = String(document.getElementById("na_src")?.value || "").trim();
@@ -1052,6 +1064,7 @@ async function createAbonent() {
 
   __createAbonentBusy = true;
   setCreateUiBusy(true);
+  if (window.JKHBusy && typeof JKHBusy.show === 'function') JKHBusy.show('Создание абонента…');
   setCreateStatus('Создаём абонента и сохраняем на сервер...');
 
   try {
@@ -1233,6 +1246,7 @@ async function createAbonent() {
     const src = String(document.getElementById("na_src").value || "").trim();
     if (src === 'import_xls') {
       try { importPaymentsFromDraftForNewAbonent(String(ls), dbRoot.abonents[ls]); } catch (e) {}
+      saveImportCreatedUid(uid);
     }
 
     if (!(window.saveAbonentsDB && window.saveAbonentsDB())) {
@@ -1283,6 +1297,7 @@ async function createAbonent() {
   } finally {
     __createAbonentBusy = false;
     setCreateUiBusy(false);
+    if (window.JKHBusy && typeof JKHBusy.hide === 'function') JKHBusy.hide();
   }
 }
 
