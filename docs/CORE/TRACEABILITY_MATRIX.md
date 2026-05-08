@@ -57,8 +57,8 @@
 | Правило                          | Где в ТЗ                     | Где в коде                  | Статус | Комментарий                  |
 | -------------------------------- | ---------------------------- | --------------------------- | ------ | ---------------------------- |
 | Ставка берётся по дате           | LOGIC_SPEC                   | calc_engine.js / rateOnDate | ⚫      |                              |
-| Если ставка отсутствует — ошибка | ⚪ должно быть                | calc_engine.js / loadRates  | 🟡     | Сейчас warning               |
-| Если дата раньше первой ставки   | LOGIC_SPEC (правило проекта) | calc_engine.js              | 🔴     | Сейчас берётся первая ставка |
+| Если ставка отсутствует — fatal `RATES_MISSING` / `RATES_JSON_INVALID` | LOGIC_SPEC | calc_engine.js / loadRates | ✅ OK | commit 9688dbb |
+| Если дата не покрыта ставками — fatal `MISSING_REQUIRED_RATE` | LOGIC_SPEC | calc_engine.js | ✅ OK | commit 9688dbb |
 
 ---
 
@@ -186,15 +186,15 @@
 | Правило | Где в ТЗ | Где в коде | Статус | Комментарий |
 |--------|----------|------------|--------|------------|
 | Справка использует calc_engine | ❌ | buildCourtViewRows | 🔴 | |
-| Справка НЕ должна менять данные | ❌ | recalcForAbonent | 🔴 | Нарушение |
+| Справка НЕ должна менять данные | LOGIC_SPEC | read-only view guard | ✅ OK | commit 60e6ee9 |
 | Используется payments_<uid> | LOGIC_SPEC | resolvePaymentsKey | ⚫ | |
 | Если UID нет → блокировка | ❌ | resolvePaymentsKey | 🔴 | |
-| Справка может запустить автоначисление | ❌ | recalcForAbonent | 🔴 | Очень опасно |
+| Справка не запускает autoaccrual apply при открытии | LOGIC_SPEC | read-only view guard | ✅ OK | commit 60e6ee9 |
 | Данные загружаются через server-first | LOGIC_SPEC | waitForInit | ⚫ | |
 | Есть таймаут загрузки | ❌ | waitForInit | 🔴 | |
 | Период выбирается пользователем | LOGIC_SPEC | loadSelectedPeriod | ⚫ | |
 | Период ограничивается датой начала | ❌ | clamp logic | 🔴 | |
-| Если нет даты — fallback 2000 год | ❌ | resolveAbonentStartDate | 🔴 | КРИТИЧНО |
+| Если нет даты — fatal `START_DATE_MISSING` / `RESPONSIBILITY_DATE_MISSING` | LOGIC_SPEC | resolveAbonentStartDate | ✅ OK | commit 13176e3 |
 | Пеня считается по source-month | ❌ | calcPenaltyBreakdown | 🔴 | |
 | Итог берётся из calc_engine | LOGIC_SPEC | calcTotalsAsOfAdjusted | ⚫ | |
 
@@ -262,7 +262,15 @@
 | Нет versioning | ❌ | отсутствует | 🔴 | |
 | Дата в двух форматах | ❌ | toDMY / ISO | 🔴 | риск |
 
+## 🧩 Блок: P0 Silent-fallback Audit Closure
 
-
-
+| Правило | Где в ТЗ | Где в коде | Статус | Комментарий |
+|--------|----------|------------|--------|------------|
+| Открытие справки, главной страницы и таблицы платежей не меняет ledger, не запускает autoaccrual apply и не вызывает flush | LOGIC_SPEC 15.1 | read-only view guards | ✅ OK | commit 60e6ee9 Block read-only view write side effects |
+| Существующий повреждённый или не-array `payments_<uid>` является fatal `LEDGER_JSON_INVALID`, а не fallback `[]` | LOGIC_SPEC 15.2 | payment ledger readers | ✅ OK | commit 22f6858 Make invalid payment ledgers fatal |
+| Отсутствующие, повреждённые или непокрывающие дату ставки являются fatal `RATES_MISSING` / `RATES_JSON_INVALID` / `MISSING_REQUIRED_RATE`, расчёт по `0` запрещён | LOGIC_SPEC 15.3 | calc_engine.js / refinancing readers | ✅ OK | commit 9688dbb Make refinancing rate errors fatal |
+| Повреждённые или невалидные `exclude_periods_<abonentId>` являются fatal `EXCLUDES_JSON_INVALID` / `EXCLUDES_INVALID`, fallback «без исключений» запрещён | LOGIC_SPEC 15.4 | exclusion period readers | ✅ OK | commit 815c3b0 Make invalid exclusion periods fatal |
+| `2000-01-01` запрещена как fallback для финансовых/судебных дат; отсутствие даты даёт `START_DATE_MISSING` / `RESPONSIBILITY_DATE_MISSING` | LOGIC_SPEC 15.5 | responsibility/start date resolution | ✅ OK | commit 13176e3 Remove default 2000 date fallback |
+| Импорт платежей требует явный `payment_period` `YYYY-MM`; текущий год не используется как fallback | LOGIC_SPEC 15.6 | import payments validation | ✅ OK | commit a2ce9a0 Require explicit payment import period |
+| Перенос долга `WITH_DEBT` требует успешный frozen debt calculation; ошибка расчёта/JSON не становится `principal: 0` / `penalty: 0` | LOGIC_SPEC 15.7 | debt transfer / frozen debt calculation | ✅ OK | commit Prevent unsafe zero debt transfer fallback |
 

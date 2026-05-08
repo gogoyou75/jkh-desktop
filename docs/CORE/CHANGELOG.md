@@ -1,5 +1,12 @@
 # CHANGELOG
 
+## 2026-05-08 — Docs: closure of P0 silent-fallback audit
+
+- Зафиксировано, что открытие справки, главной страницы и таблицы платежей является read-only и не должно менять ledger, запускать autoaccrual apply или flush.
+- Зафиксированы fatal-правила вместо молчаливых fallback: `LEDGER_JSON_INVALID`, `RATES_MISSING`, `RATES_JSON_INVALID`, `MISSING_REQUIRED_RATE`, `EXCLUDES_JSON_INVALID`, `EXCLUDES_INVALID`, `START_DATE_MISSING`, `RESPONSIBILITY_DATE_MISSING`.
+- Зафиксирован запрет fallback-даты `2000-01-01`, запрет расчёта пени по ставке `0`, обязательность явного `payment_period` `YYYY-MM` при импорте платежей и запрет unsafe zero fallback при переносе долга `WITH_DEBT`.
+- В audit table добавлены commit references: `60e6ee9`, `22f6858`, `9688dbb`, `815c3b0`, `13176e3`, `a2ce9a0`, `Prevent unsafe zero debt transfer fallback`.
+
 
 ## 2026-05-08 — Import XLS: Busy finally и разделение Excel UID / created UID
 
