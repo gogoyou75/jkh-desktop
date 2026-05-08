@@ -41,6 +41,114 @@ function ensureAuthScriptLoaded() {
 }
 ensureAuthScriptLoaded();
 
+
+// ============================================================
+// GLOBAL BUSY INDICATOR
+// ============================================================
+(function initJKHBusy(){
+  if (window.JKHBusy && typeof window.JKHBusy.show === "function" && typeof window.JKHBusy.hide === "function") return;
+
+  const state = { stack: [] };
+
+  function clearBusy(){
+    state.stack.length = 0;
+    const box = ensureBusyElement();
+    box.classList.remove("visible");
+    if (document.body) document.body.classList.remove("jkh-busy-active");
+  }
+
+  function ensureBusyElement(){
+    let box = document.getElementById("jkhBusyOverlay");
+    if (box) return box;
+
+    box = document.createElement("div");
+    box.id = "jkhBusyOverlay";
+    box.className = "jkh-busy-overlay";
+    box.setAttribute("aria-live", "polite");
+    box.setAttribute("aria-busy", "true");
+    box.innerHTML = '<div class="jkh-busy-panel"><span class="jkh-busy-spinner" aria-hidden="true"></span><span class="jkh-busy-text" id="jkhBusyText">Загрузка данных…</span></div>';
+    (document.body || document.documentElement).appendChild(box);
+    return box;
+  }
+
+  function setMessage(message){
+    const box = ensureBusyElement();
+    const text = box.querySelector(".jkh-busy-text");
+    if (text) text.textContent = String(message || "Выполнение операции…");
+  }
+
+  window.JKHBusy = {
+    show: function(message){
+      state.stack.push(String(message || "Выполнение операции…"));
+      const box = ensureBusyElement();
+      setMessage(state.stack[state.stack.length - 1]);
+      box.classList.add("visible");
+      if (document.body) document.body.classList.add("jkh-busy-active");
+    },
+    hide: function(){
+      if (state.stack.length) state.stack.pop();
+      const box = ensureBusyElement();
+      if (state.stack.length){
+        setMessage(state.stack[state.stack.length - 1]);
+        box.classList.add("visible");
+        if (document.body) document.body.classList.add("jkh-busy-active");
+        return;
+      }
+      box.classList.remove("visible");
+      if (document.body) document.body.classList.remove("jkh-busy-active");
+    },
+    hideAll: function(){
+      clearBusy();
+    },
+    isVisible: function(){
+      return state.stack.length > 0;
+    },
+    withBusy: async function(message, asyncFn){
+      this.show(message);
+      try{
+        return await asyncFn();
+      } finally {
+        this.hide();
+      }
+    }
+  };
+})();
+
+function jkhBusyWrapAsyncGlobals(){
+  try{
+    if (window.Data && typeof window.Data.flushDbToServer === "function" && !window.Data.flushDbToServer.__jkhBusyWrapped){
+      const originalFlush = window.Data.flushDbToServer;
+      window.Data.flushDbToServer = async function(){
+        const args = arguments;
+        return window.JKHBusy.withBusy("Сохранение на сервер…", async function(){
+          return await originalFlush.apply(window.Data, args);
+        });
+      };
+      window.Data.flushDbToServer.__jkhBusyWrapped = true;
+    }
+
+    if (window.JKHDataLoader && typeof window.JKHDataLoader.loadFromServer === "function" && !window.JKHDataLoader.loadFromServer.__jkhBusyWrapped){
+      const originalLoad = window.JKHDataLoader.loadFromServer;
+      window.JKHDataLoader.loadFromServer = async function(){
+        const args = arguments;
+        return window.JKHBusy.withBusy("Загрузка данных…", async function(){
+          return await originalLoad.apply(window.JKHDataLoader, args);
+        });
+      };
+      window.JKHDataLoader.loadFromServer.__jkhBusyWrapped = true;
+    }
+  }catch(e){
+    console.warn("jkhBusyWrapAsyncGlobals failed", e);
+  }
+}
+jkhBusyWrapAsyncGlobals();
+document.addEventListener("DOMContentLoaded", function(){
+  jkhBusyWrapAsyncGlobals();
+  setTimeout(jkhBusyWrapAsyncGlobals, 0);
+  setTimeout(jkhBusyWrapAsyncGlobals, 250);
+  setTimeout(jkhBusyWrapAsyncGlobals, 1000);
+});
+
 function ensureLayoutStyles() {
   if (document.getElementById("layoutStyles")) return;
 
@@ -187,6 +295,43 @@ function ensureLayoutStyles() {
 }
 .global-result-item:hover { background: #f2f2f2; }
 mark { background: yellow; }
+
+/* ===== GLOBAL BUSY INDICATOR ===== */
+.jkh-busy-overlay {
+  position: fixed;
+  top: 62px;
+  right: 18px;
+  display: none;
+  z-index: 5000;
+  pointer-events: none;
+}
+.jkh-busy-overlay.visible { display: block; }
+.jkh-busy-panel {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 34px;
+  max-width: 420px;
+  padding: 8px 12px;
+  border: 2px solid #000;
+  background: rgba(255,255,255,0.96);
+  box-shadow: 0 2px 10px rgba(0,0,0,0.18);
+  font-size: 13px;
+  color: #000;
+  box-sizing: border-box;
+}
+.jkh-busy-spinner {
+  width: 20px;
+  height: 20px;
+  border: 3px solid #cfcfcf;
+  border-top-color: #000;
+  border-radius: 50%;
+  animation: jkhBusyRotate .8s linear infinite;
+  flex: 0 0 auto;
+}
+.jkh-busy-text { line-height: 1.25; }
+@keyframes jkhBusyRotate { to { transform: rotate(360deg); } }
+
   `;
   document.head.appendChild(style);
 }

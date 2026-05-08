@@ -11,6 +11,41 @@ window.PremisesAdmin = (function () {
     }
 
     function normStr(s) { return String(s ?? '').trim(); }
+    function normalizePersonText(v) {
+        return String(v || '')
+            .toLowerCase()
+            .replace(/ё/g, 'е')
+            .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+    }
+    function splitPersonParts(v) {
+        return normalizePersonText(v).split(' ').filter(Boolean);
+    }
+    function softFioMatch(excelRow, abonent) {
+        const excelParts = splitPersonParts([
+            excelRow && excelRow.fam,
+            excelRow && excelRow.name,
+            excelRow && excelRow.otch,
+            excelRow && excelRow.fio
+        ].filter(Boolean).join(' '));
+        const dbParts = splitPersonParts([
+            abonent && abonent.fam,
+            abonent && abonent.name,
+            abonent && abonent.otch,
+            abonent && abonent.fio
+        ].filter(Boolean).join(' '));
+        if (!excelParts.length || !dbParts.length) return true;
+        const excelSurname = excelParts[0] || '';
+        const dbSurname = dbParts[0] || '';
+        if (excelSurname && dbSurname && excelSurname !== dbSurname) return false;
+        const dbSet = new Set(dbParts);
+        let hits = 0;
+        for (const part of excelParts) {
+            if (dbSet.has(part)) hits++;
+        }
+        return hits >= 1;
+    }
     function normRegnum(s) { return normStr(s).replace(/\s+/g, ''); }
     function normalizeOfficialRegnum(s) { return normStr(s).replace(/\s+/g, ' '); }
     function findOfficialRegnumDuplicate(db, officialRegnum, selfRegnum) {
@@ -633,6 +668,7 @@ window.PremisesAdmin = (function () {
     let state = { editingRegnum: null, busy: false };
     let navigationGuardsBound = false;
     let importOpenContext = null;
+    let importOpenContextBlocked = false;
 
     function setBusyUI(isBusy) {
         state.busy = !!isBusy;
@@ -947,6 +983,9 @@ window.PremisesAdmin = (function () {
             if (String(params.get('from') || '').trim() !== 'import') return null;
             return {
                 regnum: String(params.get('regnum') || '').trim(),
+                uid: String(params.get('uid') || '').trim(),
+                ls: String(params.get('ls') || '').trim(),
+                fam: String(params.get('fam') || '').trim(),
                 excelSquare: String(params.get('excelSquare') || '').trim(),
                 excelRow: String(params.get('excelRow') || '').trim()
             };
@@ -955,19 +994,123 @@ window.PremisesAdmin = (function () {
         }
     }
 
+    function getImportContextBlockedMessage() {
+        return 'Открытие квартиры из импорта заблокировано: объект не соответствует UID/active link/regnum строки Excel. Это защита от изменения чужой квартиры.';
+    }
+
+    function logPremisesImportContextCheck(ctx, result, reason) {
+        try {
+            console.log('[premises][import-context-check]', {
+                regnum: normStr(ctx && ctx.regnum),
+                uid: normStr(ctx && ctx.uid),
+                ls: normStr(ctx && ctx.ls),
+                fam: normStr(ctx && ctx.fam),
+                excelRow: normStr(ctx && ctx.excelRow),
+                result: result,
+                reason: reason || ''
+            });
+        } catch (e) {}
+    }
+
+    function checkImportOpenContext(ctx) {
+        const c = ctx || importOpenContext;
+        const db = window.AbonentsDB || {};
+        const reg = normStr(c && c.regnum);
+        if (!c) return { ok:true, result:'ok', reason:'NO_CONTEXT' };
+        if (!reg) return { ok:false, result:'blocked', reason:'NO_REGNUM' };
+        if (!normStr(c.uid)) return { ok:false, result:'blocked', reason:'NO_UID' };
+        const premise = db.premises && db.premises[reg];
+        if (!premise) return { ok:false, result:'blocked', reason:'PREMISE_NOT_FOUND' };
+        const link = activeLinkForRegnum(db, reg);
+        if (!link) return { ok:false, result:'blocked', reason:'ACTIVE_LINK_NOT_FOUND' };
+        const abonentId = normStr(link.abonentId);
+        const abonent = db.abonents && db.abonents[abonentId];
+        if (!abonent) return { ok:false, result:'blocked', reason:'ABONENT_NOT_FOUND' };
+        if (normStr(c.uid) && normStr(abonent.uid).toLowerCase() !== normStr(c.uid).toLowerCase()) return { ok:false, result:'blocked', reason:'UID_MISMATCH' };
+        if (normStr(c.ls) && db.abonents && db.abonents[normStr(c.ls)] && db.abonents[normStr(c.ls)] !== abonent) {
+            const otherUid = normStr(db.abonents[normStr(c.ls)] && db.abonents[normStr(c.ls)].uid);
+            if (otherUid && otherUid.toLowerCase() !== normStr(c.uid).toLowerCase()) return { ok:false, result:'blocked', reason:'LS_OTHER_UID' };
+        }
+        const lsMatch = !normStr(c.ls) || normStr(abonent.id) === normStr(c.ls) || abonentId === normStr(c.ls);
+        const fioMatch = softFioMatch({ fam:normStr(c.fam) }, abonent);
+        if (!lsMatch || !fioMatch) return { ok:true, result:'warning', reason:'UID_SOFT_MISMATCH', premise:premise, link:link, abonent:abonent };
+        return { ok:true, result:'ok', reason:'OK', premise:premise, link:link, abonent:abonent };
+    }
+
     function renderImportOpenWarning(premise) {
         if (!importOpenContext) return;
         const p = premise || (importOpenContext.regnum ? window.AbonentsDB?.premises?.[importOpenContext.regnum] : null);
         const dbSquare = (p?.square ?? '') === '' ? '—' : String(p.square);
         const excelSquare = importOpenContext.excelSquare || '—';
-        const rowPart = importOpenContext.excelRow ? ' Строка Excel: ' + importOpenContext.excelRow + '.' : '';
         setWarn(
-            'Эта квартира открыта из импорта Excel.' + rowPart +
-            ' Площадь в Excel: ' + excelSquare +
+            'Открыто обновление площади из импорта Excel. Строка Excel: ' + (importOpenContext.excelRow || '—') +
+            '. UID: ' + (importOpenContext.uid || '—') +
+            '. ЛС: ' + (importOpenContext.ls || '—') +
+            '. Площадь в Excel: ' + excelSquare +
             '. Текущая площадь в базе: ' + dbSquare +
-            '. При необходимости измените площадь вручную.',
-            false
+            '. Разрешено изменить только площадь.',
+            true
         );
+    }
+
+
+    function isPremiseIdentityFixed(p) {
+        if (!p) return false;
+        if (normStr(p.officialRegnum)) return true;
+        return !!p.regnum && !isTempRegnum(p.regnum);
+    }
+
+    function setDisabled(id, disabled) {
+        const el = q(id);
+        if (el) el.disabled = !!disabled;
+    }
+
+    function applyPremiseEditLocks(p) {
+        const isEdit = !!state.editingRegnum;
+        const onlySquare = isEdit && (importOpenContext || isPremiseIdentityFixed(p));
+        ['p_created','p_city','p_street','p_house','p_flat','p_official_regnum'].forEach(id => setDisabled(id, onlySquare));
+        if (onlySquare) {
+            setDisabled('p_regnum', true);
+            setDisabled('p_regnum_unknown', true);
+            if (normStr(p && p.officialRegnum)) setRegnumHint('Объект зафиксирован кадастровым номером. Разрешено менять только площадь.');
+            else setRegnumHint(importOpenContext ? 'Открыто из импорта Excel. Разрешено менять только площадь.' : 'Объект зафиксирован. Разрешено менять только площадь.');
+        } else {
+            ['p_created','p_city','p_street','p_house','p_flat','p_official_regnum'].forEach(id => setDisabled(id, false));
+        }
+        setDisabled('p_square', false);
+    }
+
+    function sameIdentityValue(a, b) {
+        return normStr(a) === normStr(b);
+    }
+
+    function changedIdentityFields(existing, f, reg) {
+        const changed = [];
+        if (!sameIdentityValue(existing.createdAt, f.createdAt)) changed.push('createdAt');
+        if (!sameIdentityValue(existing.city, f.city)) changed.push('city');
+        if (!sameIdentityValue(existing.street, f.street)) changed.push('street');
+        if (!sameIdentityValue(existing.house, f.house)) changed.push('house');
+        if (!sameIdentityValue(existing.flat, f.flat)) changed.push('flat');
+        if (!sameIdentityValue(existing.officialRegnum, f.officialRegnum)) changed.push('officialRegnum');
+        if (!sameIdentityValue(reg, f.regnum)) changed.push('regnum');
+        return changed;
+    }
+
+    function logIdentityEditBlocked(tag, regnum, changedFields) {
+        try { console.log(tag, { regnum: normStr(regnum), changedFields: changedFields || [] }); } catch (e) {}
+    }
+
+    function logImportSaveBlocked(ctx, reason) {
+        try {
+            console.log('[premises][import-save-blocked]', {
+                regnum: normStr(ctx && ctx.regnum),
+                uid: normStr(ctx && ctx.uid),
+                ls: normStr(ctx && ctx.ls),
+                fam: normStr(ctx && ctx.fam),
+                excelRow: normStr(ctx && ctx.excelRow),
+                reason: reason || ''
+            });
+        } catch (e) {}
     }
 
     function readForm() {
@@ -990,7 +1133,8 @@ window.PremisesAdmin = (function () {
         if (!el) return;
         el.textContent = msg || '';
         el.style.display = msg ? 'block' : 'none';
-        el.style.borderColor = isOk ? '#0a0' : '#000';
+        el.style.borderColor = isOk ? '#0a0' : '#b00020';
+        el.style.color = isOk ? '#0b6b0b' : '#b00020';
     }
 
     function setFormModeAdd() {
@@ -1002,9 +1146,11 @@ window.PremisesAdmin = (function () {
         if (chk) { chk.disabled = false; chk.checked = false; }
         q('p_regnum').disabled = false;
         setRegnumHint('Если regnum неизвестен — поставь галочку, создадим временный.');
+        applyPremiseEditLocks(null);
         const cb = q('btnCreateAbonentFromPremise');
         if (cb) cb.style.display = 'none';
-        if (importOpenContext) renderImportOpenWarning(null);
+        if (importOpenContext && importOpenContextBlocked) setWarn(getImportContextBlockedMessage(), false);
+        else if (importOpenContext) renderImportOpenWarning(null);
         else setWarn('', true);
         renderDupHints();
         refreshAddressDatalists(); // ✅ обновим подсказки
@@ -1026,6 +1172,16 @@ window.PremisesAdmin = (function () {
 
     function setFormModeEdit(regnum) {
         const db = window.AbonentsDB;
+        if (importOpenContext) {
+            const ctxCheck = checkImportOpenContext(importOpenContext);
+            logPremisesImportContextCheck(importOpenContext, ctxCheck.ok ? (ctxCheck.result || 'ok') : 'blocked', ctxCheck.reason);
+            if (!ctxCheck.ok || String(importOpenContext.regnum || '') !== String(regnum || '')) {
+                importOpenContextBlocked = true;
+                setFormModeAdd();
+                setWarn(getImportContextBlockedMessage(), false);
+                return;
+            }
+        }
         const p = db?.premises?.[regnum];
         state.editingRegnum = regnum;
         q('premFormTitle').textContent = 'Редактировать квартиру (объект)';
@@ -1040,9 +1196,11 @@ window.PremisesAdmin = (function () {
             chk.checked = isTempRegnum(p?.regnum);
         }
         fillForm(p);
+        applyPremiseEditLocks(p);
         const cb = q('btnCreateAbonentFromPremise');
         if (cb) cb.style.display = '';
         if (importOpenContext && (!importOpenContext.regnum || String(importOpenContext.regnum) === String(regnum))) renderImportOpenWarning(p);
+        else if (normStr(p && p.officialRegnum)) setWarn('Объект зафиксирован кадастровым номером. Разрешено менять только площадь.', true);
         else setWarn('', true);
         renderDupHints();
         refreshAddressDatalists(); // ✅ обновим подсказки
@@ -1230,12 +1388,40 @@ function onSave() {
         const db = window.AbonentsDB;
         const f = readForm();
 
+        if (importOpenContext) {
+            const ctxCheck = checkImportOpenContext(importOpenContext);
+            const editMatches = state.editingRegnum && String(state.editingRegnum) === String(importOpenContext.regnum || '');
+            logPremisesImportContextCheck(importOpenContext, (ctxCheck.ok && editMatches) ? (ctxCheck.result || 'ok') : 'blocked', ctxCheck.ok ? (editMatches ? ctxCheck.reason : 'EDIT_REGNUM_MISMATCH') : ctxCheck.reason);
+            if (!ctxCheck.ok || !editMatches) {
+                importOpenContextBlocked = true;
+                logImportSaveBlocked(importOpenContext, ctxCheck.ok ? 'EDIT_REGNUM_MISMATCH' : ctxCheck.reason);
+                setWarn('Сохранение заблокировано: квартира больше не соответствует строке импорта. Площадь не изменена.', false);
+                return;
+            }
+        }
+
         // regnum может быть неизвестен только на этапе создания (ставим галочку)
         const isUnknown = !!f.regnumUnknown;
         if (!state.editingRegnum) {
             if (!isUnknown && !f.regnum) { setWarn('Укажите regnum (регистрационный номер квартиры) или отметьте "regnum неизвестен".', false); return; }
         }
         if (!f.city || !f.street || !f.house || !f.flat) { setWarn('Заполните адрес: город, улица, дом, квартира.', false); return; }
+
+        if (state.editingRegnum) {
+            const existingForIdentityCheck = db.premises?.[state.editingRegnum];
+            if (!existingForIdentityCheck) { setWarn('Ошибка: объект не найден в базе.', false); return; }
+            const identityChanged = changedIdentityFields(existingForIdentityCheck, f, state.editingRegnum);
+            if (identityChanged.length && (importOpenContext || isPremiseIdentityFixed(existingForIdentityCheck))) {
+                if (normStr(existingForIdentityCheck.officialRegnum)) {
+                    logIdentityEditBlocked('[premises][fixed-object-edit-blocked]', state.editingRegnum, identityChanged);
+                    setWarn('Объект с кадастровым номером зафиксирован. Для изменения создайте новый объект.', false);
+                } else {
+                    logIdentityEditBlocked('[premises][identity-edit-blocked]', state.editingRegnum, identityChanged);
+                    setWarn('Изменение идентификационных данных квартиры запрещено. Для нового адреса или новой записи нужно закрыть старый объект и создать новый.', false);
+                }
+                return;
+            }
+        }
 
         // 🔒 CRITICAL: запрет одинаковых адресов при пересечении по времени ответственности.
         // Разрешено только если периоды стыкуются без пересечения.
@@ -1269,7 +1455,8 @@ function onSave() {
             const existing = db.premises?.[reg];
             if (!existing) { setWarn('Ошибка: объект не найден в базе.', false); return; }
 
-            const allowRegEdit = isTempRegnum(existing?.regnum) && !existing?.regnumLocked;
+            const allowRegEdit = isTempRegnum(existing?.regnum) && !existing?.regnumLocked && !importOpenContext && !normStr(existing?.officialRegnum);
+            const saveOnlySquare = !!importOpenContext || isPremiseIdentityFixed(existing);
 
             // 🔒 TEMP-* -> настоящий regnum (одноразовая фиксация)
             if (allowRegEdit && !isUnknown && f.regnum && String(f.regnum) !== String(reg)) {
@@ -1312,13 +1499,20 @@ function onSave() {
                 successMessage: 'Сохранено.',
                 affectedAbonentIds: collectAffectedAbonentIdsByRegnums(db, [reg]),
                 mutate: function () {
-                    db.premises[reg] = {
-                        ...existing,
-                        city: f.city, street: f.street, house: f.house, flat: f.flat,
-                        square: f.square, createdAt: f.createdAt,
-                        officialRegnum: f.officialRegnum,
-                        regnumType: f.officialRegnum ? 'official' : 'temp'
-                    };
+                    if (saveOnlySquare) {
+                        db.premises[reg] = {
+                            ...existing,
+                            square: f.square
+                        };
+                    } else {
+                        db.premises[reg] = {
+                            ...existing,
+                            city: f.city, street: f.street, house: f.house, flat: f.flat,
+                            square: f.square, createdAt: f.createdAt,
+                            officialRegnum: f.officialRegnum,
+                            regnumType: f.officialRegnum ? 'official' : 'temp'
+                        };
+                    }
                     syncLegacyFieldsForRegnum(db, reg);
                     return { ok: true, affectedAbonentIds: collectAffectedAbonentIdsByRegnums(db, [reg]) };
                 },
@@ -1488,10 +1682,13 @@ function onSave() {
         setFormModeAdd();
         renderTable();
         if (importOpenContext && importOpenContext.regnum) {
-            if (window.AbonentsDB?.premises?.[importOpenContext.regnum]) {
+            const ctxCheck = checkImportOpenContext(importOpenContext);
+            logPremisesImportContextCheck(importOpenContext, ctxCheck.ok ? (ctxCheck.result || 'ok') : 'blocked', ctxCheck.reason);
+            if (ctxCheck.ok) {
                 setFormModeEdit(importOpenContext.regnum);
             } else {
-                setWarn('Квартира из импорта не найдена по regnum: ' + importOpenContext.regnum, false);
+                importOpenContextBlocked = true;
+                setWarn(getImportContextBlockedMessage(), false);
             }
         }
 

@@ -363,3 +363,61 @@ th { background: #efefef; }
     box-sizing: border-box;
     min-width: 92px; /* чтобы 01.2026 выглядело ровно */
 }
+
+/* ================================
+      ЕДИНЫЙ ИНДИКАТОР ПРОЦЕССА
+   ================================ */
+.jkh-busy-overlay {
+    position: fixed;
+    top: 62px;
+    right: 18px;
+    display: none;
+    z-index: 5000;
+    pointer-events: none;
+}
+
+.jkh-busy-overlay.visible {
+    display: block;
+}
+
+.jkh-busy-panel {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-height: 34px;
+    max-width: 420px;
+    padding: 8px 12px;
+    border: 2px solid #000;
+    background: rgba(255, 255, 255, 0.96);
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.18);
+    font-size: 13px;
+    color: #000;
+    box-sizing: border-box;
+}
+
+.jkh-busy-spinner {
+    width: 20px;
+    height: 20px;
+    border: 3px solid #cfcfcf;
+    border-top-color: #000;
+    border-radius: 50%;
+    animation: jkhBusyRotate 0.8s linear infinite;
+    flex: 0 0 auto;
+}
+
+.jkh-busy-text {
+    line-height: 1.25;
+}
+
+@keyframes jkhBusyRotate {
+    to { transform: rotate(360deg); }
+}
+
+/* Import XLS UID provenance */
+.uid-empty {
+    color: #666;
+}
+.uid-created {
+    color: #0b6b0b;
+    font-weight: bold;
+}

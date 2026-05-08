@@ -56,6 +56,8 @@
 
     .action-btn { border:1px solid #000; background:#fff; padding:2px 6px; cursor:pointer; font-size:12px; margin-right:6px; }
     .action-btn[disabled]{ opacity:0.45; cursor:default; }
+    .uid-empty{ color:#666; }
+    .uid-created{ color:#0b6b0b; font-weight:bold; }
   </style>
 </head>
 
@@ -141,6 +143,46 @@ function $(id){ return document.getElementById(id); }
 function normStr(v){ return String(v==null?'':v).trim(); }
 function lowKey(s){
   return normStr(s).toLowerCase().replace(/ё/g,'е').replace(/[^\p{L}\p{N}\s]/gu,' ').replace(/\s+/g,' ').trim();
+}
+function normalizePersonText(v) {
+  return String(v || '')
+    .toLowerCase()
+    .replace(/ё/g, 'е')
+    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+function splitPersonParts(v) {
+  return normalizePersonText(v).split(' ').filter(Boolean);
+}
+function softFioMatch(excelRow, abonent) {
+  const excelParts = splitPersonParts([
+    excelRow && excelRow.fam,
+    excelRow && excelRow.name,
+    excelRow && excelRow.otch,
+    excelRow && excelRow.fio
+  ].filter(Boolean).join(' '));
+
+  const dbParts = splitPersonParts([
+    abonent && abonent.fam,
+    abonent && abonent.name,
+    abonent && abonent.otch,
+    abonent && abonent.fio
+  ].filter(Boolean).join(' '));
+
+  if (!excelParts.length || !dbParts.length) return true;
+
+  const excelSurname = excelParts[0] || '';
+  const dbSurname = dbParts[0] || '';
+  if (excelSurname && dbSurname && excelSurname !== dbSurname) return false;
+
+  const dbSet = new Set(dbParts);
+  let hits = 0;
+  for (const p of excelParts) {
+    if (dbSet.has(p)) hits++;
+  }
+
+  return hits >= 1;
 }
 function normNum(v){
   if (v==null) return NaN;
@@ -290,13 +332,73 @@ function isPaymentBeforeAbonentStart(ab, paymentPeriod){
   return payYm < startYm;
 }
 
+function ensureImportRowUidFields(row){
+  if (!row) return row;
+  if (typeof row.excelUid === 'undefined') row.excelUid = normStr(row.uid);
+  row.excelUid = normStr(row.excelUid);
+  row.createdUid = normStr(row.createdUid);
+  row.resolvedUid = normStr(row.resolvedUid);
+
+  // Совместимость со старыми draft: прежний код мог записать createdUid в row.uid.
+  // Если createdUid и uid совпадают, считаем, что UID был создан программой, а в Excel был пустой.
+  if (row.createdUid && normStr(row.uid) && normStr(row.uid).toLowerCase() === row.createdUid.toLowerCase()){
+    row.excelUid = '';
+    row.uid = '';
+  } else {
+    row.uid = row.excelUid;
+  }
+
+  if (!row.resolvedUid) row.resolvedUid = row.createdUid || row.excelUid;
+  return row;
+}
+function normalizeImportRowsUidFields(rows){
+  if (!Array.isArray(rows)) return [];
+  for (let i=0;i<rows.length;i++) ensureImportRowUidFields(rows[i]);
+  return rows;
+}
+function getExcelUid(row){
+  ensureImportRowUidFields(row);
+  return normStr(row && row.excelUid);
+}
+function getCreatedUid(row){
+  ensureImportRowUidFields(row);
+  return normStr(row && row.createdUid);
+}
+function getResolvedUid(row){
+  ensureImportRowUidFields(row);
+  return normStr((row && row.resolvedUid) || (row && row.createdUid) || (row && row.excelUid) || (row && row.uid));
+}
+function setCreatedUidForRow(row, uid){
+  if (!row) return;
+  ensureImportRowUidFields(row);
+  const clean = normStr(uid);
+  row.createdUid = clean;
+  row.resolvedUid = clean || row.excelUid;
+  row.uid = row.excelUid;
+}
+function setResolvedUidForRow(row, uid){
+  if (!row) return;
+  ensureImportRowUidFields(row);
+  row.resolvedUid = normStr(uid) || row.createdUid || row.excelUid;
+  row.uid = row.excelUid;
+}
+function formatUidPreviewHtml(rowOrPreview){
+  const excelUid = normStr(rowOrPreview && (rowOrPreview.excelUid || rowOrPreview.uid));
+  const createdUid = normStr(rowOrPreview && rowOrPreview.createdUid);
+  if (excelUid) return escHtml(excelUid);
+  if (createdUid){
+    return '<span class="uid-empty">В Excel UID пусто</span><br><span class="uid-created">Создан UID: ' + escHtml(createdUid) + '</span>';
+  }
+  return '—';
+}
+
 function makeContractError(code){
   const err = new Error(code);
   err.code = code;
   return err;
 }
 function buildServerPaymentRow(row, pay, ab){
-  const accountUid = normStr((ab && ab.uid) || row.uid);
+  const accountUid = normStr((ab && ab.uid) || getResolvedUid(row));
   if (!accountUid) throw makeContractError('ACCOUNT_UID_REQUIRED');
   const accountNumber = normStr((ab && ab.id) || row.ls);
   if (!accountNumber) throw makeContractError('ACCOUNT_NUMBER_REQUIRED');
@@ -472,6 +574,16 @@ function readFileYearFromA15(sheet) {
   }
 
   return year;
+}
+function getFileYearA15Error(sheet) {
+  const cell = sheet && sheet['A15'];
+  const raw = cell ? cell.v : null;
+
+  if (raw === null || raw === undefined || String(raw).trim() === '') {
+    return 'Ошибка: не указан год в A15';
+  }
+
+  return 'Ошибка: некорректный год в A15';
 }
 
 function getPaymentYearForValidation(row){
@@ -772,6 +884,9 @@ function saveImportResumeState(payload){
     next.allowCreate = !!$('optAllowCreate').checked;
     next.allowSquareUpdate = !!$('optAllowSquareUpdate').checked;
     next.parseMeta = parseMeta || null;
+    next.fileYearValidation = fileYearValidation || null;
+    next.fileYearBlockReason = fileYearBlockReason || '';
+    next.fileName = normStr(currentFileName);
     JKHStore.setJSON('import_xls_resume_v1', next, null);
   }catch(e){}
 }
@@ -795,6 +910,8 @@ function saveImportDraftState(){
       allowCreate: !!$('optAllowCreate').checked,
       allowSquareUpdate: !!$('optAllowSquareUpdate').checked,
       parseMeta: parseMeta || null,
+      fileYearValidation: fileYearValidation || null,
+      fileYearBlockReason: fileYearBlockReason || '',
       ownerId: getCurrentOwnerId(),
       fileName: normStr(currentFileName),
       savedAt: new Date().toISOString()
@@ -832,24 +949,38 @@ function tryResumeFromHash(){
   if (!resume) return false;
 
   if ((!Array.isArray(dataRows) || !dataRows.length) && Array.isArray(resume.dataRows) && resume.dataRows.length){
-    dataRows = resume.dataRows;
+    dataRows = normalizeImportRowsUidFields(resume.dataRows);
     primaryApplied = !!resume.primaryApplied;
     primaryBlocked = !!resume.primaryBlocked;
     mode = resume.mode === 'payments' ? 'payments' : 'primary';
     conflictDecision = resume.conflictDecision || {};
   }
   if (resume.parseMeta && typeof resume.parseMeta === 'object') parseMeta = resume.parseMeta;
+  if (resume.fileYearValidation && typeof resume.fileYearValidation === 'object') fileYearValidation = resume.fileYearValidation;
+  fileYearBlockReason = normStr(resume.fileYearBlockReason);
+  if (resume.fileName) currentFileName = normStr(resume.fileName);
+  if (!fileYearValidation && Array.isArray(dataRows) && dataRows.length){
+    fileYearBlockReason = 'Черновик устарел. Требуется повторная загрузка файла для проверки года.';
+  }
+  if (fileYearValidation) setFileYearAnalysis(fileYearValidation, currentFileName, '');
+  else if (fileYearBlockReason) setFileYearAnalysis(null, currentFileName, fileYearBlockReason);
   if (typeof resume.allowCreate !== 'undefined') $('optAllowCreate').checked = !!resume.allowCreate;
   if (typeof resume.allowSquareUpdate !== 'undefined') $('optAllowSquareUpdate').checked = !!resume.allowSquareUpdate;
 
   const db = getDB();
   const target = Number(resume.targetExcelRow) || 0;
+  let resumedUid = normStr(resume.createdUid || resume.uid);
   if (db && db.abonents && target){
     const row = dataRows.find(x => Number(x.excelRow)===target);
     if (row){
-      const found = findAbonentByRules(db, row);
-      if (found && found.abonent){
-        row.createdUid = normStr(found.abonent.uid || "");
+      if (!resumedUid){
+        const found = findAbonentByRules(db, row);
+        if (found && found.abonent){
+          resumedUid = normStr(found.abonent.uid || "");
+        }
+      }
+      if (resumedUid){
+        setCreatedUidForRow(row, resumedUid);
       }
     }
   }
@@ -860,8 +991,17 @@ function tryResumeFromHash(){
   }
   if (target){
     const row = dataRows.find(function(x){ return Number(x.excelRow)===target; });
-    const uidTxt = row && row.createdUid ? (' UID: ' + row.createdUid + '.') : '';
-    setImportStatus('Абонент создан. Строка Excel #' + target + ' восстановлена. Можно продолжить импорт.' + uidTxt, 'ok');
+    const uid = normStr((row && getResolvedUid(row)) || resumedUid);
+    const excelUid = row ? getExcelUid(row) : "";
+    if (uid){
+      if (excelUid){
+        setImportStatus('Абонент создан. Строка Excel: ' + target + '. UID: ' + uid + '.', 'ok');
+      } else {
+        setImportStatus('Абонент создан. Строка Excel: ' + target + '. UID создан в базе: ' + uid + '. В исходном Excel UID отсутствовал.', 'ok');
+      }
+    } else {
+      setImportStatus('Абонент создан. Строка Excel: ' + target + '. UID не найден — проверьте карточку абонента.', 'warn');
+    }
   }
   clearImportResumeState();
   history.replaceState(null, '', location.pathname + location.search);
@@ -1219,6 +1359,9 @@ const rowYear =
     rows.push({
       excelRow:r+1,
       uid:normStr(uidVal),
+      excelUid:normStr(uidVal),
+      createdUid:'',
+      resolvedUid:normStr(uidVal),
       ls:normStr(lsVal),
       fam:normStr(famVal),
       name:normStr(nameVal),
@@ -1260,11 +1403,122 @@ function createAbonentMinimal(db, desiredUid, ls, fam, name, otch, square){
   return { ok:true, uid: uid, abonent: db.abonents[lsKey] };
 }
 
+const UID_MISMATCH_MESSAGE = 'UID найден в базе, но обнаружен структурный конфликт UID/active link/regnum/ЛС. Проверьте абонента вручную.';
+const UID_SOFT_MISMATCH_TEXT = 'UID найден. ЛС/ФИО отличаются по формату — проверьте строку Excel. Открытие квартиры разрешено, потому что UID совпал.';
+
+function getExcelFio(row){
+  return [row && row.fam, row && row.name, row && row.otch, row && row.fio].map(normStr).filter(Boolean).join(' ');
+}
+function getDbFio(abonent){
+  return [abonent && abonent.fam, abonent && abonent.name, abonent && abonent.otch, abonent && abonent.fio].map(normStr).filter(Boolean).join(' ');
+}
+function lsMatchesUidHit(row, abonent, key){
+  const excelLs = normStr(row && row.ls);
+  if (!excelLs) return true;
+  return excelLs === normStr(abonent && abonent.id) || excelLs === normStr(key);
+}
+function uidSoftMatchInfo(row, abonent, key){
+  const lsMatch = lsMatchesUidHit(row, abonent, key);
+  const fioMatch = softFioMatch(row || {}, abonent || {});
+  return { lsMatch:lsMatch, fioMatch:fioMatch, ok:lsMatch && fioMatch };
+}
+function logUidSoftMismatch(row, uid, abonent, key, info){
+  try {
+    console.warn('[import_xls][uid-soft-mismatch]', {
+      excelRow: row && row.excelRow,
+      uid: normStr(uid),
+      excelLs: normStr(row && row.ls),
+      dbLs: normStr((abonent && abonent.id) || key),
+      excelFio: getExcelFio(row),
+      dbFio: getDbFio(abonent),
+      lsMatch: !!(info && info.lsMatch),
+      fioMatch: !!(info && info.fioMatch)
+    });
+  } catch (e) {}
+}
+
+function abonentMatchesExcelRow(abonent, row, requireUid){
+  if (!abonent || !row) return { ok:false, reason:'NO_ABONENT' };
+  const uidExcel = getExcelUid(row);
+  const uidDb = normStr(abonent.uid);
+  if (requireUid && uidExcel && uidDb !== uidExcel) return { ok:false, reason:'UID' };
+  const lsExcel = normStr(row.ls);
+  if (lsExcel && normStr(abonent.id) !== lsExcel) return { ok:false, reason:'LS' };
+  if (!softFioMatch(row, abonent)) return { ok:false, reason:'FIO' };
+  return { ok:true, reason:'OK' };
+}
+
+function logImportPremiseOpenCheck(row, regnum, result, reason){
+  try {
+    console.log('[import_xls][premise-open-check]', {
+      excelRow: row && row.excelRow,
+      uid: getResolvedUid(row),
+      ls: normStr(row && row.ls),
+      fam: normStr(row && row.fam),
+      regnum: normStr(regnum),
+      result: result,
+      reason: reason || ''
+    });
+  } catch (e) {}
+}
+
+const PREMISE_OPEN_BLOCK_MESSAGE = 'Нельзя открыть квартиру: UID/active link/regnum строки Excel не соответствует активной квартире в базе. Защита от изменения чужой квартиры.';
+
+function activeLinkForRegnumImport(db, regnum){
+  const r = normStr(regnum);
+  if (!r || !db || !Array.isArray(db.links)) return null;
+  for (let i=0;i<db.links.length;i++){
+    const l = db.links[i];
+    if (normStr(l && l.regnum) === r && !normStr(l && l.dateTo)) return l;
+  }
+  return null;
+}
+
+function verifyPremiseOpenContext(db, row, abonentHit, regnum){
+  const reg = normStr(regnum);
+  const uid = getResolvedUid(row);
+  if (!db) return { ok:false, result:'blocked', reason:'NO_DB' };
+  if (!uid) return { ok:false, result:'blocked', reason:'NO_UID' };
+  const uidHit = findAbonentByUid(db, uid);
+  if (!uidHit || !uidHit.abonent) return { ok:false, result:'blocked', reason:'UID_NOT_FOUND' };
+  const abonent = uidHit.abonent;
+  if (abonentHit && abonentHit.abonent && abonentHit.abonent !== abonent) return { ok:false, result:'blocked', reason:'ABONENT_CONTEXT_MISMATCH' };
+  if (!reg) return { ok:false, result:'blocked', reason:'NO_REGNUM' };
+  if (!db.premises || !db.premises[reg]) return { ok:false, result:'blocked', reason:'PREMISE_NOT_FOUND' };
+  const link = activeLinkForRegnumImport(db, reg);
+  if (!link) return { ok:false, result:'blocked', reason:'ACTIVE_LINK_NOT_FOUND' };
+  const linkAbonentId = normStr(link.abonentId);
+  const abonentKey = normStr(uidHit.key);
+  const abonentLs = normStr(abonent.id);
+  if (linkAbonentId !== abonentKey && linkAbonentId !== abonentLs) return { ok:false, result:'blocked', reason:'ACTIVE_LINK_ABONENT_MISMATCH' };
+  const soft = uidSoftMatchInfo(row, abonent, uidHit.key);
+  if (!soft.ok){
+    logUidSoftMismatch(row, uid, abonent, uidHit.key, soft);
+    return { ok:true, result:'warning', reason:'UID_SOFT_MISMATCH', warningCode:'UID_SOFT_MISMATCH', warningText:UID_SOFT_MISMATCH_TEXT, abonent:abonent, key:uidHit.key, premise:db.premises[reg], link:link };
+  }
+  return { ok:true, result:'ok', reason:'OK', abonent:abonent, key:uidHit.key, premise:db.premises[reg], link:link };
+}
+
 function findAbonentByRules(db, row){
-  const uid = normStr(row.uid), ls = normStr(row.ls), fam = normStr(row.fam);
+  const uid = getExcelUid(row), ls = normStr(row.ls), fam = normStr(row.fam);
   if (uid){
     const foundU = findAbonentByUid(db, uid);
-    if (foundU && foundU.abonent) return { type:'UID_OK', key:foundU.key, abonent:foundU.abonent, uid: normStr(foundU.abonent.uid || uid) };
+    if (foundU && foundU.abonent){
+      if (ls && db && db.abonents && db.abonents[ls] && db.abonents[ls] !== foundU.abonent){
+        const otherUid = normStr(db.abonents[ls] && db.abonents[ls].uid);
+        if (otherUid && otherUid.toLowerCase() !== uid.toLowerCase()){
+          return { type:'UID_STRUCTURAL_CONFLICT', msg:UID_MISMATCH_MESSAGE, key:foundU.key, abonent:foundU.abonent, uid: normStr(foundU.abonent.uid || uid), mismatchReason:'LS_OTHER_UID' };
+        }
+      }
+      const soft = uidSoftMatchInfo(row, foundU.abonent, foundU.key);
+      if (!soft.ok){
+        const reg = normStr(foundU.abonent.premiseRegnum || foundU.abonent.regnum);
+        logUidSoftMismatch(row, uid, foundU.abonent, foundU.key, soft);
+        logImportPremiseOpenCheck(row, reg, 'warning', 'UID_SOFT_MISMATCH');
+        return { type:'UID_SOFT_MISMATCH', msg:UID_SOFT_MISMATCH_TEXT, warningCode:'UID_SOFT_MISMATCH', warningText:UID_SOFT_MISMATCH_TEXT, key:foundU.key, abonent:foundU.abonent, uid: normStr(foundU.abonent.uid || uid), mismatchReason:'UID_SOFT_MISMATCH' };
+      }
+      return { type:'UID_OK', key:foundU.key, abonent:foundU.abonent, uid: normStr(foundU.abonent.uid || uid) };
+    }
     return { type:'UID_MISSING', msg:'UID из Excel не найден в базе. Нельзя применить первичку.' };
   }
   if (!ls || !fam) return { type:'NO_ID', msg:'Нет ЛС/Фамилии — идентификация невозможна.' };
@@ -1450,6 +1704,9 @@ function parseSheetToRows(sheet, fileName, sheetName){
       rows.push({
         excelRow: r + 1,
         uid: normStr(line[fieldMap[0]]),
+        excelUid: normStr(line[fieldMap[0]]),
+        createdUid: '',
+        resolvedUid: normStr(line[fieldMap[0]]),
         ls: normStr(line[fieldMap[1]]),
         fam: normStr(line[fieldMap[2]]),
         name: normStr(line[fieldMap[3]]),
@@ -1569,6 +1826,9 @@ function parseSheetToRows(sheet, fileName, sheetName){
         rows.push({
           excelRow: r + 1,
           uid: normStr(uidVal),
+          excelUid: normStr(uidVal),
+          createdUid: '',
+          resolvedUid: normStr(uidVal),
           ls: normStr(lsVal),
           fam: normStr(famVal),
           name: normStr(nameVal),
@@ -1678,21 +1938,24 @@ function evaluatePrimaryRow(db, row){
     status='ERROR'; critical=true; messages.push('Ошибки: "Общая площадь" должна быть числом > 0.');
   }
 
-  if (normStr(row.createdUid) && !normStr(row.uid)){
+  if (getCreatedUid(row) && !getExcelUid(row)){
     status='WARNING_CREATED';
     critical=false;
     messages.push('Абонент создан. Скопируйте UID в Excel и перезагрузите файл.');
-    messages.push('UID: ' + row.createdUid);
-    action = { type:'COPY_UID', uid: row.createdUid };
-  } else if (found.type === 'UID_MISSING' || found.type === 'NO_ID' || found.type === 'AMBIG'){
+    messages.push('Создан UID: ' + getCreatedUid(row));
+    action = { type:'COPY_UID', uid: getCreatedUid(row) };
+  } else if (found.type === 'UID_STRUCTURAL_CONFLICT' || found.type === 'UID_MISMATCH' || found.type === 'UID_MISSING' || found.type === 'NO_ID' || found.type === 'AMBIG'){
     status='ERROR'; critical=true; messages.push(found.msg);
   } else if (found.type === 'NOT_FOUND'){
     status='ERROR'; critical=true; messages.push(found.msg);
-    if (!normStr(row.uid)) action = { type:'ADD_ABONENT' };
+    if (!getExcelUid(row) && !getCreatedUid(row)) action = { type:'ADD_ABONENT' };
     if (!normStr(row.ls) || !normStr(row.fam)) messages.push('Для создания нужны непустые ФИО/ЛС.');
   } else if (found.type === 'FOUND_BY_LS_FAM'){
     status='UPDATED';
     warnings.push('Абонент найден по ЛС/Фамилии. UID будет присвоен при применении первички.');
+  } else if (found.type === 'UID_SOFT_MISMATCH'){
+    status='UPDATED';
+    warnings.push(UID_SOFT_MISMATCH_TEXT);
   }
 
   if (found.abonent){
@@ -1705,8 +1968,15 @@ function evaluatePrimaryRow(db, row){
       if ($('optAllowSquareUpdate').checked && mode==='primary' && premise){
         warnings.push('Площадь будет обновлена: было ' + dbSq + ', станет ' + row.square + '.');
       }
-      if (premise){
-        action = action || { type:'OPEN_PREMISE', regnum: reg, excelSquare: row.square, excelRow: row.excelRow };
+      if (premise && found.type !== 'UID_STRUCTURAL_CONFLICT' && found.type !== 'UID_MISMATCH'){
+        const openCheck = verifyPremiseOpenContext(db, row, found, reg);
+        logImportPremiseOpenCheck(row, reg, openCheck.ok ? (openCheck.result || 'ok') : 'blocked', openCheck.reason);
+        if (openCheck.ok){
+          if (openCheck.warningText) warnings.push(openCheck.warningText);
+          action = action || { type:'OPEN_PREMISE', regnum: reg, excelSquare: row.square, excelRow: row.excelRow, uid: getResolvedUid(row), ls: normStr(row.ls), fam: normStr(row.fam) };
+        } else {
+          status='ERROR'; critical=true; messages.push(PREMISE_OPEN_BLOCK_MESSAGE);
+        }
       }
     }
   }
@@ -1717,28 +1987,36 @@ function evaluatePrimaryRow(db, row){
 
 function evaluatePaymentsRow(db, row){
   const details = [];
+  if (row && row.paymentsImportStatus === 'applied'){
+    return { status:'APPLIED', critical:false, details:['Импорт выполнен: строка применена.'], conflicts:0, unresolved:0, adds:0, dups:0, found:paymentPairsCount(row), skipped:0 };
+  }
   let status='OK', critical=false;
-  const uid = normStr(row.uid);
+  const uid = getResolvedUid(row);
   const foundU = uid ? findAbonentByUid(db, uid) : null;
   const ab = foundU ? foundU.abonent : null;
 
   if (!uid){
-    return { status:'ERROR', critical:true, details:['Создайте абонента в программе и вставьте UID в Excel'], conflicts:0, unresolved:0, adds:0, dups:0, found:paymentPairsCount(row), skipped:0 };
+    return { status:'ERROR', critical:true, details:['Создайте абонента в программе; для созданного из импорта UID будет использован как внутренний createdUid/resolvedUid.'], conflicts:0, unresolved:0, adds:0, dups:0, found:paymentPairsCount(row), skipped:0 };
   }
   if (!ab){
     return { status:'ERROR', critical:true, details:['UID из Excel не найден в базе.'], conflicts:0, unresolved:0, adds:0, dups:0, found:paymentPairsCount(row), skipped:0 };
   }
+  const primaryFoundForPayment = findAbonentByRules(db, row);
+  if (primaryFoundForPayment && (primaryFoundForPayment.type === 'UID_STRUCTURAL_CONFLICT' || primaryFoundForPayment.type === 'UID_MISMATCH')){
+    return { status:'ERROR', critical:true, details:[primaryFoundForPayment.msg], conflicts:0, unresolved:1, adds:0, dups:0, found:paymentPairsCount(row), skipped:paymentPairsCount(row) };
+  }
+  if (primaryFoundForPayment && primaryFoundForPayment.type === 'UID_SOFT_MISMATCH'){
+    details.push(UID_SOFT_MISMATCH_TEXT);
+  }
   if (parseMeta.mode === 'strict-template-customer-2009'){
     const lsExcel = normStr(row.ls);
-    const famExcel = normStr(row.fam);
     const lsDb = normStr(ab.id);
-    const famDb = normStr(ab.fam || ab.surname || ab.last_name);
-    if ((lsExcel && lsDb && lsExcel !== lsDb) || (famExcel && famDb && famExcel !== famDb)){
-      return { status:'CONFLICT', critical:true, details:['Конфликт: UID найден, но ЛС/фамилия не совпадают. Строка не будет импортирована.'], conflicts:1, unresolved:1, adds:0, dups:0, found:paymentPairsCount(row), skipped:paymentPairsCount(row) };
+    if ((lsExcel && lsDb && lsExcel !== lsDb) || !softFioMatch(row, ab)){
+      details.push(UID_SOFT_MISMATCH_TEXT);
     }
   }
 
-  const uidKey = normStr(ab.uid || row.uid);
+  const uidKey = normStr(ab.uid || getResolvedUid(row));
   const existing = getPaymentsByUid(uidKey);
   let conflicts=0, unresolved=0, errs=0, dups=0, adds=0, found=0;
 
@@ -1813,17 +2091,20 @@ function buildPreview(){
   }
 
   let noUidCount = 0;
+  let createdUidCount = 0;
 
   for (let i=0;i<dataRows.length;i++){
     const r = dataRows[i];
-    if (!normStr(r.uid)) noUidCount++;
+    ensureImportRowUidFields(r);
+    if (!getExcelUid(r)) noUidCount++;
+    if (!getExcelUid(r) && getCreatedUid(r)) createdUidCount++;
 
     const p1 = evaluatePrimaryRow(db, r);
     if (p1.critical) primaryBlocked = true;
 
     if (mode === 'primary'){
       preview.push({
-        excelRow:r.excelRow, uid:normStr(r.uid), ls:normStr(r.ls), fio:toFio(r.fam,r.name,r.otch),
+        excelRow:r.excelRow, uid:getExcelUid(r), excelUid:getExcelUid(r), createdUid:getCreatedUid(r), resolvedUid:getResolvedUid(r), ls:normStr(r.ls), fio:toFio(r.fam,r.name,r.otch),
         square:asSquare(r.square), paymentsBrief: formatPaymentListHtml(r),
         status:p1.status, critical:p1.critical, action:p1.action, details:p1.details
       });
@@ -1834,7 +2115,7 @@ function buildPreview(){
         const st = rowStatusMap[normStr(rr.status)] || 'UPDATED';
         preview.push({
           excelRow: rr.excel_row_ref || r.excelRow,
-          uid:normStr(rr.account_uid || r.uid),
+          uid:getExcelUid(r), excelUid:getExcelUid(r), createdUid:getCreatedUid(r), resolvedUid:normStr(rr.account_uid || getResolvedUid(r)),
           ls:normStr(rr.account_number || r.ls),
           fio:toFio(r.fam,r.name,r.otch),
           square:asSquare(r.square),
@@ -1847,7 +2128,7 @@ function buildPreview(){
         const p2 = evaluatePaymentsRow(db, r);
         p2.details.push('По строке LS ' + (normStr(r.ls) || '—') + ' найдено ' + paymentPairsCount(r) + ' платежей.');
         preview.push({
-          excelRow:r.excelRow, uid:normStr(r.uid), ls:normStr(r.ls), fio:toFio(r.fam,r.name,r.otch),
+          excelRow:r.excelRow, uid:getExcelUid(r), excelUid:getExcelUid(r), createdUid:getCreatedUid(r), resolvedUid:getResolvedUid(r), ls:normStr(r.ls), fio:toFio(r.fam,r.name,r.otch),
           square:asSquare(r.square), paymentsBrief: formatPaymentListHtml(r),
           status:p2.status, critical:p2.critical, details:p2.details
         });
@@ -1855,12 +2136,14 @@ function buildPreview(){
     }
   }
 
-  $('uidHint').innerHTML = noUidCount > 0 ? 'Найдено строк без UID: <b>' + noUidCount + '</b>. Нажмите "Создать абонента" в нужной строке.' : 'Строк без UID не найдено.';
+  $('uidHint').innerHTML = noUidCount > 0
+    ? 'Найдено строк без UID в Excel: <b>' + noUidCount + '</b>.' + (createdUidCount ? ' Создано программой: <b>' + createdUidCount + '</b>.' : ' Нажмите "Создать абонента" в нужной строке.')
+    : 'Строк без UID в Excel не найдено.';
   renderPreview();
 }
 
-function statusRU(s){ return ({OK:'ОК', ERROR:'ОШИБКА', UPDATED:'ПРЕДУПРЕЖДЕНИЕ', WARNING_CREATED:'СОЗДАН', SKIP_DUPLICATE:'ДУБЛИКАТ', CONFLICT:'КОНФЛИКТ'})[s] || s; }
-function statusClass(s){ return ({OK:'status-ok', ERROR:'status-err', UPDATED:'status-warn', WARNING_CREATED:'status-created', SKIP_DUPLICATE:'status-skip', CONFLICT:'status-conflict'})[s] || ''; }
+function statusRU(s){ return ({OK:'ОК', ERROR:'ОШИБКА', UPDATED:'ПРЕДУПРЕЖДЕНИЕ', WARNING_CREATED:'СОЗДАН', SKIP_DUPLICATE:'ДУБЛИКАТ', CONFLICT:'КОНФЛИКТ', APPLIED:'ПРИМЕНЕНО'})[s] || s; }
+function statusClass(s){ return ({OK:'status-ok', ERROR:'status-err', UPDATED:'status-warn', WARNING_CREATED:'status-created', SKIP_DUPLICATE:'status-skip', CONFLICT:'status-conflict', APPLIED:'status-ok'})[s] || ''; }
 
 function renderPreview(){
   const body = $('previewBody');
@@ -1883,17 +2166,17 @@ function renderPreview(){
         '<span class="small ' + (allow?'':'danger') + '">' + (allow?'':'Включи "Разрешить создание абонента"') + '</span>';
     }
     if (mode==='primary' && r.action && r.action.type==='COPY_UID'){
-      actionsHTML += '<button class="action-btn" data-act="copy_uid" data-uid="' + escHtml(r.action.uid || '') + '">Скопировать UID</button>';
+      actionsHTML += '<button type="button" class="action-btn" data-act="copy_uid" data-excelrow="' + escHtml(r.excelRow || '') + '" data-uid="' + escHtml(r.action.uid || '') + '">Скопировать UID</button>';
     }
     if (mode==='primary' && r.action && r.action.type==='OPEN_PREMISE'){
-      actionsHTML += '<button class="action-btn" data-act="open_premise" data-regnum="' + escHtml(r.action.regnum || '') + '" data-excelsquare="' + escHtml(r.action.excelSquare || '') + '" data-excelrow="' + escHtml(r.action.excelRow || '') + '">Открыть квартиру для изменения площади</button>';
+      actionsHTML += '<button class="action-btn" data-act="open_premise" data-regnum="' + escHtml(r.action.regnum || '') + '" data-uid="' + escHtml(r.action.uid || '') + '" data-ls="' + escHtml(r.action.ls || '') + '" data-fam="' + escHtml(r.action.fam || '') + '" data-excelsquare="' + escHtml(r.action.excelSquare || '') + '" data-excelrow="' + escHtml(r.action.excelRow || '') + '">Открыть квартиру для изменения площади</button>';
     }
 
     if (mode==='payments' && r.status==='CONFLICT'){
       const db = getDB();
       const rr = dataRows.find(x => x.excelRow===r.excelRow);
-      const foundU = (rr && rr.uid && db) ? findAbonentByUid(db, rr.uid) : null;
-      const uid = foundU && foundU.abonent ? normStr(foundU.abonent.uid || rr.uid) : '';
+      const foundU = (rr && getResolvedUid(rr) && db) ? findAbonentByUid(db, getResolvedUid(rr)) : null;
+      const uid = foundU && foundU.abonent ? normStr(foundU.abonent.uid || getResolvedUid(rr)) : '';
       if (uid){
         rr.payments.forEach(function(p){
           const amount = normNum(p.amount);
@@ -1928,7 +2211,7 @@ function renderPreview(){
     const tr = document.createElement('tr');
     tr.className = statusClass(r.status);
     tr.innerHTML = '<td class="mono">' + r.excelRow + '</td>' +
-      '<td class="mono">' + (r.uid||'') + '</td>' +
+      '<td class="mono">' + formatUidPreviewHtml(r) + '</td>' +
       '<td class="mono">' + (r.ls||'') + '</td>' +
       '<td>' + (r.fio||'') + '</td>' +
       '<td class="mono">' + (r.square!=='' ? r.square : '') + '</td>' +
@@ -1997,7 +2280,7 @@ function hasPrimaryCritical(){ return preview.some(r => r.critical && r.status==
 function hasPaymentsCritical(){ return preview.some(r => r.critical && r.status==='ERROR'); }
 function hasRowsWithUid(){
   for (let i=0;i<dataRows.length;i++){
-    if (normStr(dataRows[i] && dataRows[i].uid)) return true;
+    if (getResolvedUid(dataRows[i])) return true;
   }
   return false;
 }
@@ -2036,6 +2319,7 @@ function getPaymentsToApplyCount(){
   if (!db || !db.abonents) return 0;
   let adds = 0;
   for (let i=0;i<dataRows.length;i++){
+    if (dataRows[i] && dataRows[i].paymentsImportStatus === 'applied') continue;
     const p = evaluatePaymentsRow(db, dataRows[i]);
     adds += Number(p.adds || 0);
   }
@@ -2051,8 +2335,8 @@ function updateStateLine(){
 
 function setButtons(){
   const hasFile = !!$('fileInput').files && $('fileInput').files.length>0;
-  $('btnParse').disabled = !hasFile;
-  $('btnReset').disabled = !dataRows.length && !preview.length;
+  $('btnParse').disabled = !hasFile || importApplyBusy;
+  $('btnReset').disabled = importApplyBusy || (!dataRows.length && !preview.length);
 
   $('btnModePrimary').classList.toggle('active', mode==='primary');
   $('btnModePayments').classList.toggle('active', mode==='payments');
@@ -2061,6 +2345,7 @@ function setButtons(){
   const parsed = dataRows.length > 0;
   const fileYearBlocked = isImportBlockedByFileYear();
 
+  $('btnModePrimary').disabled = importApplyBusy;
   $('btnModePayments').disabled = !canEnterPaymentsMode() || importApplyBusy || fileYearBlocked;
   const canApplyPrimary = (mode==='primary' && parsed && canWrite && !primaryBlocked && !importApplyBusy && !isApplyBlockedByTemplateMode() && !fileYearBlocked);
   $('btnApplyPrimary').disabled = !canApplyPrimary;
@@ -2086,7 +2371,11 @@ function setButtons(){
 
 function updateRestoredFileInfo(){
   const file = normStr(currentFileName);
-  $('restoredFileLine').textContent = (restoredFromDraft && file) ? ('Восстановлен предпросмотр из файла: ' + file) : '';
+  if (restoredFromDraft){
+    $('restoredFileLine').textContent = 'Предпросмотр восстановлен. Исходный файл не выбран, но можно продолжать работу.' + (file ? (' Файл: ' + file) : '');
+  } else {
+    $('restoredFileLine').textContent = '';
+  }
 }
 function clearRuntimeState(){
   preview=[];
@@ -2114,6 +2403,10 @@ function resetPreview(){
 }
 
 async function onParse(){
+  if (importApplyBusy) return;
+  setImportBusy(true, 'Чтение Excel…');
+  if (window.JKHBusy && typeof JKHBusy.show === 'function') JKHBusy.show('Чтение Excel…');
+  try{
   $('writeWarning').innerHTML = '';
   clearFileYearAnalysis();
   refreshWho();
@@ -2139,12 +2432,12 @@ async function onParse(){
   if (fileYear === null){
     clearRuntimeState();
     currentFileName = parsedFileName;
-    fileYearBlockReason = 'Ошибка: не указан год в A15';
+    fileYearBlockReason = getFileYearA15Error(sheet);
     setFileYearAnalysis(null, parsedFileName, fileYearBlockReason);
     setImportStatus(fileYearBlockReason + '. Импорт заблокирован.', 'err');
-    $('summaryLine').textContent = 'Импорт заблокирован: не указан год в A15';
-    $('errorsBox').innerHTML = '<span class="danger">Ошибка: не указан год в A15</span>';
-    $('previewBody').innerHTML = '<tr><td colspan="7" class="small danger">Импорт заблокирован: не указан год в A15</td></tr>';
+    $('summaryLine').textContent = 'Импорт заблокирован: проверка года A15 не пройдена';
+    $('errorsBox').innerHTML = '<span class="danger">' + escHtml(fileYearBlockReason) + '</span>';
+    $('previewBody').innerHTML = '<tr><td colspan="7" class="small danger">Импорт заблокирован: проверка года A15 не пройдена</td></tr>';
     updateRestoredFileInfo();
     updateStateLine();
     setButtons();
@@ -2157,7 +2450,7 @@ async function onParse(){
     return;
   }
 
-  dataRows = res.rows;
+  dataRows = normalizeImportRowsUidFields(res.rows);
   const paymentRowsForYear = collectPaymentRowsForYearValidation(dataRows);
   fileYearValidation = validatePaymentYears(paymentRowsForYear, fileYear);
   fileYearBlockReason = fileYearValidation.invalidYearCount > 0 ? 'Обнаружены некорректные даты оплат' : '';
@@ -2172,20 +2465,25 @@ async function onParse(){
   restoredFromDraft = false;
   buildPreview();
   saveImportDraftState();
+  } finally {
+    setImportBusy(false);
+    if (window.JKHBusy && typeof JKHBusy.hide === 'function') JKHBusy.hide();
+  }
 }
 
 async function applyPrimary(){
   if (importApplyBusy) return;
   if (isImportBlockedByFileYear()){ setImportStatus((fileYearBlockReason || 'Импорт заблокирован проверкой года A15') + '.', 'err'); setButtons(); return; }
   if (!canWriteOrExplain()) return setButtons();
-  setImportBusy(true, 'Идёт запись на сервер... Не закрывайте страницу.');
+  setImportBusy(true, 'Применение первички…');
+  if (window.JKHBusy && typeof JKHBusy.show === 'function') JKHBusy.show('Применение первички…');
 
   const db = getDB();
-  if (!db || !db.abonents){ setImportStatus('База абонентов не загружена.', 'err'); setImportBusy(false); return; }
+  if (!db || !db.abonents){ setImportStatus('База абонентов не загружена.', 'err'); setImportBusy(false); if (window.JKHBusy && typeof JKHBusy.hide === 'function') JKHBusy.hide(); return; }
 
   mode='primary';
   buildPreview();
-  if (primaryBlocked){ setImportStatus('Шаг 1 заблокирован: есть критические ошибки первички.', 'err'); return; }
+  if (primaryBlocked){ setImportStatus('Шаг 1 заблокирован: есть критические ошибки первички.', 'err'); setImportBusy(false); if (window.JKHBusy && typeof JKHBusy.hide === 'function') JKHBusy.hide(); return; }
 
   const localSnapshot = { db: deepCloneJSONSafe(getDB()) };
 
@@ -2196,21 +2494,31 @@ async function applyPrimary(){
   for (let i=0;i<dataRows.length;i++){
     const row = dataRows[i];
     const found = findAbonentByRules(db, row);
-    if (found.type==='UID_MISSING' || found.type==='NO_ID' || found.type==='AMBIG' || found.type==='NOT_FOUND') continue;
+    if (found.type==='UID_STRUCTURAL_CONFLICT' || found.type==='UID_MISMATCH' || found.type==='UID_MISSING' || found.type==='NO_ID' || found.type==='AMBIG' || found.type==='NOT_FOUND') continue;
     if (!Number.isFinite(row.square) || row.square<=0) continue;
 
     let a = found.abonent;
+    if (!getExcelUid(row)){
+      const applyMatch = abonentMatchesExcelRow(a, row, false);
+      if (!applyMatch.ok){
+        logImportPremiseOpenCheck(row, normStr(a && (a.premiseRegnum || a.regnum)), 'blocked', 'APPLY_BLOCK_' + applyMatch.reason);
+        setImportStatus(UID_MISMATCH_MESSAGE, 'err');
+        continue;
+      }
+    }
 
     // Канон: ключуем по ЛС, UID — поле внутри записи.
-    // Если UID не указан в Excel, но у абонента его ещё нет — генерируем (чтобы шаг 2 мог работать по UID).
-    if (!normStr(row.uid) && found.type==='FOUND_BY_LS_FAM'){
+    // Если UID не указан в Excel, но у абонента его ещё нет — генерируем системный UID.
+    // row.uid/excelUid не затираем: это значение из Excel, а не UID, созданный программой.
+    if (!getExcelUid(row) && found.type==='FOUND_BY_LS_FAM'){
       if (!normStr(a.uid)){
         a.uid = genUID();
         uidAssigned++;
       }
-      row.uid = normStr(a.uid);
-    } else if (normStr(row.uid)) {
-      a.uid = normStr(row.uid);
+      setCreatedUidForRow(row, normStr(a.uid));
+    } else if (getExcelUid(row)) {
+      a.uid = getExcelUid(row);
+      setResolvedUidForRow(row, a.uid);
     }
 
     a.id = normStr(row.ls) || a.id;
@@ -2246,17 +2554,20 @@ async function applyPrimary(){
     await rollbackAfterFlushError(localSnapshot, { reason: 'import_apply_primary_flush_error', reload: true });
   } finally {
     setImportBusy(false);
+    if (window.JKHBusy && typeof JKHBusy.hide === 'function') JKHBusy.hide();
   }
 }
 
 async function applyPayments(){
   if (importApplyBusy) return;
   if (isImportBlockedByFileYear()){ setImportStatus((fileYearBlockReason || 'Импорт заблокирован проверкой года A15') + '.', 'err'); setButtons(); return; }
-  setImportBusy(true, "Идёт запись на сервер... Не закрывайте страницу.");
+  setImportBusy(true, 'Добавление платежей…');
+  if (window.JKHBusy && typeof JKHBusy.show === 'function') JKHBusy.show('Добавление платежей…');
   const db = getDB();
-  if (!db || !db.abonents){ setImportStatus('База абонентов не загружена.', 'err'); setImportBusy(false); return; }
+  if (!db || !db.abonents){ setImportStatus('База абонентов не загружена.', 'err'); setImportBusy(false); if (window.JKHBusy && typeof JKHBusy.hide === 'function') JKHBusy.hide(); return; }
 
   const rows = [];
+  const appliedExcelRows = {};
   const contractMessages = {
     ACCOUNT_UID_REQUIRED: 'Импорт остановлен: отсутствует UID (account_uid).',
     ACCOUNT_NUMBER_REQUIRED: 'Импорт остановлен: отсутствует лицевой счёт (account_number).',
@@ -2269,7 +2580,9 @@ async function applyPayments(){
   };
   for (let i=0;i<dataRows.length;i++){
     const row = dataRows[i];
-    const uid = normStr(row.uid);
+    const primaryFoundForPayment = findAbonentByRules(db, row);
+    if (primaryFoundForPayment && (primaryFoundForPayment.type === 'UID_STRUCTURAL_CONFLICT' || primaryFoundForPayment.type === 'UID_MISMATCH')) continue;
+    const uid = getResolvedUid(row);
     const foundU = uid ? findAbonentByUid(db, uid) : null;
     const ab = foundU ? foundU.abonent : null;
     const accountUid = uid || '';
@@ -2289,12 +2602,14 @@ async function applyPayments(){
           ' раньше даты начала расчёта абонента (' + getAbonentStartDate(ab) + ').',
           'err'
         );
+        setImportBusy(false);
+        if (window.JKHBusy && typeof JKHBusy.hide === 'function') JKHBusy.hide();
         return;
       }
       const previewRow = evaluatePaymentsRow(db, row);
       if (!previewRow || previewRow.status==='ERROR') continue;
-      const paymentUid = normStr(ab && ab.uid ? ab.uid : row.uid);
-      if (!paymentUid){ setImportStatus('Для импорта платежей нужен UID.', 'err'); return; }
+      const paymentUid = normStr(ab && ab.uid ? ab.uid : getResolvedUid(row));
+      if (!paymentUid){ setImportStatus('Для импорта платежей нужен UID.', 'err'); setImportBusy(false); if (window.JKHBusy && typeof JKHBusy.hide === 'function') JKHBusy.hide(); return; }
       const existing = getPaymentsByUid(paymentUid);
       const isDup = existing.some(function(x){
         const ym = getLedgerYearMonth(x);
@@ -2313,21 +2628,27 @@ async function applyPayments(){
           ' раньше даты начала расчёта абонента (' + getAbonentStartDate(ab) + ').',
           'err'
         );
+        setImportBusy(false);
+        if (window.JKHBusy && typeof JKHBusy.hide === 'function') JKHBusy.hide();
         return;
       }
       try{
         rows.push(buildServerPaymentRow(row, pay, ab));
+        appliedExcelRows[String(row.excelRow)] = true;
       }catch(e){
         const code = normStr(e && e.code) || 'UNKNOWN';
         const msg = contractMessages[code] || ('Импорт остановлен: ошибка контракта ' + code + '.');
         setImportStatus(msg, 'err');
+        setImportBusy(false);
+        if (window.JKHBusy && typeof JKHBusy.hide === 'function') JKHBusy.hide();
         return;
       }
     }
   }
 
-  if (!rows.length){ setImportStatus('Нет платежей для добавления.', 'err'); return; }
+  if (!rows.length){ setImportStatus('Нет платежей для добавления.', 'err'); setImportBusy(false); if (window.JKHBusy && typeof JKHBusy.hide === 'function') JKHBusy.hide(); return; }
 
+  let appliedCount = 0;
   try{
     const uploaded = await apiJson('/api/import/payments/upload_rows', {
       method:'POST',
@@ -2338,7 +2659,7 @@ async function applyPayments(){
     await apiJson('/api/import/' + serverPaymentBatchId + '/validate', { method:'POST' });
     const applied = await apiJson('/api/import/' + serverPaymentBatchId + '/apply', { method:'POST' });
     const s = applied.summary || {};
-    const appliedCount = Number(s.applied_count || 0);
+    appliedCount = Number(s.applied_count || 0);
     const skippedCount = Number(s.skipped_count || 0);
     const duplicateCount = Number(s.duplicate_count || 0);
     const conflictCount = Number(s.conflict_count || 0);
@@ -2380,16 +2701,28 @@ async function applyPayments(){
     return;
   } finally {
     setImportBusy(false);
+    if (window.JKHBusy && typeof JKHBusy.hide === 'function') JKHBusy.hide();
   }
-  clearRuntimeState();
+  let appliedRowsCount = 0;
+  for (let i=0;i<dataRows.length;i++){
+    const key = String(dataRows[i] && dataRows[i].excelRow);
+    if (appliedExcelRows[key]){
+      dataRows[i].paymentsImportStatus = 'applied';
+      dataRows[i].paymentsAppliedAt = new Date().toISOString();
+      appliedRowsCount++;
+    }
+  }
   serverPaymentBatchId = 0;
   serverPaymentRows = [];
   clearImportResumeState();
-  clearImportDraftState();
-  $('summaryLine').textContent = 'Импорт завершён. Предпросмотр очищен';
-  $('errorsBox').innerHTML='';
-  $('uidHint').innerHTML='';
-  $('previewBody').innerHTML = '<tr><td colspan="7" class="small">Нет предпросмотра</td></tr>';
+  mode = 'payments';
+  buildPreview();
+  saveImportDraftState();
+  let remainingRows = 0;
+  for (let i=0;i<dataRows.length;i++){
+    if (!(dataRows[i] && dataRows[i].paymentsImportStatus === 'applied')) remainingRows++;
+  }
+  setImportStatus('Импорт выполнен. Добавлено: ' + appliedCount + '. Осталось: ' + remainingRows + '.', 'ok');
   updateRestoredFileInfo();
   updateStateLine();
   setButtons();
@@ -2407,12 +2740,18 @@ $('previewBody').addEventListener('click', function(ev){
     const db = getDB();
     if (!row || !db || !db.abonents) return;
 
-    if (normStr(row.uid)){ setImportStatus('В строке уже указан UID.', 'err'); return; }
+    if (getExcelUid(row)){ setImportStatus('В строке уже указан UID.', 'err'); return; }
+    if (getCreatedUid(row)){ setImportStatus('Абонент для строки уже создан. UID создан в базе: ' + getCreatedUid(row) + '.', 'info'); return; }
     if (!normStr(row.ls) || !normStr(row.fam)){ setImportStatus('Нельзя создать абонента: пустые ЛС/ФИО.', 'err'); return; }
     if (!Number.isFinite(row.square) || row.square<=0){ setImportStatus('Нельзя создать абонента: "Общая площадь" должна быть > 0.', 'err'); return; }
 
+    if (window.JKHBusy && typeof JKHBusy.show === 'function') JKHBusy.show('Создание абонента…');
     const draftOK = saveDraftNewAbonent(row);
-    if (!draftOK){ setImportStatus('Не удалось сохранить draft для создания абонента.', 'err'); return; }
+    if (!draftOK){
+      if (window.JKHBusy && typeof JKHBusy.hide === 'function') JKHBusy.hide();
+      setImportStatus('Не удалось сохранить draft для создания абонента.', 'err');
+      return;
+    }
 
     saveImportResumeState({
       dataRows: dataRows,
@@ -2429,12 +2768,58 @@ $('previewBody').addEventListener('click', function(ev){
   }
 
   if (act === 'copy_uid'){
-    const uid = normStr(btn.getAttribute('data-uid'));
-    if (!uid) return;
-    if (navigator.clipboard && navigator.clipboard.writeText){
-      navigator.clipboard.writeText(uid).then(function(){ setImportStatus('UID скопирован: ' + uid, 'ok'); });
+    const excelRow = Number(btn.getAttribute('data-excelrow')) || 0;
+    const row = dataRows.find(function(x){ return Number(x.excelRow) === excelRow; }) || null;
+    const uid = normStr((row && (getCreatedUid(row) || getResolvedUid(row))) || btn.getAttribute('data-uid'));
+
+    function logCopyCreatedUid(ok, reason){
+      console.log('[import_xls][copy-created-uid]', {
+        excelRow: excelRow,
+        uid: uid,
+        ok: !!ok,
+        reason: normStr(reason)
+      });
+    }
+    function showCopyResult(ok, reason){
+      logCopyCreatedUid(ok, reason);
+      if (ok) setImportStatus('UID скопирован: ' + uid, 'ok');
+      else setImportStatus('Не удалось скопировать UID. Скопируйте вручную: ' + uid, 'err');
+    }
+    function fallbackCopyUid(){
+      let textarea = null;
+      try {
+        textarea = document.createElement('textarea');
+        textarea.value = uid;
+        textarea.setAttribute('readonly', 'readonly');
+        textarea.style.position = 'fixed';
+        textarea.style.left = '-9999px';
+        textarea.style.top = '0';
+        document.body.appendChild(textarea);
+        textarea.focus();
+        textarea.select();
+        const ok = document.execCommand && document.execCommand('copy');
+        showCopyResult(!!ok, ok ? 'fallback' : 'fallback_exec_false');
+      } catch (e) {
+        showCopyResult(false, 'fallback_error:' + (e && e.message ? e.message : e));
+      } finally {
+        if (textarea && textarea.parentNode) textarea.parentNode.removeChild(textarea);
+      }
+    }
+
+    if (!uid){
+      logCopyCreatedUid(false, 'uid_empty');
+      setImportStatus('Не удалось скопировать UID. UID пуст.', 'err');
+      return;
+    }
+    if (window.navigator && window.navigator.clipboard && window.navigator.clipboard.writeText){
+      window.navigator.clipboard.writeText(uid).then(function(){
+        showCopyResult(true, 'navigator.clipboard.writeText');
+      }).catch(function(e){
+        logCopyCreatedUid(false, 'clipboard_error:' + (e && e.message ? e.message : e));
+        fallbackCopyUid();
+      });
     } else {
-      setImportStatus('UID: ' + uid, 'info');
+      fallbackCopyUid();
     }
     return;
   }
@@ -2452,9 +2837,20 @@ $('previewBody').addEventListener('click', function(ev){
       targetExcelRow: Number(btn.getAttribute('data-excelrow')) || 0
     });
     saveImportDraftState();
+    const found = findAbonentByRules(getDB(), row);
+    const openCheck = verifyPremiseOpenContext(getDB(), row, found, reg);
+    if (!openCheck.ok){
+      logImportPremiseOpenCheck(row, reg, 'blocked', openCheck.reason);
+      setImportStatus(PREMISE_OPEN_BLOCK_MESSAGE, 'err');
+      return;
+    }
+    logImportPremiseOpenCheck(row, reg, openCheck.result || 'ok', openCheck.reason || 'OK');
     location.href =
-      'premises.html?regnum=' + encodeURIComponent(reg) +
-      '&from=import' +
+      'premises.html?from=import' +
+      '&regnum=' + encodeURIComponent(reg) +
+      '&uid=' + encodeURIComponent(normStr(getResolvedUid(row) || btn.getAttribute('data-uid') || '')) +
+      '&ls=' + encodeURIComponent(normStr(row.ls || btn.getAttribute('data-ls') || '')) +
+      '&fam=' + encodeURIComponent(normStr(row.fam || btn.getAttribute('data-fam') || '')) +
       '&excelSquare=' + encodeURIComponent(row.square || btn.getAttribute('data-excelsquare') || '') +
       '&excelRow=' + encodeURIComponent(row.excelRow || btn.getAttribute('data-excelrow') || '');
     return;
@@ -2470,6 +2866,7 @@ $('previewBody').addEventListener('click', function(ev){
 });
 
 (function init(){
+  try {
   refreshWho();
 
   const draft = loadImportDraftState();
@@ -2477,7 +2874,7 @@ $('previewBody').addEventListener('click', function(ev){
     const draftOwner = normStr(draft.ownerId);
     const currentOwner = getCurrentOwnerId();
     if (!draftOwner || draftOwner === currentOwner){
-      dataRows = draft.dataRows;
+      dataRows = normalizeImportRowsUidFields(draft.dataRows);
       mode = draft.mode === 'payments' ? 'payments' : 'primary';
       primaryApplied = !!draft.primaryApplied;
       primaryBlocked = !!draft.primaryBlocked;
@@ -2486,8 +2883,18 @@ $('previewBody').addEventListener('click', function(ev){
       if (typeof draft.allowSquareUpdate !== 'undefined') $('optAllowSquareUpdate').checked = !!draft.allowSquareUpdate;
       if (draft.parseMeta && typeof draft.parseMeta === 'object') parseMeta = draft.parseMeta;
       currentFileName = normStr(draft.fileName);
+      if (draft.fileYearValidation && typeof draft.fileYearValidation === 'object'){
+        fileYearValidation = draft.fileYearValidation;
+        fileYearBlockReason = normStr(draft.fileYearBlockReason);
+        setFileYearAnalysis(fileYearValidation, currentFileName, '');
+      } else {
+        fileYearValidation = null;
+        fileYearBlockReason = 'Черновик устарел. Требуется повторная загрузка файла для проверки года.';
+        setFileYearAnalysis(null, currentFileName, fileYearBlockReason);
+      }
       restoredFromDraft = true;
       buildPreview();
+      setImportStatus(fileYearBlockReason || 'Предпросмотр восстановлен. Исходный файл не выбран, но можно продолжать работу.', fileYearBlockReason ? 'err' : 'info');
     }
   }
 
@@ -2506,6 +2913,10 @@ $('previewBody').addEventListener('click', function(ev){
   $('btnApplyPayments').addEventListener('click', applyPayments);
 
   setButtons();
+  } finally {
+    if (window.JKHBusy && typeof JKHBusy.hideAll === 'function') JKHBusy.hideAll();
+    else if (window.JKHBusy && typeof JKHBusy.hide === 'function') JKHBusy.hide();
+  }
 })();
 </script>
 
