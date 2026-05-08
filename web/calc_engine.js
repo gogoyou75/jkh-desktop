@@ -128,6 +128,69 @@
     throw err;
   }
 
+
+  const TRANSFER_FATAL_MESSAGE = "Перенос долга остановлен: не удалось надёжно рассчитать долг старого абонента.";
+
+  function makeTransferFatalError(code, key, details, cause){
+    const err = new Error(TRANSFER_FATAL_MESSAGE);
+    err.code = code || "DEBT_TRANSFER_ABORTED";
+    err.key = key || "";
+    err.details = details || {};
+    err.cause = cause;
+    return err;
+  }
+
+  function isTransferFatalError(e){
+    const code = String(e && e.code || "");
+    return code === "FROZEN_DEBT_CALC_FAILED" ||
+      code === "FROZEN_DEBT_JSON_INVALID" ||
+      code === "TRANSFER_BALANCE_JSON_INVALID" ||
+      code === "TRANSFER_BALANCE_MISSING" ||
+      code === "DEBT_TRANSFER_ABORTED";
+  }
+
+  function logTransferFatal(err){
+    const code = String(err && err.code || "");
+    const tag = (code === "FROZEN_DEBT_CALC_FAILED") ? "[fatal][frozen-debt-calc-failed]" :
+      "[fatal][transfer-balance-invalid]";
+    console.error(tag, {
+      code: code,
+      key: err && err.key || "",
+      details: err && err.details || {},
+      error: err && err.cause
+    });
+  }
+
+  function throwTransferFatal(code, key, details, cause){
+    const err = makeTransferFatalError(code, key, details, cause);
+    logTransferFatal(err);
+    throw err;
+  }
+
+  function parseTransferJson(raw, code, key){
+    try{
+      const obj = JSON.parse(raw);
+      if (!obj || typeof obj !== "object" || Array.isArray(obj)) {
+        throw new Error("transfer payload is not an object");
+      }
+      return obj;
+    }catch(e){
+      throwTransferFatal(code, key, { reason: "JSON_INVALID" }, e);
+    }
+  }
+
+  function validateDebtAmounts(obj, code, key){
+    const p = Number(obj && obj.principal);
+    const pen = Number(obj && obj.penalty);
+    if (!Number.isFinite(p) || !Number.isFinite(pen)) {
+      throwTransferFatal(code, key, { reason: "DEBT_AMOUNTS_INVALID" });
+    }
+    if (r2(p) === 0 && r2(pen) === 0 && obj.success !== true) {
+      throwTransferFatal(code, key, { reason: "ZERO_DEBT_NOT_PROVEN" });
+    }
+    return { principal: r2(p), penalty: r2(pen) };
+  }
+
   function storeGetRaw(key){
     if (!isDataReady()) return null;
     if (!(window.JKHStore && typeof window.JKHStore.getRaw === "function")) return null;
@@ -476,64 +539,75 @@
   }
 
   function calculateFrozenDebt(abonentId, freezeISO){
+    const d = parseDateAnyToDate(String(freezeISO||"").trim());
+    if (!d) {
+      throwTransferFatal("FROZEN_DEBT_CALC_FAILED", "", { abonentId: String(abonentId || ""), freezeISO: String(freezeISO || ""), reason: "FREEZE_DATE_INVALID" });
+    }
+
     try{
-      const d = parseDateAnyToDate(String(freezeISO||"").trim());
-      if (!d) return null;
       const rows = loadPaymentsForAbonent(String(abonentId));
       const tot = calcTotalsAsOfAdjusted(rows, d, {
         abonentId: String(abonentId),
         applyAdvanceOffset: true,
         allowNegativePrincipal: false
       });
+      const principal = Number(tot && tot.principal);
+      const penalty = Number(tot && tot.penaltyDebt);
+      if (!Number.isFinite(principal) || !Number.isFinite(penalty)) {
+        throw new Error("calculated totals are invalid");
+      }
       return {
-        principal: r2(toNum(tot?.principal)),
-        penalty: r2(toNum(tot?.penaltyDebt)),
+        success: true,
+        principal: r2(principal),
+        penalty: r2(penalty),
         calculatedAt: toISODateString(d)
       };
     }catch(e){
-      if (e && e.code === "LEDGER_JSON_INVALID") throw e;
-      return null;
+      if (isTransferFatalError(e)) throw e;
+      throwTransferFatal("FROZEN_DEBT_CALC_FAILED", "", { abonentId: String(abonentId || ""), freezeISO: toISODateString(d), causeCode: String(e && e.code || "") }, e);
     }
   }
 
   function getTransferredDebtOnDate(abonentId, asOfDate){
-    try{
-      const id = String(abonentId || getAbonentIdFromUrl());
-      const asOfISO = toISODateString(startOfDay(asOfDate));
+    const id = String(abonentId || getAbonentIdFromUrl());
+    const asOfISO = toISODateString(startOfDay(asOfDate));
 
-      // 1) Канон: transfer_balance_v1 (обрабатывается в calcTotalsAsOfAdjusted через getTransferBalance)
-      // Здесь только альтернативная схема:
+    // 1) Канон: transfer_balance_v1 (обрабатывается в calcTotalsAsOfAdjusted через getTransferBalance)
+    // Здесь только альтернативная схема:
 
-      const transferRaw = storeGetRaw("jkh_transfer_to_v1:" + id);
-      if (!transferRaw) return null;
-      const tr = JSON.parse(transferRaw);
-      if (!tr || !tr.fromAbonentId) return null;
+    const transferKey = "jkh_transfer_to_v1:" + id;
+    const transferRaw = storeGetRaw(transferKey);
+    if (!transferRaw) return null;
+    const tr = parseTransferJson(transferRaw, "TRANSFER_BALANCE_JSON_INVALID", transferKey);
+    if (!tr.fromAbonentId) return null;
 
-      const transferDate = String(tr.transferDate || "").trim();
-      if (!/^\d{4}-\d{2}-\d{2}$/.test(transferDate)) return null;
-      if (asOfISO < transferDate) return null;
+    const transferDate = String(tr.transferDate || "").trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(transferDate)) return null;
+    if (asOfISO < transferDate) return null;
 
-      const fromId = String(tr.fromAbonentId || "").trim();
-      if (!fromId) return null;
+    const fromId = String(tr.fromAbonentId || "").trim();
+    if (!fromId) return null;
 
-      const freezeISO = String(storeGetRaw("jkh_freeze_to_v1:" + fromId) || "").trim();
-      if (!/^\d{4}-\d{2}-\d{2}$/.test(freezeISO)) return null;
+    const freezeISO = String(storeGetRaw("jkh_freeze_to_v1:" + fromId) || "").trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(freezeISO)) {
+      throwTransferFatal("TRANSFER_BALANCE_MISSING", transferKey, { reason: "FREEZE_DATE_MISSING", fromAbonentId: fromId });
+    }
 
-      const debtRaw = storeGetRaw("jkh_frozen_debt_v1:" + fromId + ":" + freezeISO);
-      if (!debtRaw) return null;
-      const debt = JSON.parse(debtRaw);
-      if (!debt || typeof debt !== "object") return null;
+    const debtKey = "jkh_frozen_debt_v1:" + fromId + ":" + freezeISO;
+    const debtRaw = storeGetRaw(debtKey);
+    if (!debtRaw) throwTransferFatal("TRANSFER_BALANCE_MISSING", debtKey, { reason: "FROZEN_DEBT_MISSING", fromAbonentId: fromId, freezeISO: freezeISO });
+    const debt = parseTransferJson(debtRaw, "FROZEN_DEBT_JSON_INVALID", debtKey);
+    const amounts = validateDebtAmounts(debt, "FROZEN_DEBT_JSON_INVALID", debtKey);
 
-      return {
-        principal: r2(toNum(debt.principal)),
-        penalty: r2(toNum(debt.penalty)),
-        transferDate: transferDate,
-        fromAbonentId: fromId,
-        freezeDate: freezeISO,
-        regnum: String(tr.regnum || "").trim(),
-        mode: String(tr.transferMode || tr.mode || "WITH_DEBT")
-      };
-    }catch(e){ return null; }
+    return {
+      principal: amounts.principal,
+      penalty: amounts.penalty,
+      transferDate: transferDate,
+      fromAbonentId: fromId,
+      freezeDate: freezeISO,
+      regnum: String(tr.regnum || "").trim(),
+      mode: String(tr.transferMode || tr.mode || "WITH_DEBT")
+    };
   }
 
   function freezeKey(abonentId){
@@ -548,69 +622,75 @@
   }
 
   function getTransferBalance(abonentId){
-    try{
-      const id = String(abonentId || getAbonentIdFromUrl());
-      const a = window.AbonentsDB?.abonents?.[id] || null;
-      const regnum = String(a?.premiseRegnum || a?.regnum || "").trim();
-      // regnum может отсутствовать (например, при открытии карточки до привязки) — тогда перенос по канону не найдём.
-      // Но альтернативная схема transfer_to_v1 может вернуть regnum внутри объекта — попробуем и её.
-      let keyRegnum = regnum;
+    const id = String(abonentId || getAbonentIdFromUrl());
+    const a = window.AbonentsDB?.abonents?.[id] || null;
+    const regnum = String(a?.premiseRegnum || a?.regnum || "").trim();
+    // regnum может отсутствовать (например, при открытии карточки до привязки) — тогда перенос по канону не найдём.
+    // Но альтернативная схема transfer_to_v1 может вернуть regnum внутри объекта — попробуем и её.
+    let keyRegnum = regnum;
 
-      // ---- 1) Канон: jkh_transfer_balance_v1:<to>:<regnum>
-      if (keyRegnum){
-        const key = "jkh_transfer_balance_v1:" + id + ":" + keyRegnum;
-        const raw = storeGetRaw(key);
-        if (raw){
-          const obj = JSON.parse(raw);
-          if (obj && typeof obj === "object"){
-            const startDate = String(obj.startDate || "").trim();
-            if (/^\d{4}-\d{2}-\d{2}$/.test(startDate)){
-              return {
-                startDate,
-                principal: toNum(obj.principal),
-                penalty: toNum(obj.penalty),
-                regnum: String(obj.regnum || keyRegnum),
-                fromAbonentId: String(obj.fromAbonentId || ""),
-                mode: String(obj.mode || "")
-              };
-            }
-          }
+    // ---- 1) Канон: jkh_transfer_balance_v1:<to>:<regnum>
+    if (keyRegnum){
+      const key = "jkh_transfer_balance_v1:" + id + ":" + keyRegnum;
+      const raw = storeGetRaw(key);
+      if (raw){
+        const obj = parseTransferJson(raw, "TRANSFER_BALANCE_JSON_INVALID", key);
+        const startDate = String(obj.startDate || "").trim();
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(startDate)) {
+          throwTransferFatal("TRANSFER_BALANCE_JSON_INVALID", key, { reason: "START_DATE_INVALID" });
         }
+        const amounts = validateDebtAmounts(obj, "TRANSFER_BALANCE_JSON_INVALID", key);
+        return {
+          startDate,
+          principal: amounts.principal,
+          penalty: amounts.penalty,
+          regnum: String(obj.regnum || keyRegnum),
+          fromAbonentId: String(obj.fromAbonentId || ""),
+          mode: String(obj.mode || "")
+        };
       }
+    }
 
-      // ---- 2) Совместимость: jkh_transfer_to_v1:<to> + jkh_frozen_debt_v1:<from>:<freezeISO>
-      const trRaw = storeGetRaw("jkh_transfer_to_v1:" + id);
-      if (!trRaw) return null;
-      const tr = JSON.parse(trRaw);
-      if (!tr || typeof tr !== "object") return null;
+    // ---- 2) Совместимость: jkh_transfer_to_v1:<to> + jkh_frozen_debt_v1:<from>:<freezeISO>
+    const transferKey = "jkh_transfer_to_v1:" + id;
+    const trRaw = storeGetRaw(transferKey);
+    if (!trRaw) return null;
+    const tr = parseTransferJson(trRaw, "TRANSFER_BALANCE_JSON_INVALID", transferKey);
 
-      const startDate = String(tr.transferDate || tr.startDate || "").trim();
-      if (!/^\d{4}-\d{2}-\d{2}$/.test(startDate)) return null;
+    const startDate = String(tr.transferDate || tr.startDate || "").trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(startDate)) return null;
 
-      const fromId = String(tr.fromAbonentId || "").trim();
-      if (!fromId) return null;
+    const fromId = String(tr.fromAbonentId || "").trim();
+    if (!fromId) return null;
 
-      const freezeISO = String(storeGetRaw("jkh_freeze_to_v1:" + fromId) || "").trim();
-      if (!/^\d{4}-\d{2}-\d{2}$/.test(freezeISO)) return null;
+    const mode = String(tr.transferMode || tr.mode || "WITH_DEBT");
+    if (mode === "WITH_DEBT" && keyRegnum) {
+      throwTransferFatal("TRANSFER_BALANCE_MISSING", "jkh_transfer_balance_v1:" + id + ":" + keyRegnum, { reason: "CANON_TRANSFER_BALANCE_MISSING", abonentId: id, regnum: keyRegnum });
+    }
 
-      const debtRaw = storeGetRaw("jkh_frozen_debt_v1:" + fromId + ":" + freezeISO);
-      if (!debtRaw) return null;
+    const freezeISO = String(storeGetRaw("jkh_freeze_to_v1:" + fromId) || "").trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(freezeISO)) {
+      throwTransferFatal("TRANSFER_BALANCE_MISSING", transferKey, { reason: "FREEZE_DATE_MISSING", fromAbonentId: fromId });
+    }
 
-      const debt = JSON.parse(debtRaw);
-      if (!debt || typeof debt !== "object") return null;
+    const debtKey = "jkh_frozen_debt_v1:" + fromId + ":" + freezeISO;
+    const debtRaw = storeGetRaw(debtKey);
+    if (!debtRaw) throwTransferFatal("TRANSFER_BALANCE_MISSING", debtKey, { reason: "FROZEN_DEBT_MISSING", fromAbonentId: fromId, freezeISO: freezeISO });
 
-      const regFromTr = String(tr.regnum || "").trim();
-      if (!keyRegnum && regFromTr) keyRegnum = regFromTr;
+    const debt = parseTransferJson(debtRaw, "FROZEN_DEBT_JSON_INVALID", debtKey);
+    const amounts = validateDebtAmounts(debt, "FROZEN_DEBT_JSON_INVALID", debtKey);
 
-      return {
-        startDate,
-        principal: toNum(debt.principal),
-        penalty: toNum(debt.penalty),
-        regnum: keyRegnum,
-        fromAbonentId: fromId,
-        mode: String(tr.transferMode || tr.mode || "WITH_DEBT")
-      };
-    }catch(e){ return null; }
+    const regFromTr = String(tr.regnum || "").trim();
+    if (!keyRegnum && regFromTr) keyRegnum = regFromTr;
+
+    return {
+      startDate,
+      principal: amounts.principal,
+      penalty: amounts.penalty,
+      regnum: keyRegnum,
+      fromAbonentId: fromId,
+      mode: mode
+    };
   }
 
   function minDateObj(a,b){

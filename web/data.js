@@ -1029,6 +1029,72 @@
     }catch(e){ return ""; }
   }
 
+
+  var DEBT_TRANSFER_FATAL_MESSAGE = "Перенос долга остановлен: не удалось надёжно рассчитать долг старого абонента.";
+
+  function __makeDebtTransferError(code, details, cause){
+    var err = new Error(DEBT_TRANSFER_FATAL_MESSAGE);
+    err.code = code || "DEBT_TRANSFER_ABORTED";
+    err.details = details || {};
+    err.cause = cause;
+    return err;
+  }
+
+  function __isDebtTransferError(e){
+    var code = String(e && e.code || "");
+    return code === "FROZEN_DEBT_CALC_FAILED" ||
+      code === "FROZEN_DEBT_JSON_INVALID" ||
+      code === "TRANSFER_BALANCE_JSON_INVALID" ||
+      code === "TRANSFER_BALANCE_MISSING" ||
+      code === "DEBT_TRANSFER_ABORTED" ||
+      code === "LEDGER_JSON_INVALID";
+  }
+
+  function __logDebtTransferAbort(err){
+    try{
+      var code = String(err && err.code || "DEBT_TRANSFER_ABORTED");
+      if (code === "FROZEN_DEBT_CALC_FAILED" || code === "LEDGER_JSON_INVALID") {
+        console.error("[fatal][frozen-debt-calc-failed]", { code: code, details: err && err.details || {}, error: err && (err.cause || err) });
+      }
+      console.error("[debt-transfer][aborted]", { code: code, details: err && err.details || {}, error: err && (err.cause || err) });
+    }catch(e){}
+  }
+
+  function __abortDebtTransfer(code, details, cause){
+    throw __makeDebtTransferError(code, details, cause);
+  }
+
+  function __parseDebtJson(raw, code, key){
+    try{
+      if (!raw) __abortDebtTransfer(code, { key: key, reason: "MISSING" });
+      var obj = JSON.parse(raw);
+      if (!obj || typeof obj !== "object" || Array.isArray(obj)) {
+        __abortDebtTransfer(code, { key: key, reason: "NOT_OBJECT" });
+      }
+      return obj;
+    }catch(e){
+      if (__isDebtTransferError(e)) throw e;
+      __abortDebtTransfer(code, { key: key, reason: "JSON_INVALID" }, e);
+    }
+  }
+
+  function __validateFrozenDebt(obj, code, key){
+    var principal = Number(obj && obj.principal);
+    var penalty = Number(obj && obj.penalty);
+    if (!Number.isFinite(principal) || !Number.isFinite(penalty)) {
+      __abortDebtTransfer(code, { key: key, reason: "DEBT_AMOUNTS_INVALID" });
+    }
+    if (principal === 0 && penalty === 0 && obj.success !== true) {
+      __abortDebtTransfer(code, { key: key, reason: "ZERO_DEBT_NOT_PROVEN" });
+    }
+    return {
+      success: obj.success === true,
+      principal: principal,
+      penalty: penalty,
+      calculatedAt: String(obj.calculatedAt || "")
+    };
+  }
+
   function prepareDebtTransfer(oldAbonentId, newAbonentId, regnum, transferDate, transferMode){
     if (!Data.ensureWriteOrExplain()) return false;
 
@@ -1045,34 +1111,56 @@
       var freezeISO = __isoYesterday(td);
       if (!freezeISO) return false;
 
-      // 1) Рассчитать и заморозить долг старого (principal + penalty)
       var frozenDebt = null;
-      if (window.JKHCalcEngine && typeof window.JKHCalcEngine.calculateFrozenDebt === "function"){
-        frozenDebt = window.JKHCalcEngine.calculateFrozenDebt(oldId, freezeISO);
-      }else if (window.JKHCalcEngine && typeof window.JKHCalcEngine.calcTotalsAsOfAdjusted === "function"){
-        try{
-          var rows = (window.JKHCalcEngine.loadPaymentsForAbonent)
-            ? window.JKHCalcEngine.loadPaymentsForAbonent(oldId)
-            : (function(){
-                try{ var raw=_getProjectRaw("payments_"+oldId); return raw?JSON.parse(raw):[]; }catch(e){ return []; }
-              })();
-          var d = new Date(String(freezeISO)+"T12:00:00");
-          var tot = window.JKHCalcEngine.calcTotalsAsOfAdjusted(rows, d, { abonentId: oldId, applyAdvanceOffset:true, allowNegativePrincipal:false });
-          frozenDebt = { principal: Number(tot?.principal)||0, penalty: Number(tot?.penaltyDebt)||0, calculatedAt: freezeISO };
-        }catch(e){}
-      }
+      var frozenKey = "jkh_frozen_debt_v1:" + oldId + ":" + freezeISO;
 
-      if (frozenDebt){
-        _setProjectRaw("jkh_frozen_debt_v1:" + oldId + ":" + freezeISO, JSON.stringify({
-          principal: Number(frozenDebt.principal)||0,
-          penalty: Number(frozenDebt.penalty)||0,
-          calculatedAt: String(frozenDebt.calculatedAt||freezeISO)
+      // 1) В режиме WITH_DEBT долг старого должен быть рассчитан явно.
+      if (mode === "WITH_DEBT"){
+        if (window.JKHCalcEngine && typeof window.JKHCalcEngine.calculateFrozenDebt === "function"){
+          try{
+            frozenDebt = window.JKHCalcEngine.calculateFrozenDebt(oldId, freezeISO);
+          }catch(calcFrozenErr){
+            if (__isDebtTransferError(calcFrozenErr) && calcFrozenErr.code === "FROZEN_DEBT_CALC_FAILED") throw calcFrozenErr;
+            __abortDebtTransfer("FROZEN_DEBT_CALC_FAILED", { oldAbonentId: oldId, freezeISO: freezeISO }, calcFrozenErr);
+          }
+        }else if (window.JKHCalcEngine && typeof window.JKHCalcEngine.calcTotalsAsOfAdjusted === "function"){
+          try{
+            var rows = (window.JKHCalcEngine.loadPaymentsForAbonent)
+              ? window.JKHCalcEngine.loadPaymentsForAbonent(oldId)
+              : (function(){
+                  var raw = _getProjectRaw("payments_" + oldId);
+                  if (!raw) return [];
+                  var arr = JSON.parse(raw);
+                  if (!Array.isArray(arr)) throw new Error("payments ledger is not an array");
+                  return arr;
+                })();
+            var d = new Date(String(freezeISO)+"T12:00:00");
+            var tot = window.JKHCalcEngine.calcTotalsAsOfAdjusted(rows, d, { abonentId: oldId, applyAdvanceOffset:true, allowNegativePrincipal:false });
+            var principal = Number(tot && tot.principal);
+            var penalty = Number(tot && tot.penaltyDebt);
+            if (!Number.isFinite(principal) || !Number.isFinite(penalty)) throw new Error("calculated totals are invalid");
+            frozenDebt = { success: true, principal: principal, penalty: penalty, calculatedAt: freezeISO };
+          }catch(calcErr){
+            __abortDebtTransfer("FROZEN_DEBT_CALC_FAILED", { oldAbonentId: oldId, freezeISO: freezeISO }, calcErr);
+          }
+        }else{
+          __abortDebtTransfer("FROZEN_DEBT_CALC_FAILED", { oldAbonentId: oldId, freezeISO: freezeISO, reason: "CALC_ENGINE_UNAVAILABLE" });
+        }
+
+        frozenDebt = __validateFrozenDebt(frozenDebt, "FROZEN_DEBT_CALC_FAILED", frozenKey);
+        if (frozenDebt.calculatedAt && frozenDebt.calculatedAt !== freezeISO) {
+          __abortDebtTransfer("FROZEN_DEBT_CALC_FAILED", { key: frozenKey, reason: "CALCULATED_AT_MISMATCH", calculatedAt: frozenDebt.calculatedAt, freezeISO: freezeISO });
+        }
+
+        _setProjectRaw(frozenKey, JSON.stringify({
+          success: true,
+          principal: frozenDebt.principal,
+          penalty: frozenDebt.penalty,
+          calculatedAt: freezeISO
         }));
-      } else {
-        // если не смогли рассчитать — всё равно пишем нули, чтобы система была детерминированной
-        _setProjectRaw("jkh_frozen_debt_v1:" + oldId + ":" + freezeISO, JSON.stringify({
-          principal: 0, penalty: 0, calculatedAt: freezeISO
-        }));
+
+        var frozenRaw = _getProjectRaw(frozenKey);
+        frozenDebt = __validateFrozenDebt(__parseDebtJson(frozenRaw, "FROZEN_DEBT_JSON_INVALID", frozenKey), "FROZEN_DEBT_JSON_INVALID", frozenKey);
       }
 
       // 2) Установить дату заморозки расчёта у старого
@@ -1089,18 +1177,18 @@
         }));
 
         // 3a) КАНОН: transfer_balance для движка (по regnum)
-        try{
-          var debtRaw = _getProjectRaw("jkh_frozen_debt_v1:" + oldId + ":" + freezeISO);
-          var dd = debtRaw ? JSON.parse(debtRaw) : { principal:0, penalty:0 };
-          _setProjectRaw("jkh_transfer_balance_v1:" + newId + ":" + rn, JSON.stringify({
-            startDate: td,
-            principal: Number(dd?.principal)||0,
-            penalty: Number(dd?.penalty)||0,
-            regnum: rn,
-            fromAbonentId: oldId,
-            mode: "WITH_DEBT"
-          }));
-        }catch(e){}
+        var transferBalanceKey = "jkh_transfer_balance_v1:" + newId + ":" + rn;
+        _setProjectRaw(transferBalanceKey, JSON.stringify({
+          success: true,
+          startDate: td,
+          principal: frozenDebt.principal,
+          penalty: frozenDebt.penalty,
+          regnum: rn,
+          fromAbonentId: oldId,
+          mode: "WITH_DEBT"
+        }));
+
+        __validateFrozenDebt(__parseDebtJson(_getProjectRaw(transferBalanceKey), "TRANSFER_BALANCE_JSON_INVALID", transferBalanceKey), "TRANSFER_BALANCE_JSON_INVALID", transferBalanceKey);
       } else {
         // NO_DEBT: снимаем возможные хвосты переноса на нового (на всякий случай)
         try{ _removeProjectRaw("jkh_transfer_to_v1:" + newId); }catch(e){}
@@ -1124,6 +1212,9 @@
 
       return true;
     }catch(e){
+      var err = __isDebtTransferError(e) ? e : __makeDebtTransferError("DEBT_TRANSFER_ABORTED", {}, e);
+      __logDebtTransferAbort(err);
+      try{ alert(DEBT_TRANSFER_FATAL_MESSAGE); }catch(alertErr){}
       return false;
     }
   }
