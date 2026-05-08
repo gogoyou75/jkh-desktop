@@ -598,6 +598,72 @@ class ImportPaymentsE2ETest(unittest.TestCase):
             ).first()
             self.assertIsNone(kv)
 
+
+    def test_validate_import_with_corrupted_existing_ledger_returns_ledger_json_invalid(self):
+        with app_module.app.app_context():
+            app_module.db.session.add(app_module.KVStore(
+                owner=self.owner_id,
+                k=f"payments_{self.account_uid}",
+                v="{broken-json",
+            ))
+            app_module.db.session.commit()
+
+        with patch.object(app_module, "_import_schema_error_response", return_value=None):
+            upload_resp = self._upload_rows()
+            self.assertEqual(upload_resp.status_code, 200)
+            batch_id = upload_resp.json["batch"]["id"]
+
+            validate_resp = self.client.post(f"/api/import/{batch_id}/validate")
+            self.assertEqual(validate_resp.status_code, 200)
+            self.assertEqual(validate_resp.json["batch"]["rows_invalid"], 1)
+
+        with app_module.app.app_context():
+            row = app_module.ImportBatchRow.query.filter_by(batch_id=batch_id).first()
+            self.assertIsNotNone(row)
+            self.assertEqual(row.status, "invalid")
+            self.assertEqual(row.reason_code, "LEDGER_JSON_INVALID")
+            ledger_row = app_module.KVStore.query.filter_by(
+                owner=self.owner_id,
+                k=f"payments_{self.account_uid}",
+            ).first()
+            self.assertIsNotNone(ledger_row)
+            self.assertEqual(ledger_row.v, "{broken-json")
+
+    def test_apply_import_with_corrupted_existing_ledger_fails_and_leaves_ledger_unchanged(self):
+        with patch.object(app_module, "_import_schema_error_response", return_value=None):
+            upload_resp = self._upload_rows()
+            self.assertEqual(upload_resp.status_code, 200)
+            batch_id = upload_resp.json["batch"]["id"]
+
+            validate_resp = self.client.post(f"/api/import/{batch_id}/validate")
+            self.assertEqual(validate_resp.status_code, 200)
+            self.assertEqual(validate_resp.json["batch"]["rows_invalid"], 0)
+
+        with app_module.app.app_context():
+            app_module.db.session.add(app_module.KVStore(
+                owner=self.owner_id,
+                k=f"payments_{self.account_uid}",
+                v="not-json",
+            ))
+            app_module.db.session.commit()
+
+        with patch.object(app_module, "_import_schema_error_response", return_value=None):
+            apply_resp = self.client.post(f"/api/import/{batch_id}/apply")
+        self.assertEqual(apply_resp.status_code, 500)
+        self.assertEqual(apply_resp.json["details"], "LEDGER_JSON_INVALID")
+
+        with app_module.app.app_context():
+            batch = app_module.ImportBatch.query.filter_by(id=batch_id).first()
+            self.assertIsNotNone(batch)
+            self.assertEqual(batch.status, "failed")
+            self.assertEqual(batch.rows_applied, 0)
+            ledger_row = app_module.KVStore.query.filter_by(
+                owner=self.owner_id,
+                k=f"payments_{self.account_uid}",
+            ).first()
+            self.assertIsNotNone(ledger_row)
+            self.assertEqual(ledger_row.v, "not-json")
+
     def test_upload_rows_returns_503_when_import_batch_schema_is_missing_rows_skipped(self):
         schema_status = {
             "ok": False,

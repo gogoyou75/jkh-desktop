@@ -443,6 +443,19 @@ function refreshWho(){
 
 function getDB(){ return window.AbonentsDB || null; }
 function saveDB(){ try{ if (typeof window.saveAbonentsDB === 'function') return window.saveAbonentsDB(); }catch(e){} }
+const LEDGER_FATAL_MESSAGE = 'Данные платежей повреждены. Расчёт/импорт остановлен, чтобы не потерять историю платежей.';
+function makeLedgerJsonInvalidError(key, cause){
+  const err = new Error(LEDGER_FATAL_MESSAGE);
+  err.code = 'LEDGER_JSON_INVALID';
+  err.key = key || '';
+  err.cause = cause;
+  return err;
+}
+function logLedgerJsonInvalid(key, cause){
+  console.error('[fatal][ledger-json-invalid]', { key: key || '', error: cause });
+}
+function isLedgerJsonInvalidError(e){ return !!(e && e.code === 'LEDGER_JSON_INVALID'); }
+
 function payKeyByUid(uid){
   const u = normStr(uid);
   if (!u) return '';
@@ -455,8 +468,19 @@ function getPaymentsByUid(uid){
     console.warn('[import_xls][payment-key] blocked', { uid: normStr(uid), reason: 'UID_REQUIRED' });
     return [];
   }
-  try{ return (window.JKHStore && JKHStore.getJSON) ? (JKHStore.getJSON(key, [], null) || []) : []; }
-  catch(e){ return []; }
+  if (!window.JKHStore || typeof JKHStore.getRaw !== 'function') return [];
+  const raw = JKHStore.getRaw(key, null);
+  if (raw === null || raw === undefined) return [];
+  try{
+    const arr = JSON.parse(raw);
+    if (Array.isArray(arr)) return arr;
+    logLedgerJsonInvalid(key, 'parsed value is not an array');
+    throw makeLedgerJsonInvalidError(key, 'parsed value is not an array');
+  }catch(e){
+    if (isLedgerJsonInvalidError(e)) throw e;
+    logLedgerJsonInvalid(key, e);
+    throw makeLedgerJsonInvalidError(key, e);
+  }
 }
 function setPaymentsByUid(uid, arr){
   const key = payKeyByUid(uid);
@@ -2610,7 +2634,18 @@ async function applyPayments(){
       if (!previewRow || previewRow.status==='ERROR') continue;
       const paymentUid = normStr(ab && ab.uid ? ab.uid : getResolvedUid(row));
       if (!paymentUid){ setImportStatus('Для импорта платежей нужен UID.', 'err'); setImportBusy(false); if (window.JKHBusy && typeof JKHBusy.hide === 'function') JKHBusy.hide(); return; }
-      const existing = getPaymentsByUid(paymentUid);
+      let existing;
+      try{
+        existing = getPaymentsByUid(paymentUid);
+      }catch(e){
+        if (isLedgerJsonInvalidError(e)){
+          setImportStatus(LEDGER_FATAL_MESSAGE, 'err');
+          setImportBusy(false);
+          if (window.JKHBusy && typeof JKHBusy.hide === 'function') JKHBusy.hide();
+          return;
+        }
+        throw e;
+      }
       const isDup = existing.some(function(x){
         const ym = getLedgerYearMonth(x);
         const paid = getLedgerPaidAmount(x);
@@ -2697,7 +2732,11 @@ async function applyPayments(){
       return;
     }
   } catch (e) {
-    setImportStatus('Ошибка записи на сервер. Данные не применены. ' + (e.message || e), 'err');
+    if (isLedgerJsonInvalidError(e)){
+      setImportStatus(LEDGER_FATAL_MESSAGE, 'err');
+    } else {
+      setImportStatus('Ошибка записи на сервер. Данные не применены. ' + (e.message || e), 'err');
+    }
     return;
   } finally {
     setImportBusy(false);

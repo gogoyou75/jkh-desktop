@@ -63,6 +63,20 @@
     const uiReady = (uiStatus === "ready" || uiStatus === "empty");
     return legacyReady || uiReady;
   }
+  const LEDGER_FATAL_MESSAGE = "Данные платежей повреждены. Расчёт/импорт остановлен, чтобы не потерять историю платежей.";
+
+  function makeLedgerJsonInvalidError(key, cause){
+    const err = new Error(LEDGER_FATAL_MESSAGE);
+    err.code = "LEDGER_JSON_INVALID";
+    err.key = key || "";
+    err.cause = cause;
+    return err;
+  }
+
+  function logLedgerJsonInvalid(key, cause){
+    console.error("[fatal][ledger-json-invalid]", { key: key || "", error: cause });
+  }
+
   function storeGetRaw(key){
     if (!isDataReady()) return null;
     if (!(window.JKHStore && typeof window.JKHStore.getRaw === "function")) return null;
@@ -364,13 +378,20 @@
   }
 
   function loadPaymentsForAbonent(abonentId){
+    const key = resolvePaymentKeyForAbonent(abonentId);
+    if (!key) return [];
+    const raw = (window.JKHStore && JKHStore.getRaw) ? JKHStore.getRaw(key) : null;
+    if (raw === null || raw === undefined) return [];
     try{
-      const key = resolvePaymentKeyForAbonent(abonentId);
-      if (!key) return [];
-      const raw = (window.JKHStore && JKHStore.getRaw) ? JKHStore.getRaw(key) : null;
-      const arr = raw ? JSON.parse(raw) : [];
-      return Array.isArray(arr) ? arr : [];
-    }catch(e){ return []; }
+      const arr = JSON.parse(raw);
+      if (Array.isArray(arr)) return arr;
+      logLedgerJsonInvalid(key, "parsed value is not an array");
+      throw makeLedgerJsonInvalidError(key, "parsed value is not an array");
+    }catch(e){
+      if (e && e.code === "LEDGER_JSON_INVALID") throw e;
+      logLedgerJsonInvalid(key, e);
+      throw makeLedgerJsonInvalidError(key, e);
+    }
   }
 
   function calculateFrozenDebt(abonentId, freezeISO){
@@ -388,7 +409,10 @@
         penalty: r2(toNum(tot?.penaltyDebt)),
         calculatedAt: toISODateString(d)
       };
-    }catch(e){ return null; }
+    }catch(e){
+      if (e && e.code === "LEDGER_JSON_INVALID") throw e;
+      return null;
+    }
   }
 
   function getTransferredDebtOnDate(abonentId, asOfDate){

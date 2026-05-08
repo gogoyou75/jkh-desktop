@@ -52,6 +52,20 @@
     if (!(window.JKHStore && typeof window.JKHStore.removeRaw === "function")) return;
     try { JKHStore.removeRaw(String(key)); } catch(e) { console.error(e); throw e; }
   }
+
+  const LEDGER_FATAL_MESSAGE = "Данные платежей повреждены. Расчёт/импорт остановлен, чтобы не потерять историю платежей.";
+
+  function makeLedgerJsonInvalidError(key, cause){
+    const err = new Error(LEDGER_FATAL_MESSAGE);
+    err.code = "LEDGER_JSON_INVALID";
+    err.key = key || "";
+    err.cause = cause;
+    return err;
+  }
+
+  function logLedgerJsonInvalid(key, cause){
+    console.error("[fatal][ledger-json-invalid]", { key: key || "", error: cause });
+  }
   // ===========================
   // UI: сворачиваемые блоки месяца (ledger)
   // хранение состояния: `payments_ui_collapsed_<LS>` -> {"YYYY-MM": true/false}
@@ -997,18 +1011,22 @@ for (const p of parts) {
   }
 
   function getPayments() {
+    const key = paymentsKey();
+    if (!key) return [];
+    const raw = storeGetRaw(key);
+    if (raw === null || raw === undefined) return [];
     try {
-      const key = paymentsKey();
-      if (!key) return [];
-      const raw = storeGetRaw(key);
-      if (!raw) return [];
       const arr = JSON.parse(raw);
-      if (!Array.isArray(arr)) return [];
-
-      // Read-only path: do not migrate rows, set source defaults, or normalize paid_date while reading.
-      return arr;
-    } catch {
-      return [];
+      if (Array.isArray(arr)) {
+        // Read-only path: do not migrate rows, set source defaults, or normalize paid_date while reading.
+        return arr;
+      }
+      logLedgerJsonInvalid(key, "parsed value is not an array");
+      throw makeLedgerJsonInvalidError(key, "parsed value is not an array");
+    } catch (e) {
+      if (e && e.code === "LEDGER_JSON_INVALID") throw e;
+      logLedgerJsonInvalid(key, e);
+      throw makeLedgerJsonInvalidError(key, e);
     }
   }
 
@@ -1769,7 +1787,17 @@ function applyRunningTotals(viewRows) {
     })();
     if (!tbody) return;
 
-    let arr = getPayments();
+    let arr;
+    try {
+      arr = getPayments();
+    } catch (e) {
+      if (e && e.code === "LEDGER_JSON_INVALID") {
+        tbody.innerHTML = '<tr><td colspan="20" style="color:#b00020;font-weight:700;">' + LEDGER_FATAL_MESSAGE + '</td></tr>';
+        try { alert(LEDGER_FATAL_MESSAGE); } catch (_) {}
+        return;
+      }
+      throw e;
+    }
 
     // Read-only load path: autoaccrual is not applied during page opening.
 
@@ -2175,6 +2203,10 @@ tbody.innerHTML = "";
       if (debtEl)  debtEl.textContent  = r2(sumDebt).toFixed(2);
       if (penEl)   penEl.textContent   = r2(sumPenalty).toFixed(2);
     } catch (e) {
+      if (e && e.code === "LEDGER_JSON_INVALID") {
+        try { alert(LEDGER_FATAL_MESSAGE); } catch (_) {}
+        return;
+      }
       console.warn('JKH_RecalcAbonentTotalDebtCard failed', e);
     }
   }

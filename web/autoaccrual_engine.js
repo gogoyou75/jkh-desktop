@@ -80,6 +80,20 @@
     try{ JKHStore.setRaw(String(key), value, ownerId); } catch {}
   }
 
+  const LEDGER_FATAL_MESSAGE = 'Данные платежей повреждены. Расчёт/импорт остановлен, чтобы не потерять историю платежей.';
+
+  function makeLedgerJsonInvalidError(key, cause){
+    const err = new Error(LEDGER_FATAL_MESSAGE);
+    err.code = 'LEDGER_JSON_INVALID';
+    err.key = key || '';
+    err.cause = cause;
+    return err;
+  }
+
+  function logLedgerJsonInvalid(key, cause){
+    console.error('[fatal][ledger-json-invalid]', { key: key || '', error: cause });
+  }
+
   function iso(y,m,d){ return `${y}-${pad2(m)}-${pad2(d)}`; }
   function isISODate(s){ return /^\d{4}-\d{2}-\d{2}$/.test(String(s||'')); }
 
@@ -185,12 +199,18 @@
   function loadPayments(abonentId, ownerId){
     const key = resolvePaymentsKeyForAbonent(abonentId);
     if (!key) return [];
+    const raw = storeGetRaw(key, ownerId);
+    if (raw === null || raw === undefined) return [];
     try{
-      const raw = storeGetRaw(key, ownerId);
-      if (!raw) return [];
       const arr = JSON.parse(raw);
-      return Array.isArray(arr) ? arr : [];
-    } catch { return []; }
+      if (Array.isArray(arr)) return arr;
+      logLedgerJsonInvalid(key, 'parsed value is not an array');
+      throw makeLedgerJsonInvalidError(key, 'parsed value is not an array');
+    } catch (e) {
+      if (e && e.code === 'LEDGER_JSON_INVALID') throw e;
+      logLedgerJsonInvalid(key, e);
+      throw makeLedgerJsonInvalidError(key, e);
+    }
   }
   function savePayments(abonentId, arr, ownerId){
     const key = resolvePaymentsKeyForAbonent(abonentId);
@@ -243,7 +263,7 @@
       const key = ownerTariffsKey();
       if (!key) return [];
       const raw = storeGetRaw(key);
-      if (!raw) return [];
+      if (raw === null || raw === undefined) return [];
       const parsed = JSON.parse(raw);
       return Array.isArray(parsed) ? parsed : [];
     }catch(e){
@@ -621,7 +641,15 @@
       : '';
     if (!ownerId) return { ok:false, reason:'EMPTY_OWNER', ls:id };
 
-    const arr = loadPayments(id, ownerId);
+    let arr;
+    try {
+      arr = loadPayments(id, ownerId);
+    } catch (e) {
+      if (e && e.code === 'LEDGER_JSON_INVALID') {
+        return { ok:false, reason:'LEDGER_JSON_INVALID', message:LEDGER_FATAL_MESSAGE, ls:id };
+      }
+      throw e;
+    }
     const beforeRows = dryRun ? JSON.parse(JSON.stringify(arr || [])) : null;
     const res = ensureAutoAccrualsForAbonent(id, arr);
     const rows = arr;
