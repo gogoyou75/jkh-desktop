@@ -312,6 +312,41 @@ const pageSize = 20;
 let sortField = null;
 let sortAsc = true;
 const filters = {};
+const __indexLedgerReadCache = new Map();
+let __indexLedgerReadCacheOwner = "";
+
+function __indexOwnerId(){
+    try {
+        if (window.JKHStore && typeof JKHStore.getOwnerId === "function") return String(JKHStore.getOwnerId() || "");
+        if (window.Auth && typeof Auth.getActiveDbOwnerId === "function") return String(Auth.getActiveDbOwnerId() || "");
+    } catch(e) {}
+    return "";
+}
+
+function clearIndexLedgerReadCache(){
+    __indexLedgerReadCache.clear();
+    __indexLedgerReadCacheOwner = __indexOwnerId();
+}
+
+function getPaymentRowsByStorageKeyCached(key){
+    try {
+        const owner = __indexOwnerId();
+        if (__indexLedgerReadCacheOwner !== owner) clearIndexLedgerReadCache();
+        key = String(key || "");
+        if (!key) return [];
+        const raw = (window.JKHStore && JKHStore.getRaw) ? JKHStore.getRaw(key) : null;
+        if (!raw) return [];
+        const cacheKey = owner + "::" + key;
+        const cached = __indexLedgerReadCache.get(cacheKey);
+        if (cached && cached.raw === raw && Array.isArray(cached.rows)) return cached.rows;
+        const arr = JSON.parse(raw);
+        if (!Array.isArray(arr)) return [];
+        __indexLedgerReadCache.set(cacheKey, { raw: raw, rows: arr });
+        return arr;
+    } catch(e) {
+        return [];
+    }
+}
 
 // ============================================================
 // 🔐 CRITICAL_ASSERT (DEV)
@@ -419,14 +454,8 @@ function getAbonentNote(id, a){
 }
 
 function getPaymentsForAbonent(id){
-    try{
-        const raw = (window.JKHStore && JKHStore.getRaw) ? JKHStore.getRaw(((typeof window.getPaymentsKeyForAbonent === "function") ? window.getPaymentsKeyForAbonent(id) : ("payments_" + id))) : null;
-        if (!raw) return [];
-        const arr = JSON.parse(raw);
-        return Array.isArray(arr) ? arr : [];
-    }catch{
-        return [];
-    }
+    const key = ((typeof window.getPaymentsKeyForAbonent === "function") ? window.getPaymentsKeyForAbonent(id) : ("payments_" + id));
+    return getPaymentRowsByStorageKeyCached(key);
 }
 
 // Итоги + даты:
@@ -653,9 +682,8 @@ function rebuildIndexRows(){
 
 function hasUsablePaymentLedger(abonentId){
     try {
-        const raw = (window.JKHStore && JKHStore.getRaw) ? JKHStore.getRaw(((typeof window.getPaymentsKeyForAbonent === "function") ? window.getPaymentsKeyForAbonent(abonentId) : ("payments_" + abonentId))) : null;
-        if (!raw) return false;
-        const arr = JSON.parse(raw);
+        const key = ((typeof window.getPaymentsKeyForAbonent === "function") ? window.getPaymentsKeyForAbonent(abonentId) : ("payments_" + abonentId));
+        const arr = getPaymentRowsByStorageKeyCached(key);
         if (!Array.isArray(arr)) return false;
         for (const row of arr){
             if (toNum(row && row.accrued) > 0 || toNum(row && row.paid) > 0) return true;
@@ -726,10 +754,24 @@ function showIndexAccrualsReadonlyStatus(){
 }
 
 document.addEventListener("DOMContentLoaded", initIndexPage);
+let __indexLastUiReadyKey = "";
+let __indexUiRenderScheduled = false;
 window.addEventListener("JKH_UI_STATE_CHANGED", function(){
     syncLoadingWarning();
-    showIndexAccrualsReadonlyStatus();
-    renderIndexRowsReadonly();
+    const st = window.JKH_UI_STATE && window.JKH_UI_STATE.data;
+    const ready = !!(st && (st.status === "ready" || st.status === "empty"));
+    if (!ready) return;
+    const key = String(st.status || "") + "|" + String(st.ownerId || st.owner || __indexOwnerId());
+    if (key === __indexLastUiReadyKey) return;
+    __indexLastUiReadyKey = key;
+    if (__indexUiRenderScheduled) return;
+    __indexUiRenderScheduled = true;
+    setTimeout(function(){
+        __indexUiRenderScheduled = false;
+        clearIndexLedgerReadCache();
+        showIndexAccrualsReadonlyStatus();
+        renderIndexRowsReadonly();
+    }, 0);
 });
 
 /* ============================================================

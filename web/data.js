@@ -212,14 +212,64 @@
     }
   }
 
+  const __paymentKeyResolveCache = new Map();
+  let __paymentKeyResolveCacheOwner = null;
+  let __paymentKeyResolveCacheDb = null;
+  let __paymentKeyResolveCacheVersion = 0;
+  const __paymentKeyResolveLogOnce = new Set();
+
+  function _paymentKeyDebugEnabled() {
+    try { return !!window.JKH_DEBUG_PAYMENT_KEY; } catch (e) { return false; }
+  }
+
+  function _resetPaymentKeyResolveCache(reason) {
+    __paymentKeyResolveCache.clear();
+    __paymentKeyResolveLogOnce.clear();
+    __paymentKeyResolveCacheOwner = _ownerId();
+    __paymentKeyResolveCacheDb = window.AbonentsDB || null;
+    __paymentKeyResolveCacheVersion++;
+    try {
+      if (_paymentKeyDebugEnabled()) console.debug('[payment-key] cache reset', { reason: String(reason || ''), version: __paymentKeyResolveCacheVersion });
+    } catch (e) { }
+  }
+
+  function _ensurePaymentKeyResolveCacheFresh() {
+    const owner = _ownerId();
+    const db = window.AbonentsDB || null;
+    if (__paymentKeyResolveCacheOwner !== owner || __paymentKeyResolveCacheDb !== db) {
+      _resetPaymentKeyResolveCache('owner-or-db-change');
+    }
+  }
+
+  function _logPaymentKeyResolve(level, payload) {
+    try {
+      if (!_paymentKeyDebugEnabled()) return;
+      const id = String(payload && payload.abonentId || '');
+      const key = String(payload && (payload.key || payload.reason || payload.mode) || '');
+      const onceKey = level + ':' + id + ':' + key;
+      if (__paymentKeyResolveLogOnce.has(onceKey)) return;
+      __paymentKeyResolveLogOnce.add(onceKey);
+      const fn = console[level] || console.debug || console.log;
+      fn.call(console, '[payment-key] resolve', payload);
+    } catch (e) { }
+  }
+
   function getAbonentTechId(abonentId) {
+    _ensurePaymentKeyResolveCacheFresh();
+
     const id = String(abonentId || '').trim();
+    if (__paymentKeyResolveCache.has(id)) {
+      const cached = __paymentKeyResolveCache.get(id);
+      return cached && cached.uid ? cached.uid : null;
+    }
+
     const db = (window.Data && typeof window.Data.getDb === 'function') ? window.Data.getDb() : (window.AbonentsDB || {});
     const abonents = db && db.abonents && typeof db.abonents === 'object' ? db.abonents : {};
     const a = abonents[id] || null;
 
     if (!a) {
-      console.warn('[payment-key] resolve', {
+      __paymentKeyResolveCache.set(id, { uid: '', key: '', found: false });
+      _logPaymentKeyResolve('debug', {
         abonentId: id,
         found: false,
         uid: '',
@@ -232,17 +282,19 @@
 
     const uid = String(a.uid || '').trim();
     if (uid) {
-      console.log('[payment-key] resolve', {
+      __paymentKeyResolveCache.set(id, { uid: uid, key: 'payments_' + uid, found: true });
+      _logPaymentKeyResolve('debug', {
         abonentId: id,
         found: true,
-        uid,
+        uid: uid,
         key: 'payments_' + uid,
         mode: 'uid'
       });
       return uid;
     }
 
-    console.warn('[payment-key] resolve', {
+    __paymentKeyResolveCache.set(id, { uid: '', key: '', found: true });
+    _logPaymentKeyResolve('debug', {
       abonentId: id,
       found: true,
       uid: '',
@@ -271,6 +323,8 @@
 
 
   window.getPaymentsKeyForAbonent = getPaymentsKeyForAbonent;
+  window.getAbonentTechId = getAbonentTechId;
+  window.JKHInvalidatePaymentKeyCache = _resetPaymentKeyResolveCache;
 
   function _todayStamp() {
     var d = new Date();
@@ -559,10 +613,12 @@
   const stored = loadFromStorage();
   if (!_isAllMode()) window.JKH_DATA_READY = !!stored;
   window.AbonentsDB = stored ? mergePreferStored(BASE_DB, stored) : deepClone(BASE_DB);
+  _resetPaymentKeyResolveCache('initial-load');
 
   window.saveAbonentsDB = function () {
     if (!window.AbonentsDB) return;
     normalizeDb(window.AbonentsDB);
+    _resetPaymentKeyResolveCache('save-abonents-db');
     return saveToStorage(window.AbonentsDB);
   };
 
@@ -1375,6 +1431,7 @@ window.JKHBoot?.markReady?.('data');
     // После удаления — восстановим пустую структуру DB
     window.AbonentsDB = deepClone(BASE_DB);
     normalizeDb(window.AbonentsDB);
+    _resetPaymentKeyResolveCache('reset-database');
     saveToStorage(window.AbonentsDB);
 
     alert("Готово. База очищена.");
@@ -1398,6 +1455,7 @@ window.JKHBoot?.markReady?.('data');
     const fresh = loadFromStorage();
     window.AbonentsDB = fresh ? mergePreferStored(BASE_DB, fresh) : deepClone(BASE_DB);
     normalizeDb(window.AbonentsDB);
+    _resetPaymentKeyResolveCache('load-demo');
 
     alert("Демо загружено: абоненты 1006 и 1008.");
     location.reload();

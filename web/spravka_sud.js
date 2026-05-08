@@ -43,12 +43,43 @@
     return null;
   }
 
+  const __spravkaLedgerReadCache = new Map();
+  const __spravkaPaymentKeyLogOnce = new Set();
+
   function safeJSON(key, def, ownerId){
     try {
       const raw = storeGet(key, ownerId);
       if (!raw) return def;
       return JSON.parse(raw);
     } catch (e) { return def; }
+  }
+
+  function safeLedgerJSON(key, def, ownerId){
+    try {
+      key = String(key || "");
+      const owner = String(ownerId || "");
+      const raw = storeGet(key, ownerId);
+      if (!raw) return def;
+      const cacheKey = owner + "::" + key;
+      const cached = __spravkaLedgerReadCache.get(cacheKey);
+      if (cached && cached.raw === raw) return cached.rows;
+      const arr = JSON.parse(raw);
+      if (!Array.isArray(arr)) return def;
+      __spravkaLedgerReadCache.set(cacheKey, { raw: raw, rows: arr });
+      return arr;
+    } catch (e) {
+      return def;
+    }
+  }
+
+  function logSpravkaPaymentKeyOnce(payload){
+    try {
+      if (!window.JKH_DEBUG_PAYMENT_KEY) return;
+      const onceKey = String(payload && payload.abonentId || '') + ':' + String(payload && (payload.key || payload.reason) || '');
+      if (__spravkaPaymentKeyLogOnce.has(onceKey)) return;
+      __spravkaPaymentKeyLogOnce.add(onceKey);
+      console.debug("[spravka_sud][payment-key]", payload);
+    } catch(e) {}
   }
 
   function setText(id, txt){
@@ -164,7 +195,7 @@
   function resolvePaymentsKeyForSpravka(ctx){
     const abonentId = String((ctx && ctx.abonentId) || "").trim();
     if (!abonentId) {
-      console.warn("[spravka_sud][payment-key] blocked", { abonentId: abonentId, reason: "UID_REQUIRED" });
+      logSpravkaPaymentKeyOnce({ abonentId: abonentId, reason: "UID_REQUIRED" });
       return "";
     }
 
@@ -172,7 +203,7 @@
       if (typeof window.getPaymentsKeyForAbonent === "function") {
         const key = String(window.getPaymentsKeyForAbonent(abonentId) || "").trim();
         if (key) {
-          console.log("[spravka_sud][payment-key] uid", { abonentId: abonentId, key: key });
+          logSpravkaPaymentKeyOnce({ abonentId: abonentId, key: key });
           return key;
         }
       }
@@ -183,11 +214,11 @@
     const uid = String((abonent && abonent.uid) || "").trim();
     if (uid) {
       const key = "payments_" + uid;
-      console.log("[spravka_sud][payment-key] uid", { abonentId: abonentId, key: key });
+      logSpravkaPaymentKeyOnce({ abonentId: abonentId, key: key });
       return key;
     }
 
-    console.warn("[spravka_sud][payment-key] blocked", { abonentId: abonentId, reason: "UID_REQUIRED" });
+    logSpravkaPaymentKeyOnce({ abonentId: abonentId, reason: "UID_REQUIRED" });
     return "";
   }
 
@@ -506,7 +537,7 @@
         }
         return false;
       }
-      let allRowsRaw = safeJSON(paymentsKey, [], ctx.readOwner);
+      let allRowsRaw = safeLedgerJSON(paymentsKey, [], ctx.readOwner);
       let allRows = Array.isArray(allRowsRaw) ? allRowsRaw : [];
       const hasLedger = hasUsableLedgerRows(allRows);
       console.log('[spravka_sud][ledger-check] id=' + ctx.abonentId + ' len=' + allRows.length);

@@ -1021,20 +1021,23 @@ async function applyPremiseMerge(){
 // 🔴 SAFE INIT: карточка не должна зависать при входе
 let __abonentCardInitStarted = false;
 let __paymentTableLoading = false;
+let __paymentTableLoadScheduled = false;
 
 function __safeLoadPaymentTableOnce(reason){
-    if (__paymentTableLoading) {
-        try { console.warn('[abonent_card] payment table load skipped, already running:', reason); } catch(e){}
+    if (__paymentTableLoading || __paymentTableLoadScheduled) {
+        try { if (window.JKH_DEBUG_PAYMENT_KEY) console.debug('[abonent_card] payment table load coalesced:', reason); } catch(e){}
         return;
     }
 
     if (!window.__loadPaymentTable) return;
 
-    __paymentTableLoading = true;
+    __paymentTableLoadScheduled = true;
 
     setTimeout(() => {
+        __paymentTableLoadScheduled = false;
+        __paymentTableLoading = true;
         try {
-            window.__loadPaymentTable();
+            window.__loadPaymentTable(reason || 'abonent-card');
         } catch(e) {
             try { console.error('[abonent_card] __loadPaymentTable failed:', reason, e); } catch(_){}
         } finally {
@@ -1104,6 +1107,7 @@ function __isAbonentCardDataReady() {
 function __waitForAbonentCardDataReady(cb) {
     let done = false;
     let tries = 0;
+    let lastStateKey = "";
 
     function finish(reason) {
         if (done) return;
@@ -1131,6 +1135,9 @@ function __waitForAbonentCardDataReady(cb) {
     function onState() {
         const st = window.JKH_UI_STATE && window.JKH_UI_STATE.data;
         if (st && (st.status === "ready" || st.status === "empty")) {
+            const key = String(st.status || "") + "|" + String(st.ownerId || st.owner || "");
+            if (key === lastStateKey) return;
+            lastStateKey = key;
             check("JKH_UI_STATE_CHANGED");
         }
     }

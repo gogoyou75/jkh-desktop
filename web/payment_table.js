@@ -53,6 +53,79 @@
     try { JKHStore.removeRaw(String(key)); } catch(e) { console.error(e); throw e; }
   }
 
+
+  // Read-only ledger cache: parsed rows are reused while storage raw value is unchanged.
+  // Corrupted ledgers are never cached as valid. Explicit writes/reloads clear the cache.
+  const __ledgerReadCache = new Map();
+  let __ledgerReadCacheOwner = null;
+  const __paymentKeyReadLogOnce = new Set();
+
+  function currentOwnerIdForPaymentCache(){
+    try {
+      if (window.JKHStore && typeof JKHStore.getOwnerId === "function") return String(JKHStore.getOwnerId() || "");
+      if (window.Auth && typeof Auth.getActiveDbOwnerId === "function") return String(Auth.getActiveDbOwnerId() || "");
+    } catch(e) {}
+    return "";
+  }
+
+  function clearPaymentLedgerReadCache(reason){
+    __ledgerReadCache.clear();
+    __paymentKeyReadLogOnce.clear();
+    __ledgerReadCacheOwner = currentOwnerIdForPaymentCache();
+    try {
+      if (window.JKH_DEBUG_PAYMENT_KEY) console.debug('[payment-key] ledger cache reset', { reason: String(reason || '') });
+    } catch(e) {}
+  }
+
+  function ensurePaymentLedgerReadCacheFresh(){
+    const owner = currentOwnerIdForPaymentCache();
+    if (__ledgerReadCacheOwner !== owner) clearPaymentLedgerReadCache('owner-change');
+  }
+
+  function cloneLedgerRows(rows){
+    if (!Array.isArray(rows)) return [];
+    return rows.map(function(r){ return (r && typeof r === 'object') ? Object.assign({}, r) : r; });
+  }
+
+  function readPaymentLedgerRowsCached(key){
+    ensurePaymentLedgerReadCacheFresh();
+    const cacheKey = currentOwnerIdForPaymentCache() + '::' + String(key || '');
+    const raw = storeGetRaw(key);
+    if (raw === null || raw === undefined) return [];
+
+    const cached = __ledgerReadCache.get(cacheKey);
+    if (cached && cached.raw === raw && Array.isArray(cached.rows)) {
+      return cloneLedgerRows(cached.rows);
+    }
+
+    try {
+      const arr = JSON.parse(raw);
+      if (Array.isArray(arr)) {
+        __ledgerReadCache.set(cacheKey, { raw: raw, rows: arr });
+        return cloneLedgerRows(arr);
+      }
+      logLedgerJsonInvalid(key, "parsed value is not an array");
+      throw makeLedgerJsonInvalidError(key, "parsed value is not an array");
+    } catch (e) {
+      __ledgerReadCache.delete(cacheKey);
+      if (e && e.code === "LEDGER_JSON_INVALID") throw e;
+      logLedgerJsonInvalid(key, e);
+      throw makeLedgerJsonInvalidError(key, e);
+    }
+  }
+
+  function logPaymentKeyReadOnce(payload){
+    try {
+      if (!window.JKH_DEBUG_PAYMENT_KEY) return;
+      const onceKey = String(payload && payload.abonentId || '') + ':' + String(payload && (payload.key || payload.reason) || '');
+      if (__paymentKeyReadLogOnce.has(onceKey)) return;
+      __paymentKeyReadLogOnce.add(onceKey);
+      console.debug('[payment-key] read', payload);
+    } catch(e) {}
+  }
+
+  window.JKHClearPaymentLedgerReadCache = clearPaymentLedgerReadCache;
+
   const LEDGER_FATAL_MESSAGE = "Данные платежей повреждены. Расчёт/импорт остановлен, чтобы не потерять историю платежей.";
 
   function makeLedgerJsonInvalidError(key, cause){
@@ -482,11 +555,11 @@ function splitAccrualByOwnership(accr, year, month, history) {
       : "";
 
     if (!key) {
-      try { console.warn("[payment-key] read blocked", { abonentId: id, reason: "ABONENT_NOT_READY" }); } catch(e) {}
+      logPaymentKeyReadOnce({ abonentId: id, reason: "ABONENT_NOT_READY" });
       return "";
     }
 
-    try { console.log("[payment-key] read", { abonentId: id, key: key }); } catch(e) {}
+    logPaymentKeyReadOnce({ abonentId: id, key: key });
     return key;
   }
 
@@ -625,14 +698,12 @@ function splitAccrualByOwnership(accr, year, month, history) {
     try {
       const pKey = (typeof window.getPaymentsKeyForAbonent === "function") ? window.getPaymentsKeyForAbonent(id) : "";
       if (!pKey) {
-        try { console.warn("[payment-key] read blocked", { abonentId: id, reason: "ABONENT_NOT_READY_OR_UID_MISSING" }); } catch(e) {}
+        logPaymentKeyReadOnce({ abonentId: id, reason: "ABONENT_NOT_READY_OR_UID_MISSING" });
         return null;
       }
-      try { console.log("[payment-key] read", { abonentId: id, key: pKey }); } catch(e) {}
-      const raw = (window.JKHStore && JKHStore.getRaw) ? JKHStore.getRaw(pKey) : null;
-      if (raw) {
-        const arr = JSON.parse(raw);
-        if (Array.isArray(arr) && arr.length) {
+      logPaymentKeyReadOnce({ abonentId: id, key: pKey });
+      const arr = readPaymentLedgerRowsCached(pKey);
+      if (Array.isArray(arr) && arr.length) {
           let minY = null, minM = null;
           for (const r of arr) {
             const y = parseInt(String(r?.year || ""), 10);
@@ -659,7 +730,6 @@ function splitAccrualByOwnership(accr, year, month, history) {
             return clamp({ from: fromISO2, to: "" });
           }
         }
-      }
     } catch (e) {}
 
     console.warn("[autoaccrual] не найден период ответственности/расчёта (AbonentsDB.links или abonent.startCalc)");
@@ -1088,21 +1158,8 @@ for (const p of parts) {
   function getPayments() {
     const key = paymentsKey();
     if (!key) return [];
-    const raw = storeGetRaw(key);
-    if (raw === null || raw === undefined) return [];
-    try {
-      const arr = JSON.parse(raw);
-      if (Array.isArray(arr)) {
-        // Read-only path: do not migrate rows, set source defaults, or normalize paid_date while reading.
-        return arr;
-      }
-      logLedgerJsonInvalid(key, "parsed value is not an array");
-      throw makeLedgerJsonInvalidError(key, "parsed value is not an array");
-    } catch (e) {
-      if (e && e.code === "LEDGER_JSON_INVALID") throw e;
-      logLedgerJsonInvalid(key, e);
-      throw makeLedgerJsonInvalidError(key, e);
-    }
+    // Read-only path: do not migrate rows, set source defaults, or normalize paid_date while reading.
+    return readPaymentLedgerRowsCached(key);
   }
 
 
@@ -1201,6 +1258,7 @@ for (const p of parts) {
       const key = paymentsKey();
       if (!key) return;
       storeSetRaw(key, JSON.stringify(arr));
+      clearPaymentLedgerReadCache('save-payments');
 
       // ОБЯЗАТЕЛЬНО: сервер
       if (window.Data && typeof Data.flushDbToServer === "function"){
@@ -1914,7 +1972,7 @@ function applyRunningTotals(viewRows) {
     // на рендере НЕ сохраняем и НЕ flush-им
   }
 
-  async function loadPaymentTable() {
+  async function loadPaymentTableImpl() {
     if (!isDataReady()) {
       try { console.warn('[payment-table] load skipped: DATA_NOT_READY'); } catch(e) {}
       return;
@@ -2035,6 +2093,37 @@ tbody.innerHTML = "";
     });
 
     clearLastAddedPaymentId();
+  }
+
+  let __paymentTableLoadRunning = false;
+  let __paymentTableLoadScheduled = false;
+  let __paymentTableLoadRunAgain = false;
+
+  function requestLoadPaymentTable(reason){
+    if (__paymentTableLoadScheduled) return;
+    __paymentTableLoadScheduled = true;
+    setTimeout(function(){
+      __paymentTableLoadScheduled = false;
+      try { loadPaymentTable(reason || 'scheduled'); } catch(e) { console.error(e); throw e; }
+    }, 0);
+  }
+
+  async function loadPaymentTable(reason) {
+    if (__paymentTableLoadRunning) {
+      __paymentTableLoadRunAgain = true;
+      try { if (window.JKH_DEBUG_PAYMENT_KEY) console.debug('[payment-table] rebuild skipped: already running', { reason: String(reason || '') }); } catch(e) {}
+      return;
+    }
+    __paymentTableLoadRunning = true;
+    try {
+      await loadPaymentTableImpl();
+    } finally {
+      __paymentTableLoadRunning = false;
+      if (__paymentTableLoadRunAgain) {
+        __paymentTableLoadRunAgain = false;
+        requestLoadPaymentTable('queued-after-running');
+      }
+    }
   }
 
 
@@ -2407,7 +2496,7 @@ tbody.innerHTML = "";
   }
 
 
-  window.__loadPaymentTable = loadPaymentTable;
+  window.__loadPaymentTable = requestLoadPaymentTable;
 
   window.addPaymentRow = async function addPaymentRow() {
     const arr = getPayments();
@@ -2626,8 +2715,8 @@ tbody.innerHTML = "";
 
     if (isDataReady()) {
       started = true;
-      console.log("[payment-table] start after data-ready");
-      loadPaymentTable();
+      try { if (window.JKH_DEBUG_PAYMENT_KEY) console.debug("[payment-table] start after data-ready"); } catch(e) {}
+      requestLoadPaymentTable('data-ready');
     }
   }
 
