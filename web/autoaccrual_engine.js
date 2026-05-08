@@ -610,8 +610,10 @@
     return { changed, reason:'OK' };
   }
 
-  function recalcForAbonent(ls){
+  function recalcForAbonent(ls, opts){
     const id = String(ls||'').trim();
+    const options = opts && typeof opts === 'object' ? opts : {};
+    const dryRun = options.dryRun === true || options.readOnly === true;
     if (!id) return { ok:false, reason:'EMPTY_ID' };
 
     const ownerId = (window.JKHStore && typeof window.JKHStore.getOwnerId === 'function')
@@ -620,12 +622,19 @@
     if (!ownerId) return { ok:false, reason:'EMPTY_OWNER', ls:id };
 
     const arr = loadPayments(id, ownerId);
+    const beforeRows = dryRun ? JSON.parse(JSON.stringify(arr || [])) : null;
     const res = ensureAutoAccrualsForAbonent(id, arr);
     const rows = arr;
+
+    if (dryRun){
+      console.log('[autoaccrual][dry-run]', { id, changed: !!res.changed, len: rows.length });
+      return { ok:true, ...res, ls:id, dryRun:true, rows: beforeRows, proposedRows: rows };
+    }
 
     if (!rows.length && res.changed) return { ok:true, changed:false, reason:'EMPTY_ROWS', ls:id };
 
     if (res.changed){
+      console.log('[autoaccrual][apply]', { id, len: rows.length });
       savePayments(id, rows, ownerId);
       const lenSaved = rows.length;
       const existsSaved = lenSaved > 0;
@@ -643,6 +652,10 @@
     }
 
     return { ok:true, ...res, ls:id };
+  }
+
+  function dryRunForAbonent(ls){
+    return recalcForAbonent(ls, { dryRun: true });
   }
 
   function recalcForMany(list){
@@ -664,6 +677,7 @@
   window.JKHAutoAccrual = {
     version: '2026-04-15-owner-tariffs-v2',
     recalcForAbonent,
+    dryRunForAbonent,
     recalcForMany,
     recalcAll,
     saveTariffsV1,

@@ -665,55 +665,8 @@ function hasUsablePaymentLedger(abonentId){
 }
 
 async function ensureIndexAccrualsReady(){
-    const uiStatus = String((window.JKH_UI_STATE && window.JKH_UI_STATE.data && window.JKH_UI_STATE.data.status) || "");
-    if (!(uiStatus === "ready" || uiStatus === "empty")) return;
-    const ownerId = (window.JKHStore && JKHStore.getOwnerId) ? (JKHStore.getOwnerId() || "") : "";
-    if (indexAutoAccrualInFlight) return;
-    if (indexAutoAccrualDoneForOwner === ownerId) return;
-    indexAutoAccrualInFlight = true;
-    try {
-        const db = window.AbonentsDB?.abonents || {};
-        const ids = Object.keys(db);
-        let missing = 0;
-        let changed = false;
-        for (const id of ids) if (!hasUsablePaymentLedger(id)) missing++;
-        console.log('[index][ledger-check] id=' + ownerId + ' len=' + ids.length);
-
-        for (const id of ids) {
-            if (hasUsablePaymentLedger(id)) {
-                const existingKey = (typeof window.getPaymentsKeyForAbonent === 'function') ? window.getPaymentsKeyForAbonent(id) : ('payments_' + id);
-                console.log('[index][autoaccrual] skip existing ' + existingKey);
-                continue;
-            }
-            let res = { changed: false, reason: 'autoaccrual-unavailable' };
-            if (window.JKHAutoAccrual && typeof window.JKHAutoAccrual.recalcForAbonent === 'function') {
-                res = await window.JKHAutoAccrual.recalcForAbonent(id);
-            }
-            console.log('[index][autoaccrual] recalc id=' + id + ' result=', res);
-            if (res && res.changed === true) changed = true;
-        }
-
-        if (changed) {
-            console.log('[index][autoaccrual] changed=true flush start');
-            if (window.Data && typeof Data.flushDbToServer === 'function') {
-                try {
-                    await Data.flushDbToServer();
-                    console.log('[index][autoaccrual] flush ok');
-                } catch(e){
-                    console.warn('[index][autoaccrual] flush failed but continue', e);
-                }
-            }
-        } else {
-            console.log('[index][autoaccrual] changed=false no flush');
-        }
-
-        rebuildIndexRows();
-        console.log('[index][rebuild] id=' + ownerId + ' len=' + ids.length);
-        render();
-        indexAutoAccrualDoneForOwner = ownerId;
-    } finally {
-        indexAutoAccrualInFlight = false;
-    }
+    // Read-only compatibility shim: index page must not create ledgers or flush data on open.
+    showIndexAccrualsReadonlyStatus();
 }
 
 function initIndexPage(){
@@ -735,18 +688,41 @@ function initIndexPage(){
         return;
     }
     syncLoadingWarning();
+    showIndexAccrualsReadonlyStatus();
     if (!indexTableInitDone){
         initFilters();
         initSorting();
         indexTableInitDone = true;
     }
-    ensureIndexAccrualsReady();
+}
+
+function showIndexAccrualsReadonlyStatus(){
+    try {
+        const db = window.AbonentsDB?.abonents || {};
+        const ids = Object.keys(db);
+        if (!ids.length) return;
+        const missing = ids.filter(id => !hasUsablePaymentLedger(id)).length;
+        if (!missing) return;
+        console.warn('[readonly][blocked-write-path]', { page: 'index', reason: 'ACCRUALS_NOT_READY', missing, total: ids.length });
+        let box = document.getElementById('indexAccrualsReadonlyWarning');
+        if (!box) {
+            box = document.createElement('div');
+            box.id = 'indexAccrualsReadonlyWarning';
+            box.style.cssText = 'margin:16px 0;padding:12px;border:1px solid #e0a800;border-radius:8px;background:#fff8e1;color:#5f4300;';
+            const anchor = document.querySelector('h2') || document.body.firstChild;
+            if (anchor && anchor.parentNode) anchor.parentNode.insertBefore(box, anchor.nextSibling);
+            else document.body.appendChild(box);
+        }
+        box.textContent = 'Начисления подготовлены не для всех абонентов. Выполните пересчёт начислений вручную.';
+    } catch(e) {
+        console.warn('[index][readonly-status] failed', e);
+    }
 }
 
 document.addEventListener("DOMContentLoaded", initIndexPage);
 window.addEventListener("JKH_UI_STATE_CHANGED", function(){
-    const st = String((window.JKH_UI_STATE && window.JKH_UI_STATE.data && window.JKH_UI_STATE.data.status) || "");
-    if (st === "ready" || st === "empty") ensureIndexAccrualsReady();
+    syncLoadingWarning();
+    showIndexAccrualsReadonlyStatus();
 });
 
 /* ============================================================
