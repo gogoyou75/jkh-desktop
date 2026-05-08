@@ -11,6 +11,41 @@ window.PremisesAdmin = (function () {
     }
 
     function normStr(s) { return String(s ?? '').trim(); }
+    function normalizePersonText(v) {
+        return String(v || '')
+            .toLowerCase()
+            .replace(/ё/g, 'е')
+            .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+    }
+    function splitPersonParts(v) {
+        return normalizePersonText(v).split(' ').filter(Boolean);
+    }
+    function softFioMatch(excelRow, abonent) {
+        const excelParts = splitPersonParts([
+            excelRow && excelRow.fam,
+            excelRow && excelRow.name,
+            excelRow && excelRow.otch,
+            excelRow && excelRow.fio
+        ].filter(Boolean).join(' '));
+        const dbParts = splitPersonParts([
+            abonent && abonent.fam,
+            abonent && abonent.name,
+            abonent && abonent.otch,
+            abonent && abonent.fio
+        ].filter(Boolean).join(' '));
+        if (!excelParts.length || !dbParts.length) return true;
+        const excelSurname = excelParts[0] || '';
+        const dbSurname = dbParts[0] || '';
+        if (excelSurname && dbSurname && excelSurname !== dbSurname) return false;
+        const dbSet = new Set(dbParts);
+        let hits = 0;
+        for (const part of excelParts) {
+            if (dbSet.has(part)) hits++;
+        }
+        return hits >= 1;
+    }
     function normRegnum(s) { return normStr(s).replace(/\s+/g, ''); }
     function normalizeOfficialRegnum(s) { return normStr(s).replace(/\s+/g, ' '); }
     function findOfficialRegnumDuplicate(db, officialRegnum, selfRegnum) {
@@ -960,7 +995,7 @@ window.PremisesAdmin = (function () {
     }
 
     function getImportContextBlockedMessage() {
-        return 'Открытие квартиры из импорта заблокировано: объект не соответствует UID/ЛС/ФИО строки Excel. Это защита от изменения чужой квартиры.';
+        return 'Открытие квартиры из импорта заблокировано: объект не соответствует UID/active link/regnum строки Excel. Это защита от изменения чужой квартиры.';
     }
 
     function logPremisesImportContextCheck(ctx, result, reason) {
@@ -981,20 +1016,25 @@ window.PremisesAdmin = (function () {
         const c = ctx || importOpenContext;
         const db = window.AbonentsDB || {};
         const reg = normStr(c && c.regnum);
-        if (!c) return { ok:true, reason:'NO_CONTEXT' };
-        if (!reg) return { ok:false, reason:'NO_REGNUM' };
-        if (!normStr(c.uid)) return { ok:false, reason:'NO_UID' };
+        if (!c) return { ok:true, result:'ok', reason:'NO_CONTEXT' };
+        if (!reg) return { ok:false, result:'blocked', reason:'NO_REGNUM' };
+        if (!normStr(c.uid)) return { ok:false, result:'blocked', reason:'NO_UID' };
         const premise = db.premises && db.premises[reg];
-        if (!premise) return { ok:false, reason:'PREMISE_NOT_FOUND' };
+        if (!premise) return { ok:false, result:'blocked', reason:'PREMISE_NOT_FOUND' };
         const link = activeLinkForRegnum(db, reg);
-        if (!link) return { ok:false, reason:'ACTIVE_LINK_NOT_FOUND' };
+        if (!link) return { ok:false, result:'blocked', reason:'ACTIVE_LINK_NOT_FOUND' };
         const abonentId = normStr(link.abonentId);
         const abonent = db.abonents && db.abonents[abonentId];
-        if (!abonent) return { ok:false, reason:'ABONENT_NOT_FOUND' };
-        if (normStr(c.uid) && normStr(abonent.uid) !== normStr(c.uid)) return { ok:false, reason:'UID_MISMATCH' };
-        if (normStr(c.ls) && normStr(abonent.id) !== normStr(c.ls) && abonentId !== normStr(c.ls)) return { ok:false, reason:'LS_MISMATCH' };
-        if (normStr(c.fam) && normStr(abonent.fam).toLowerCase() !== normStr(c.fam).toLowerCase()) return { ok:false, reason:'FAM_MISMATCH' };
-        return { ok:true, reason:'OK', premise:premise, link:link, abonent:abonent };
+        if (!abonent) return { ok:false, result:'blocked', reason:'ABONENT_NOT_FOUND' };
+        if (normStr(c.uid) && normStr(abonent.uid).toLowerCase() !== normStr(c.uid).toLowerCase()) return { ok:false, result:'blocked', reason:'UID_MISMATCH' };
+        if (normStr(c.ls) && db.abonents && db.abonents[normStr(c.ls)] && db.abonents[normStr(c.ls)] !== abonent) {
+            const otherUid = normStr(db.abonents[normStr(c.ls)] && db.abonents[normStr(c.ls)].uid);
+            if (otherUid && otherUid.toLowerCase() !== normStr(c.uid).toLowerCase()) return { ok:false, result:'blocked', reason:'LS_OTHER_UID' };
+        }
+        const lsMatch = !normStr(c.ls) || normStr(abonent.id) === normStr(c.ls) || abonentId === normStr(c.ls);
+        const fioMatch = softFioMatch({ fam:normStr(c.fam) }, abonent);
+        if (!lsMatch || !fioMatch) return { ok:true, result:'warning', reason:'UID_SOFT_MISMATCH', premise:premise, link:link, abonent:abonent };
+        return { ok:true, result:'ok', reason:'OK', premise:premise, link:link, abonent:abonent };
     }
 
     function renderImportOpenWarning(premise) {
@@ -1134,7 +1174,7 @@ window.PremisesAdmin = (function () {
         const db = window.AbonentsDB;
         if (importOpenContext) {
             const ctxCheck = checkImportOpenContext(importOpenContext);
-            logPremisesImportContextCheck(importOpenContext, ctxCheck.ok ? 'ALLOW' : 'BLOCK', ctxCheck.reason);
+            logPremisesImportContextCheck(importOpenContext, ctxCheck.ok ? (ctxCheck.result || 'ok') : 'blocked', ctxCheck.reason);
             if (!ctxCheck.ok || String(importOpenContext.regnum || '') !== String(regnum || '')) {
                 importOpenContextBlocked = true;
                 setFormModeAdd();
@@ -1351,7 +1391,7 @@ function onSave() {
         if (importOpenContext) {
             const ctxCheck = checkImportOpenContext(importOpenContext);
             const editMatches = state.editingRegnum && String(state.editingRegnum) === String(importOpenContext.regnum || '');
-            logPremisesImportContextCheck(importOpenContext, (ctxCheck.ok && editMatches) ? 'ALLOW_SAVE' : 'BLOCK_SAVE', ctxCheck.ok ? (editMatches ? 'OK' : 'EDIT_REGNUM_MISMATCH') : ctxCheck.reason);
+            logPremisesImportContextCheck(importOpenContext, (ctxCheck.ok && editMatches) ? (ctxCheck.result || 'ok') : 'blocked', ctxCheck.ok ? (editMatches ? ctxCheck.reason : 'EDIT_REGNUM_MISMATCH') : ctxCheck.reason);
             if (!ctxCheck.ok || !editMatches) {
                 importOpenContextBlocked = true;
                 logImportSaveBlocked(importOpenContext, ctxCheck.ok ? 'EDIT_REGNUM_MISMATCH' : ctxCheck.reason);
@@ -1643,7 +1683,7 @@ function onSave() {
         renderTable();
         if (importOpenContext && importOpenContext.regnum) {
             const ctxCheck = checkImportOpenContext(importOpenContext);
-            logPremisesImportContextCheck(importOpenContext, ctxCheck.ok ? 'ALLOW' : 'BLOCK', ctxCheck.reason);
+            logPremisesImportContextCheck(importOpenContext, ctxCheck.ok ? (ctxCheck.result || 'ok') : 'blocked', ctxCheck.reason);
             if (ctxCheck.ok) {
                 setFormModeEdit(importOpenContext.regnum);
             } else {
