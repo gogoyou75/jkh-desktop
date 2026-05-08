@@ -2166,7 +2166,7 @@ function renderPreview(){
         '<span class="small ' + (allow?'':'danger') + '">' + (allow?'':'Включи "Разрешить создание абонента"') + '</span>';
     }
     if (mode==='primary' && r.action && r.action.type==='COPY_UID'){
-      actionsHTML += '<button class="action-btn" data-act="copy_uid" data-uid="' + escHtml(r.action.uid || '') + '">Скопировать UID</button>';
+      actionsHTML += '<button type="button" class="action-btn" data-act="copy_uid" data-excelrow="' + escHtml(r.excelRow || '') + '" data-uid="' + escHtml(r.action.uid || '') + '">Скопировать UID</button>';
     }
     if (mode==='primary' && r.action && r.action.type==='OPEN_PREMISE'){
       actionsHTML += '<button class="action-btn" data-act="open_premise" data-regnum="' + escHtml(r.action.regnum || '') + '" data-uid="' + escHtml(r.action.uid || '') + '" data-ls="' + escHtml(r.action.ls || '') + '" data-fam="' + escHtml(r.action.fam || '') + '" data-excelsquare="' + escHtml(r.action.excelSquare || '') + '" data-excelrow="' + escHtml(r.action.excelRow || '') + '">Открыть квартиру для изменения площади</button>';
@@ -2768,12 +2768,58 @@ $('previewBody').addEventListener('click', function(ev){
   }
 
   if (act === 'copy_uid'){
-    const uid = normStr(btn.getAttribute('data-uid'));
-    if (!uid) return;
-    if (navigator.clipboard && navigator.clipboard.writeText){
-      navigator.clipboard.writeText(uid).then(function(){ setImportStatus('UID скопирован: ' + uid, 'ok'); });
+    const excelRow = Number(btn.getAttribute('data-excelrow')) || 0;
+    const row = dataRows.find(function(x){ return Number(x.excelRow) === excelRow; }) || null;
+    const uid = normStr((row && (getCreatedUid(row) || getResolvedUid(row))) || btn.getAttribute('data-uid'));
+
+    function logCopyCreatedUid(ok, reason){
+      console.log('[import_xls][copy-created-uid]', {
+        excelRow: excelRow,
+        uid: uid,
+        ok: !!ok,
+        reason: normStr(reason)
+      });
+    }
+    function showCopyResult(ok, reason){
+      logCopyCreatedUid(ok, reason);
+      if (ok) setImportStatus('UID скопирован: ' + uid, 'ok');
+      else setImportStatus('Не удалось скопировать UID. Скопируйте вручную: ' + uid, 'err');
+    }
+    function fallbackCopyUid(){
+      let textarea = null;
+      try {
+        textarea = document.createElement('textarea');
+        textarea.value = uid;
+        textarea.setAttribute('readonly', 'readonly');
+        textarea.style.position = 'fixed';
+        textarea.style.left = '-9999px';
+        textarea.style.top = '0';
+        document.body.appendChild(textarea);
+        textarea.focus();
+        textarea.select();
+        const ok = document.execCommand && document.execCommand('copy');
+        showCopyResult(!!ok, ok ? 'fallback' : 'fallback_exec_false');
+      } catch (e) {
+        showCopyResult(false, 'fallback_error:' + (e && e.message ? e.message : e));
+      } finally {
+        if (textarea && textarea.parentNode) textarea.parentNode.removeChild(textarea);
+      }
+    }
+
+    if (!uid){
+      logCopyCreatedUid(false, 'uid_empty');
+      setImportStatus('Не удалось скопировать UID. UID пуст.', 'err');
+      return;
+    }
+    if (window.navigator && window.navigator.clipboard && window.navigator.clipboard.writeText){
+      window.navigator.clipboard.writeText(uid).then(function(){
+        showCopyResult(true, 'navigator.clipboard.writeText');
+      }).catch(function(e){
+        logCopyCreatedUid(false, 'clipboard_error:' + (e && e.message ? e.message : e));
+        fallbackCopyUid();
+      });
     } else {
-      setImportStatus('UID: ' + uid, 'info');
+      fallbackCopyUid();
     }
     return;
   }
