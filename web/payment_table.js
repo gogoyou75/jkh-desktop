@@ -1114,30 +1114,62 @@ for (const p of parts) {
      - paid не может быть отрицательным
      ========================================================= */
 
+  function makePaymentPeriodError(code, row, details){
+    const err = new Error(code === "PAYMENT_YEAR_REQUIRED" ? "Не указан корректный год платежа." : "Не указан корректный период платежа.");
+    err.code = code || "PAYMENT_PERIOD_INVALID";
+    err.row = row || null;
+    err.details = details || {};
+    return err;
+  }
+
+  function logPaymentPeriodInvalid(err){
+    try {
+      console.error("[fatal][payment-period-invalid]", {
+        code: String(err && err.code || "PAYMENT_PERIOD_INVALID"),
+        rowId: err && err.row ? err.row.id : undefined,
+        details: err && err.details || {}
+      });
+    } catch(e) {}
+  }
+
+  function throwPaymentPeriodInvalid(code, row, details){
+    const err = makePaymentPeriodError(code, row, details);
+    logPaymentPeriodInvalid(err);
+    throw err;
+  }
+
   function normalizePaymentRow(r){
     if (!r || typeof r !== 'object') return;
 
     // id
     r.id = Number(r.id) || 0;
 
-    // month/year
-    const mm = String(r.month ?? '').padStart(2,'0');
-    r.month = (/^(0[1-9]|1[0-2])$/.test(mm)) ? mm : String(new Date().getMonth()+1).padStart(2,'0');
-    const yy = String(r.year ?? '');
-    r.year = (/^(19|20)\d{2}$/.test(yy)) ? yy : String(new Date().getFullYear());
+    // paid_date: если валидна — расчётный месяц/год синхронизируются из неё.
+    const paidDateObj = parseDateAnyToDate(r.paid_date);
+    if (paidDateObj) {
+      r.paid_date = toISODateString(paidDateObj);
+      r.year = String(paidDateObj.getFullYear());
+      r.month = pad2(paidDateObj.getMonth() + 1);
+    } else {
+      r.paid_date = '';
+    }
+
+    // month/year: запрещено молча заменять повреждённый период текущей датой.
+    const mmRaw = String(r.month ?? '').trim();
+    const mm = mmRaw.length === 1 ? mmRaw.padStart(2,'0') : mmRaw;
+    const yy = String(r.year ?? '').trim();
+    if (!/^(19|20)\d{2}$/.test(yy)) {
+      throwPaymentPeriodInvalid("PAYMENT_YEAR_REQUIRED", r, { month: mmRaw, year: yy, paid_date: r.paid_date || "" });
+    }
+    if (!/^(0[1-9]|1[0-2])$/.test(mm)) {
+      throwPaymentPeriodInvalid("PAYMENT_PERIOD_INVALID", r, { month: mmRaw, year: yy, paid_date: r.paid_date || "" });
+    }
+    r.month = mm;
+    r.year = yy;
 
     // amounts
     r.accrued = r2(toNum(r.accrued));
     r.paid = r2(Math.max(0, toNum(r.paid)));
-
-    // paid_date
-    if (String(r.paid_date || '').trim()) {
-      normalizePaidDateISO(r);
-      // sync month/year from paid_date to obey P2
-      syncYearMonthFromPaidDate(r);
-    } else {
-      r.paid_date = '';
-    }
 
     // period
     r.use_period = !!r.use_period;
@@ -1750,9 +1782,11 @@ function applyRunningTotals(viewRows) {
   function normalizePeriod(row) {
     if (row.period_from_m && row.period_from_y && row.period_to_m && row.period_to_y) return;
 
-    const d = new Date();
-    const defM = pad2(d.getMonth() + 1);
-    const defY = String(d.getFullYear());
+    const defM = (/^(0[1-9]|1[0-2])$/.test(String(row.month || ''))) ? String(row.month) : '';
+    const defY = (/^(19|20)\d{2}$/.test(String(row.year || ''))) ? String(row.year) : '';
+
+    if (!defY) throwPaymentPeriodInvalid("PAYMENT_YEAR_REQUIRED", row, { month: row.month || "", year: row.year || "" });
+    if (!defM) throwPaymentPeriodInvalid("PAYMENT_PERIOD_INVALID", row, { month: row.month || "", year: row.year || "" });
 
     row.period_from_m = row.period_from_m || defM;
     row.period_from_y = row.period_from_y || defY;
