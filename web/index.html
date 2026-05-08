@@ -669,6 +669,11 @@ async function ensureIndexAccrualsReady(){
     showIndexAccrualsReadonlyStatus();
 }
 
+function renderIndexRowsReadonly(){
+    rebuildIndexRows();
+    render();
+}
+
 function initIndexPage(){
     var uiState = (window.JKH_UI_STATE && typeof window.JKH_UI_STATE === "object")
         ? window.JKH_UI_STATE
@@ -694,6 +699,7 @@ function initIndexPage(){
         initSorting();
         indexTableInitDone = true;
     }
+    renderIndexRowsReadonly();
 }
 
 function showIndexAccrualsReadonlyStatus(){
@@ -723,6 +729,7 @@ document.addEventListener("DOMContentLoaded", initIndexPage);
 window.addEventListener("JKH_UI_STATE_CHANGED", function(){
     syncLoadingWarning();
     showIndexAccrualsReadonlyStatus();
+    renderIndexRowsReadonly();
 });
 
 /* ============================================================
