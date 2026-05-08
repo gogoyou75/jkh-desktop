@@ -305,6 +305,22 @@
   }
 
 
+  const EXCLUDES_FATAL_MESSAGE = "Исключённые периоды повреждены. Расчёт пени остановлен.";
+
+  function isExcludesFatalError(e){
+    const code = String(e && e.code || "");
+    return code === "EXCLUDES_JSON_INVALID" || code === "EXCLUDES_INVALID";
+  }
+
+  function logExcludesFatal(e){
+    if (window.JKHCalcEngine && typeof window.JKHCalcEngine.logExcludesFatal === "function") {
+      window.JKHCalcEngine.logExcludesFatal(e);
+      return;
+    }
+    const code = String(e && e.code || "");
+    console.error("[fatal][excludes-json-invalid]", { code: code, details: e && e.details || {} });
+  }
+
   const RATES_FATAL_MESSAGE = "Ставки рефинансирования отсутствуют или повреждены. Расчёт пени остановлен.";
 
   function isRatesFatalError(e){
@@ -526,6 +542,11 @@
           showFatal(RATES_FATAL_MESSAGE);
           return;
         }
+        if (isExcludesFatalError(e)) {
+          logExcludesFatal(e);
+          showFatal(EXCLUDES_FATAL_MESSAGE);
+          return;
+        }
         penaltyBySourceMonth = {};
       }
 
@@ -591,6 +612,11 @@
           showFatal(RATES_FATAL_MESSAGE);
           return;
         }
+        if (isExcludesFatalError(e)) {
+          logExcludesFatal(e);
+          showFatal(EXCLUDES_FATAL_MESSAGE);
+          return;
+        }
         console.error("[spravka_sud] calcTotals failed", e);
         return;
       }
@@ -646,6 +672,11 @@
         if (isRatesFatalError(e)) {
           logRatesFatal(e);
           showFatal(RATES_FATAL_MESSAGE);
+          return;
+        }
+        if (isExcludesFatalError(e)) {
+          logExcludesFatal(e);
+          showFatal(EXCLUDES_FATAL_MESSAGE);
           return;
         }
         throw e;

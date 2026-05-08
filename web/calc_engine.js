@@ -77,6 +77,33 @@
     console.error("[fatal][ledger-json-invalid]", { key: key || "", error: cause });
   }
 
+  const EXCLUDES_FATAL_MESSAGE = "Исключённые периоды повреждены. Расчёт пени остановлен.";
+
+  function makeExcludesFatalError(code, key, details, cause){
+    const err = new Error(EXCLUDES_FATAL_MESSAGE);
+    err.code = code || "EXCLUDES_INVALID";
+    err.key = key || "";
+    err.details = details || {};
+    err.cause = cause;
+    return err;
+  }
+
+  function isExcludesFatalError(e){
+    const code = String(e && e.code || "");
+    return code === "EXCLUDES_JSON_INVALID" || code === "EXCLUDES_INVALID";
+  }
+
+  function logExcludesFatal(err){
+    const code = String(err && err.code || "");
+    console.error("[fatal][excludes-json-invalid]", { code: code, key: err && err.key || "", details: err && err.details || {}, error: err && err.cause });
+  }
+
+  function throwExcludesFatal(code, key, details, cause){
+    const err = makeExcludesFatalError(code, key, details, cause);
+    logExcludesFatal(err);
+    throw err;
+  }
+
   const RATES_FATAL_MESSAGE = "Ставки рефинансирования отсутствуют или повреждены. Расчёт пени остановлен.";
 
   function makeRatesFatalError(code, key, details){
@@ -277,20 +304,40 @@
   function isMoratoriumActive(abonentId){ return storeGetRaw(moratoriumKey(abonentId)) === "1"; }
 
   function loadExcludes(abonentId){
+    const key = excludePeriodsKey(abonentId);
+    const raw = storeGetRaw(key);
+    if (raw === null || raw === undefined) return [];
+
+    let arr;
     try{
-      const raw = storeGetRaw(excludePeriodsKey(abonentId));
-      const arr = raw ? JSON.parse(raw) : [];
-      if (!Array.isArray(arr)) return [];
-      const startDay = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate(), 0,0,0,0);
-      const endDay   = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate(), 23,59,59,999);
-      return arr.map(x => {
-        const fromRaw = x.from ?? x.dateFrom ?? x.start ?? x.fromISO ?? x.from_iso;
-        const toRaw   = x.to   ?? x.dateTo   ?? x.end   ?? x.toISO   ?? x.to_iso;
-        const from = parseDateAnyToDate(fromRaw);
-        const to   = parseDateAnyToDate(toRaw);
-        return { from: from ? startDay(from) : null, to: to ? endDay(to) : null };
-      }).filter(x => x.from && x.to && x.to >= x.from);
-    }catch(e){ return []; }
+      arr = JSON.parse(raw);
+    }catch(e){
+      throwExcludesFatal("EXCLUDES_JSON_INVALID", key, { reason: "JSON_PARSE_FAILED" }, e);
+    }
+
+    if (!Array.isArray(arr)) {
+      throwExcludesFatal("EXCLUDES_JSON_INVALID", key, { reason: "EXCLUDES_NOT_ARRAY" });
+    }
+
+    const startDay = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate(), 0,0,0,0);
+    const endDay   = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate(), 23,59,59,999);
+
+    return arr.map((x, index) => {
+      if (!x || typeof x !== "object") {
+        throwExcludesFatal("EXCLUDES_INVALID", key, { index: index, reason: "EXCLUDE_NOT_OBJECT" });
+      }
+
+      const fromRaw = x.from ?? x.dateFrom ?? x.start ?? x.fromISO ?? x.from_iso;
+      const toRaw   = x.to   ?? x.dateTo   ?? x.end   ?? x.toISO   ?? x.to_iso;
+      const from = parseDateAnyToDate(fromRaw);
+      const to   = parseDateAnyToDate(toRaw);
+
+      if (!from || !to || endDay(to) < startDay(from)) {
+        throwExcludesFatal("EXCLUDES_INVALID", key, { index: index, reason: "EXCLUDE_DATE_INVALID", from: fromRaw, to: toRaw });
+      }
+
+      return { from: startDay(from), to: endDay(to) };
+    });
   }
 
   function isExcludedDay(d, excludes){
@@ -972,6 +1019,8 @@
     getAbonentIdFromUrl,
     getActiveResponsibilityRangeISO,
     loadExcludes,
+    isExcludesFatalError,
+    logExcludesFatal,
     loadRates,
     calcTotalsAsOfAdjusted,
     calcTotalsAsOfCore,
