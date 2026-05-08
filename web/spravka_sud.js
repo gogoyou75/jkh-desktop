@@ -203,12 +203,42 @@
     } catch (e) { return null; }
   }
 
-  function firstValidDate(eng, values){
+  const START_DATE_FATAL_MESSAGE = "Дата начала ответственности/расчёта не указана. Расчёт остановлен, чтобы не использовать фиктивную дату.";
+
+  function isDefault2000Date(d){
+    return !!(d && d.getFullYear && d.getFullYear() === 2000 && d.getMonth() === 0 && d.getDate() === 1);
+  }
+
+  function makeStartDateError(code, details){
+    const err = new Error(START_DATE_FATAL_MESSAGE);
+    err.code = code;
+    err.details = details || {};
+    return err;
+  }
+
+  function logStartDateFatal(err){
+    const code = String(err && err.code || "");
+    const tag = (code === "DEFAULT_2000_DATE_FORBIDDEN")
+      ? "[fatal][default-2000-date-forbidden]"
+      : "[fatal][responsibility-date-missing]";
+    console.error(tag, { code: code, details: err && err.details || {} });
+  }
+
+  function isStartDateFatalError(e){
+    const code = String(e && e.code || "");
+    return code === "START_DATE_MISSING" || code === "RESPONSIBILITY_DATE_MISSING" || code === "DEFAULT_2000_DATE_FORBIDDEN";
+  }
+
+  function firstValidDate(eng, values, source){
     for (let i = 0; i < values.length; i++) {
       const raw = String(values[i] || "").trim();
       if (!raw) continue;
       const d = eng.parseDateAnyToDate(raw);
-      if (d) return d;
+      if (!d) continue;
+      if (isDefault2000Date(d)) {
+        throw makeStartDateError("DEFAULT_2000_DATE_FORBIDDEN", { source: source || "", raw: raw });
+      }
+      return d;
     }
     return null;
   }
@@ -216,10 +246,10 @@
   function resolveAbonentStartDate(eng, abonent, activeLink, abonentId){
     const result = { date: null, source: "" };
 
-    const d1 = firstValidDate(eng, [abonent && abonent.calcStartDate]);
+    const d1 = firstValidDate(eng, [abonent && abonent.calcStartDate], "abonent.calcStartDate");
     if (d1) return { date: eng.startOfDay(d1), source: "abonent.calcStartDate" };
 
-    const d2 = firstValidDate(eng, [activeLink && activeLink.dateFrom]);
+    const d2 = firstValidDate(eng, [activeLink && activeLink.dateFrom], "activeLink.dateFrom");
     if (d2) return { date: eng.startOfDay(d2), source: "activeLink.dateFrom" };
 
     const d3 = firstValidDate(eng, [
@@ -240,23 +270,22 @@
       abonent && abonent.registrationDate,
       abonent && abonent.date_reg,
       abonent && abonent.dateRegistration
-    ]);
+    ], "abonent.compat.startDateField");
     if (d3) return { date: eng.startOfDay(d3), source: "abonent.compat.startDateField" };
 
     try {
       const r = eng.getActiveResponsibilityRangeISO(abonentId);
-      const d4 = firstValidDate(eng, [r && r.from]);
+      const d4 = firstValidDate(eng, [r && r.from], "calcEngine.getActiveResponsibilityRangeISO");
       if (d4) return { date: eng.startOfDay(d4), source: "calcEngine.getActiveResponsibilityRangeISO" };
-    } catch (e) {}
+    } catch (e) {
+      if (isStartDateFatalError(e)) throw e;
+    }
 
-    const fallback = eng.startOfDay(new Date(2000, 0, 1));
-    console.warn("[spravka_sud] fallback start date applied", {
+    throw makeStartDateError("RESPONSIBILITY_DATE_MISSING", {
+      codeAlias: "START_DATE_MISSING",
       reason: "no abonent start date sources",
       abonentId: String(abonentId || "")
     });
-    result.date = fallback;
-    result.source = "fallback:2000-01-01";
-    return result;
   }
 
   function renderRow(tbody, cells){
@@ -436,6 +465,12 @@
       const activeLink = getActiveLinkForAbonent(dbRoot, ctx.abonentId);
       const startResolved = resolveAbonentStartDate(eng, abonent, activeLink, ctx.abonentId);
       const abonentStart = startResolved.date;
+      if (!abonentStart) {
+        const err = makeStartDateError("RESPONSIBILITY_DATE_MISSING", { abonentId: ctx.abonentId });
+        logStartDateFatal(err);
+        showFatal(START_DATE_FATAL_MESSAGE);
+        return;
+      }
 
       let period = loadSelectedPeriod(ctx.abonentId, ctx.readOwner);
       let periodSource = period ? "stored report/calc period" : "auto from start date";
@@ -540,6 +575,11 @@
         if (isRatesFatalError(e)) {
           logRatesFatal(e);
           showFatal(RATES_FATAL_MESSAGE);
+          return;
+        }
+        if (isStartDateFatalError(e)) {
+          logStartDateFatal(e);
+          showFatal(START_DATE_FATAL_MESSAGE);
           return;
         }
         if (isExcludesFatalError(e)) {
@@ -672,6 +712,11 @@
         if (isRatesFatalError(e)) {
           logRatesFatal(e);
           showFatal(RATES_FATAL_MESSAGE);
+          return;
+        }
+        if (isStartDateFatalError(e)) {
+          logStartDateFatal(e);
+          showFatal(START_DATE_FATAL_MESSAGE);
           return;
         }
         if (isExcludesFatalError(e)) {

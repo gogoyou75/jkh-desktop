@@ -464,6 +464,18 @@
     }
   }
 
+
+  function isForbiddenDefaultDateString(v) {
+    var s = String(v || "").trim();
+    if (!s) return false;
+    var m = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+    return !!(m && Number(m[1]) === 2000 && Number(m[2]) === 1 && Number(m[3]) === 1);
+  }
+
+  function safeFinancialDateValue(v) {
+    return isForbiddenDefaultDateString(v) ? "" : String(v || "").trim();
+  }
+
   function normalizeDb(db) {
     if (!db) return;
 
@@ -502,7 +514,7 @@
           house: a.house || "",
           flat: a.flat || "",
           square: a.square ?? a.totalArea ?? "",
-          createdAt: a.premiseCreatedAt || a.premiseCreated || "2000-01-01",
+          createdAt: safeFinancialDateValue(a.premiseCreatedAt || a.premiseCreated),
           officialRegnum: normalizeOfficialRegnumValue(a.officialRegnum || ""),
           regnumType: a.officialRegnum ? "official" : "temp"
         };
@@ -527,6 +539,7 @@
       if (!p || typeof p !== "object") return;
       const officialRegnum = normalizeOfficialRegnumValue(p.officialRegnum);
       p.officialRegnum = officialRegnum;
+      p.createdAt = safeFinancialDateValue(p.createdAt);
       if (officialRegnum) p.regnumType = "official";
       else if (!String(p.regnumType || "").trim()) p.regnumType = "temp";
       console.log("[premises][official-regnum] normalized", String(regKey));
@@ -653,7 +666,7 @@
       merged.officialRegnum = normalizeOfficialRegnumValue(merged.officialRegnum);
       if (merged.officialRegnum) merged.regnumType = "official";
       else if (!String(merged.regnumType || "").trim()) merged.regnumType = "temp";
-      if (!String(merged.createdAt || "").trim()) merged.createdAt = "2000-01-01";
+      merged.createdAt = safeFinancialDateValue(merged.createdAt);
       console.log("[premises][official-regnum] normalized", regnum);
 
       window.AbonentsDB.premises[regnum] = merged;
@@ -738,7 +751,7 @@
           house: input.house || "",
           flat: input.flat || "",
           square: input.square !== undefined ? input.square : (input.totalArea !== undefined ? input.totalArea : ""),
-          createdAt: input.premiseCreatedAt || input.premiseCreated || "2000-01-01",
+          createdAt: safeFinancialDateValue(input.premiseCreatedAt || input.premiseCreated),
           officialRegnum: normalizeOfficialRegnumValue(input.officialRegnum || "")
         };
         this.ensurePremise(premiseObj);
@@ -1182,7 +1195,7 @@ window.JKHBoot?.markReady?.('data');
         calcEndDate: "",
 
         // служебное (не обязательно, но удобно)
-        premiseCreatedAt: "2000-01-01"
+        premiseCreatedAt: ""
       },
 
       "1008": {
@@ -1204,7 +1217,7 @@ window.JKHBoot?.markReady?.('data');
 
         calcStartDate: "2025-01-01",
         calcEndDate: "",
-        premiseCreatedAt: "2000-01-01"
+        premiseCreatedAt: ""
       }
     };
 

@@ -62,8 +62,20 @@
   if (window[ENGINE_KEY]) return;
 
   const DAY_MS = 24*3600*1000;
+  const START_DATE_FATAL_MESSAGE = 'Дата начала ответственности/расчёта не указана. Расчёт остановлен, чтобы не использовать фиктивную дату.';
+
 
   function pad2(n){ return String(n).padStart(2,'0'); }
+  function isDefault2000ISO(v){
+    const d = parseISOToDate(v);
+    return !!(d && d.getFullYear() === 2000 && d.getMonth() === 0 && d.getDate() === 1);
+  }
+  function makeFatalRange(code, ls, details){
+    const tag = code === 'DEFAULT_2000_DATE_FORBIDDEN' ? '[fatal][default-2000-date-forbidden]' : '[fatal][responsibility-date-missing]';
+    const out = Object.assign({ abonentId: String(ls || '') }, details || {});
+    console.error(tag, { code, details: out });
+    return { __fatal:true, code, message:START_DATE_FATAL_MESSAGE, details:out };
+  }
   function r2(x){ return Math.round((Number(x)||0)*100)/100; }
   function toNum(v){
     const n = parseFloat(String(v ?? '').replace(/\s+/g, '').replace(',', '.'));
@@ -436,8 +448,14 @@
       .sort((x,y) => String(x?.dateFrom||'').localeCompare(String(y?.dateFrom||''), 'ru'))
       .slice(-1)[0] || null;
 
-    const from = parseAnyToISO(link?.dateFrom || a.calcStartDate || a.startCalc || a.calcDate || '');
-    if (!from) return null;
+    const fromRaw = link?.dateFrom || a.calcStartDate || a.startCalc || a.calcDate || '';
+    const from = parseAnyToISO(fromRaw);
+    if (!from) {
+      return makeFatalRange('RESPONSIBILITY_DATE_MISSING', ls, { codeAlias:'START_DATE_MISSING', source:'link.dateFrom|abonent.calcStartDate', raw:String(fromRaw || '') });
+    }
+    if (isDefault2000ISO(from)) {
+      return makeFatalRange('DEFAULT_2000_DATE_FORBIDDEN', ls, { source:'link.dateFrom|abonent.calcStartDate', raw:String(fromRaw || '') });
+    }
 
     const hasLink = !!link;
     const hasDateToField = hasLink && Object.prototype.hasOwnProperty.call(link, 'dateTo');
@@ -540,6 +558,7 @@
 
   function ensureAutoAccrualsForAbonent(ls, arr){
     const range = getActiveRangeISOForAbonent(ls);
+    if (range && range.__fatal) return { changed:false, reason:range.code, code:range.code, message:range.message, fatal:true, details:range.details };
     if (!range) return { changed:false, reason:'NO_RANGE' };
 
     const months = monthIter(range.from, range.to);
