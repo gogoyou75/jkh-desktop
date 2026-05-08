@@ -50,6 +50,13 @@ ensureAuthScriptLoaded();
 
   const state = { stack: [] };
 
+  function clearBusy(){
+    state.stack.length = 0;
+    const box = ensureBusyElement();
+    box.classList.remove("visible");
+    if (document.body) document.body.classList.remove("jkh-busy-active");
+  }
+
   function ensureBusyElement(){
     let box = document.getElementById("jkhBusyOverlay");
     if (box) return box;
@@ -76,7 +83,7 @@ ensureAuthScriptLoaded();
       const box = ensureBusyElement();
       setMessage(state.stack[state.stack.length - 1]);
       box.classList.add("visible");
-      document.body.classList.add("jkh-busy-active");
+      if (document.body) document.body.classList.add("jkh-busy-active");
     },
     hide: function(){
       if (state.stack.length) state.stack.pop();
@@ -84,11 +91,17 @@ ensureAuthScriptLoaded();
       if (state.stack.length){
         setMessage(state.stack[state.stack.length - 1]);
         box.classList.add("visible");
-        document.body.classList.add("jkh-busy-active");
+        if (document.body) document.body.classList.add("jkh-busy-active");
         return;
       }
       box.classList.remove("visible");
-      document.body.classList.remove("jkh-busy-active");
+      if (document.body) document.body.classList.remove("jkh-busy-active");
+    },
+    hideAll: function(){
+      clearBusy();
+    },
+    isVisible: function(){
+      return state.stack.length > 0;
     },
     withBusy: async function(message, asyncFn){
       this.show(message);

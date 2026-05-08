@@ -412,3 +412,12 @@ th { background: #efefef; }
 @keyframes jkhBusyRotate {
     to { transform: rotate(360deg); }
 }
+
+/* Import XLS UID provenance */
+.uid-empty {
+    color: #666;
+}
+.uid-created {
+    color: #0b6b0b;
+    font-weight: bold;
+}

@@ -56,6 +56,8 @@
 
     .action-btn { border:1px solid #000; background:#fff; padding:2px 6px; cursor:pointer; font-size:12px; margin-right:6px; }
     .action-btn[disabled]{ opacity:0.45; cursor:default; }
+    .uid-empty{ color:#666; }
+    .uid-created{ color:#0b6b0b; font-weight:bold; }
   </style>
 </head>
 
@@ -330,13 +332,73 @@ function isPaymentBeforeAbonentStart(ab, paymentPeriod){
   return payYm < startYm;
 }
 
+function ensureImportRowUidFields(row){
+  if (!row) return row;
+  if (typeof row.excelUid === 'undefined') row.excelUid = normStr(row.uid);
+  row.excelUid = normStr(row.excelUid);
+  row.createdUid = normStr(row.createdUid);
+  row.resolvedUid = normStr(row.resolvedUid);
+
+  // Совместимость со старыми draft: прежний код мог записать createdUid в row.uid.
+  // Если createdUid и uid совпадают, считаем, что UID был создан программой, а в Excel был пустой.
+  if (row.createdUid && normStr(row.uid) && normStr(row.uid).toLowerCase() === row.createdUid.toLowerCase()){
+    row.excelUid = '';
+    row.uid = '';
+  } else {
+    row.uid = row.excelUid;
+  }
+
+  if (!row.resolvedUid) row.resolvedUid = row.createdUid || row.excelUid;
+  return row;
+}
+function normalizeImportRowsUidFields(rows){
+  if (!Array.isArray(rows)) return [];
+  for (let i=0;i<rows.length;i++) ensureImportRowUidFields(rows[i]);
+  return rows;
+}
+function getExcelUid(row){
+  ensureImportRowUidFields(row);
+  return normStr(row && row.excelUid);
+}
+function getCreatedUid(row){
+  ensureImportRowUidFields(row);
+  return normStr(row && row.createdUid);
+}
+function getResolvedUid(row){
+  ensureImportRowUidFields(row);
+  return normStr((row && row.resolvedUid) || (row && row.createdUid) || (row && row.excelUid) || (row && row.uid));
+}
+function setCreatedUidForRow(row, uid){
+  if (!row) return;
+  ensureImportRowUidFields(row);
+  const clean = normStr(uid);
+  row.createdUid = clean;
+  row.resolvedUid = clean || row.excelUid;
+  row.uid = row.excelUid;
+}
+function setResolvedUidForRow(row, uid){
+  if (!row) return;
+  ensureImportRowUidFields(row);
+  row.resolvedUid = normStr(uid) || row.createdUid || row.excelUid;
+  row.uid = row.excelUid;
+}
+function formatUidPreviewHtml(rowOrPreview){
+  const excelUid = normStr(rowOrPreview && (rowOrPreview.excelUid || rowOrPreview.uid));
+  const createdUid = normStr(rowOrPreview && rowOrPreview.createdUid);
+  if (excelUid) return escHtml(excelUid);
+  if (createdUid){
+    return '<span class="uid-empty">В Excel UID пусто</span><br><span class="uid-created">Создан UID: ' + escHtml(createdUid) + '</span>';
+  }
+  return '—';
+}
+
 function makeContractError(code){
   const err = new Error(code);
   err.code = code;
   return err;
 }
 function buildServerPaymentRow(row, pay, ab){
-  const accountUid = normStr((ab && ab.uid) || row.uid);
+  const accountUid = normStr((ab && ab.uid) || getResolvedUid(row));
   if (!accountUid) throw makeContractError('ACCOUNT_UID_REQUIRED');
   const accountNumber = normStr((ab && ab.id) || row.ls);
   if (!accountNumber) throw makeContractError('ACCOUNT_NUMBER_REQUIRED');
@@ -887,7 +949,7 @@ function tryResumeFromHash(){
   if (!resume) return false;
 
   if ((!Array.isArray(dataRows) || !dataRows.length) && Array.isArray(resume.dataRows) && resume.dataRows.length){
-    dataRows = resume.dataRows;
+    dataRows = normalizeImportRowsUidFields(resume.dataRows);
     primaryApplied = !!resume.primaryApplied;
     primaryBlocked = !!resume.primaryBlocked;
     mode = resume.mode === 'payments' ? 'payments' : 'primary';
@@ -918,8 +980,7 @@ function tryResumeFromHash(){
         }
       }
       if (resumedUid){
-        row.createdUid = resumedUid;
-        row.uid = resumedUid;
+        setCreatedUidForRow(row, resumedUid);
       }
     }
   }
@@ -930,9 +991,14 @@ function tryResumeFromHash(){
   }
   if (target){
     const row = dataRows.find(function(x){ return Number(x.excelRow)===target; });
-    const uid = normStr((row && (row.uid || row.createdUid)) || resumedUid);
+    const uid = normStr((row && getResolvedUid(row)) || resumedUid);
+    const excelUid = row ? getExcelUid(row) : "";
     if (uid){
-      setImportStatus('Абонент создан. Строка Excel: ' + target + '. UID: ' + uid + '. Можно продолжить импорт.', 'ok');
+      if (excelUid){
+        setImportStatus('Абонент создан. Строка Excel: ' + target + '. UID: ' + uid + '.', 'ok');
+      } else {
+        setImportStatus('Абонент создан. Строка Excel: ' + target + '. UID создан в базе: ' + uid + '. В исходном Excel UID отсутствовал.', 'ok');
+      }
     } else {
       setImportStatus('Абонент создан. Строка Excel: ' + target + '. UID не найден — проверьте карточку абонента.', 'warn');
     }
@@ -1293,6 +1359,9 @@ const rowYear =
     rows.push({
       excelRow:r+1,
       uid:normStr(uidVal),
+      excelUid:normStr(uidVal),
+      createdUid:'',
+      resolvedUid:normStr(uidVal),
       ls:normStr(lsVal),
       fam:normStr(famVal),
       name:normStr(nameVal),
@@ -1370,7 +1439,7 @@ function logUidSoftMismatch(row, uid, abonent, key, info){
 
 function abonentMatchesExcelRow(abonent, row, requireUid){
   if (!abonent || !row) return { ok:false, reason:'NO_ABONENT' };
-  const uidExcel = normStr(row.uid);
+  const uidExcel = getExcelUid(row);
   const uidDb = normStr(abonent.uid);
   if (requireUid && uidExcel && uidDb !== uidExcel) return { ok:false, reason:'UID' };
   const lsExcel = normStr(row.ls);
@@ -1383,7 +1452,7 @@ function logImportPremiseOpenCheck(row, regnum, result, reason){
   try {
     console.log('[import_xls][premise-open-check]', {
       excelRow: row && row.excelRow,
-      uid: normStr(row && row.uid),
+      uid: getResolvedUid(row),
       ls: normStr(row && row.ls),
       fam: normStr(row && row.fam),
       regnum: normStr(regnum),
@@ -1407,7 +1476,7 @@ function activeLinkForRegnumImport(db, regnum){
 
 function verifyPremiseOpenContext(db, row, abonentHit, regnum){
   const reg = normStr(regnum);
-  const uid = normStr(row && row.uid);
+  const uid = getResolvedUid(row);
   if (!db) return { ok:false, result:'blocked', reason:'NO_DB' };
   if (!uid) return { ok:false, result:'blocked', reason:'NO_UID' };
   const uidHit = findAbonentByUid(db, uid);
@@ -1431,7 +1500,7 @@ function verifyPremiseOpenContext(db, row, abonentHit, regnum){
 }
 
 function findAbonentByRules(db, row){
-  const uid = normStr(row.uid), ls = normStr(row.ls), fam = normStr(row.fam);
+  const uid = getExcelUid(row), ls = normStr(row.ls), fam = normStr(row.fam);
   if (uid){
     const foundU = findAbonentByUid(db, uid);
     if (foundU && foundU.abonent){
@@ -1635,6 +1704,9 @@ function parseSheetToRows(sheet, fileName, sheetName){
       rows.push({
         excelRow: r + 1,
         uid: normStr(line[fieldMap[0]]),
+        excelUid: normStr(line[fieldMap[0]]),
+        createdUid: '',
+        resolvedUid: normStr(line[fieldMap[0]]),
         ls: normStr(line[fieldMap[1]]),
         fam: normStr(line[fieldMap[2]]),
         name: normStr(line[fieldMap[3]]),
@@ -1754,6 +1826,9 @@ function parseSheetToRows(sheet, fileName, sheetName){
         rows.push({
           excelRow: r + 1,
           uid: normStr(uidVal),
+          excelUid: normStr(uidVal),
+          createdUid: '',
+          resolvedUid: normStr(uidVal),
           ls: normStr(lsVal),
           fam: normStr(famVal),
           name: normStr(nameVal),
@@ -1863,17 +1938,17 @@ function evaluatePrimaryRow(db, row){
     status='ERROR'; critical=true; messages.push('Ошибки: "Общая площадь" должна быть числом > 0.');
   }
 
-  if (normStr(row.createdUid) && !normStr(row.uid)){
+  if (getCreatedUid(row) && !getExcelUid(row)){
     status='WARNING_CREATED';
     critical=false;
     messages.push('Абонент создан. Скопируйте UID в Excel и перезагрузите файл.');
-    messages.push('UID: ' + row.createdUid);
-    action = { type:'COPY_UID', uid: row.createdUid };
+    messages.push('Создан UID: ' + getCreatedUid(row));
+    action = { type:'COPY_UID', uid: getCreatedUid(row) };
   } else if (found.type === 'UID_STRUCTURAL_CONFLICT' || found.type === 'UID_MISMATCH' || found.type === 'UID_MISSING' || found.type === 'NO_ID' || found.type === 'AMBIG'){
     status='ERROR'; critical=true; messages.push(found.msg);
   } else if (found.type === 'NOT_FOUND'){
     status='ERROR'; critical=true; messages.push(found.msg);
-    if (!normStr(row.uid)) action = { type:'ADD_ABONENT' };
+    if (!getExcelUid(row) && !getCreatedUid(row)) action = { type:'ADD_ABONENT' };
     if (!normStr(row.ls) || !normStr(row.fam)) messages.push('Для создания нужны непустые ФИО/ЛС.');
   } else if (found.type === 'FOUND_BY_LS_FAM'){
     status='UPDATED';
@@ -1898,7 +1973,7 @@ function evaluatePrimaryRow(db, row){
         logImportPremiseOpenCheck(row, reg, openCheck.ok ? (openCheck.result || 'ok') : 'blocked', openCheck.reason);
         if (openCheck.ok){
           if (openCheck.warningText) warnings.push(openCheck.warningText);
-          action = action || { type:'OPEN_PREMISE', regnum: reg, excelSquare: row.square, excelRow: row.excelRow, uid: normStr(row.uid), ls: normStr(row.ls), fam: normStr(row.fam) };
+          action = action || { type:'OPEN_PREMISE', regnum: reg, excelSquare: row.square, excelRow: row.excelRow, uid: getResolvedUid(row), ls: normStr(row.ls), fam: normStr(row.fam) };
         } else {
           status='ERROR'; critical=true; messages.push(PREMISE_OPEN_BLOCK_MESSAGE);
         }
@@ -1916,12 +1991,12 @@ function evaluatePaymentsRow(db, row){
     return { status:'APPLIED', critical:false, details:['Импорт выполнен: строка применена.'], conflicts:0, unresolved:0, adds:0, dups:0, found:paymentPairsCount(row), skipped:0 };
   }
   let status='OK', critical=false;
-  const uid = normStr(row.uid);
+  const uid = getResolvedUid(row);
   const foundU = uid ? findAbonentByUid(db, uid) : null;
   const ab = foundU ? foundU.abonent : null;
 
   if (!uid){
-    return { status:'ERROR', critical:true, details:['Создайте абонента в программе и вставьте UID в Excel'], conflicts:0, unresolved:0, adds:0, dups:0, found:paymentPairsCount(row), skipped:0 };
+    return { status:'ERROR', critical:true, details:['Создайте абонента в программе; для созданного из импорта UID будет использован как внутренний createdUid/resolvedUid.'], conflicts:0, unresolved:0, adds:0, dups:0, found:paymentPairsCount(row), skipped:0 };
   }
   if (!ab){
     return { status:'ERROR', critical:true, details:['UID из Excel не найден в базе.'], conflicts:0, unresolved:0, adds:0, dups:0, found:paymentPairsCount(row), skipped:0 };
@@ -1941,7 +2016,7 @@ function evaluatePaymentsRow(db, row){
     }
   }
 
-  const uidKey = normStr(ab.uid || row.uid);
+  const uidKey = normStr(ab.uid || getResolvedUid(row));
   const existing = getPaymentsByUid(uidKey);
   let conflicts=0, unresolved=0, errs=0, dups=0, adds=0, found=0;
 
@@ -2016,17 +2091,20 @@ function buildPreview(){
   }
 
   let noUidCount = 0;
+  let createdUidCount = 0;
 
   for (let i=0;i<dataRows.length;i++){
     const r = dataRows[i];
-    if (!normStr(r.uid)) noUidCount++;
+    ensureImportRowUidFields(r);
+    if (!getExcelUid(r)) noUidCount++;
+    if (!getExcelUid(r) && getCreatedUid(r)) createdUidCount++;
 
     const p1 = evaluatePrimaryRow(db, r);
     if (p1.critical) primaryBlocked = true;
 
     if (mode === 'primary'){
       preview.push({
-        excelRow:r.excelRow, uid:normStr(r.uid), ls:normStr(r.ls), fio:toFio(r.fam,r.name,r.otch),
+        excelRow:r.excelRow, uid:getExcelUid(r), excelUid:getExcelUid(r), createdUid:getCreatedUid(r), resolvedUid:getResolvedUid(r), ls:normStr(r.ls), fio:toFio(r.fam,r.name,r.otch),
         square:asSquare(r.square), paymentsBrief: formatPaymentListHtml(r),
         status:p1.status, critical:p1.critical, action:p1.action, details:p1.details
       });
@@ -2037,7 +2115,7 @@ function buildPreview(){
         const st = rowStatusMap[normStr(rr.status)] || 'UPDATED';
         preview.push({
           excelRow: rr.excel_row_ref || r.excelRow,
-          uid:normStr(rr.account_uid || r.uid),
+          uid:getExcelUid(r), excelUid:getExcelUid(r), createdUid:getCreatedUid(r), resolvedUid:normStr(rr.account_uid || getResolvedUid(r)),
           ls:normStr(rr.account_number || r.ls),
           fio:toFio(r.fam,r.name,r.otch),
           square:asSquare(r.square),
@@ -2050,7 +2128,7 @@ function buildPreview(){
         const p2 = evaluatePaymentsRow(db, r);
         p2.details.push('По строке LS ' + (normStr(r.ls) || '—') + ' найдено ' + paymentPairsCount(r) + ' платежей.');
         preview.push({
-          excelRow:r.excelRow, uid:normStr(r.uid), ls:normStr(r.ls), fio:toFio(r.fam,r.name,r.otch),
+          excelRow:r.excelRow, uid:getExcelUid(r), excelUid:getExcelUid(r), createdUid:getCreatedUid(r), resolvedUid:getResolvedUid(r), ls:normStr(r.ls), fio:toFio(r.fam,r.name,r.otch),
           square:asSquare(r.square), paymentsBrief: formatPaymentListHtml(r),
           status:p2.status, critical:p2.critical, details:p2.details
         });
@@ -2058,7 +2136,9 @@ function buildPreview(){
     }
   }
 
-  $('uidHint').innerHTML = noUidCount > 0 ? 'Найдено строк без UID: <b>' + noUidCount + '</b>. Нажмите "Создать абонента" в нужной строке.' : 'Строк без UID не найдено.';
+  $('uidHint').innerHTML = noUidCount > 0
+    ? 'Найдено строк без UID в Excel: <b>' + noUidCount + '</b>.' + (createdUidCount ? ' Создано программой: <b>' + createdUidCount + '</b>.' : ' Нажмите "Создать абонента" в нужной строке.')
+    : 'Строк без UID в Excel не найдено.';
   renderPreview();
 }
 
@@ -2095,8 +2175,8 @@ function renderPreview(){
     if (mode==='payments' && r.status==='CONFLICT'){
       const db = getDB();
       const rr = dataRows.find(x => x.excelRow===r.excelRow);
-      const foundU = (rr && rr.uid && db) ? findAbonentByUid(db, rr.uid) : null;
-      const uid = foundU && foundU.abonent ? normStr(foundU.abonent.uid || rr.uid) : '';
+      const foundU = (rr && getResolvedUid(rr) && db) ? findAbonentByUid(db, getResolvedUid(rr)) : null;
+      const uid = foundU && foundU.abonent ? normStr(foundU.abonent.uid || getResolvedUid(rr)) : '';
       if (uid){
         rr.payments.forEach(function(p){
           const amount = normNum(p.amount);
@@ -2131,7 +2211,7 @@ function renderPreview(){
     const tr = document.createElement('tr');
     tr.className = statusClass(r.status);
     tr.innerHTML = '<td class="mono">' + r.excelRow + '</td>' +
-      '<td class="mono">' + (r.uid||'') + '</td>' +
+      '<td class="mono">' + formatUidPreviewHtml(r) + '</td>' +
       '<td class="mono">' + (r.ls||'') + '</td>' +
       '<td>' + (r.fio||'') + '</td>' +
       '<td class="mono">' + (r.square!=='' ? r.square : '') + '</td>' +
@@ -2200,7 +2280,7 @@ function hasPrimaryCritical(){ return preview.some(r => r.critical && r.status==
 function hasPaymentsCritical(){ return preview.some(r => r.critical && r.status==='ERROR'); }
 function hasRowsWithUid(){
   for (let i=0;i<dataRows.length;i++){
-    if (normStr(dataRows[i] && dataRows[i].uid)) return true;
+    if (getResolvedUid(dataRows[i])) return true;
   }
   return false;
 }
@@ -2370,7 +2450,7 @@ async function onParse(){
     return;
   }
 
-  dataRows = res.rows;
+  dataRows = normalizeImportRowsUidFields(res.rows);
   const paymentRowsForYear = collectPaymentRowsForYearValidation(dataRows);
   fileYearValidation = validatePaymentYears(paymentRowsForYear, fileYear);
   fileYearBlockReason = fileYearValidation.invalidYearCount > 0 ? 'Обнаружены некорректные даты оплат' : '';
@@ -2418,7 +2498,7 @@ async function applyPrimary(){
     if (!Number.isFinite(row.square) || row.square<=0) continue;
 
     let a = found.abonent;
-    if (!normStr(row.uid)){
+    if (!getExcelUid(row)){
       const applyMatch = abonentMatchesExcelRow(a, row, false);
       if (!applyMatch.ok){
         logImportPremiseOpenCheck(row, normStr(a && (a.premiseRegnum || a.regnum)), 'blocked', 'APPLY_BLOCK_' + applyMatch.reason);
@@ -2428,15 +2508,17 @@ async function applyPrimary(){
     }
 
     // Канон: ключуем по ЛС, UID — поле внутри записи.
-    // Если UID не указан в Excel, но у абонента его ещё нет — генерируем (чтобы шаг 2 мог работать по UID).
-    if (!normStr(row.uid) && found.type==='FOUND_BY_LS_FAM'){
+    // Если UID не указан в Excel, но у абонента его ещё нет — генерируем системный UID.
+    // row.uid/excelUid не затираем: это значение из Excel, а не UID, созданный программой.
+    if (!getExcelUid(row) && found.type==='FOUND_BY_LS_FAM'){
       if (!normStr(a.uid)){
         a.uid = genUID();
         uidAssigned++;
       }
-      row.uid = normStr(a.uid);
-    } else if (normStr(row.uid)) {
-      a.uid = normStr(row.uid);
+      setCreatedUidForRow(row, normStr(a.uid));
+    } else if (getExcelUid(row)) {
+      a.uid = getExcelUid(row);
+      setResolvedUidForRow(row, a.uid);
     }
 
     a.id = normStr(row.ls) || a.id;
@@ -2500,7 +2582,7 @@ async function applyPayments(){
     const row = dataRows[i];
     const primaryFoundForPayment = findAbonentByRules(db, row);
     if (primaryFoundForPayment && (primaryFoundForPayment.type === 'UID_STRUCTURAL_CONFLICT' || primaryFoundForPayment.type === 'UID_MISMATCH')) continue;
-    const uid = normStr(row.uid);
+    const uid = getResolvedUid(row);
     const foundU = uid ? findAbonentByUid(db, uid) : null;
     const ab = foundU ? foundU.abonent : null;
     const accountUid = uid || '';
@@ -2526,7 +2608,7 @@ async function applyPayments(){
       }
       const previewRow = evaluatePaymentsRow(db, row);
       if (!previewRow || previewRow.status==='ERROR') continue;
-      const paymentUid = normStr(ab && ab.uid ? ab.uid : row.uid);
+      const paymentUid = normStr(ab && ab.uid ? ab.uid : getResolvedUid(row));
       if (!paymentUid){ setImportStatus('Для импорта платежей нужен UID.', 'err'); setImportBusy(false); if (window.JKHBusy && typeof JKHBusy.hide === 'function') JKHBusy.hide(); return; }
       const existing = getPaymentsByUid(paymentUid);
       const isDup = existing.some(function(x){
@@ -2658,7 +2740,8 @@ $('previewBody').addEventListener('click', function(ev){
     const db = getDB();
     if (!row || !db || !db.abonents) return;
 
-    if (normStr(row.uid)){ setImportStatus('В строке уже указан UID.', 'err'); return; }
+    if (getExcelUid(row)){ setImportStatus('В строке уже указан UID.', 'err'); return; }
+    if (getCreatedUid(row)){ setImportStatus('Абонент для строки уже создан. UID создан в базе: ' + getCreatedUid(row) + '.', 'info'); return; }
     if (!normStr(row.ls) || !normStr(row.fam)){ setImportStatus('Нельзя создать абонента: пустые ЛС/ФИО.', 'err'); return; }
     if (!Number.isFinite(row.square) || row.square<=0){ setImportStatus('Нельзя создать абонента: "Общая площадь" должна быть > 0.', 'err'); return; }
 
@@ -2719,7 +2802,7 @@ $('previewBody').addEventListener('click', function(ev){
     location.href =
       'premises.html?from=import' +
       '&regnum=' + encodeURIComponent(reg) +
-      '&uid=' + encodeURIComponent(normStr(row.uid || btn.getAttribute('data-uid') || '')) +
+      '&uid=' + encodeURIComponent(normStr(getResolvedUid(row) || btn.getAttribute('data-uid') || '')) +
       '&ls=' + encodeURIComponent(normStr(row.ls || btn.getAttribute('data-ls') || '')) +
       '&fam=' + encodeURIComponent(normStr(row.fam || btn.getAttribute('data-fam') || '')) +
       '&excelSquare=' + encodeURIComponent(row.square || btn.getAttribute('data-excelsquare') || '') +
@@ -2737,6 +2820,7 @@ $('previewBody').addEventListener('click', function(ev){
 });
 
 (function init(){
+  try {
   refreshWho();
 
   const draft = loadImportDraftState();
@@ -2744,7 +2828,7 @@ $('previewBody').addEventListener('click', function(ev){
     const draftOwner = normStr(draft.ownerId);
     const currentOwner = getCurrentOwnerId();
     if (!draftOwner || draftOwner === currentOwner){
-      dataRows = draft.dataRows;
+      dataRows = normalizeImportRowsUidFields(draft.dataRows);
       mode = draft.mode === 'payments' ? 'payments' : 'primary';
       primaryApplied = !!draft.primaryApplied;
       primaryBlocked = !!draft.primaryBlocked;
@@ -2783,6 +2867,10 @@ $('previewBody').addEventListener('click', function(ev){
   $('btnApplyPayments').addEventListener('click', applyPayments);
 
   setButtons();
+  } finally {
+    if (window.JKHBusy && typeof JKHBusy.hideAll === 'function') JKHBusy.hideAll();
+    else if (window.JKHBusy && typeof JKHBusy.hide === 'function') JKHBusy.hide();
+  }
 })();
 </script>
 

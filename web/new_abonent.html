@@ -562,7 +562,7 @@ function saveImportCreatedUid(uid){
   try{
     const resume = JKHStore.getJSON('import_xls_resume_v1', null, null) || {};
     resume.createdUid = cleanUid;
-    resume.uid = cleanUid;
+    resume.resolvedUid = cleanUid;
     JKHStore.setJSON('import_xls_resume_v1', resume, null);
   }catch(e){}
 }
