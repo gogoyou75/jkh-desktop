@@ -212,14 +212,64 @@
     }
   }
 
+  const __paymentKeyResolveCache = new Map();
+  let __paymentKeyResolveCacheOwner = null;
+  let __paymentKeyResolveCacheDb = null;
+  let __paymentKeyResolveCacheVersion = 0;
+  const __paymentKeyResolveLogOnce = new Set();
+
+  function _paymentKeyDebugEnabled() {
+    try { return !!window.JKH_DEBUG_PAYMENT_KEY; } catch (e) { return false; }
+  }
+
+  function _resetPaymentKeyResolveCache(reason) {
+    __paymentKeyResolveCache.clear();
+    __paymentKeyResolveLogOnce.clear();
+    __paymentKeyResolveCacheOwner = _ownerId();
+    __paymentKeyResolveCacheDb = window.AbonentsDB || null;
+    __paymentKeyResolveCacheVersion++;
+    try {
+      if (_paymentKeyDebugEnabled()) console.debug('[payment-key] cache reset', { reason: String(reason || ''), version: __paymentKeyResolveCacheVersion });
+    } catch (e) { }
+  }
+
+  function _ensurePaymentKeyResolveCacheFresh() {
+    const owner = _ownerId();
+    const db = window.AbonentsDB || null;
+    if (__paymentKeyResolveCacheOwner !== owner || __paymentKeyResolveCacheDb !== db) {
+      _resetPaymentKeyResolveCache('owner-or-db-change');
+    }
+  }
+
+  function _logPaymentKeyResolve(level, payload) {
+    try {
+      if (!_paymentKeyDebugEnabled()) return;
+      const id = String(payload && payload.abonentId || '');
+      const key = String(payload && (payload.key || payload.reason || payload.mode) || '');
+      const onceKey = level + ':' + id + ':' + key;
+      if (__paymentKeyResolveLogOnce.has(onceKey)) return;
+      __paymentKeyResolveLogOnce.add(onceKey);
+      const fn = console[level] || console.debug || console.log;
+      fn.call(console, '[payment-key] resolve', payload);
+    } catch (e) { }
+  }
+
   function getAbonentTechId(abonentId) {
+    _ensurePaymentKeyResolveCacheFresh();
+
     const id = String(abonentId || '').trim();
+    if (__paymentKeyResolveCache.has(id)) {
+      const cached = __paymentKeyResolveCache.get(id);
+      return cached && cached.uid ? cached.uid : null;
+    }
+
     const db = (window.Data && typeof window.Data.getDb === 'function') ? window.Data.getDb() : (window.AbonentsDB || {});
     const abonents = db && db.abonents && typeof db.abonents === 'object' ? db.abonents : {};
     const a = abonents[id] || null;
 
     if (!a) {
-      console.warn('[payment-key] resolve', {
+      __paymentKeyResolveCache.set(id, { uid: '', key: '', found: false });
+      _logPaymentKeyResolve('debug', {
         abonentId: id,
         found: false,
         uid: '',
@@ -232,17 +282,19 @@
 
     const uid = String(a.uid || '').trim();
     if (uid) {
-      console.log('[payment-key] resolve', {
+      __paymentKeyResolveCache.set(id, { uid: uid, key: 'payments_' + uid, found: true });
+      _logPaymentKeyResolve('debug', {
         abonentId: id,
         found: true,
-        uid,
+        uid: uid,
         key: 'payments_' + uid,
         mode: 'uid'
       });
       return uid;
     }
 
-    console.warn('[payment-key] resolve', {
+    __paymentKeyResolveCache.set(id, { uid: '', key: '', found: true });
+    _logPaymentKeyResolve('debug', {
       abonentId: id,
       found: true,
       uid: '',
@@ -271,6 +323,8 @@
 
 
   window.getPaymentsKeyForAbonent = getPaymentsKeyForAbonent;
+  window.getAbonentTechId = getAbonentTechId;
+  window.JKHInvalidatePaymentKeyCache = _resetPaymentKeyResolveCache;
 
   function _todayStamp() {
     var d = new Date();
@@ -464,6 +518,18 @@
     }
   }
 
+
+  function isForbiddenDefaultDateString(v) {
+    var s = String(v || "").trim();
+    if (!s) return false;
+    var m = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+    return !!(m && Number(m[1]) === 2000 && Number(m[2]) === 1 && Number(m[3]) === 1);
+  }
+
+  function safeFinancialDateValue(v) {
+    return isForbiddenDefaultDateString(v) ? "" : String(v || "").trim();
+  }
+
   function normalizeDb(db) {
     if (!db) return;
 
@@ -502,7 +568,7 @@
           house: a.house || "",
           flat: a.flat || "",
           square: a.square ?? a.totalArea ?? "",
-          createdAt: a.premiseCreatedAt || a.premiseCreated || "2000-01-01",
+          createdAt: safeFinancialDateValue(a.premiseCreatedAt || a.premiseCreated),
           officialRegnum: normalizeOfficialRegnumValue(a.officialRegnum || ""),
           regnumType: a.officialRegnum ? "official" : "temp"
         };
@@ -527,6 +593,7 @@
       if (!p || typeof p !== "object") return;
       const officialRegnum = normalizeOfficialRegnumValue(p.officialRegnum);
       p.officialRegnum = officialRegnum;
+      p.createdAt = safeFinancialDateValue(p.createdAt);
       if (officialRegnum) p.regnumType = "official";
       else if (!String(p.regnumType || "").trim()) p.regnumType = "temp";
       console.log("[premises][official-regnum] normalized", String(regKey));
@@ -546,10 +613,12 @@
   const stored = loadFromStorage();
   if (!_isAllMode()) window.JKH_DATA_READY = !!stored;
   window.AbonentsDB = stored ? mergePreferStored(BASE_DB, stored) : deepClone(BASE_DB);
+  _resetPaymentKeyResolveCache('initial-load');
 
   window.saveAbonentsDB = function () {
     if (!window.AbonentsDB) return;
     normalizeDb(window.AbonentsDB);
+    _resetPaymentKeyResolveCache('save-abonents-db');
     return saveToStorage(window.AbonentsDB);
   };
 
@@ -653,7 +722,7 @@
       merged.officialRegnum = normalizeOfficialRegnumValue(merged.officialRegnum);
       if (merged.officialRegnum) merged.regnumType = "official";
       else if (!String(merged.regnumType || "").trim()) merged.regnumType = "temp";
-      if (!String(merged.createdAt || "").trim()) merged.createdAt = "2000-01-01";
+      merged.createdAt = safeFinancialDateValue(merged.createdAt);
       console.log("[premises][official-regnum] normalized", regnum);
 
       window.AbonentsDB.premises[regnum] = merged;
@@ -738,7 +807,7 @@
           house: input.house || "",
           flat: input.flat || "",
           square: input.square !== undefined ? input.square : (input.totalArea !== undefined ? input.totalArea : ""),
-          createdAt: input.premiseCreatedAt || input.premiseCreated || "2000-01-01",
+          createdAt: safeFinancialDateValue(input.premiseCreatedAt || input.premiseCreated),
           officialRegnum: normalizeOfficialRegnumValue(input.officialRegnum || "")
         };
         this.ensurePremise(premiseObj);
@@ -1016,6 +1085,72 @@
     }catch(e){ return ""; }
   }
 
+
+  var DEBT_TRANSFER_FATAL_MESSAGE = "Перенос долга остановлен: не удалось надёжно рассчитать долг старого абонента.";
+
+  function __makeDebtTransferError(code, details, cause){
+    var err = new Error(DEBT_TRANSFER_FATAL_MESSAGE);
+    err.code = code || "DEBT_TRANSFER_ABORTED";
+    err.details = details || {};
+    err.cause = cause;
+    return err;
+  }
+
+  function __isDebtTransferError(e){
+    var code = String(e && e.code || "");
+    return code === "FROZEN_DEBT_CALC_FAILED" ||
+      code === "FROZEN_DEBT_JSON_INVALID" ||
+      code === "TRANSFER_BALANCE_JSON_INVALID" ||
+      code === "TRANSFER_BALANCE_MISSING" ||
+      code === "DEBT_TRANSFER_ABORTED" ||
+      code === "LEDGER_JSON_INVALID";
+  }
+
+  function __logDebtTransferAbort(err){
+    try{
+      var code = String(err && err.code || "DEBT_TRANSFER_ABORTED");
+      if (code === "FROZEN_DEBT_CALC_FAILED" || code === "LEDGER_JSON_INVALID") {
+        console.error("[fatal][frozen-debt-calc-failed]", { code: code, details: err && err.details || {}, error: err && (err.cause || err) });
+      }
+      console.error("[debt-transfer][aborted]", { code: code, details: err && err.details || {}, error: err && (err.cause || err) });
+    }catch(e){}
+  }
+
+  function __abortDebtTransfer(code, details, cause){
+    throw __makeDebtTransferError(code, details, cause);
+  }
+
+  function __parseDebtJson(raw, code, key){
+    try{
+      if (!raw) __abortDebtTransfer(code, { key: key, reason: "MISSING" });
+      var obj = JSON.parse(raw);
+      if (!obj || typeof obj !== "object" || Array.isArray(obj)) {
+        __abortDebtTransfer(code, { key: key, reason: "NOT_OBJECT" });
+      }
+      return obj;
+    }catch(e){
+      if (__isDebtTransferError(e)) throw e;
+      __abortDebtTransfer(code, { key: key, reason: "JSON_INVALID" }, e);
+    }
+  }
+
+  function __validateFrozenDebt(obj, code, key){
+    var principal = Number(obj && obj.principal);
+    var penalty = Number(obj && obj.penalty);
+    if (!Number.isFinite(principal) || !Number.isFinite(penalty)) {
+      __abortDebtTransfer(code, { key: key, reason: "DEBT_AMOUNTS_INVALID" });
+    }
+    if (principal === 0 && penalty === 0 && obj.success !== true) {
+      __abortDebtTransfer(code, { key: key, reason: "ZERO_DEBT_NOT_PROVEN" });
+    }
+    return {
+      success: obj.success === true,
+      principal: principal,
+      penalty: penalty,
+      calculatedAt: String(obj.calculatedAt || "")
+    };
+  }
+
   function prepareDebtTransfer(oldAbonentId, newAbonentId, regnum, transferDate, transferMode){
     if (!Data.ensureWriteOrExplain()) return false;
 
@@ -1032,34 +1167,56 @@
       var freezeISO = __isoYesterday(td);
       if (!freezeISO) return false;
 
-      // 1) Рассчитать и заморозить долг старого (principal + penalty)
       var frozenDebt = null;
-      if (window.JKHCalcEngine && typeof window.JKHCalcEngine.calculateFrozenDebt === "function"){
-        frozenDebt = window.JKHCalcEngine.calculateFrozenDebt(oldId, freezeISO);
-      }else if (window.JKHCalcEngine && typeof window.JKHCalcEngine.calcTotalsAsOfAdjusted === "function"){
-        try{
-          var rows = (window.JKHCalcEngine.loadPaymentsForAbonent)
-            ? window.JKHCalcEngine.loadPaymentsForAbonent(oldId)
-            : (function(){
-                try{ var raw=_getProjectRaw("payments_"+oldId); return raw?JSON.parse(raw):[]; }catch(e){ return []; }
-              })();
-          var d = new Date(String(freezeISO)+"T12:00:00");
-          var tot = window.JKHCalcEngine.calcTotalsAsOfAdjusted(rows, d, { abonentId: oldId, applyAdvanceOffset:true, allowNegativePrincipal:false });
-          frozenDebt = { principal: Number(tot?.principal)||0, penalty: Number(tot?.penaltyDebt)||0, calculatedAt: freezeISO };
-        }catch(e){}
-      }
+      var frozenKey = "jkh_frozen_debt_v1:" + oldId + ":" + freezeISO;
 
-      if (frozenDebt){
-        _setProjectRaw("jkh_frozen_debt_v1:" + oldId + ":" + freezeISO, JSON.stringify({
-          principal: Number(frozenDebt.principal)||0,
-          penalty: Number(frozenDebt.penalty)||0,
-          calculatedAt: String(frozenDebt.calculatedAt||freezeISO)
+      // 1) В режиме WITH_DEBT долг старого должен быть рассчитан явно.
+      if (mode === "WITH_DEBT"){
+        if (window.JKHCalcEngine && typeof window.JKHCalcEngine.calculateFrozenDebt === "function"){
+          try{
+            frozenDebt = window.JKHCalcEngine.calculateFrozenDebt(oldId, freezeISO);
+          }catch(calcFrozenErr){
+            if (__isDebtTransferError(calcFrozenErr) && calcFrozenErr.code === "FROZEN_DEBT_CALC_FAILED") throw calcFrozenErr;
+            __abortDebtTransfer("FROZEN_DEBT_CALC_FAILED", { oldAbonentId: oldId, freezeISO: freezeISO }, calcFrozenErr);
+          }
+        }else if (window.JKHCalcEngine && typeof window.JKHCalcEngine.calcTotalsAsOfAdjusted === "function"){
+          try{
+            var rows = (window.JKHCalcEngine.loadPaymentsForAbonent)
+              ? window.JKHCalcEngine.loadPaymentsForAbonent(oldId)
+              : (function(){
+                  var raw = _getProjectRaw("payments_" + oldId);
+                  if (!raw) return [];
+                  var arr = JSON.parse(raw);
+                  if (!Array.isArray(arr)) throw new Error("payments ledger is not an array");
+                  return arr;
+                })();
+            var d = new Date(String(freezeISO)+"T12:00:00");
+            var tot = window.JKHCalcEngine.calcTotalsAsOfAdjusted(rows, d, { abonentId: oldId, applyAdvanceOffset:true, allowNegativePrincipal:false });
+            var principal = Number(tot && tot.principal);
+            var penalty = Number(tot && tot.penaltyDebt);
+            if (!Number.isFinite(principal) || !Number.isFinite(penalty)) throw new Error("calculated totals are invalid");
+            frozenDebt = { success: true, principal: principal, penalty: penalty, calculatedAt: freezeISO };
+          }catch(calcErr){
+            __abortDebtTransfer("FROZEN_DEBT_CALC_FAILED", { oldAbonentId: oldId, freezeISO: freezeISO }, calcErr);
+          }
+        }else{
+          __abortDebtTransfer("FROZEN_DEBT_CALC_FAILED", { oldAbonentId: oldId, freezeISO: freezeISO, reason: "CALC_ENGINE_UNAVAILABLE" });
+        }
+
+        frozenDebt = __validateFrozenDebt(frozenDebt, "FROZEN_DEBT_CALC_FAILED", frozenKey);
+        if (frozenDebt.calculatedAt && frozenDebt.calculatedAt !== freezeISO) {
+          __abortDebtTransfer("FROZEN_DEBT_CALC_FAILED", { key: frozenKey, reason: "CALCULATED_AT_MISMATCH", calculatedAt: frozenDebt.calculatedAt, freezeISO: freezeISO });
+        }
+
+        _setProjectRaw(frozenKey, JSON.stringify({
+          success: true,
+          principal: frozenDebt.principal,
+          penalty: frozenDebt.penalty,
+          calculatedAt: freezeISO
         }));
-      } else {
-        // если не смогли рассчитать — всё равно пишем нули, чтобы система была детерминированной
-        _setProjectRaw("jkh_frozen_debt_v1:" + oldId + ":" + freezeISO, JSON.stringify({
-          principal: 0, penalty: 0, calculatedAt: freezeISO
-        }));
+
+        var frozenRaw = _getProjectRaw(frozenKey);
+        frozenDebt = __validateFrozenDebt(__parseDebtJson(frozenRaw, "FROZEN_DEBT_JSON_INVALID", frozenKey), "FROZEN_DEBT_JSON_INVALID", frozenKey);
       }
 
       // 2) Установить дату заморозки расчёта у старого
@@ -1076,18 +1233,18 @@
         }));
 
         // 3a) КАНОН: transfer_balance для движка (по regnum)
-        try{
-          var debtRaw = _getProjectRaw("jkh_frozen_debt_v1:" + oldId + ":" + freezeISO);
-          var dd = debtRaw ? JSON.parse(debtRaw) : { principal:0, penalty:0 };
-          _setProjectRaw("jkh_transfer_balance_v1:" + newId + ":" + rn, JSON.stringify({
-            startDate: td,
-            principal: Number(dd?.principal)||0,
-            penalty: Number(dd?.penalty)||0,
-            regnum: rn,
-            fromAbonentId: oldId,
-            mode: "WITH_DEBT"
-          }));
-        }catch(e){}
+        var transferBalanceKey = "jkh_transfer_balance_v1:" + newId + ":" + rn;
+        _setProjectRaw(transferBalanceKey, JSON.stringify({
+          success: true,
+          startDate: td,
+          principal: frozenDebt.principal,
+          penalty: frozenDebt.penalty,
+          regnum: rn,
+          fromAbonentId: oldId,
+          mode: "WITH_DEBT"
+        }));
+
+        __validateFrozenDebt(__parseDebtJson(_getProjectRaw(transferBalanceKey), "TRANSFER_BALANCE_JSON_INVALID", transferBalanceKey), "TRANSFER_BALANCE_JSON_INVALID", transferBalanceKey);
       } else {
         // NO_DEBT: снимаем возможные хвосты переноса на нового (на всякий случай)
         try{ _removeProjectRaw("jkh_transfer_to_v1:" + newId); }catch(e){}
@@ -1111,6 +1268,9 @@
 
       return true;
     }catch(e){
+      var err = __isDebtTransferError(e) ? e : __makeDebtTransferError("DEBT_TRANSFER_ABORTED", {}, e);
+      __logDebtTransferAbort(err);
+      try{ alert(DEBT_TRANSFER_FATAL_MESSAGE); }catch(alertErr){}
       return false;
     }
   }
@@ -1182,7 +1342,7 @@ window.JKHBoot?.markReady?.('data');
         calcEndDate: "",
 
         // служебное (не обязательно, но удобно)
-        premiseCreatedAt: "2000-01-01"
+        premiseCreatedAt: ""
       },
 
       "1008": {
@@ -1204,7 +1364,7 @@ window.JKHBoot?.markReady?.('data');
 
         calcStartDate: "2025-01-01",
         calcEndDate: "",
-        premiseCreatedAt: "2000-01-01"
+        premiseCreatedAt: ""
       }
     };
 
@@ -1271,6 +1431,7 @@ window.JKHBoot?.markReady?.('data');
     // После удаления — восстановим пустую структуру DB
     window.AbonentsDB = deepClone(BASE_DB);
     normalizeDb(window.AbonentsDB);
+    _resetPaymentKeyResolveCache('reset-database');
     saveToStorage(window.AbonentsDB);
 
     alert("Готово. База очищена.");
@@ -1294,6 +1455,7 @@ window.JKHBoot?.markReady?.('data');
     const fresh = loadFromStorage();
     window.AbonentsDB = fresh ? mergePreferStored(BASE_DB, fresh) : deepClone(BASE_DB);
     normalizeDb(window.AbonentsDB);
+    _resetPaymentKeyResolveCache('load-demo');
 
     alert("Демо загружено: абоненты 1006 и 1008.");
     location.reload();

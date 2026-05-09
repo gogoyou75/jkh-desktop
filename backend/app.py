@@ -439,6 +439,29 @@ def _norm_period(v):
     return None
 
 
+def _norm_upload_payment_period(v):
+    s = _norm_text(v)
+    if not s:
+        return None
+    m = re.match(r"^(\d{4})-(\d{2})$", s)
+    if not m:
+        return None
+    month = int(m.group(2))
+    if month < 1 or month > 12:
+        return None
+    return s
+
+
+def _raw_upload_payment_period_present(row):
+    try:
+        payload = json.loads(row.raw_payload_json or "{}")
+    except Exception:
+        payload = {}
+    if isinstance(payload, dict) and "payment_period" in payload:
+        return _norm_text(payload.get("payment_period")) != ""
+    return False
+
+
 def normalize_paid_date(v):
     value = _norm_date(v)
     if not value:
@@ -508,6 +531,23 @@ def payment_fingerprint(account_uid, paid_date, amount, source_index):
 def build_payment_fingerprint(owner_id, account_uid, account_number, paid_date, amount, source_index, payment_period):
     return payment_fingerprint(account_uid, paid_date, amount, source_index)
 
+
+
+class LedgerJsonInvalidError(ValueError):
+    pass
+
+
+def _load_existing_payment_ledger_or_raise(kv):
+    if not kv:
+        return []
+    raw = kv.v
+    try:
+        ledger = json.loads(raw)
+    except Exception as exc:
+        raise LedgerJsonInvalidError("LEDGER_JSON_INVALID") from exc
+    if not isinstance(ledger, list):
+        raise LedgerJsonInvalidError("LEDGER_JSON_INVALID")
+    return ledger
 
 def _classify_payment(account_uid, paid_date, amount, ledger_items):
     paid_date_norm = normalize_paid_date(paid_date)
@@ -1160,7 +1200,7 @@ def import_payments_upload_rows():
         abonent_id = _norm_text(src.get("abonent_id"))
         account_number = _norm_text(src.get("account_number"))
         payment_date = _norm_iso_date(src.get("payment_date"))
-        payment_period = _norm_period(src.get("payment_period"))
+        payment_period = _norm_upload_payment_period(src.get("payment_period"))
         amount = _norm_amount(src.get("amount"))
         src_index_raw = src.get("source_index")
         try:
@@ -1368,8 +1408,8 @@ def import_payments_validate(batch_id):
             invalid += 1
         elif not r.payment_period:
             r.status = "invalid"
-            r.reason_code = "PAYMENT_PERIOD_INVALID"
-            r.reason_text = "Некорректный период платежа"
+            r.reason_code = "PAYMENT_PERIOD_INVALID" if _raw_upload_payment_period_present(r) else "PAYMENT_PERIOD_REQUIRED"
+            r.reason_text = "Не найден год/период платежа. Импорт строки остановлен, чтобы не записать платёж не в тот год."
             details["field"] = "payment_period"
             details["recommendation"] = "Проверьте период платежа, ожидается YYYY-MM."
             invalid += 1
@@ -1470,13 +1510,14 @@ def import_payments_validate(batch_id):
                     kv = KVStore.query.filter_by(owner=batch.owner_id, k=key).first()
                     if not kv:
                         kv = KVStore.query.filter_by(owner=batch.owner_id, k=legacy_key).first()
-                    ledger = []
-                    if kv and kv.v:
-                        try:
-                            loaded = json.loads(kv.v)
-                            ledger = loaded if isinstance(loaded, list) else []
-                        except Exception:
-                            ledger = []
+                    try:
+                        ledger = _load_existing_payment_ledger_or_raise(kv)
+                    except LedgerJsonInvalidError:
+                        r.status = "invalid"
+                        r.reason_code = "LEDGER_JSON_INVALID"
+                        r.reason_text = "Данные платежей повреждены. Расчёт/импорт остановлен, чтобы не потерять историю платежей."
+                        invalid += 1
+                        continue
 
                     classification = _classify_import_payment(r.account_uid, r.paid_date, r.amount, r.fingerprint, ledger)
                     if classification == "NEW_PAYMENT":
@@ -1646,13 +1687,10 @@ def import_payments_apply(batch_id):
             if not source_kv:
                 legacy_kv = KVStore.query.filter_by(owner=batch.owner_id, k=legacy_key).first()
                 source_kv = legacy_kv
-            if source_kv and source_kv.v:
-                try:
-                    ledger = json.loads(source_kv.v)
-                    if not isinstance(ledger, list):
-                        ledger = []
-                except Exception:
-                    ledger = []
+            try:
+                ledger = _load_existing_payment_ledger_or_raise(source_kv)
+            except LedgerJsonInvalidError:
+                raise LedgerJsonInvalidError("LEDGER_JSON_INVALID")
 
             max_id = 0
             for x in ledger:
@@ -1713,6 +1751,27 @@ def import_payments_apply(batch_id):
         if batch.uploaded_at and app.config["IMPORT_UPLOAD_BLOB_TTL_DAYS"] <= 0:
             batch.upload_blob = b""
         db.session.commit()
+    except LedgerJsonInvalidError as ex:
+        db.session.rollback()
+        batch = ImportBatch.query.filter_by(id=batch.id).first()
+        if batch:
+            batch.status = "failed"
+            batch.finished_at = datetime.utcnow()
+            batch.error_message = "LEDGER_JSON_INVALID"
+            db.session.execute(
+                text("UPDATE import_rows SET status = 'failed', reason_code = 'LEDGER_JSON_INVALID', reason_text = :reason_text WHERE batch_id = :batch_id"),
+                {"batch_id": batch.id, "reason_text": "Данные платежей повреждены. Расчёт/импорт остановлен, чтобы не потерять историю платежей."},
+            )
+            db.session.add(PaymentAuditLog(
+                owner_id=batch.owner_id,
+                batch_id=batch.id,
+                action="FAILED",
+                status="FAILED",
+                details_json=json.dumps({"error": "LEDGER_JSON_INVALID", "row_id": current_row_id}, ensure_ascii=False),
+            ))
+            db.session.commit()
+        failed_count = 1
+        return jsonify(ok=False, error="apply_failed", details="LEDGER_JSON_INVALID"), 500
     except IntegrityError as e:
         db.session.rollback()
         batch = ImportBatch.query.filter_by(id=batch.id).first()

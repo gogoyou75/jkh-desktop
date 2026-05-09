@@ -392,6 +392,31 @@ function formatUidPreviewHtml(rowOrPreview){
   return '—';
 }
 
+
+const PAYMENT_PERIOD_MISSING_MESSAGE = 'Не найден год/период платежа. Импорт строки остановлен, чтобы не записать платёж не в тот год.';
+function logPaymentPeriodContract(code, context){
+  try{
+    if (code === 'PAYMENT_YEAR_REQUIRED') console.warn('[import][payment-year-required]', context || {});
+    if (code === 'PAYMENT_PERIOD_REQUIRED') console.warn('[import][payment-period-required]', context || {});
+  }catch(e){}
+}
+function resolveExplicitPaymentPeriod(pay, row){
+  const per = normalizePeriod(pay && pay.periodRaw);
+  const paidDateDisplay = normalizePaidDateStrict(pay && pay.paidDateRaw);
+  const paidDateYear = paidDateDisplay ? extractYearFromAny(paidDateDisplay) : '';
+  const rawYear = normStr(pay && pay.year);
+  const rowYear = normStr(row && row.rowYear);
+  const workbookYear = normStr(parseMeta && parseMeta.workbookYear);
+  const year = rawYear || (per ? per.period.slice(0,4) : '') || paidDateYear || rowYear || workbookYear;
+  const month = pad2((pay && pay.month) || (per ? per.period.slice(5,7) : ''));
+  if (!year) return { ok:false, code:'PAYMENT_YEAR_REQUIRED', year:'', month:month, period:'' };
+  if (!month) return { ok:false, code:'PAYMENT_PERIOD_REQUIRED', year:year, month:'', period:'' };
+  if (!/^\d{4}$/.test(year) || !/^\d{2}$/.test(month)) return { ok:false, code:'PAYMENT_PERIOD_INVALID', year:year, month:month, period:'' };
+  const period = year + '-' + month;
+  if (!/^\d{4}-\d{2}$/.test(period)) return { ok:false, code:'PAYMENT_PERIOD_INVALID', year:year, month:month, period:period };
+  return { ok:true, code:'', year:year, month:month, period:period };
+}
+
 function makeContractError(code){
   const err = new Error(code);
   err.code = code;
@@ -409,13 +434,12 @@ function buildServerPaymentRow(row, pay, ab){
   const paymentDate = toIsoDateFromDisplayDate(paidDateDisplay);
   if (!paymentDate || !/^\d{4}-\d{2}-\d{2}$/.test(paymentDate)) throw makeContractError('PAYMENT_DATE_INVALID');
 
-  const per = normalizePeriod(pay && pay.periodRaw);
-  const year = normStr(pay && pay.year) || (per ? per.period.slice(0,4) : '');
-  const month = pad2((pay && pay.month) || (per ? per.period.slice(5,7) : ''));
-  if (!year || !month) throw makeContractError('PAYMENT_PERIOD_REQUIRED');
-  if (!/^\d{4}$/.test(year) || !/^\d{2}$/.test(month)) throw makeContractError('PAYMENT_PERIOD_INVALID');
-  const paymentPeriod = year + '-' + month;
-  if (!/^\d{4}-\d{2}$/.test(paymentPeriod)) throw makeContractError('PAYMENT_PERIOD_INVALID');
+  const resolvedPeriod = resolveExplicitPaymentPeriod(pay, row);
+  if (!resolvedPeriod.ok){
+    logPaymentPeriodContract(resolvedPeriod.code, { excelRow: row && row.excelRow, sourceIndex: pay && pay.sourceIndex });
+    throw makeContractError(resolvedPeriod.code);
+  }
+  const paymentPeriod = resolvedPeriod.period;
 
   const amount = normNum(pay && pay.amount);
   if (!Number.isFinite(amount) || amount <= 0) throw makeContractError('AMOUNT_INVALID');
@@ -443,6 +467,19 @@ function refreshWho(){
 
 function getDB(){ return window.AbonentsDB || null; }
 function saveDB(){ try{ if (typeof window.saveAbonentsDB === 'function') return window.saveAbonentsDB(); }catch(e){} }
+const LEDGER_FATAL_MESSAGE = 'Данные платежей повреждены. Расчёт/импорт остановлен, чтобы не потерять историю платежей.';
+function makeLedgerJsonInvalidError(key, cause){
+  const err = new Error(LEDGER_FATAL_MESSAGE);
+  err.code = 'LEDGER_JSON_INVALID';
+  err.key = key || '';
+  err.cause = cause;
+  return err;
+}
+function logLedgerJsonInvalid(key, cause){
+  console.error('[fatal][ledger-json-invalid]', { key: key || '', error: cause });
+}
+function isLedgerJsonInvalidError(e){ return !!(e && e.code === 'LEDGER_JSON_INVALID'); }
+
 function payKeyByUid(uid){
   const u = normStr(uid);
   if (!u) return '';
@@ -455,8 +492,19 @@ function getPaymentsByUid(uid){
     console.warn('[import_xls][payment-key] blocked', { uid: normStr(uid), reason: 'UID_REQUIRED' });
     return [];
   }
-  try{ return (window.JKHStore && JKHStore.getJSON) ? (JKHStore.getJSON(key, [], null) || []) : []; }
-  catch(e){ return []; }
+  if (!window.JKHStore || typeof JKHStore.getRaw !== 'function') return [];
+  const raw = JKHStore.getRaw(key, null);
+  if (raw === null || raw === undefined) return [];
+  try{
+    const arr = JSON.parse(raw);
+    if (Array.isArray(arr)) return arr;
+    logLedgerJsonInvalid(key, 'parsed value is not an array');
+    throw makeLedgerJsonInvalidError(key, 'parsed value is not an array');
+  }catch(e){
+    if (isLedgerJsonInvalidError(e)) throw e;
+    logLedgerJsonInvalid(key, e);
+    throw makeLedgerJsonInvalidError(key, e);
+  }
 }
 function setPaymentsByUid(uid, arr){
   const key = payKeyByUid(uid);
@@ -772,8 +820,13 @@ function buildImportedPaymentLedgerRow(list, paymentEntry){
     const idNum = Number(list[i] && list[i].id);
     if (Number.isFinite(idNum) && idNum > maxId) maxId = idNum;
   }
-  const year = normStr(paymentEntry && paymentEntry.year) || String(new Date().getFullYear());
-  const month = pad2(paymentEntry && paymentEntry.month ? paymentEntry.month : '');
+  const resolvedPeriod = resolveExplicitPaymentPeriod(paymentEntry, null);
+  if (!resolvedPeriod.ok){
+    logPaymentPeriodContract(resolvedPeriod.code, { sourceIndex: paymentEntry && paymentEntry.sourceIndex });
+    throw makeContractError(resolvedPeriod.code);
+  }
+  const year = resolvedPeriod.year;
+  const month = resolvedPeriod.month;
   const paidDate = normalizePaidDateStrict(paymentEntry && paymentEntry.paidDateRaw);
   if (!paidDate) {
     throw new Error('PAYMENT_DATE_REQUIRED');
@@ -1335,12 +1388,12 @@ const rowYear =
         const amount = normNum(amountRaw);
         if (!Number.isFinite(amount) || amount <= 0) continue;
 
-        const y = extractYearFromAny(paidDateRaw) || rowYear || workbookYear || String(new Date().getFullYear());
+        const y = extractYearFromAny(paidDateRaw) || rowYear || workbookYear;
         const month = pad2(grp.month);
         payments.push({
           amount: amountRaw,
           paidDateRaw: paidDateRaw,
-          periodRaw: y + '-' + month,
+          periodRaw: y ? (y + '-' + month) : '',
           sourceIndex: src.sourceIndex,
           sourceName: sourceNameByIndex(src.sourceIndex),
           month: month,
@@ -1398,7 +1451,7 @@ function createAbonentMinimal(db, desiredUid, ls, fam, name, otch, square){
     premiseRegnum: regnum,
     city:'', street:'', house:'', flat:'', rooms:'', share:'',
     calcStartDate:'', calcEndDate:'',
-    premiseCreatedAt:'2000-01-01'
+    premiseCreatedAt:''
   };
   return { ok:true, uid: uid, abonent: db.abonents[lsKey] };
 }
@@ -2025,11 +2078,16 @@ function evaluatePaymentsRow(db, row){
     const amount = normNum(p.amount);
     if (!Number.isFinite(amount) || amount <= 0) continue;
     found++;
-    const per = normalizePeriod(p.periodRaw);
-    const year = normStr(p.year) || extractYearFromAny(p.periodRaw) || extractYearFromAny(p.paidDateRaw) || normStr(row.rowYear) || parseMeta.workbookYear || (per ? per.period.slice(0,4) : '') || String(new Date().getFullYear());
-    const month = pad2(p.month || (per ? per.period.slice(5,7) : ''));
-    if (!/^\d{4}$/.test(year) || !/^\d{2}$/.test(month)){ errs++; continue; }
-    const paymentPeriod = year + '-' + month;
+    const resolvedPeriod = resolveExplicitPaymentPeriod(p, row);
+    if (!resolvedPeriod.ok){
+      errs++;
+      logPaymentPeriodContract(resolvedPeriod.code, { excelRow: row && row.excelRow, sourceIndex: p && p.sourceIndex });
+      details.push(PAYMENT_PERIOD_MISSING_MESSAGE + ' (' + resolvedPeriod.code + ')');
+      continue;
+    }
+    const year = resolvedPeriod.year;
+    const month = resolvedPeriod.month;
+    const paymentPeriod = resolvedPeriod.period;
     if (isPaymentBeforeAbonentStart(ab, paymentPeriod)){
       errs++;
       details.push(
@@ -2069,7 +2127,7 @@ function evaluatePaymentsRow(db, row){
     adds++;
   }
 
-  if (errs>0){ status='ERROR'; critical=true; details.push('Есть ошибки платежей: нужен корректный год/месяц и сумма > 0.'); }
+  if (errs>0){ status='ERROR'; critical=true; details.push('Есть ошибки платежей: нужен корректный явный год/месяц и сумма > 0.'); }
   if (conflicts>0){ status = (status==='ERROR' ? status : 'CONFLICT'); details.push('Конфликт: на эту дату уже есть платеж с другой суммой.'); }
   if (!errs && !conflicts && adds===0 && dups>0){ status='SKIP_DUPLICATE'; details.push('Дубликат: уже есть такой платеж.'); }
   if (!errs && !conflicts && adds>0){ status='OK'; details.push('OK: добавится дополнительный платеж.'); }
@@ -2181,10 +2239,10 @@ function renderPreview(){
         rr.payments.forEach(function(p){
           const amount = normNum(p.amount);
           if (!Number.isFinite(amount) || amount<=0) return;
-          const per = normalizePeriod(p.periodRaw);
-          const year = normStr(p.year) || extractYearFromAny(p.periodRaw) || extractYearFromAny(p.paidDateRaw) || normStr(rr.rowYear) || parseMeta.workbookYear || (per ? per.period.slice(0,4) : '') || String(new Date().getFullYear());
-          const month = pad2(p.month || (per ? per.period.slice(5,7) : ''));
-          if (!/^\d{4}$/.test(year) || !/^\d{2}$/.test(month)) return;
+          const resolvedPeriod = resolveExplicitPaymentPeriod(p, rr);
+          if (!resolvedPeriod.ok) return;
+          const year = resolvedPeriod.year;
+          const month = resolvedPeriod.month;
           const paidDate = normalizePaidDateStrict(p.paidDateRaw);
           if (!paidDate) return;
           const source = sourceNameByIndex(p.sourceIndex || 1);
@@ -2573,7 +2631,8 @@ async function applyPayments(){
     ACCOUNT_NUMBER_REQUIRED: 'Импорт остановлен: отсутствует лицевой счёт (account_number).',
     PAYMENT_DATE_REQUIRED: 'Импорт остановлен: отсутствует дата платежа.',
     PAYMENT_DATE_INVALID: 'Импорт остановлен: некорректная дата платежа (требуется YYYY-MM-DD).',
-    PAYMENT_PERIOD_REQUIRED: 'Импорт остановлен: отсутствует период платежа.',
+    PAYMENT_YEAR_REQUIRED: PAYMENT_PERIOD_MISSING_MESSAGE,
+    PAYMENT_PERIOD_REQUIRED: PAYMENT_PERIOD_MISSING_MESSAGE,
     PAYMENT_PERIOD_INVALID: 'Импорт остановлен: некорректный период платежа (требуется YYYY-MM).',
     AMOUNT_INVALID: 'Импорт остановлен: некорректная сумма платежа.',
     SOURCE_INDEX_INVALID: 'Импорт остановлен: некорректный source_index (целое число >= 1).'
@@ -2590,12 +2649,20 @@ async function applyPayments(){
 
     for (let p=0;p<(row.payments || []).length;p++){
       const pay = row.payments[p];
-      const per = normalizePeriod(pay.periodRaw);
-      const year = normStr(pay.year) || (per ? per.period.slice(0,4) : '');
-      const month = pad2(pay.month || (per ? per.period.slice(5,7) : ''));
+      const resolvedPeriod = resolveExplicitPaymentPeriod(pay, row);
+      if (!resolvedPeriod.ok){
+        logPaymentPeriodContract(resolvedPeriod.code, { excelRow: row && row.excelRow, sourceIndex: pay && pay.sourceIndex });
+        const msg = contractMessages[resolvedPeriod.code] || ('Импорт остановлен: ошибка контракта ' + resolvedPeriod.code + '.');
+        setImportStatus(msg, 'err');
+        setImportBusy(false);
+        if (window.JKHBusy && typeof JKHBusy.hide === 'function') JKHBusy.hide();
+        return;
+      }
+      const year = resolvedPeriod.year;
+      const month = resolvedPeriod.month;
       const amountNum = normNum(pay.amount);
       const paidDateDisplay = normalizePaidDateStrict(pay.paidDateRaw);
-      const paymentPeriod = year + '-' + month;
+      const paymentPeriod = resolvedPeriod.period;
       if (isPaymentBeforeAbonentStart(ab, paymentPeriod)){
         setImportStatus(
           'Импорт остановлен: платёж за ' + paymentPeriod +
@@ -2610,7 +2677,18 @@ async function applyPayments(){
       if (!previewRow || previewRow.status==='ERROR') continue;
       const paymentUid = normStr(ab && ab.uid ? ab.uid : getResolvedUid(row));
       if (!paymentUid){ setImportStatus('Для импорта платежей нужен UID.', 'err'); setImportBusy(false); if (window.JKHBusy && typeof JKHBusy.hide === 'function') JKHBusy.hide(); return; }
-      const existing = getPaymentsByUid(paymentUid);
+      let existing;
+      try{
+        existing = getPaymentsByUid(paymentUid);
+      }catch(e){
+        if (isLedgerJsonInvalidError(e)){
+          setImportStatus(LEDGER_FATAL_MESSAGE, 'err');
+          setImportBusy(false);
+          if (window.JKHBusy && typeof JKHBusy.hide === 'function') JKHBusy.hide();
+          return;
+        }
+        throw e;
+      }
       const isDup = existing.some(function(x){
         const ym = getLedgerYearMonth(x);
         const paid = getLedgerPaidAmount(x);
@@ -2697,7 +2775,11 @@ async function applyPayments(){
       return;
     }
   } catch (e) {
-    setImportStatus('Ошибка записи на сервер. Данные не применены. ' + (e.message || e), 'err');
+    if (isLedgerJsonInvalidError(e)){
+      setImportStatus(LEDGER_FATAL_MESSAGE, 'err');
+    } else {
+      setImportStatus('Ошибка записи на сервер. Данные не применены. ' + (e.message || e), 'err');
+    }
     return;
   } finally {
     setImportBusy(false);

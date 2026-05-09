@@ -859,6 +859,22 @@ function paymentsHasDuplicate(arr, iso, amount){
   const d = String(iso || '').trim();
   return (arr || []).some(r => r2(r?.paid) === a && String(r?.paid_date || '').trim() === d);
 }
+function isStrictIsoDate(iso){
+  const s = String(iso || '').trim();
+  const m = s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) return false;
+  const y = Number(m[1]);
+  const mo = Number(m[2]);
+  const d = Number(m[3]);
+  const dt = new Date(y, mo - 1, d, 12, 0, 0);
+  return Number.isFinite(dt.getTime()) &&
+    dt.getFullYear() === y &&
+    (dt.getMonth() + 1) === mo &&
+    dt.getDate() === d;
+}
+function logImportPaymentYearRequired(iso, details){
+  try { console.warn('[import][payment-year-required]', { iso: String(iso || '').trim(), details: details || {} }); } catch(e) {}
+}
 function debtsHasDuplicate(debtsArr, dmy, amount){
   const a = r2(amount);
   const dd = String(dmy || '').trim();
@@ -895,10 +911,14 @@ function importPaymentsFromDraftForNewAbonent(ls, abonentObj){
     const iso = String(p?.iso || '').trim();
     const amount = r2(p?.amount);
     if (!(amount > 0) || !iso) continue;
+    if (!isStrictIsoDate(iso)) {
+      logImportPaymentYearRequired(iso, { ls: String(ls || '').trim(), amount: amount });
+      continue;
+    }
     if (paymentsHasDuplicate(payArr, iso, amount)) continue;
 
-    const mm = iso.slice(5,7) || '01';
-    const yy = iso.slice(0,4) || String(new Date().getFullYear());
+    const mm = iso.slice(5,7);
+    const yy = iso.slice(0,4);
 
     payArr.push({
       id: idCounter++,
@@ -934,8 +954,12 @@ function importPaymentsFromDraftForNewAbonent(ls, abonentObj){
         const iso = String(p?.iso || '').trim();
         const amount = r2(p?.amount);
         if (!(amount > 0) || !dmy || !iso) continue;
+        if (!isStrictIsoDate(iso)) {
+          logImportPaymentYearRequired(iso, { ls: String(ls || '').trim(), amount: amount, target: 'debts' });
+          continue;
+        }
         if (debtsHasDuplicate(abonentObj.debts, dmy, amount)) continue;
-        const year = Number(iso.slice(0,4)) || new Date().getFullYear();
+        const year = Number(iso.slice(0,4));
         const monthName = String(p?.monthName || '').trim() || '';
         abonentObj.debts.push({
           year: year,

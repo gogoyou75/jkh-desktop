@@ -43,12 +43,43 @@
     return null;
   }
 
+  const __spravkaLedgerReadCache = new Map();
+  const __spravkaPaymentKeyLogOnce = new Set();
+
   function safeJSON(key, def, ownerId){
     try {
       const raw = storeGet(key, ownerId);
       if (!raw) return def;
       return JSON.parse(raw);
     } catch (e) { return def; }
+  }
+
+  function safeLedgerJSON(key, def, ownerId){
+    try {
+      key = String(key || "");
+      const owner = String(ownerId || "");
+      const raw = storeGet(key, ownerId);
+      if (!raw) return def;
+      const cacheKey = owner + "::" + key;
+      const cached = __spravkaLedgerReadCache.get(cacheKey);
+      if (cached && cached.raw === raw) return cached.rows;
+      const arr = JSON.parse(raw);
+      if (!Array.isArray(arr)) return def;
+      __spravkaLedgerReadCache.set(cacheKey, { raw: raw, rows: arr });
+      return arr;
+    } catch (e) {
+      return def;
+    }
+  }
+
+  function logSpravkaPaymentKeyOnce(payload){
+    try {
+      if (!window.JKH_DEBUG_PAYMENT_KEY) return;
+      const onceKey = String(payload && payload.abonentId || '') + ':' + String(payload && (payload.key || payload.reason) || '');
+      if (__spravkaPaymentKeyLogOnce.has(onceKey)) return;
+      __spravkaPaymentKeyLogOnce.add(onceKey);
+      console.debug("[spravka_sud][payment-key]", payload);
+    } catch(e) {}
   }
 
   function setText(id, txt){
@@ -164,7 +195,7 @@
   function resolvePaymentsKeyForSpravka(ctx){
     const abonentId = String((ctx && ctx.abonentId) || "").trim();
     if (!abonentId) {
-      console.warn("[spravka_sud][payment-key] blocked", { abonentId: abonentId, reason: "UID_REQUIRED" });
+      logSpravkaPaymentKeyOnce({ abonentId: abonentId, reason: "UID_REQUIRED" });
       return "";
     }
 
@@ -172,7 +203,7 @@
       if (typeof window.getPaymentsKeyForAbonent === "function") {
         const key = String(window.getPaymentsKeyForAbonent(abonentId) || "").trim();
         if (key) {
-          console.log("[spravka_sud][payment-key] uid", { abonentId: abonentId, key: key });
+          logSpravkaPaymentKeyOnce({ abonentId: abonentId, key: key });
           return key;
         }
       }
@@ -183,11 +214,11 @@
     const uid = String((abonent && abonent.uid) || "").trim();
     if (uid) {
       const key = "payments_" + uid;
-      console.log("[spravka_sud][payment-key] uid", { abonentId: abonentId, key: key });
+      logSpravkaPaymentKeyOnce({ abonentId: abonentId, key: key });
       return key;
     }
 
-    console.warn("[spravka_sud][payment-key] blocked", { abonentId: abonentId, reason: "UID_REQUIRED" });
+    logSpravkaPaymentKeyOnce({ abonentId: abonentId, reason: "UID_REQUIRED" });
     return "";
   }
 
@@ -203,12 +234,42 @@
     } catch (e) { return null; }
   }
 
-  function firstValidDate(eng, values){
+  const START_DATE_FATAL_MESSAGE = "Дата начала ответственности/расчёта не указана. Расчёт остановлен, чтобы не использовать фиктивную дату.";
+
+  function isDefault2000Date(d){
+    return !!(d && d.getFullYear && d.getFullYear() === 2000 && d.getMonth() === 0 && d.getDate() === 1);
+  }
+
+  function makeStartDateError(code, details){
+    const err = new Error(START_DATE_FATAL_MESSAGE);
+    err.code = code;
+    err.details = details || {};
+    return err;
+  }
+
+  function logStartDateFatal(err){
+    const code = String(err && err.code || "");
+    const tag = (code === "DEFAULT_2000_DATE_FORBIDDEN")
+      ? "[fatal][default-2000-date-forbidden]"
+      : "[fatal][responsibility-date-missing]";
+    console.error(tag, { code: code, details: err && err.details || {} });
+  }
+
+  function isStartDateFatalError(e){
+    const code = String(e && e.code || "");
+    return code === "START_DATE_MISSING" || code === "RESPONSIBILITY_DATE_MISSING" || code === "DEFAULT_2000_DATE_FORBIDDEN";
+  }
+
+  function firstValidDate(eng, values, source){
     for (let i = 0; i < values.length; i++) {
       const raw = String(values[i] || "").trim();
       if (!raw) continue;
       const d = eng.parseDateAnyToDate(raw);
-      if (d) return d;
+      if (!d) continue;
+      if (isDefault2000Date(d)) {
+        throw makeStartDateError("DEFAULT_2000_DATE_FORBIDDEN", { source: source || "", raw: raw });
+      }
+      return d;
     }
     return null;
   }
@@ -216,10 +277,10 @@
   function resolveAbonentStartDate(eng, abonent, activeLink, abonentId){
     const result = { date: null, source: "" };
 
-    const d1 = firstValidDate(eng, [abonent && abonent.calcStartDate]);
+    const d1 = firstValidDate(eng, [abonent && abonent.calcStartDate], "abonent.calcStartDate");
     if (d1) return { date: eng.startOfDay(d1), source: "abonent.calcStartDate" };
 
-    const d2 = firstValidDate(eng, [activeLink && activeLink.dateFrom]);
+    const d2 = firstValidDate(eng, [activeLink && activeLink.dateFrom], "activeLink.dateFrom");
     if (d2) return { date: eng.startOfDay(d2), source: "activeLink.dateFrom" };
 
     const d3 = firstValidDate(eng, [
@@ -240,23 +301,22 @@
       abonent && abonent.registrationDate,
       abonent && abonent.date_reg,
       abonent && abonent.dateRegistration
-    ]);
+    ], "abonent.compat.startDateField");
     if (d3) return { date: eng.startOfDay(d3), source: "abonent.compat.startDateField" };
 
     try {
       const r = eng.getActiveResponsibilityRangeISO(abonentId);
-      const d4 = firstValidDate(eng, [r && r.from]);
+      const d4 = firstValidDate(eng, [r && r.from], "calcEngine.getActiveResponsibilityRangeISO");
       if (d4) return { date: eng.startOfDay(d4), source: "calcEngine.getActiveResponsibilityRangeISO" };
-    } catch (e) {}
+    } catch (e) {
+      if (isStartDateFatalError(e)) throw e;
+    }
 
-    const fallback = eng.startOfDay(new Date(2000, 0, 1));
-    console.warn("[spravka_sud] fallback start date applied", {
+    throw makeStartDateError("RESPONSIBILITY_DATE_MISSING", {
+      codeAlias: "START_DATE_MISSING",
       reason: "no abonent start date sources",
       abonentId: String(abonentId || "")
     });
-    result.date = fallback;
-    result.source = "fallback:2000-01-01";
-    return result;
   }
 
   function renderRow(tbody, cells){
@@ -304,6 +364,38 @@
     };
   }
 
+
+  const EXCLUDES_FATAL_MESSAGE = "Исключённые периоды повреждены. Расчёт пени остановлен.";
+
+  function isExcludesFatalError(e){
+    const code = String(e && e.code || "");
+    return code === "EXCLUDES_JSON_INVALID" || code === "EXCLUDES_INVALID";
+  }
+
+  function logExcludesFatal(e){
+    if (window.JKHCalcEngine && typeof window.JKHCalcEngine.logExcludesFatal === "function") {
+      window.JKHCalcEngine.logExcludesFatal(e);
+      return;
+    }
+    const code = String(e && e.code || "");
+    console.error("[fatal][excludes-json-invalid]", { code: code, details: e && e.details || {} });
+  }
+
+  const RATES_FATAL_MESSAGE = "Ставки рефинансирования отсутствуют или повреждены. Расчёт пени остановлен.";
+
+  function isRatesFatalError(e){
+    const code = String(e && e.code || "");
+    return code === "RATES_MISSING" || code === "RATES_JSON_INVALID" || code === "MISSING_REQUIRED_RATE";
+  }
+
+  function logRatesFatal(e){
+    const code = String(e && e.code || "");
+    const tag = (code === "RATES_JSON_INVALID") ? "[fatal][rates-json-invalid]" :
+      (code === "MISSING_REQUIRED_RATE" ? "[fatal][missing-required-rate]" :
+      (code === "RATES_MISSING" ? "[fatal][rates-missing]" : "[fatal][rates-error]"));
+    console.error(tag, { code: code, details: e && e.details || {} });
+  }
+
   function showFatal(msg, details){
     console.error("[spravka_sud] " + msg, details || {});
     alert(msg);
@@ -325,14 +417,11 @@
 
       const previousMissingRateHandler = window.JKHCalcEngine.onMissingRate;
       window.JKHCalcEngine.onMissingRate = function(info){
-        console.error("[spravka_sud] missing rate detected", info);
-
-        showFatal(
-          "Невозможно построить справку: отсутствует ставка рефинансирования для части периода. " +
-          "Проверьте даты начислений и таблицу ставок."
-        );
-
-        throw new Error("MISSING_REQUIRED_RATE");
+        const err = new Error(RATES_FATAL_MESSAGE);
+        err.code = "MISSING_REQUIRED_RATE";
+        err.details = info || {};
+        logRatesFatal(err);
+        throw err;
       };
 
       try {
@@ -407,6 +496,12 @@
       const activeLink = getActiveLinkForAbonent(dbRoot, ctx.abonentId);
       const startResolved = resolveAbonentStartDate(eng, abonent, activeLink, ctx.abonentId);
       const abonentStart = startResolved.date;
+      if (!abonentStart) {
+        const err = makeStartDateError("RESPONSIBILITY_DATE_MISSING", { abonentId: ctx.abonentId });
+        logStartDateFatal(err);
+        showFatal(START_DATE_FATAL_MESSAGE);
+        return;
+      }
 
       let period = loadSelectedPeriod(ctx.abonentId, ctx.readOwner);
       let periodSource = period ? "stored report/calc period" : "auto from start date";
@@ -442,7 +537,7 @@
         }
         return false;
       }
-      let allRowsRaw = safeJSON(paymentsKey, [], ctx.readOwner);
+      let allRowsRaw = safeLedgerJSON(paymentsKey, [], ctx.readOwner);
       let allRows = Array.isArray(allRowsRaw) ? allRowsRaw : [];
       const hasLedger = hasUsableLedgerRows(allRows);
       console.log('[spravka_sud][ledger-check] id=' + ctx.abonentId + ' len=' + allRows.length);
@@ -508,6 +603,21 @@
           ) || {};
         }
       } catch (e) {
+        if (isRatesFatalError(e)) {
+          logRatesFatal(e);
+          showFatal(RATES_FATAL_MESSAGE);
+          return;
+        }
+        if (isStartDateFatalError(e)) {
+          logStartDateFatal(e);
+          showFatal(START_DATE_FATAL_MESSAGE);
+          return;
+        }
+        if (isExcludesFatalError(e)) {
+          logExcludesFatal(e);
+          showFatal(EXCLUDES_FATAL_MESSAGE);
+          return;
+        }
         penaltyBySourceMonth = {};
       }
 
@@ -568,6 +678,16 @@
           allowNegativePrincipal: true
         });
       } catch (e) {
+        if (isRatesFatalError(e)) {
+          logRatesFatal(e);
+          showFatal(RATES_FATAL_MESSAGE);
+          return;
+        }
+        if (isExcludesFatalError(e)) {
+          logExcludesFatal(e);
+          showFatal(EXCLUDES_FATAL_MESSAGE);
+          return;
+        }
         console.error("[spravka_sud] calcTotals failed", e);
         return;
       }
@@ -619,6 +739,23 @@
         jkhDataStatus: String((window.JKH_UI_STATE && window.JKH_UI_STATE.data && window.JKH_UI_STATE.data.status) || ""),
         ownerContext: ctx
       });
+      } catch (e) {
+        if (isRatesFatalError(e)) {
+          logRatesFatal(e);
+          showFatal(RATES_FATAL_MESSAGE);
+          return;
+        }
+        if (isStartDateFatalError(e)) {
+          logStartDateFatal(e);
+          showFatal(START_DATE_FATAL_MESSAGE);
+          return;
+        }
+        if (isExcludesFatalError(e)) {
+          logExcludesFatal(e);
+          showFatal(EXCLUDES_FATAL_MESSAGE);
+          return;
+        }
+        throw e;
       } finally {
         window.JKHCalcEngine.onMissingRate = previousMissingRateHandler;
       }

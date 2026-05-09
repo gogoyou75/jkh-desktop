@@ -52,6 +52,168 @@
     if (!(window.JKHStore && typeof window.JKHStore.removeRaw === "function")) return;
     try { JKHStore.removeRaw(String(key)); } catch(e) { console.error(e); throw e; }
   }
+
+
+  // Read-only ledger cache: parsed rows are reused while storage raw value is unchanged.
+  // Corrupted ledgers are never cached as valid. Explicit writes/reloads clear the cache.
+  const __ledgerReadCache = new Map();
+  let __ledgerReadCacheOwner = null;
+  const __paymentKeyReadLogOnce = new Set();
+
+  function currentOwnerIdForPaymentCache(){
+    try {
+      if (window.JKHStore && typeof JKHStore.getOwnerId === "function") return String(JKHStore.getOwnerId() || "");
+      if (window.Auth && typeof Auth.getActiveDbOwnerId === "function") return String(Auth.getActiveDbOwnerId() || "");
+    } catch(e) {}
+    return "";
+  }
+
+  function clearPaymentLedgerReadCache(reason){
+    __ledgerReadCache.clear();
+    __paymentKeyReadLogOnce.clear();
+    __ledgerReadCacheOwner = currentOwnerIdForPaymentCache();
+    try {
+      if (window.JKH_DEBUG_PAYMENT_KEY) console.debug('[payment-key] ledger cache reset', { reason: String(reason || '') });
+    } catch(e) {}
+  }
+
+  function ensurePaymentLedgerReadCacheFresh(){
+    const owner = currentOwnerIdForPaymentCache();
+    if (__ledgerReadCacheOwner !== owner) clearPaymentLedgerReadCache('owner-change');
+  }
+
+  function cloneLedgerRows(rows){
+    if (!Array.isArray(rows)) return [];
+    return rows.map(function(r){ return (r && typeof r === 'object') ? Object.assign({}, r) : r; });
+  }
+
+  function readPaymentLedgerRowsCached(key){
+    ensurePaymentLedgerReadCacheFresh();
+    const cacheKey = currentOwnerIdForPaymentCache() + '::' + String(key || '');
+    const raw = storeGetRaw(key);
+    if (raw === null || raw === undefined) return [];
+
+    const cached = __ledgerReadCache.get(cacheKey);
+    if (cached && cached.raw === raw && Array.isArray(cached.rows)) {
+      return cloneLedgerRows(cached.rows);
+    }
+
+    try {
+      const arr = JSON.parse(raw);
+      if (Array.isArray(arr)) {
+        __ledgerReadCache.set(cacheKey, { raw: raw, rows: arr });
+        return cloneLedgerRows(arr);
+      }
+      logLedgerJsonInvalid(key, "parsed value is not an array");
+      throw makeLedgerJsonInvalidError(key, "parsed value is not an array");
+    } catch (e) {
+      __ledgerReadCache.delete(cacheKey);
+      if (e && e.code === "LEDGER_JSON_INVALID") throw e;
+      logLedgerJsonInvalid(key, e);
+      throw makeLedgerJsonInvalidError(key, e);
+    }
+  }
+
+  function logPaymentKeyReadOnce(payload){
+    try {
+      if (!window.JKH_DEBUG_PAYMENT_KEY) return;
+      const onceKey = String(payload && payload.abonentId || '') + ':' + String(payload && (payload.key || payload.reason) || '');
+      if (__paymentKeyReadLogOnce.has(onceKey)) return;
+      __paymentKeyReadLogOnce.add(onceKey);
+      console.debug('[payment-key] read', payload);
+    } catch(e) {}
+  }
+
+  window.JKHClearPaymentLedgerReadCache = clearPaymentLedgerReadCache;
+
+  const LEDGER_FATAL_MESSAGE = "Данные платежей повреждены. Расчёт/импорт остановлен, чтобы не потерять историю платежей.";
+
+  function makeLedgerJsonInvalidError(key, cause){
+    const err = new Error(LEDGER_FATAL_MESSAGE);
+    err.code = "LEDGER_JSON_INVALID";
+    err.key = key || "";
+    err.cause = cause;
+    return err;
+  }
+
+  function logLedgerJsonInvalid(key, cause){
+    console.error("[fatal][ledger-json-invalid]", { key: key || "", error: cause });
+  }
+
+  const EXCLUDES_FATAL_MESSAGE = "Исключённые периоды повреждены. Расчёт пени остановлен.";
+
+  function isExcludesFatalError(e){
+    const code = String(e && e.code || "");
+    return code === "EXCLUDES_JSON_INVALID" || code === "EXCLUDES_INVALID";
+  }
+
+  function makeExcludesFatalError(code, key, details, cause){
+    const err = new Error(EXCLUDES_FATAL_MESSAGE);
+    err.code = code || "EXCLUDES_INVALID";
+    err.key = key || "";
+    err.details = details || {};
+    err.cause = cause;
+    return err;
+  }
+
+  function logExcludesFatal(err){
+    if (window.JKHCalcEngine && typeof window.JKHCalcEngine.logExcludesFatal === "function") {
+      window.JKHCalcEngine.logExcludesFatal(err);
+      return;
+    }
+    const code = String(err && err.code || "");
+    console.error("[fatal][excludes-json-invalid]", { code: code, key: err && err.key || "", details: err && err.details || {}, error: err && err.cause });
+  }
+
+  function throwExcludesFatal(code, key, details, cause){
+    const err = makeExcludesFatalError(code, key, details, cause);
+    logExcludesFatal(err);
+    throw err;
+  }
+
+  function renderExcludesFatal(tbody){
+    try { alert(EXCLUDES_FATAL_MESSAGE); } catch (_) {}
+    if (tbody) {
+      tbody.innerHTML = '<tr><td colspan="20" style="color:#b00020;font-weight:700;">' + EXCLUDES_FATAL_MESSAGE + '</td></tr>';
+    }
+  }
+
+  const RATES_FATAL_MESSAGE = "Ставки рефинансирования отсутствуют или повреждены. Расчёт пени остановлен.";
+
+  function isRatesFatalError(e){
+    const code = String(e && e.code || "");
+    return code === "RATES_MISSING" || code === "RATES_JSON_INVALID" || code === "MISSING_REQUIRED_RATE";
+  }
+
+  function makeRatesFatalError(code, key, details){
+    const err = new Error(RATES_FATAL_MESSAGE);
+    err.code = code || "RATES_ERROR";
+    err.key = key || "";
+    err.details = details || {};
+    return err;
+  }
+
+  function logRatesFatal(err){
+    const code = String(err && err.code || "");
+    const tag = (code === "RATES_JSON_INVALID") ? "[fatal][rates-json-invalid]" :
+      (code === "MISSING_REQUIRED_RATE" ? "[fatal][missing-required-rate]" :
+      (code === "RATES_MISSING" ? "[fatal][rates-missing]" : "[fatal][rates-error]"));
+    console.error(tag, { code: code, key: err && err.key || "", details: err && err.details || {} });
+  }
+
+  function throwRatesFatal(code, key, details){
+    const err = makeRatesFatalError(code, key, details);
+    logRatesFatal(err);
+    throw err;
+  }
+
+  function renderRatesFatal(tbody){
+    try { alert(RATES_FATAL_MESSAGE); } catch (_) {}
+    if (tbody) {
+      tbody.innerHTML = '<tr><td colspan="20" style="color:#b00020;font-weight:700;">' + RATES_FATAL_MESSAGE + '</td></tr>';
+    }
+  }
+
   // ===========================
   // UI: сворачиваемые блоки месяца (ledger)
   // хранение состояния: `payments_ui_collapsed_<LS>` -> {"YYYY-MM": true/false}
@@ -393,11 +555,11 @@ function splitAccrualByOwnership(accr, year, month, history) {
       : "";
 
     if (!key) {
-      try { console.warn("[payment-key] read blocked", { abonentId: id, reason: "ABONENT_NOT_READY" }); } catch(e) {}
+      logPaymentKeyReadOnce({ abonentId: id, reason: "ABONENT_NOT_READY" });
       return "";
     }
 
-    try { console.log("[payment-key] read", { abonentId: id, key: key }); } catch(e) {}
+    logPaymentKeyReadOnce({ abonentId: id, key: key });
     return key;
   }
 
@@ -536,14 +698,12 @@ function splitAccrualByOwnership(accr, year, month, history) {
     try {
       const pKey = (typeof window.getPaymentsKeyForAbonent === "function") ? window.getPaymentsKeyForAbonent(id) : "";
       if (!pKey) {
-        try { console.warn("[payment-key] read blocked", { abonentId: id, reason: "ABONENT_NOT_READY_OR_UID_MISSING" }); } catch(e) {}
+        logPaymentKeyReadOnce({ abonentId: id, reason: "ABONENT_NOT_READY_OR_UID_MISSING" });
         return null;
       }
-      try { console.log("[payment-key] read", { abonentId: id, key: pKey }); } catch(e) {}
-      const raw = (window.JKHStore && JKHStore.getRaw) ? JKHStore.getRaw(pKey) : null;
-      if (raw) {
-        const arr = JSON.parse(raw);
-        if (Array.isArray(arr) && arr.length) {
+      logPaymentKeyReadOnce({ abonentId: id, key: pKey });
+      const arr = readPaymentLedgerRowsCached(pKey);
+      if (Array.isArray(arr) && arr.length) {
           let minY = null, minM = null;
           for (const r of arr) {
             const y = parseInt(String(r?.year || ""), 10);
@@ -570,7 +730,6 @@ function splitAccrualByOwnership(accr, year, month, history) {
             return clamp({ from: fromISO2, to: "" });
           }
         }
-      }
     } catch (e) {}
 
     console.warn("[autoaccrual] не найден период ответственности/расчёта (AbonentsDB.links или abonent.startCalc)");
@@ -997,19 +1156,10 @@ for (const p of parts) {
   }
 
   function getPayments() {
-    try {
-      const key = paymentsKey();
-      if (!key) return [];
-      const raw = storeGetRaw(key);
-      if (!raw) return [];
-      const arr = JSON.parse(raw);
-      if (!Array.isArray(arr)) return [];
-
-      // Read-only path: do not migrate rows, set source defaults, or normalize paid_date while reading.
-      return arr;
-    } catch {
-      return [];
-    }
+    const key = paymentsKey();
+    if (!key) return [];
+    // Read-only path: do not migrate rows, set source defaults, or normalize paid_date while reading.
+    return readPaymentLedgerRowsCached(key);
   }
 
 
@@ -1021,30 +1171,62 @@ for (const p of parts) {
      - paid не может быть отрицательным
      ========================================================= */
 
+  function makePaymentPeriodError(code, row, details){
+    const err = new Error(code === "PAYMENT_YEAR_REQUIRED" ? "Не указан корректный год платежа." : "Не указан корректный период платежа.");
+    err.code = code || "PAYMENT_PERIOD_INVALID";
+    err.row = row || null;
+    err.details = details || {};
+    return err;
+  }
+
+  function logPaymentPeriodInvalid(err){
+    try {
+      console.error("[fatal][payment-period-invalid]", {
+        code: String(err && err.code || "PAYMENT_PERIOD_INVALID"),
+        rowId: err && err.row ? err.row.id : undefined,
+        details: err && err.details || {}
+      });
+    } catch(e) {}
+  }
+
+  function throwPaymentPeriodInvalid(code, row, details){
+    const err = makePaymentPeriodError(code, row, details);
+    logPaymentPeriodInvalid(err);
+    throw err;
+  }
+
   function normalizePaymentRow(r){
     if (!r || typeof r !== 'object') return;
 
     // id
     r.id = Number(r.id) || 0;
 
-    // month/year
-    const mm = String(r.month ?? '').padStart(2,'0');
-    r.month = (/^(0[1-9]|1[0-2])$/.test(mm)) ? mm : String(new Date().getMonth()+1).padStart(2,'0');
-    const yy = String(r.year ?? '');
-    r.year = (/^(19|20)\d{2}$/.test(yy)) ? yy : String(new Date().getFullYear());
+    // paid_date: если валидна — расчётный месяц/год синхронизируются из неё.
+    const paidDateObj = parseDateAnyToDate(r.paid_date);
+    if (paidDateObj) {
+      r.paid_date = toISODateString(paidDateObj);
+      r.year = String(paidDateObj.getFullYear());
+      r.month = pad2(paidDateObj.getMonth() + 1);
+    } else {
+      r.paid_date = '';
+    }
+
+    // month/year: запрещено молча заменять повреждённый период текущей датой.
+    const mmRaw = String(r.month ?? '').trim();
+    const mm = mmRaw.length === 1 ? mmRaw.padStart(2,'0') : mmRaw;
+    const yy = String(r.year ?? '').trim();
+    if (!/^(19|20)\d{2}$/.test(yy)) {
+      throwPaymentPeriodInvalid("PAYMENT_YEAR_REQUIRED", r, { month: mmRaw, year: yy, paid_date: r.paid_date || "" });
+    }
+    if (!/^(0[1-9]|1[0-2])$/.test(mm)) {
+      throwPaymentPeriodInvalid("PAYMENT_PERIOD_INVALID", r, { month: mmRaw, year: yy, paid_date: r.paid_date || "" });
+    }
+    r.month = mm;
+    r.year = yy;
 
     // amounts
     r.accrued = r2(toNum(r.accrued));
     r.paid = r2(Math.max(0, toNum(r.paid)));
-
-    // paid_date
-    if (String(r.paid_date || '').trim()) {
-      normalizePaidDateISO(r);
-      // sync month/year from paid_date to obey P2
-      syncYearMonthFromPaidDate(r);
-    } else {
-      r.paid_date = '';
-    }
 
     // period
     r.use_period = !!r.use_period;
@@ -1076,6 +1258,7 @@ for (const p of parts) {
       const key = paymentsKey();
       if (!key) return;
       storeSetRaw(key, JSON.stringify(arr));
+      clearPaymentLedgerReadCache('save-payments');
 
       // ОБЯЗАТЕЛЬНО: сервер
       if (window.Data && typeof Data.flushDbToServer === "function"){
@@ -1259,7 +1442,10 @@ function calcPenaltyForObligation(ob, asOf, excludes, rates){
       if (principal > 0.0000001 && overdueIndex > 30){
         const denom = (overdueIndex <= 90) ? 300 : 130;
         const rawRate = rateOnDate(day, rates);
-        const rate = Number.isFinite(rawRate) ? capRateUntil2027(day, rawRate) : 0;
+        if (!Number.isFinite(rawRate)) {
+          throwRatesFatal("MISSING_REQUIRED_RATE", "", { date: toISODateString(day), reason: "MISSING_REQUIRED_RATE" });
+        }
+        const rate = capRateUntil2027(day, rawRate);
         penalty += principal * (rate / 100) / denom;
       }
     }
@@ -1283,7 +1469,17 @@ function calcTotalsAsOf(rows, asOfDate){
       }
       return { principal: t.principal, penalty: t.penaltyDebt, total: t.total };
     }
-  } catch (e) { /* fallback to local calc */ }
+  } catch (e) {
+    if (isRatesFatalError(e)) {
+      logRatesFatal(e);
+      throw e;
+    }
+    if (isExcludesFatalError(e)) {
+      logExcludesFatal(e);
+      throw e;
+    }
+    /* fallback to local calc */
+  }
 
   const excludes = loadExcludes();
   const rates = loadRates();
@@ -1453,33 +1649,46 @@ function applyRunningTotals(viewRows) {
   }
 
   function loadExcludes(){
+    const key = excludePeriodsKey();
+    const raw = storeGetRaw(key);
+    if (raw === null || raw === undefined) return [];
+
+    let arr;
     try{
-      const raw = storeGetRaw(excludePeriodsKey());
-      const arr = raw ? JSON.parse(raw) : [];
-      if (!Array.isArray(arr)) return [];
-
-      // Нормализуем даты исключения: from = начало дня, to = конец дня (включительно)
-      const startDay = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate(), 0,0,0,0);
-      const endDay   = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate(), 23,59,59,999);
-
-      return arr
-        .map(x => {
-          const fromRaw = x.from ?? x.dateFrom ?? x.start ?? x.fromISO ?? x.from_iso;
-          const toRaw   = x.to   ?? x.dateTo   ?? x.end   ?? x.toISO   ?? x.to_iso;
-
-          const from = parseDateAnyToDate(fromRaw);
-          const to   = parseDateAnyToDate(toRaw);
-
-          return {
-            from: from ? startDay(from) : null,
-            to:   to   ? endDay(to)     : null,
-            reason: String(x.reason || x.note || x.comment || "")
-          };
-        })
-        .filter(x => x.from && x.to && x.to >= x.from);
-    }catch{
-      return [];
+      arr = JSON.parse(raw);
+    }catch(e){
+      throwExcludesFatal("EXCLUDES_JSON_INVALID", key, { reason: "JSON_PARSE_FAILED" }, e);
     }
+
+    if (!Array.isArray(arr)) {
+      throwExcludesFatal("EXCLUDES_JSON_INVALID", key, { reason: "EXCLUDES_NOT_ARRAY" });
+    }
+
+    // Нормализуем даты исключения: from = начало дня, to = конец дня (включительно)
+    const startDay = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate(), 0,0,0,0);
+    const endDay   = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate(), 23,59,59,999);
+
+    return arr.map((x, index) => {
+      if (!x || typeof x !== "object") {
+        throwExcludesFatal("EXCLUDES_INVALID", key, { index: index, reason: "EXCLUDE_NOT_OBJECT" });
+      }
+
+      const fromRaw = x.from ?? x.dateFrom ?? x.start ?? x.fromISO ?? x.from_iso;
+      const toRaw   = x.to   ?? x.dateTo   ?? x.end   ?? x.toISO   ?? x.to_iso;
+
+      const from = parseDateAnyToDate(fromRaw);
+      const to   = parseDateAnyToDate(toRaw);
+
+      if (!from || !to || endDay(to) < startDay(from)) {
+        throwExcludesFatal("EXCLUDES_INVALID", key, { index: index, reason: "EXCLUDE_DATE_INVALID", from: fromRaw, to: toRaw });
+      }
+
+      return {
+        from: startDay(from),
+        to:   endDay(to),
+        reason: String(x.reason || x.note || x.comment || "")
+      };
+    });
   }
 
   function isExcludedDay(d, excludes){
@@ -1492,27 +1701,46 @@ function applyRunningTotals(viewRows) {
 
   function loadRates(){
     const key = isMoratoriumActive() ? REFI_KEY_MORA : REFI_KEY_NORMAL;
-    try{
-      const raw = storeGetRaw(key);
-      const arr = raw ? JSON.parse(raw) : [];
-      if (!Array.isArray(arr)) return [];
-      const parsed = arr
-        .map(x => ({
-          from: parseDMY(x.from),
-          rate: Number(String(x.rate ?? "").replace(",", "."))
-        }))
-        .filter(x => x.from && Number.isFinite(x.rate))
-        .sort((a,b)=>a.from-b.from);
-      return parsed;
-    }catch{
-      return [];
+    const raw = storeGetRaw(key);
+    if (raw === null || raw === undefined){
+      throwRatesFatal("RATES_MISSING", key, { reason: "RATES_KEY_MISSING" });
     }
+
+    let arr;
+    try{
+      arr = JSON.parse(raw);
+    }catch(e){
+      throwRatesFatal("RATES_JSON_INVALID", key, { reason: "RATES_JSON_PARSE_FAILED", error: e && e.message ? e.message : String(e) });
+    }
+
+    if (!Array.isArray(arr)){
+      throwRatesFatal("RATES_JSON_INVALID", key, { reason: "RATES_JSON_NOT_ARRAY" });
+    }
+
+    const parsed = arr
+      .map(x => ({
+        from: parseDMY(x.from),
+        rate: Number(String(x.rate ?? "").replace(",", "."))
+      }))
+      .filter(x => x.from && Number.isFinite(x.rate))
+      .sort((a,b)=>a.from-b.from);
+    return parsed;
   }
 
   function rateOnDate(d, rates){
-    const t = d.getTime();
+    const t = d && d.getTime ? d.getTime() : NaN;
+    if (!Number.isFinite(t)) return null;
+    if (!Array.isArray(rates) || rates.length === 0) return null;
+
+    const first = rates.find(function(r){
+      return r && r.from && r.from.getTime && Number.isFinite(r.rate);
+    });
+    if (!first) return null;
+    if (t < first.from.getTime()) return null;
+
     let cur = null;
     for (const r of rates){
+      if (!r || !r.from || !r.from.getTime) continue;
       if (r.from.getTime() <= t) cur = r.rate;
       else break;
     }
@@ -1578,7 +1806,10 @@ function applyRunningTotals(viewRows) {
         if (overdueIndex > 30){
           const denom = (overdueIndex <= 90) ? 300 : 130;
           const rawRate = rateOnDate(day, rates);
-          const rate = Number.isFinite(rawRate) ? capRateUntil2027(day, rawRate) : 0;
+          if (!Number.isFinite(rawRate)) {
+            throwRatesFatal("MISSING_REQUIRED_RATE", "", { date: toISODateString(day), reason: "MISSING_REQUIRED_RATE" });
+          }
+          const rate = capRateUntil2027(day, rawRate);
 
           penalty += debt * (rate / 100) / denom;
         }
@@ -1609,9 +1840,11 @@ function applyRunningTotals(viewRows) {
   function normalizePeriod(row) {
     if (row.period_from_m && row.period_from_y && row.period_to_m && row.period_to_y) return;
 
-    const d = new Date();
-    const defM = pad2(d.getMonth() + 1);
-    const defY = String(d.getFullYear());
+    const defM = (/^(0[1-9]|1[0-2])$/.test(String(row.month || ''))) ? String(row.month) : '';
+    const defY = (/^(19|20)\d{2}$/.test(String(row.year || ''))) ? String(row.year) : '';
+
+    if (!defY) throwPaymentPeriodInvalid("PAYMENT_YEAR_REQUIRED", row, { month: row.month || "", year: row.year || "" });
+    if (!defM) throwPaymentPeriodInvalid("PAYMENT_PERIOD_INVALID", row, { month: row.month || "", year: row.year || "" });
 
     row.period_from_m = row.period_from_m || defM;
     row.period_from_y = row.period_from_y || defY;
@@ -1712,7 +1945,19 @@ function applyRunningTotals(viewRows) {
     });
 
     const view = applyCalcFilter(arr).slice();
-    applyRunningTotals(view);
+    try {
+      applyRunningTotals(view);
+    } catch (e) {
+      if (isRatesFatalError(e)) {
+        renderRatesFatal(tbody);
+        return;
+      }
+      if (isExcludesFatalError(e)) {
+        renderExcludesFatal(tbody);
+        return;
+      }
+      throw e;
+    }
 
     // сопоставление id -> rowObj
     const byId = new Map(view.map(r => [String(r.id), r]));
@@ -1727,7 +1972,7 @@ function applyRunningTotals(viewRows) {
     // на рендере НЕ сохраняем и НЕ flush-им
   }
 
-  async function loadPaymentTable() {
+  async function loadPaymentTableImpl() {
     if (!isDataReady()) {
       try { console.warn('[payment-table] load skipped: DATA_NOT_READY'); } catch(e) {}
       return;
@@ -1769,7 +2014,17 @@ function applyRunningTotals(viewRows) {
     })();
     if (!tbody) return;
 
-    let arr = getPayments();
+    let arr;
+    try {
+      arr = getPayments();
+    } catch (e) {
+      if (e && e.code === "LEDGER_JSON_INVALID") {
+        tbody.innerHTML = '<tr><td colspan="20" style="color:#b00020;font-weight:700;">' + LEDGER_FATAL_MESSAGE + '</td></tr>';
+        try { alert(LEDGER_FATAL_MESSAGE); } catch (_) {}
+        return;
+      }
+      throw e;
+    }
 
     // Read-only load path: autoaccrual is not applied during page opening.
 
@@ -1782,7 +2037,19 @@ function applyRunningTotals(viewRows) {
     });
 
     const view = applyCalcFilter(arr).slice();
-    applyRunningTotals(view);
+    try {
+      applyRunningTotals(view);
+    } catch (e) {
+      if (isRatesFatalError(e)) {
+        renderRatesFatal(tbody);
+        return;
+      }
+      if (isExcludesFatalError(e)) {
+        renderExcludesFatal(tbody);
+        return;
+      }
+      throw e;
+    }
 
     // сортировка отображения — год/месяц (новые сверху),
     // внутри месяца: сначала строка начисления, ниже — оплаты (Excel и ручные)
@@ -1826,6 +2093,37 @@ tbody.innerHTML = "";
     });
 
     clearLastAddedPaymentId();
+  }
+
+  let __paymentTableLoadRunning = false;
+  let __paymentTableLoadScheduled = false;
+  let __paymentTableLoadRunAgain = false;
+
+  function requestLoadPaymentTable(reason){
+    if (__paymentTableLoadScheduled) return;
+    __paymentTableLoadScheduled = true;
+    setTimeout(function(){
+      __paymentTableLoadScheduled = false;
+      try { loadPaymentTable(reason || 'scheduled'); } catch(e) { console.error(e); throw e; }
+    }, 0);
+  }
+
+  async function loadPaymentTable(reason) {
+    if (__paymentTableLoadRunning) {
+      __paymentTableLoadRunAgain = true;
+      try { if (window.JKH_DEBUG_PAYMENT_KEY) console.debug('[payment-table] rebuild skipped: already running', { reason: String(reason || '') }); } catch(e) {}
+      return;
+    }
+    __paymentTableLoadRunning = true;
+    try {
+      await loadPaymentTableImpl();
+    } finally {
+      __paymentTableLoadRunning = false;
+      if (__paymentTableLoadRunAgain) {
+        __paymentTableLoadRunAgain = false;
+        requestLoadPaymentTable('queued-after-running');
+      }
+    }
   }
 
 
@@ -2175,6 +2473,10 @@ tbody.innerHTML = "";
       if (debtEl)  debtEl.textContent  = r2(sumDebt).toFixed(2);
       if (penEl)   penEl.textContent   = r2(sumPenalty).toFixed(2);
     } catch (e) {
+      if (e && e.code === "LEDGER_JSON_INVALID") {
+        try { alert(LEDGER_FATAL_MESSAGE); } catch (_) {}
+        return;
+      }
       console.warn('JKH_RecalcAbonentTotalDebtCard failed', e);
     }
   }
@@ -2194,7 +2496,7 @@ tbody.innerHTML = "";
   }
 
 
-  window.__loadPaymentTable = loadPaymentTable;
+  window.__loadPaymentTable = requestLoadPaymentTable;
 
   window.addPaymentRow = async function addPaymentRow() {
     const arr = getPayments();
@@ -2413,8 +2715,8 @@ tbody.innerHTML = "";
 
     if (isDataReady()) {
       started = true;
-      console.log("[payment-table] start after data-ready");
-      loadPaymentTable();
+      try { if (window.JKH_DEBUG_PAYMENT_KEY) console.debug("[payment-table] start after data-ready"); } catch(e) {}
+      requestLoadPaymentTable('data-ready');
     }
   }
 

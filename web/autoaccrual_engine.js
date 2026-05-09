@@ -62,8 +62,20 @@
   if (window[ENGINE_KEY]) return;
 
   const DAY_MS = 24*3600*1000;
+  const START_DATE_FATAL_MESSAGE = 'Дата начала ответственности/расчёта не указана. Расчёт остановлен, чтобы не использовать фиктивную дату.';
+
 
   function pad2(n){ return String(n).padStart(2,'0'); }
+  function isDefault2000ISO(v){
+    const d = parseISOToDate(v);
+    return !!(d && d.getFullYear() === 2000 && d.getMonth() === 0 && d.getDate() === 1);
+  }
+  function makeFatalRange(code, ls, details){
+    const tag = code === 'DEFAULT_2000_DATE_FORBIDDEN' ? '[fatal][default-2000-date-forbidden]' : '[fatal][responsibility-date-missing]';
+    const out = Object.assign({ abonentId: String(ls || '') }, details || {});
+    console.error(tag, { code, details: out });
+    return { __fatal:true, code, message:START_DATE_FATAL_MESSAGE, details:out };
+  }
   function r2(x){ return Math.round((Number(x)||0)*100)/100; }
   function toNum(v){
     const n = parseFloat(String(v ?? '').replace(/\s+/g, '').replace(',', '.'));
@@ -78,6 +90,20 @@
   function storeSetRaw(key, value, ownerId){
     if (!(window.JKHStore && typeof window.JKHStore.setRaw === 'function')) return;
     try{ JKHStore.setRaw(String(key), value, ownerId); } catch {}
+  }
+
+  const LEDGER_FATAL_MESSAGE = 'Данные платежей повреждены. Расчёт/импорт остановлен, чтобы не потерять историю платежей.';
+
+  function makeLedgerJsonInvalidError(key, cause){
+    const err = new Error(LEDGER_FATAL_MESSAGE);
+    err.code = 'LEDGER_JSON_INVALID';
+    err.key = key || '';
+    err.cause = cause;
+    return err;
+  }
+
+  function logLedgerJsonInvalid(key, cause){
+    console.error('[fatal][ledger-json-invalid]', { key: key || '', error: cause });
   }
 
   function iso(y,m,d){ return `${y}-${pad2(m)}-${pad2(d)}`; }
@@ -185,12 +211,18 @@
   function loadPayments(abonentId, ownerId){
     const key = resolvePaymentsKeyForAbonent(abonentId);
     if (!key) return [];
+    const raw = storeGetRaw(key, ownerId);
+    if (raw === null || raw === undefined) return [];
     try{
-      const raw = storeGetRaw(key, ownerId);
-      if (!raw) return [];
       const arr = JSON.parse(raw);
-      return Array.isArray(arr) ? arr : [];
-    } catch { return []; }
+      if (Array.isArray(arr)) return arr;
+      logLedgerJsonInvalid(key, 'parsed value is not an array');
+      throw makeLedgerJsonInvalidError(key, 'parsed value is not an array');
+    } catch (e) {
+      if (e && e.code === 'LEDGER_JSON_INVALID') throw e;
+      logLedgerJsonInvalid(key, e);
+      throw makeLedgerJsonInvalidError(key, e);
+    }
   }
   function savePayments(abonentId, arr, ownerId){
     const key = resolvePaymentsKeyForAbonent(abonentId);
@@ -243,7 +275,7 @@
       const key = ownerTariffsKey();
       if (!key) return [];
       const raw = storeGetRaw(key);
-      if (!raw) return [];
+      if (raw === null || raw === undefined) return [];
       const parsed = JSON.parse(raw);
       return Array.isArray(parsed) ? parsed : [];
     }catch(e){
@@ -416,8 +448,14 @@
       .sort((x,y) => String(x?.dateFrom||'').localeCompare(String(y?.dateFrom||''), 'ru'))
       .slice(-1)[0] || null;
 
-    const from = parseAnyToISO(link?.dateFrom || a.calcStartDate || a.startCalc || a.calcDate || '');
-    if (!from) return null;
+    const fromRaw = link?.dateFrom || a.calcStartDate || a.startCalc || a.calcDate || '';
+    const from = parseAnyToISO(fromRaw);
+    if (!from) {
+      return makeFatalRange('RESPONSIBILITY_DATE_MISSING', ls, { codeAlias:'START_DATE_MISSING', source:'link.dateFrom|abonent.calcStartDate', raw:String(fromRaw || '') });
+    }
+    if (isDefault2000ISO(from)) {
+      return makeFatalRange('DEFAULT_2000_DATE_FORBIDDEN', ls, { source:'link.dateFrom|abonent.calcStartDate', raw:String(fromRaw || '') });
+    }
 
     const hasLink = !!link;
     const hasDateToField = hasLink && Object.prototype.hasOwnProperty.call(link, 'dateTo');
@@ -520,6 +558,7 @@
 
   function ensureAutoAccrualsForAbonent(ls, arr){
     const range = getActiveRangeISOForAbonent(ls);
+    if (range && range.__fatal) return { changed:false, reason:range.code, code:range.code, message:range.message, fatal:true, details:range.details };
     if (!range) return { changed:false, reason:'NO_RANGE' };
 
     const months = monthIter(range.from, range.to);
@@ -621,7 +660,15 @@
       : '';
     if (!ownerId) return { ok:false, reason:'EMPTY_OWNER', ls:id };
 
-    const arr = loadPayments(id, ownerId);
+    let arr;
+    try {
+      arr = loadPayments(id, ownerId);
+    } catch (e) {
+      if (e && e.code === 'LEDGER_JSON_INVALID') {
+        return { ok:false, reason:'LEDGER_JSON_INVALID', message:LEDGER_FATAL_MESSAGE, ls:id };
+      }
+      throw e;
+    }
     const beforeRows = dryRun ? JSON.parse(JSON.stringify(arr || [])) : null;
     const res = ensureAutoAccrualsForAbonent(id, arr);
     const rows = arr;
