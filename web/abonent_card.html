@@ -469,6 +469,12 @@ Doc: docs/LOGIC_SPEC_v1.5.3.md
 
 <div class="note" style="margin:6px 0 10px 0; font-size:12px; opacity:0.85;">Подсказка: начисление месяца показывается первой строкой; оплаты — ниже. Если включаете «за период», изменения сохраняются автоматически.</div>
 
+<div id="excludesFatalBox" class="note" style="display:none; margin:6px 0 10px 0; padding:8px; border:1px solid #c00; color:#900; background:#fff5f5;">
+    <b>Исключённые периоды повреждены. Расчёт пени остановлен.</b>
+    <div style="margin-top:4px;">Проверьте ключ <code id="excludesFatalKey"></code> или очистите повреждённые исключённые периоды.</div>
+    <button class="btn" id="clearBrokenExcludesBtn" type="button" style="margin-top:8px;">Очистить повреждённые исключённые периоды</button>
+</div>
+
 <div class="payments-header">
     <button class="btn" onclick="addPaymentRow()">Добавить оплату</button>
     <button class="btn" onclick="openPaymentSourcesModal()" title="Справочник источников поступления">Источники</button>
@@ -1023,6 +1029,36 @@ let __abonentCardInitStarted = false;
 let __paymentTableLoading = false;
 let __paymentTableLoadScheduled = false;
 
+function __isExcludesFatalError(e){
+    const code = String(e && e.code || "");
+    return code === "EXCLUDES_JSON_INVALID" || code === "EXCLUDES_INVALID";
+}
+
+function __showExcludesFatalBox(err){
+    try{
+        const box = document.getElementById("excludesFatalBox");
+        const keyEl = document.getElementById("excludesFatalKey");
+        if (keyEl) keyEl.textContent = String((err && err.key) || ("exclude_periods_" + getAbonentTechnicalIdFromURL()));
+        if (box) box.style.display = "block";
+    }catch(e){}
+}
+
+function __hideExcludesFatalBox(){
+    try{
+        const box = document.getElementById("excludesFatalBox");
+        if (box) box.style.display = "none";
+    }catch(e){}
+}
+
+function __clearBrokenExcludesAndReload(){
+    if (!canWriteOrExplainLocal()) return;
+    const id = getAbonentTechnicalIdFromURL();
+    const key = "exclude_periods_" + String(id || "").trim();
+    storeSet(key, JSON.stringify([]));
+    __hideExcludesFatalBox();
+    if (window.__loadPaymentTable) window.__loadPaymentTable("clear-broken-excludes");
+}
+
 function __safeLoadPaymentTableOnce(reason){
     if (__paymentTableLoading || __paymentTableLoadScheduled) {
         try { if (window.JKH_DEBUG_PAYMENT_KEY) console.debug('[abonent_card] payment table load coalesced:', reason); } catch(e){}
@@ -1038,7 +1074,9 @@ function __safeLoadPaymentTableOnce(reason){
         __paymentTableLoading = true;
         try {
             window.__loadPaymentTable(reason || 'abonent-card');
+            __hideExcludesFatalBox();
         } catch(e) {
+            if (__isExcludesFatalError(e)) __showExcludesFatalBox(e);
             try { console.error('[abonent_card] __loadPaymentTable failed:', reason, e); } catch(_){}
         } finally {
             setTimeout(() => { __paymentTableLoading = false; }, 300);
@@ -1897,7 +1935,7 @@ async function saveAbonentEdit() {
 
     loadMoratoriumUI();
 
-    if (window.__loadPaymentTable) window.__loadPaymentTable();
+    if (window.__loadPaymentTable) { try { window.__loadPaymentTable(); __hideExcludesFatalBox(); } catch(e) { if (__isExcludesFatalError(e)) __showExcludesFatalBox(e); else throw e; } }
 
     alert("Изменения сохранены");
     if (activeRegnum) renderResponsibilityHistory(activeRegnum);
@@ -1934,7 +1972,7 @@ function bindMoratoriumUI(){
             return;
         }
         storeSet(moratoriumKey(id), el.checked ? "1" : "0");
-        if (window.__loadPaymentTable) window.__loadPaymentTable();
+        if (window.__loadPaymentTable) { try { window.__loadPaymentTable(); __hideExcludesFatalBox(); } catch(e) { if (__isExcludesFatalError(e)) __showExcludesFatalBox(e); else throw e; } }
     });
 }
 document.addEventListener("DOMContentLoaded", () => {
@@ -2022,14 +2060,14 @@ function bindCalcButtons(){
         if (!isValidPeriod(from, to)) {
             saveCalcPeriod("", "");
             setCalcPeriodActive(false);
-            if (window.__loadPaymentTable) window.__loadPaymentTable();
+            if (window.__loadPaymentTable) { try { window.__loadPaymentTable(); __hideExcludesFatalBox(); } catch(e) { if (__isExcludesFatalError(e)) __showExcludesFatalBox(e); else throw e; } }
             return;
         }
 
         saveCalcPeriod(from, to);
         setCalcPeriodActive(true);
 
-        if (window.__loadPaymentTable) window.__loadPaymentTable();
+        if (window.__loadPaymentTable) { try { window.__loadPaymentTable(); __hideExcludesFatalBox(); } catch(e) { if (__isExcludesFatalError(e)) __showExcludesFatalBox(e); else throw e; } }
     });
 
     resetBtn.addEventListener("click", () => {
@@ -2038,7 +2076,7 @@ function bindCalcButtons(){
         setCalcPeriodActive(false);
         fromEl.value = "";
         toEl.value = "";
-        if (window.__loadPaymentTable) window.__loadPaymentTable();
+        if (window.__loadPaymentTable) { try { window.__loadPaymentTable(); __hideExcludesFatalBox(); } catch(e) { if (__isExcludesFatalError(e)) __showExcludesFatalBox(e); else throw e; } }
     });
 
     repBtn.addEventListener("click", () => {
@@ -2057,6 +2095,7 @@ function bindCalcButtons(){
 document.addEventListener("DOMContentLoaded", () => {
     loadCalcPeriodUI();
     bindCalcButtons();
+    document.getElementById("clearBrokenExcludesBtn")?.addEventListener("click", __clearBrokenExcludesAndReload);
 });
 
 document.addEventListener("click", (e) => {

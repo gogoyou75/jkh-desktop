@@ -1034,7 +1034,6 @@ async function createAbonent() {
       totalDebt: 0,
 
       defaultNote: note,
-      defaultExcludes: [],
 
       uid: uid,
 
@@ -1046,6 +1045,14 @@ async function createAbonent() {
       docDate: ""
     };
 
+
+    try {
+      if (window.Data && typeof window.Data.writeCanonicalExcludePeriods === 'function') {
+        window.Data.writeCanonicalExcludePeriods(String(ls), []);
+      } else if (window.JKHStore && typeof window.JKHStore.setRaw === 'function') {
+        window.JKHStore.setRaw('exclude_periods_' + String(ls), JSON.stringify([]));
+      }
+    } catch(e) {}
 
     const newPaymentsKey = 'payments_' + String(uid || '').trim();
     storeSet(newPaymentsKey, JSON.stringify([]));

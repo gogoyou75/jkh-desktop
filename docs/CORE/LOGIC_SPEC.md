@@ -1393,3 +1393,19 @@ Fatal-правила:
 - повреждённый JSON frozen debt останавливает перенос долга;
 - запрещено превращать ошибку расчёта или JSON в `principal: 0` / `penalty: 0`;
 - безопасный перенос без долга должен быть выбран явно и не является fallback из ошибочного `WITH_DEBT`.
+
+### 15.10. Исключённые периоды расчёта пени
+
+Канонический источник истины для исключённых периодов расчёта пени — ключ `exclude_periods_<abonentId>` в storage.
+
+Правила хранения и применения:
+- формат значения: JSON array;
+- объект периода: `{from:"YYYY-MM-DD", to:"YYYY-MM-DD", reason:"string"}`;
+- исключённые периоды влияют только на расчёт пени;
+- основной долг исключёнными периодами не изменяется;
+- поле абонента `defaultExcludes` является legacy/cache и не используется как источник истины для расчёта;
+- при отсутствии `exclude_periods_<abonentId>` legacy `defaultExcludes` может использоваться только как read-only migration source, после чего должен быть записан валидный JSON-массив в `exclude_periods_<abonentId>`;
+- transfer/merge/create нового абонента не копирует исключённые периоды старого абонента (`defaultExcludes`, `excludes`, `excludePeriods`, `specialExcludes`);
+- новый абонент стартует с `exclude_periods_<newAbonentId> = []`;
+- повреждённый canonical JSON в `exclude_periods_<abonentId>` блокирует расчёт пени до исправления;
+- запрещено хранить пустую строку вместо JSON-массива.

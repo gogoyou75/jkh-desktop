@@ -212,6 +212,79 @@
     }
   }
 
+  function excludePeriodsStorageKey(abonentId) {
+    return "exclude_periods_" + String(abonentId || "").trim();
+  }
+
+  function normalizeExcludePeriodsList(input) {
+    try {
+      var arr = input;
+      if (typeof arr === "string") {
+        var raw = String(arr || "").trim();
+        if (!raw) return [];
+        arr = JSON.parse(raw);
+      }
+      if (!Array.isArray(arr)) return [];
+      var out = [];
+      arr.forEach(function (p) {
+        if (!p || typeof p !== "object" || Array.isArray(p)) return;
+        var from = String(p.from || "").trim();
+        var to = String(p.to || "").trim();
+        var reason = String(p.reason || "").trim();
+        if (!from && !to && !reason) return;
+        out.push({ from: from, to: to, reason: reason });
+      });
+      return out;
+    } catch (e) {
+      return [];
+    }
+  }
+
+  function readCanonicalExcludePeriods(abonentId) {
+    var id = String(abonentId || "").trim();
+    if (!id) return [];
+    var key = excludePeriodsStorageKey(id);
+    var raw = _getProjectRaw(key);
+    if (raw !== null && raw !== undefined) {
+      try {
+        var parsed = JSON.parse(String(raw));
+        if (Array.isArray(parsed)) return normalizeExcludePeriodsList(parsed);
+        console.warn("[excludes][canonical-invalid]", { abonentId: id, key: key, reason: "EXCLUDES_NOT_ARRAY" });
+        return [];
+      } catch (e) {
+        console.warn("[excludes][canonical-invalid]", { abonentId: id, key: key, reason: "JSON_PARSE_FAILED", error: e });
+        return [];
+      }
+    }
+
+    var legacy = [];
+    try {
+      var db = window.AbonentsDB || {};
+      var a = db.abonents && db.abonents[id] ? db.abonents[id] : null;
+      legacy = normalizeExcludePeriodsList(a && a.defaultExcludes);
+    } catch (e2) {
+      legacy = [];
+    }
+    _setProjectRaw(key, JSON.stringify(legacy));
+    return legacy;
+  }
+
+  function writeCanonicalExcludePeriods(abonentId, list) {
+    var id = String(abonentId || "").trim();
+    if (!id) return false;
+    var normalized = normalizeExcludePeriodsList(list);
+    return _setProjectRaw(excludePeriodsStorageKey(id), JSON.stringify(normalized));
+  }
+
+  function removeLegacyExcludeFields(obj) {
+    if (!obj || typeof obj !== "object") return obj;
+    delete obj.defaultExcludes;
+    delete obj.excludes;
+    delete obj.excludePeriods;
+    delete obj.specialExcludes;
+    return obj;
+  }
+
   const __paymentKeyResolveCache = new Map();
   let __paymentKeyResolveCacheOwner = null;
   let __paymentKeyResolveCacheDb = null;
@@ -642,6 +715,9 @@
 
   var Data = {
     __canon_v16: true,
+    normalizeExcludePeriodsList: normalizeExcludePeriodsList,
+    readCanonicalExcludePeriods: readCanonicalExcludePeriods,
+    writeCanonicalExcludePeriods: writeCanonicalExcludePeriods,
 
     // READ
     getDb: function () {
@@ -784,6 +860,9 @@
         window.AbonentsDB.abonents = {};
       }
 
+      var existedBefore = !!window.AbonentsDB.abonents[id];
+      if (!existedBefore) removeLegacyExcludeFields(input);
+
       if (!String(input.uid || '').trim()) {
         input.uid = (typeof window.generateUid === 'function')
           ? String(window.generateUid())
@@ -798,6 +877,7 @@
       }
 
       window.AbonentsDB.abonents[id] = input;
+      if (!existedBefore) writeCanonicalExcludePeriods(id, []);
 
       if (regnum) {
         var premiseObj = {
@@ -1021,7 +1101,10 @@
           sourceAbonentId: newResp,
           sourceMergeEventId: ""
         });
+        removeLegacyExcludeFields(newAbonent);
         db.abonents[generatedNewId] = newAbonent;
+        writeCanonicalExcludePeriods(generatedNewId, []);
+        console.log("[premise-transform][excludes] new abonent initialized empty", { abonentId: generatedNewId });
         console.log("[premise-transform] new abonent generated", generatedNewId, "from", newResp);
         console.log("[premise-transform] old LS preserved", newResp);
 
@@ -1314,12 +1397,17 @@
       "jkh_freeze_to_v1:" + oldId,
       "jkh_frozen_debt_v1:" + oldId + ":" + freezeISO,
       "jkh_transfer_to_v1:" + newId,
-      "jkh_transfer_balance_v1:" + newId + ":" + rn
+      "jkh_transfer_balance_v1:" + newId + ":" + rn,
+      excludePeriodsStorageKey(newId),
+      excludePeriodsStorageKey(oldId)
     ];
     var transferRawSnapshot = {};
     transferKeys.forEach(function(k){ transferRawSnapshot[k] = _getProjectRaw(k); });
     try{
       if (prepareDebtTransfer(oldId, newId, rn, td, legacyMode) !== true) throw new Error("TRANSFER_PREPARE_FAILED");
+
+      readCanonicalExcludePeriods(oldId);
+      console.log("[transfer][excludes] old migrated", { abonentId: oldId });
 
       activeLinks.forEach(function(l){
         l.dateTo = freezeISO;
@@ -1341,6 +1429,10 @@
       }
 
       var newA = db.abonents[newId];
+      removeLegacyExcludeFields(newA);
+      console.log("[transfer][excludes] skipped legacy copy", { abonentId: newId });
+      writeCanonicalExcludePeriods(newId, []);
+      console.log("[transfer][excludes] new initialized empty", { abonentId: newId });
       var premise = db.premises && db.premises[rn] ? db.premises[rn] : {};
       newA.regnum = rn;
       newA.premiseRegnum = rn;
