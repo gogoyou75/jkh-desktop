@@ -1,5 +1,17 @@
 # CHANGELOG
 
+## 2026-05-10 — Responsibility transfer unified through Data.transferResponsibility
+
+- Зафиксирован единый финансовый канон передачи ответственности.
+- Создание нового абонента на квартиру с активным `link` теперь допускается только через transfer-flow.
+- Карточка абонента и `new_abonent.html` должны использовать единый сервис `Data.transferResponsibility(...)`.
+- Разрешены базовые режимы `WITH_DEBT` и `WITHOUT_DEBT` / `NO_DEBT`.
+- Старый период ответственности закрывается на `transferDate - 1`, новый начинается с `transferDate`.
+- `WITH_DEBT` требует успешного frozen debt calculation; silent fallback в нулевой долг запрещён.
+- `WITHOUT_DEBT` оставляет долг на старом `payments_<oldUid>`, новый абонент стартует с новым UID и нулевым ledger.
+- Преобразование квартиры без назначения нового абонента не является transfer-flow и не запускает начисления.
+- Кодовая реализация: commit `2a42b5d Enforce canonical responsibility transfer flow`.
+
 ## 2026-05-10 — P0: canonical excluded penalty periods
 
 - P0: исправлена консистентность исключённых периодов при передаче/объединении/создании абонента; введён canonical source-of-truth `exclude_periods_<abonentId>`; запрещено слепое копирование `defaultExcludes`.

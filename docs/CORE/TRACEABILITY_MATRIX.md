@@ -122,7 +122,7 @@
 | Платежи читаются по UID: payments_<uid> | Новая архитектура проекта | calc_engine.js → resolvePaymentKeyForAbonent | ✅ OK | Старый верхний комментарий про payments_<LS> устарел |
 | Если UID не найден — расчёт платежей блокируется | Новая архитектура проекта | calc_engine.js → resolvePaymentKeyForAbonent | ✅ OK | Это защита от смешивания старых ЛС |
 | Долг/пеня закрытого абонента считаются только до freezeTo | В LOGIC_SPEC надо добавить | calc_engine.js → getFreezeToISO + calcTotalsAsOfCore | 🟡 PARTIAL | В коде есть, в документах надо проверить |
-| Перенос долга между абонентами поддерживается через transfer balance | В LOGIC_SPEC надо добавить/уточнить | calc_engine.js → getTransferBalance | 🟡 PARTIAL | Есть совместимость со старой схемой |
+| Перенос долга между абонентами поддерживается через transfer balance | LOGIC_SPEC → Financial Canon | calc_engine.js → getTransferBalance | ✅ OK | commit 2a42b5d; legacy-совместимость остаётся отдельным контекстом |
 | Судебная разбивка пени считается по исходному месяцу долга | В LOGIC_SPEC надо добавить | calc_engine.js → calcPenaltyBreakdownBySourceMonth | 🟡 PARTIAL | Нужно синхронизировать со spravka_sud.js |
 
 
@@ -261,6 +261,18 @@
 | Нет истории изменений | ❌ | отсутствует | 🔴 | |
 | Нет versioning | ❌ | отсутствует | 🔴 | |
 | Дата в двух форматах | ❌ | toDMY / ISO | 🔴 | риск |
+
+## 🧩 Блок: Responsibility Transfer / Debt Transfer
+
+| Правило | Где в ТЗ | Где в коде | Статус | Комментарий |
+|---|---|---|---|---|
+| Единый transfer-flow через Data.transferResponsibility | LOGIC_SPEC → Financial Canon | web/data.js; web/new_abonent.html; web/abonent_card.html | ✅ OK | commit 2a42b5d |
+| Создание нового абонента на квартиру с active link запрещено без transfer-flow | LOGIC_SPEC → Financial Canon | web/new_abonent.html; web/data.js | ✅ OK | Новый абонент на занятую квартиру должен идти через transfer |
+| Старый период закрывается transferDate - 1, новый начинается transferDate | LOGIC_SPEC → Financial Canon | web/data.js | ✅ OK | Устраняет пересечение ответственности |
+| WITH_DEBT требует успешный frozen debt calculation | LOGIC_SPEC → Financial Canon | web/data.js | ✅ OK | Silent fallback в 0 запрещён |
+| WITHOUT_DEBT / NO_DEBT оставляет долг старому UID | LOGIC_SPEC → Financial Canon | web/data.js | ✅ OK | Новый UID стартует с нуля |
+| UI не считает долг и не пишет transfer balance напрямую | LOGIC_SPEC → Financial Canon | web/new_abonent.html; web/abonent_card.html | ✅ OK | UI вызывает единый сервис |
+| Structural transform без абонента не является transfer | LOGIC_SPEC → Financial Canon | web/data.js / premiseEvents | 🟡 PARTIAL | Зафиксировать как правило; код проверить отдельно при аудите transform |
 
 ## 🧩 Блок: P0 Silent-fallback Audit Closure
 
