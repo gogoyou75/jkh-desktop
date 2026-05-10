@@ -212,6 +212,105 @@
     }
   }
 
+  function excludePeriodsStorageKey(abonentId) {
+    return "exclude_periods_" + String(abonentId || "").trim();
+  }
+
+  function normalizeExcludePeriodsList(input) {
+    try {
+      var arr = input;
+      if (typeof arr === "string") {
+        var raw = String(arr || "").trim();
+        if (!raw) return [];
+        arr = JSON.parse(raw);
+      }
+      if (!Array.isArray(arr)) return [];
+      var out = [];
+      arr.forEach(function (p) {
+        if (!p || typeof p !== "object" || Array.isArray(p)) return;
+        var from = String(p.from || "").trim();
+        var to = String(p.to || "").trim();
+        var reason = String(p.reason || "").trim();
+        if (!from && !to && !reason) return;
+        out.push({ from: from, to: to, reason: reason });
+      });
+      return out;
+    } catch (e) {
+      return [];
+    }
+  }
+
+  function readCanonicalExcludePeriods(abonentId) {
+    var id = String(abonentId || "").trim();
+    if (!id) return [];
+    var key = excludePeriodsStorageKey(id);
+    var raw = _getProjectRaw(key);
+    if (raw !== null && raw !== undefined) {
+      if (raw === "") {
+        _setProjectRaw(key, "[]");
+        console.warn("[excludes][repair-empty-canonical]", { abonentId: id, key: key });
+        return [];
+      }
+      try {
+        var parsed = JSON.parse(String(raw));
+        if (Array.isArray(parsed)) return normalizeExcludePeriodsList(parsed);
+        console.warn("[excludes][canonical-invalid]", { abonentId: id, key: key, reason: "EXCLUDES_NOT_ARRAY" });
+        return [];
+      } catch (e) {
+        console.warn("[excludes][canonical-invalid]", { abonentId: id, key: key, reason: "JSON_PARSE_FAILED", error: e });
+        return [];
+      }
+    }
+
+    var legacy = [];
+    try {
+      var db = window.AbonentsDB || {};
+      var a = db.abonents && db.abonents[id] ? db.abonents[id] : null;
+      legacy = normalizeExcludePeriodsList(a && a.defaultExcludes);
+    } catch (e2) {
+      legacy = [];
+    }
+    writeCanonicalExcludePeriods(id, legacy);
+    return legacy;
+  }
+
+  function writeCanonicalExcludePeriods(abonentId, list) {
+    var id = String(abonentId || "").trim();
+    if (!id) return false;
+    var key = excludePeriodsStorageKey(id);
+    var normalized = normalizeExcludePeriodsList(list);
+    var payload = normalized.length ? JSON.stringify(normalized) : "[]";
+    console.log("[excludes][canonical-write]", { abonentId: id, key: key, count: normalized.length });
+    return _setProjectRaw(key, payload);
+  }
+
+  function repairEmptyExcludePeriodsKeys() {
+    var db = window.AbonentsDB || {};
+    var abonents = db && db.abonents ? db.abonents : {};
+    var ids = Object.keys(abonents || {});
+    var repaired = 0;
+    ids.forEach(function (abonentId) {
+      var id = String(abonentId || "").trim();
+      if (!id) return;
+      var key = excludePeriodsStorageKey(id);
+      var raw = _getProjectRaw(key);
+      if (raw !== "") return;
+      _setProjectRaw(key, "[]");
+      repaired++;
+      console.warn("[excludes][repair-empty-canonical]", { abonentId: id, key: key });
+    });
+    return repaired;
+  }
+
+  function removeLegacyExcludeFields(obj) {
+    if (!obj || typeof obj !== "object") return obj;
+    delete obj.defaultExcludes;
+    delete obj.excludes;
+    delete obj.excludePeriods;
+    delete obj.specialExcludes;
+    return obj;
+  }
+
   const __paymentKeyResolveCache = new Map();
   let __paymentKeyResolveCacheOwner = null;
   let __paymentKeyResolveCacheDb = null;
@@ -642,6 +741,10 @@
 
   var Data = {
     __canon_v16: true,
+    normalizeExcludePeriodsList: normalizeExcludePeriodsList,
+    readCanonicalExcludePeriods: readCanonicalExcludePeriods,
+    writeCanonicalExcludePeriods: writeCanonicalExcludePeriods,
+    repairEmptyExcludePeriodsKeys: repairEmptyExcludePeriodsKeys,
 
     // READ
     getDb: function () {
@@ -784,6 +887,9 @@
         window.AbonentsDB.abonents = {};
       }
 
+      var existedBefore = !!window.AbonentsDB.abonents[id];
+      if (!existedBefore) removeLegacyExcludeFields(input);
+
       if (!String(input.uid || '').trim()) {
         input.uid = (typeof window.generateUid === 'function')
           ? String(window.generateUid())
@@ -798,6 +904,7 @@
       }
 
       window.AbonentsDB.abonents[id] = input;
+      if (!existedBefore) writeCanonicalExcludePeriods(id, []);
 
       if (regnum) {
         var premiseObj = {
@@ -1021,7 +1128,10 @@
           sourceAbonentId: newResp,
           sourceMergeEventId: ""
         });
+        removeLegacyExcludeFields(newAbonent);
         db.abonents[generatedNewId] = newAbonent;
+        writeCanonicalExcludePeriods(generatedNewId, []);
+        console.log("[premise-transform][excludes] new abonent initialized empty", { abonentId: generatedNewId });
         console.log("[premise-transform] new abonent generated", generatedNewId, "from", newResp);
         console.log("[premise-transform] old LS preserved", newResp);
 
@@ -1275,6 +1385,153 @@
     }
   }
 
+
+
+  function __normalizeTransferMode(mode){
+    var raw = String(mode || "WITH_DEBT").trim();
+    if (raw === "NO_DEBT" || raw === "WITHOUT_DEBT") return "WITHOUT_DEBT";
+    return "WITH_DEBT";
+  }
+
+  function transferResponsibility(options){
+    if (!Data.ensureWriteOrExplain()) return false;
+    var db = window.AbonentsDB;
+    if (!db || !db.abonents) return false;
+
+    var opts = options || {};
+    var oldId = String(opts.oldAbonentId || "").trim();
+    var newId = String(opts.newAbonentId || "").trim();
+    var rn = normalizeRegnumValue(opts.regnum);
+    var td = String(opts.transferDate || opts.dateFrom || "").trim();
+    var mode = __normalizeTransferMode(opts.transferMode || opts.mode);
+    var legacyMode = (mode === "WITH_DEBT") ? "WITH_DEBT" : "NO_DEBT";
+    var freezeISO = __isoYesterday(td);
+
+    if (!oldId || !newId || !rn || !/^\d{4}-\d{2}-\d{2}$/.test(td) || !freezeISO) return false;
+    if (!db.abonents[oldId] || !db.abonents[newId]) return false;
+    if (!Array.isArray(db.links)) db.links = [];
+
+    var activeLinks = db.links.filter(function(l){
+      return normalizeRegnumValue(l && l.regnum) === rn && !String(l && l.dateTo || "").trim();
+    });
+    var oldActive = activeLinks.find(function(l){ return String(l && l.abonentId || "").trim() === oldId; });
+    if (!oldActive) return false;
+    var alreadyNewActive = activeLinks.find(function(l){ return String(l && l.abonentId || "").trim() === newId; });
+    if (alreadyNewActive) return false;
+
+    var snapshot = deepClone(db);
+    var transferKeys = [
+      "jkh_freeze_to_v1:" + oldId,
+      "jkh_frozen_debt_v1:" + oldId + ":" + freezeISO,
+      "jkh_transfer_to_v1:" + newId,
+      "jkh_transfer_balance_v1:" + newId + ":" + rn,
+      excludePeriodsStorageKey(newId),
+      excludePeriodsStorageKey(oldId)
+    ];
+    var transferRawSnapshot = {};
+    transferKeys.forEach(function(k){ transferRawSnapshot[k] = _getProjectRaw(k); });
+    try{
+      if (prepareDebtTransfer(oldId, newId, rn, td, legacyMode) !== true) throw new Error("TRANSFER_PREPARE_FAILED");
+
+      readCanonicalExcludePeriods(oldId);
+      console.log("[transfer][excludes] old migrated", { abonentId: oldId });
+
+      activeLinks.forEach(function(l){
+        l.dateTo = freezeISO;
+        var id = String(l && l.abonentId || "").trim();
+        if (id && db.abonents && db.abonents[id]) {
+          db.abonents[id].calcEndDate = freezeISO;
+          db.abonents[id].frozenDebtDate = freezeISO;
+        }
+      });
+
+      var existing = db.links.find(function(l){
+        return String(l && l.abonentId || "").trim() === newId && normalizeRegnumValue(l && l.regnum) === rn;
+      });
+      if (existing) {
+        existing.dateFrom = td;
+        existing.dateTo = "";
+      } else {
+        db.links.push({ abonentId: newId, regnum: rn, dateFrom: td, dateTo: "" });
+      }
+
+      var newA = db.abonents[newId];
+      removeLegacyExcludeFields(newA);
+      console.log("[transfer][excludes] skipped legacy copy", { abonentId: newId });
+      writeCanonicalExcludePeriods(newId, []);
+      console.log("[transfer][excludes] new initialized empty", { abonentId: newId });
+      var premise = db.premises && db.premises[rn] ? db.premises[rn] : {};
+      newA.regnum = rn;
+      newA.premiseRegnum = rn;
+      newA.calcStartDate = td;
+      newA.calcEndDate = "";
+      newA.debtTransferredFrom = (mode === "WITH_DEBT") ? oldId : null;
+      if (premise.city) newA.city = premise.city;
+      if (premise.street) newA.street = premise.street;
+      if (premise.house) newA.house = premise.house;
+      if (premise.flat) newA.flat = premise.flat;
+      if (premise.square !== undefined && premise.square !== null && premise.square !== "") newA.square = premise.square;
+
+      var oldA = db.abonents[oldId];
+      if (oldA) {
+        if (!Array.isArray(oldA.history)) oldA.history = [];
+        oldA.history.push({
+          type: "responsibility_closed",
+          date: (new Date()).toISOString().slice(0, 10),
+          closeTo: freezeISO,
+          regnum: rn,
+          note: "Период ответственности закрыт при передаче квартиры"
+        });
+      }
+
+      var transferMeta = {
+        type: "premise_transfer",
+        regnum: rn,
+        fromAbonentId: oldId,
+        fromFio: String(oldA && oldA.fio || ""),
+        transferMode: mode,
+        newRespFrom: td,
+        oldRespTo: freezeISO,
+        transferDebtApplied: mode === "WITH_DEBT",
+        createdAt: (new Date()).toISOString().slice(0, 10)
+      };
+      newA.transferMeta = transferMeta;
+
+      if (!Array.isArray(db.premiseEvents)) db.premiseEvents = [];
+      db.premiseEvents.push({
+        id: "evt_" + Date.now() + "_" + Math.floor(Math.random() * 1000000),
+        type: "RESPONSIBILITY_TRANSFER",
+        date: td,
+        fromRegnums: [rn],
+        toRegnums: [rn],
+        oldAbonentId: oldId,
+        newAbonentId: newId,
+        transferMode: mode,
+        oldRespTo: freezeISO,
+        newRespFrom: td,
+        createdAt: (new Date()).toISOString(),
+        createdBy: _ownerId()
+      });
+
+      return !!window.saveAbonentsDB && window.saveAbonentsDB();
+    }catch(e){
+      window.AbonentsDB = snapshot;
+      transferKeys.forEach(function(k){
+        try{
+          if (transferRawSnapshot[k] === null || transferRawSnapshot[k] === undefined) _removeProjectRaw(k);
+          else _setProjectRaw(k, transferRawSnapshot[k]);
+        }catch(storageErr){}
+      });
+      try{ if (window.saveAbonentsDB) window.saveAbonentsDB(); }catch(saveErr){}
+      if (__isDebtTransferError(e)) {
+        __logDebtTransferAbort(e);
+      } else {
+        try{ console.error("[transfer-responsibility][aborted]", e); }catch(logErr){}
+      }
+      return false;
+    }
+  }
+
   function getAbonentTransferInfo(abonentId){
     try{
       var id = String(abonentId||"").trim();
@@ -1302,6 +1559,7 @@
 
   // Экспорт в Service-layer API
   Data.prepareDebtTransfer = prepareDebtTransfer;
+  Data.transferResponsibility = transferResponsibility;
   Data.getAbonentTransferInfo = getAbonentTransferInfo;
 
 window.Data = Data;

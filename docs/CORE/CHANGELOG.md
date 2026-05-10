@@ -1,5 +1,10 @@
 # CHANGELOG
 
+## 2026-05-10 — P0: canonical excluded penalty periods
+
+- P0: исправлена консистентность исключённых периодов при передаче/объединении/создании абонента; введён canonical source-of-truth `exclude_periods_<abonentId>`; запрещено слепое копирование `defaultExcludes`.
+- Новый абонент при create/transfer/merge получает `exclude_periods_<newAbonentId> = []`; legacy `defaultExcludes` используется только как read-only migration source при отсутствии canonical key.
+
 ## 2026-05-08 — Docs: closure of P0 silent-fallback audit
 
 - Зафиксировано, что открытие справки, главной страницы и таблицы платежей является read-only и не должно менять ledger, запускать autoaccrual apply или flush.

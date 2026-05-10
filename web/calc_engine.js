@@ -375,11 +375,25 @@
     try{
       arr = JSON.parse(raw);
     }catch(e){
-      throwExcludesFatal("EXCLUDES_JSON_INVALID", key, { reason: "JSON_PARSE_FAILED" }, e);
+      const details = {
+        abonentId: String(abonentId || getAbonentIdFromUrl() || ""),
+        key: key,
+        rawPreview: String(raw || "").slice(0, 120),
+        reason: "JSON_PARSE_FAILED"
+      };
+      console.error("[calc][excludes-json-invalid]", details);
+      throwExcludesFatal("EXCLUDES_JSON_INVALID", key, details, e);
     }
 
     if (!Array.isArray(arr)) {
-      throwExcludesFatal("EXCLUDES_JSON_INVALID", key, { reason: "EXCLUDES_NOT_ARRAY" });
+      const details = {
+        abonentId: String(abonentId || getAbonentIdFromUrl() || ""),
+        key: key,
+        rawPreview: String(raw || "").slice(0, 120),
+        reason: "EXCLUDES_NOT_ARRAY"
+      };
+      console.error("[calc][excludes-json-invalid]", details);
+      throwExcludesFatal("EXCLUDES_JSON_INVALID", key, details);
     }
 
     const startDay = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate(), 0,0,0,0);

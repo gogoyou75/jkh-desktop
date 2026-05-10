@@ -469,6 +469,12 @@ Doc: docs/LOGIC_SPEC_v1.5.3.md
 
 <div class="note" style="margin:6px 0 10px 0; font-size:12px; opacity:0.85;">Подсказка: начисление месяца показывается первой строкой; оплаты — ниже. Если включаете «за период», изменения сохраняются автоматически.</div>
 
+<div id="excludesFatalBox" class="note" style="display:none; margin:6px 0 10px 0; padding:8px; border:1px solid #c00; color:#900; background:#fff5f5;">
+    <b>Исключённые периоды повреждены. Расчёт пени остановлен.</b>
+    <div style="margin-top:4px;">Проверьте ключ <code id="excludesFatalKey"></code> или очистите повреждённые исключённые периоды.</div>
+    <button class="btn" id="clearBrokenExcludesBtn" type="button" style="margin-top:8px;">Очистить повреждённые исключённые периоды</button>
+</div>
+
 <div class="payments-header">
     <button class="btn" onclick="addPaymentRow()">Добавить оплату</button>
     <button class="btn" onclick="openPaymentSourcesModal()" title="Справочник источников поступления">Источники</button>
@@ -542,9 +548,9 @@ Doc: docs/LOGIC_SPEC_v1.5.3.md
 
         <div class="change-resp-hint">
             <b>Выберите вариант передачи квартиры:</b>
-            <div class="row">✅ <b>С долгом</b> — долг (и начисления/оплаты) остаются «как есть», просто меняем ответственного с указанной даты.</div>
+            <div class="row">✅ <b>С долгом</b> — frozen debt старого переносится новому как стартовое сальдо с даты передачи.</div>
             <div class="row">✅ <b>Без долга</b> — фиксируем долг у старого владельца, а у нового владельца долг считается с нуля <u>с даты передачи</u>.</div>
-            <div class="row" style="margin-top:8px;"><b>Важно:</b> сейчас мы записываем режим передачи, а следующий шаг — научить расчёт реально учитывать «обнуление» в таблице оплат.</div>
+            <div class="row" style="margin-top:8px;"><b>Важно:</b> оба режима выполняются через канонический сервис Data.transferResponsibility(...).</div>
         </div>
 
         <label>Новый ответственный (лицевой счёт)</label>
@@ -1022,8 +1028,44 @@ async function applyPremiseMerge(){
 let __abonentCardInitStarted = false;
 let __paymentTableLoading = false;
 let __paymentTableLoadScheduled = false;
+let __abonentCardServerRepairDone = false;
+
+function __isExcludesFatalError(e){
+    const code = String(e && e.code || "");
+    return code === "EXCLUDES_JSON_INVALID" || code === "EXCLUDES_INVALID";
+}
+
+function __showExcludesFatalBox(err){
+    try{
+        const box = document.getElementById("excludesFatalBox");
+        const keyEl = document.getElementById("excludesFatalKey");
+        if (keyEl) keyEl.textContent = String((err && err.key) || ("exclude_periods_" + getAbonentTechnicalIdFromURL()));
+        if (box) box.style.display = "block";
+    }catch(e){}
+}
+
+function __hideExcludesFatalBox(){
+    try{
+        const box = document.getElementById("excludesFatalBox");
+        if (box) box.style.display = "none";
+    }catch(e){}
+}
+
+function __clearBrokenExcludesAndReload(){
+    if (!canWriteOrExplainLocal()) return;
+    const id = getAbonentTechnicalIdFromURL();
+    const key = "exclude_periods_" + String(id || "").trim();
+    storeSet(key, JSON.stringify([]));
+    __hideExcludesFatalBox();
+    __safeLoadPaymentTableOnce("clear-broken-excludes");
+}
 
 function __safeLoadPaymentTableOnce(reason){
+    if (!__abonentCardServerRepairDone) {
+        try { console.warn('[abonent_card] payment table load skipped before server repair:', reason); } catch(e){}
+        return;
+    }
+
     if (__paymentTableLoading || __paymentTableLoadScheduled) {
         try { if (window.JKH_DEBUG_PAYMENT_KEY) console.debug('[abonent_card] payment table load coalesced:', reason); } catch(e){}
         return;
@@ -1038,7 +1080,9 @@ function __safeLoadPaymentTableOnce(reason){
         __paymentTableLoading = true;
         try {
             window.__loadPaymentTable(reason || 'abonent-card');
+            __hideExcludesFatalBox();
         } catch(e) {
+            if (__isExcludesFatalError(e)) __showExcludesFatalBox(e);
             try { console.error('[abonent_card] __loadPaymentTable failed:', reason, e); } catch(_){}
         } finally {
             setTimeout(() => { __paymentTableLoading = false; }, 300);
@@ -1048,6 +1092,11 @@ function __safeLoadPaymentTableOnce(reason){
 
 function __runAutoAccrualRepairOnce(){
     try {
+        if (!__abonentCardServerRepairDone) {
+            try { console.warn('[abonent_card] skip autoaccrual before server repair'); } catch(e){}
+            return;
+        }
+
         const id = getAbonentIdFromURL();
         if (!id) return;
 
@@ -1078,9 +1127,46 @@ function __runAutoAccrualRepairOnce(){
     }
 }
 
-function __initAbonentCardSafe(){
+async function __uploadRepairedExcludePeriodsToServer(){
+    if (window.Data && typeof Data.flushDbToServer === "function") {
+        await Data.flushDbToServer();
+        return true;
+    }
+    if (window.JKHRemoteSync && typeof JKHRemoteSync.uploadNow === "function") {
+        await JKHRemoteSync.uploadNow();
+        return true;
+    }
+    return false;
+}
+
+async function __repairEmptyExcludePeriodsKeysAfterServerLoad(){
+    let repaired = 0;
+    try {
+        if (window.Data && typeof Data.repairEmptyExcludePeriodsKeys === "function") {
+            const result = Data.repairEmptyExcludePeriodsKeys();
+            repaired = (result && typeof result.then === "function") ? await result : result;
+            if (typeof repaired !== "number") repaired = 0;
+        }
+        console.log("[abonent-card][excludes-repair-after-server-load]", { repaired });
+        if (repaired > 0) {
+            try {
+                await __uploadRepairedExcludePeriodsToServer();
+            } catch(uploadErr) {
+                try { console.warn("[abonent-card][excludes-repair-after-server-load] upload failed", uploadErr); } catch(_){}
+            }
+        }
+    } catch(e) {
+        try { console.warn("[abonent-card][excludes-repair-after-server-load] failed", e); } catch(_){}
+    } finally {
+        __abonentCardServerRepairDone = true;
+    }
+}
+
+async function __initAbonentCardSafe(){
     if (__abonentCardInitStarted) return;
     __abonentCardInitStarted = true;
+
+    await __repairEmptyExcludePeriodsKeysAfterServerLoad();
 
     try { fillAbonentCard(); } catch(e) { try { console.error('[abonent_card] fill failed', e); } catch(_){} }
 
@@ -1104,6 +1190,19 @@ function __isAbonentCardDataReady() {
     }
 }
 
+function __isAbonentCardServerFirstReady(){
+    try {
+        const st = window.JKH_UI_STATE && window.JKH_UI_STATE.data;
+        if (!st) return false;
+        const status = String(st.status || "");
+        if (status !== "ready" && status !== "empty") return false;
+        if (Object.prototype.hasOwnProperty.call(st, "source") && String(st.source || "") !== "server") return false;
+        return true;
+    } catch(e) {
+        return false;
+    }
+}
+
 function __waitForAbonentCardDataReady(cb) {
     let done = false;
     let tries = 0;
@@ -1113,19 +1212,24 @@ function __waitForAbonentCardDataReady(cb) {
         if (done) return;
         done = true;
         try { window.removeEventListener("JKH_UI_STATE_CHANGED", onState); } catch(e) {}
-        console.log("[abonent_card] data ready init", reason);
+        console.log("[abonent_card] server data ready init", reason);
         cb();
     }
 
     function check(reason) {
-        if (__isAbonentCardDataReady()) {
+        const st = window.JKH_UI_STATE && window.JKH_UI_STATE.data;
+        const status = String((st && st.status) || "");
+        const serverReady = __isAbonentCardServerFirstReady();
+        const abonentReady = __isAbonentCardDataReady();
+
+        if (serverReady && (status === "empty" || abonentReady)) {
             finish(reason);
             return;
         }
 
         tries++;
         if (tries > 80) {
-            console.warn("[abonent_card] data not ready after wait, init blocked");
+            console.warn("[abonent_card] server data not ready after wait, init blocked");
             return;
         }
 
@@ -1135,7 +1239,7 @@ function __waitForAbonentCardDataReady(cb) {
     function onState() {
         const st = window.JKH_UI_STATE && window.JKH_UI_STATE.data;
         if (st && (st.status === "ready" || st.status === "empty")) {
-            const key = String(st.status || "") + "|" + String(st.ownerId || st.owner || "");
+            const key = String(st.status || "") + "|" + String(st.source || "") + "|" + String(st.loadedAt || st.updatedAt || "") + "|" + String(st.ownerId || st.owner || "");
             if (key === lastStateKey) return;
             lastStateKey = key;
             check("JKH_UI_STATE_CHANGED");
@@ -1575,42 +1679,6 @@ async function applyChangeResponsible(mode) {
         return;
     }
 
-    // сохраняем метаданные режима передачи (для будущего шага расчётов)
-    __saveTransferMeta(newId, regnum, dateFrom, mode);
-
-
-    // ✅ 1) вычисляем "долг + пеня" у старого на дату передачи (до передачи)
-    // Старый заканчивает накануне даты передачи.
-    const freezeISO = __isoMinusOne(dateFrom);
-
-    let oldPrincipal = 0;
-    let oldPenalty = 0;
-
-    try{
-      const oldPaymentsRaw = (window.JKHStore && JKHStore.getRaw) ? JKHStore.getRaw("payments_" + String(id)) : null;
-      const oldRows = oldPaymentsRaw ? JSON.parse(oldPaymentsRaw) : [];
-      if (window.JKHCalcEngine && typeof window.JKHCalcEngine.calcTotalsAsOfAdjusted === "function"){
-        const tot = window.JKHCalcEngine.calcTotalsAsOfAdjusted(oldRows, new Date(freezeISO + "T12:00:00"), {
-          abonentId: String(id),
-          applyAdvanceOffset: true,
-          allowNegativePrincipal: false
-        });
-        oldPrincipal = Number(tot?.principal || 0);
-        oldPenalty   = Number(tot?.penaltyDebt || 0);
-      }
-    }catch(e){}
-
-    // ✅ 2) замораживаем старого (пеня перестанет расти после freezeISO)
-    __saveFreezeTo(String(id), freezeISO);
-
-    // ✅ 3) если передача "С ДОЛГОМ" — записываем стартовое сальдо новому
-    if (String(mode) === "WITH_DEBT"){
-      __saveTransferBalance(String(newId), String(regnum), String(dateFrom), oldPrincipal, oldPenalty, String(id), "WITH_DEBT");
-    } else {
-      // "БЕЗ ДОЛГА": новому ничего не переносим
-    }
-
-
     const activeList = allLinks.filter(l =>
         String(l.regnum) === String(regnum) && !String(l.dateTo || '').trim()
     );
@@ -1623,51 +1691,27 @@ async function applyChangeResponsible(mode) {
         return;
     }
 
-    // фиксируем окончание расчёта у старого абонента
-    activeList.forEach(l => {
-        const oldAb = db[String(l.abonentId)];
-        if (!oldAb) return;
-        oldAb.calcEndDate = dateFrom;
-        if (window.Data && typeof window.Data.upsertAbonent === 'function') {
-            window.Data.upsertAbonent(Object.assign({}, oldAb, { id: String(l.abonentId) }));
-        }
-    });
-
-    // закрыть активные links по квартире
-    activeList.forEach(l => {
-        if (window.Data && typeof window.Data.unlinkAbonentFromPremise === 'function') {
-            window.Data.unlinkAbonentFromPremise(String(l.abonentId), String(regnum));
-        }
-        if (window.Data && typeof window.Data.linkAbonentToPremise === 'function') {
-            window.Data.linkAbonentToPremise(String(l.abonentId), String(regnum), String(l.dateFrom || ''), String(dateFrom));
-        }
-    });
-
-    // открыть link новому
-    if (window.Data && typeof window.Data.linkAbonentToPremise === 'function') {
-        window.Data.linkAbonentToPremise(String(newId), String(regnum), String(dateFrom), '');
+    if (!currentActiveId) {
+        alert('По квартире не найден текущий активный ответственный. Передача ответственности невозможна.');
+        return;
     }
 
-    // старт расчёта у нового
-    const newAb = db[String(newId)];
-    if (newAb) {
-        newAb.calcStartDate = dateFrom;
-        newAb.calcEndDate = "";
+    if (!(window.Data && typeof window.Data.transferResponsibility === 'function')) {
+        alert('Сервис передачи ответственности недоступен.');
+        return;
     }
 
-    // подтянуть адресные поля из premises (как было)
-    const premise = (p || getPremisesDb()[String(regnum)] || {});
-    if (newAb) {
-        newAb.regnum = String(regnum);
-        if (premise.city)   newAb.city = premise.city;
-        if (premise.street) newAb.street = premise.street;
-        if (premise.house)  newAb.house = premise.house;
-        if (premise.flat)   newAb.flat = premise.flat;
-        if (premise.square !== undefined && premise.square !== null && premise.square !== "") newAb.square = premise.square;
+    const transferred = window.Data.transferResponsibility({
+        oldAbonentId: currentActiveId,
+        newAbonentId: String(newId),
+        regnum: String(regnum),
+        transferDate: String(dateFrom),
+        transferMode: String(mode || 'WITH_DEBT')
+    });
 
-        if (window.Data && typeof window.Data.upsertAbonent === 'function') {
-            window.Data.upsertAbonent(Object.assign({}, newAb, { id: String(newId), premiseRegnum: String(regnum) }));
-        }
+    if (transferred !== true) {
+        alert('Передача ответственности не выполнена. Проверьте дату, выбранного абонента и расчёт frozen debt.');
+        return;
     }
 
     await Data.flushDbToServer();
@@ -1957,7 +2001,7 @@ async function saveAbonentEdit() {
 
     loadMoratoriumUI();
 
-    if (window.__loadPaymentTable) window.__loadPaymentTable();
+    __safeLoadPaymentTableOnce();
 
     alert("Изменения сохранены");
     if (activeRegnum) renderResponsibilityHistory(activeRegnum);
@@ -1994,7 +2038,7 @@ function bindMoratoriumUI(){
             return;
         }
         storeSet(moratoriumKey(id), el.checked ? "1" : "0");
-        if (window.__loadPaymentTable) window.__loadPaymentTable();
+        __safeLoadPaymentTableOnce();
     });
 }
 document.addEventListener("DOMContentLoaded", () => {
@@ -2082,14 +2126,14 @@ function bindCalcButtons(){
         if (!isValidPeriod(from, to)) {
             saveCalcPeriod("", "");
             setCalcPeriodActive(false);
-            if (window.__loadPaymentTable) window.__loadPaymentTable();
+            __safeLoadPaymentTableOnce();
             return;
         }
 
         saveCalcPeriod(from, to);
         setCalcPeriodActive(true);
 
-        if (window.__loadPaymentTable) window.__loadPaymentTable();
+        __safeLoadPaymentTableOnce();
     });
 
     resetBtn.addEventListener("click", () => {
@@ -2098,7 +2142,7 @@ function bindCalcButtons(){
         setCalcPeriodActive(false);
         fromEl.value = "";
         toEl.value = "";
-        if (window.__loadPaymentTable) window.__loadPaymentTable();
+        __safeLoadPaymentTableOnce();
     });
 
     repBtn.addEventListener("click", () => {
@@ -2117,6 +2161,7 @@ function bindCalcButtons(){
 document.addEventListener("DOMContentLoaded", () => {
     loadCalcPeriodUI();
     bindCalcButtons();
+    document.getElementById("clearBrokenExcludesBtn")?.addEventListener("click", __clearBrokenExcludesAndReload);
 });
 
 document.addEventListener("click", (e) => {

@@ -48,7 +48,8 @@
 /* =========================================================
    exclude_period.html
    - добавление строки работает (пустая строка НЕ удаляется)
-   - хранение: JKHStore + AbonentsDB.abonents[id].defaultExcludes
+   - canonical хранение: JKHStore exclude_periods_<abonentId>
+   - defaultExcludes: legacy mirror/migration source only
    ========================================================= */
 
 function getAbonentId(){
@@ -61,6 +62,7 @@ function getAbonentId(){
     return first || "27";
 }
 function periodsKey(id){ return "exclude_periods_" + id; }
+let __periodsDraftOverride = null;
 
 function getAbonent(){
     const id = getAbonentId();
@@ -113,12 +115,30 @@ function parseDMY(dmyOrIso){
 }
 
 
-function normalizeList(list){
-    return (Array.isArray(list) ? list : []).map(p => ({
-        from: String(p?.from || "").trim(),
-        to: String(p?.to || "").trim(),
-        reason: String(p?.reason || "").trim()
-    }));
+function normalizeList(input){
+    try{
+        if (window.Data && typeof window.Data.normalizeExcludePeriodsList === "function") {
+            return window.Data.normalizeExcludePeriodsList(input);
+        }
+    }catch(e){}
+    try{
+        let list = input;
+        if (typeof list === "string") {
+            const raw = String(list || "").trim();
+            if (!raw) return [];
+            list = JSON.parse(raw);
+        }
+        return (Array.isArray(list) ? list : [])
+            .filter(p => p && typeof p === "object" && !Array.isArray(p))
+            .map(p => ({
+                from: String(p?.from || "").trim(),
+                to: String(p?.to || "").trim(),
+                reason: String(p?.reason || "").trim()
+            }))
+            .filter(p => p.from || p.to || p.reason);
+    }catch(e){
+        return [];
+    }
 }
 
 function storeGet(key){
@@ -128,61 +148,59 @@ function storeSet(key, value){
     try { if (window.JKHStore && JKHStore.setRaw) JKHStore.setRaw(key, value); } catch {}
 }
 
-function readFromStore(){
-    const id = getAbonentId();
-    try{
-        const raw = storeGet(periodsKey(id));
-        if (!raw) return null;
-        const arr = JSON.parse(raw);
-        return normalizeList(arr);
-    }catch{
-        return null;
-    }
+function canonicalKeyExists(id){
+    const raw = storeGet(periodsKey(id));
+    return raw !== null && raw !== undefined;
 }
 
-function readFromAbonent(){
+function readLegacyDefaultExcludes(){
     const a = getAbonent();
     return normalizeList(a?.defaultExcludes || []);
 }
 
-function writeToStore(list, opts){
-    const id = getAbonentId();
-    const keepEmpty = !!(opts && opts.keepEmpty);
-
-    const normalized = normalizeList(list);
-    const cleaned = keepEmpty
-        ? normalized
-        : normalized.filter(p => p.from || p.to || p.reason);
-
-    storeSet(periodsKey(id), JSON.stringify(cleaned));
-}
-
-function writeToAbonent(list, opts){
+function writeLegacyMirror(list){
     const a = getAbonent();
     if (!a) return;
-
-    const keepEmpty = !!(opts && opts.keepEmpty);
-    const normalized = normalizeList(list);
-    const cleaned = keepEmpty
-        ? normalized
-        : normalized.filter(p => p.from || p.to || p.reason);
-
-    a.defaultExcludes = cleaned;
+    a.defaultExcludes = normalizeList(list);
 }
 
 function readPeriods(){
-    // приоритет storage cache
-    const fromLS = readFromStore();
-    if (fromLS !== null) return fromLS;
+    const id = getAbonentId();
+    const key = periodsKey(id);
+    const raw = storeGet(key);
 
-    // иначе берём из базы (defaultExcludes)
-    return readFromAbonent();
+    if (raw !== null && raw !== undefined) {
+        try{
+            const arr = JSON.parse(String(raw || "[]"));
+            return Array.isArray(arr) ? normalizeList(arr) : [];
+        }catch(e){
+            console.error("[excludes][canonical-invalid]", { abonentId: id, key, reason: "JSON_PARSE_FAILED", error: e });
+            return [];
+        }
+    }
+
+    // One-time read-only migration from legacy defaultExcludes when canonical key is absent.
+    const migrated = readLegacyDefaultExcludes();
+    storeSet(key, JSON.stringify(migrated));
+    writeLegacyMirror(migrated);
+    return migrated;
 }
 
 function writePeriods(list, opts){
-    // сохраняем в storage + runtime db
-    writeToStore(list, opts);
-    writeToAbonent(list, opts);
+    const keepEmpty = !!(opts && opts.keepEmpty);
+    const normalized = (Array.isArray(list) ? list : []).map(p => ({
+        from: String(p?.from || "").trim(),
+        to: String(p?.to || "").trim(),
+        reason: String(p?.reason || "").trim()
+    }));
+    const cleaned = keepEmpty
+        ? normalized
+        : normalized.filter(p => p.from || p.to || p.reason);
+
+    const finalList = cleaned.filter(p => p && typeof p === "object" && (p.from || p.to || p.reason));
+    __periodsDraftOverride = keepEmpty ? cleaned : null;
+    storeSet(periodsKey(getAbonentId()), JSON.stringify(finalList));
+    writeLegacyMirror(finalList);
 }
 
 function validatePeriods(list){
@@ -229,7 +247,7 @@ function render(){
     const body = document.getElementById("periodsBody");
     if (!body) return;
 
-    const list = readPeriods();
+    const list = Array.isArray(__periodsDraftOverride) ? __periodsDraftOverride : readPeriods();
 
     // если пусто — показываем одну пустую строку
     const view = (list.length === 0) ? [{from:"",to:"",reason:""}] : list;
@@ -272,10 +290,10 @@ function addRow(){
 }
 
 document.addEventListener("DOMContentLoaded", () => {
-    // при входе: если вообще нигде нет данных, создадим одну строку и положим в AbonentsDB (пустую)
+    // при входе: canonical key создаётся как валидный JSON-массив; пустая строка только в UI.
     const initial = readPeriods();
     if (!initial || initial.length === 0){
-        writePeriods([{from:"",to:"",reason:""}], { keepEmpty: true });
+        writePeriods([], { keepEmpty: false });
     }
 
     render();
@@ -295,6 +313,7 @@ document.addEventListener("DOMContentLoaded", () => {
         }
 
         writePeriods(cleaned, { keepEmpty: false });
+        __periodsDraftOverride = null;
         alert("Сохранено");
         render();
     });

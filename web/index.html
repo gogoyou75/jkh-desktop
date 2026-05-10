@@ -694,15 +694,81 @@ function hasUsablePaymentLedger(abonentId){
 
 async function ensureIndexAccrualsReady(){
     // Read-only compatibility shim: index page must not create ledgers or flush data on open.
+    await repairIndexEmptyExcludeKeysOnce();
     showIndexAccrualsReadonlyStatus();
 }
 
-function renderIndexRowsReadonly(){
+async function renderIndexRowsReadonly(){
+    var repairState = await repairIndexEmptyExcludeKeysOnce();
+    if (!repairState || !repairState.ready) return;
     rebuildIndexRows();
     render();
 }
 
-function initIndexPage(){
+let __indexExcludeRepairOwnerKey = "";
+
+function isIndexDataReadyForCalc(){
+    var st = window.JKH_UI_STATE && window.JKH_UI_STATE.data;
+    if (st && (st.status === "ready" || st.status === "empty")) return true;
+
+    var auth = window.JKH_UI_STATE && window.JKH_UI_STATE.auth;
+    var hasServerUser = !!(auth && auth.status && auth.status !== "guest" && auth.status !== "unknown");
+    if (hasServerUser) return false;
+
+    var user = null;
+    try {
+        user = (window.Auth && typeof Auth.getCurrentUser === "function") ? Auth.getCurrentUser() : null;
+    } catch(e) {
+        user = null;
+    }
+    if (user && st && st.status !== "ready" && st.status !== "empty") return false;
+
+    return !!(window.AbonentsDB && window.AbonentsDB.abonents);
+}
+
+function countIndexEmptyExcludePeriodKeys(){
+    var db = window.AbonentsDB || {};
+    var abonents = db && db.abonents ? db.abonents : {};
+    var ids = Object.keys(abonents || {});
+    var count = 0;
+    for (var i = 0; i < ids.length; i++) {
+        var id = String(ids[i] || "").trim();
+        if (!id) continue;
+        var key = "exclude_periods_" + id;
+        try {
+            var raw = (window.JKHStore && typeof JKHStore.getRaw === "function") ? JKHStore.getRaw(key) : localStorage.getItem(key);
+            if (raw === "") count++;
+        } catch(e) {}
+    }
+    return count;
+}
+
+async function repairIndexEmptyExcludeKeysOnce(){
+    try {
+        var ready = isIndexDataReadyForCalc();
+        if (!ready) return { ready: false, repairedCount: 0 };
+        var st = window.JKH_UI_STATE && window.JKH_UI_STATE.data;
+        var ownerKey = String((st && (st.ownerId || st.owner)) || __indexOwnerId() || "local");
+        var repairKey = String((st && st.status) || "local") + "|" + ownerKey + "|" + String((st && (st.loadedAt || st.updatedAt)) || "") + "|" + String(Object.keys((window.AbonentsDB && window.AbonentsDB.abonents) || {}).length);
+        if (repairKey === __indexExcludeRepairOwnerKey) return { ready: true, repairedCount: 0 };
+        var repairedCount = countIndexEmptyExcludePeriodKeys();
+        console.log("[index][excludes-repair-before-calc]", { repairedCount: repairedCount });
+        if (window.Data && typeof window.Data.repairEmptyExcludePeriodsKeys === "function") {
+            var actual = window.Data.repairEmptyExcludePeriodsKeys();
+            if (actual && typeof actual.then === "function") {
+                actual = await actual;
+            }
+            if (typeof actual === "number") repairedCount = actual;
+        }
+        __indexExcludeRepairOwnerKey = repairKey;
+        return { ready: true, repairedCount: repairedCount };
+    } catch (e) {
+        console.warn("[excludes][repair-empty-canonical] failed", e);
+        return { ready: false, repairedCount: 0 };
+    }
+}
+
+async function initIndexPage(){
     var uiState = (window.JKH_UI_STATE && typeof window.JKH_UI_STATE === "object")
         ? window.JKH_UI_STATE
         : { auth: { status: "unknown", userId: null, email: "", role: "guest" }, server: { status: "unknown", checkedAt: "", message: "" }, data: { status: "idle", loadedAt: "", source: "none", message: "" } };
@@ -721,13 +787,15 @@ function initIndexPage(){
         return;
     }
     syncLoadingWarning();
+    var repairState = await repairIndexEmptyExcludeKeysOnce();
+    if (!repairState || !repairState.ready) return;
     showIndexAccrualsReadonlyStatus();
     if (!indexTableInitDone){
         initFilters();
         initSorting();
         indexTableInitDone = true;
     }
-    renderIndexRowsReadonly();
+    await renderIndexRowsReadonly();
 }
 
 function showIndexAccrualsReadonlyStatus(){
@@ -766,11 +834,13 @@ window.addEventListener("JKH_UI_STATE_CHANGED", function(){
     __indexLastUiReadyKey = key;
     if (__indexUiRenderScheduled) return;
     __indexUiRenderScheduled = true;
-    setTimeout(function(){
+    setTimeout(async function(){
         __indexUiRenderScheduled = false;
+        var repairState = await repairIndexEmptyExcludeKeysOnce();
+        if (!repairState || !repairState.ready) return;
         clearIndexLedgerReadCache();
         showIndexAccrualsReadonlyStatus();
-        renderIndexRowsReadonly();
+        await renderIndexRowsReadonly();
     }, 0);
 });
 
