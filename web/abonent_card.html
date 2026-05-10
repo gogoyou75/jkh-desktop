@@ -1116,9 +1116,22 @@ function __runAutoAccrualRepairOnce(){
     }
 }
 
+function __repairEmptyExcludePeriodsKeysBeforeCalc(){
+    try {
+        if (window.Data && typeof Data.repairEmptyExcludePeriodsKeys === "function") {
+            const repaired = Data.repairEmptyExcludePeriodsKeys();
+            console.log("[abonent-card][excludes-repair-before-calc]", { repaired });
+        }
+    } catch(e) {
+        try { console.warn("[abonent-card][excludes-repair-before-calc] failed", e); } catch(_){}
+    }
+}
+
 function __initAbonentCardSafe(){
     if (__abonentCardInitStarted) return;
     __abonentCardInitStarted = true;
+
+    __repairEmptyExcludePeriodsKeysBeforeCalc();
 
     try { fillAbonentCard(); } catch(e) { try { console.error('[abonent_card] fill failed', e); } catch(_){} }
 
