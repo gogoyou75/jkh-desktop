@@ -246,6 +246,11 @@
     var key = excludePeriodsStorageKey(id);
     var raw = _getProjectRaw(key);
     if (raw !== null && raw !== undefined) {
+      if (raw === "") {
+        _setProjectRaw(key, "[]");
+        console.warn("[excludes][repair-empty-canonical]", { abonentId: id, key: key });
+        return [];
+      }
       try {
         var parsed = JSON.parse(String(raw));
         if (Array.isArray(parsed)) return normalizeExcludePeriodsList(parsed);
@@ -265,15 +270,36 @@
     } catch (e2) {
       legacy = [];
     }
-    _setProjectRaw(key, JSON.stringify(legacy));
+    writeCanonicalExcludePeriods(id, legacy);
     return legacy;
   }
 
   function writeCanonicalExcludePeriods(abonentId, list) {
     var id = String(abonentId || "").trim();
     if (!id) return false;
+    var key = excludePeriodsStorageKey(id);
     var normalized = normalizeExcludePeriodsList(list);
-    return _setProjectRaw(excludePeriodsStorageKey(id), JSON.stringify(normalized));
+    var payload = normalized.length ? JSON.stringify(normalized) : "[]";
+    console.log("[excludes][canonical-write]", { abonentId: id, key: key, count: normalized.length });
+    return _setProjectRaw(key, payload);
+  }
+
+  function repairEmptyExcludePeriodsKeys() {
+    var db = window.AbonentsDB || {};
+    var abonents = db && db.abonents ? db.abonents : {};
+    var ids = Object.keys(abonents || {});
+    var repaired = 0;
+    ids.forEach(function (abonentId) {
+      var id = String(abonentId || "").trim();
+      if (!id) return;
+      var key = excludePeriodsStorageKey(id);
+      var raw = _getProjectRaw(key);
+      if (raw !== "") return;
+      _setProjectRaw(key, "[]");
+      repaired++;
+      console.warn("[excludes][repair-empty-canonical]", { abonentId: id, key: key });
+    });
+    return repaired;
   }
 
   function removeLegacyExcludeFields(obj) {
@@ -718,6 +744,7 @@
     normalizeExcludePeriodsList: normalizeExcludePeriodsList,
     readCanonicalExcludePeriods: readCanonicalExcludePeriods,
     writeCanonicalExcludePeriods: writeCanonicalExcludePeriods,
+    repairEmptyExcludePeriodsKeys: repairEmptyExcludePeriodsKeys,
 
     // READ
     getDb: function () {

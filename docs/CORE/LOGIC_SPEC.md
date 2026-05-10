@@ -1405,6 +1405,10 @@ Fatal-правила:
 - основной долг исключёнными периодами не изменяется;
 - поле абонента `defaultExcludes` является legacy/cache и не используется как источник истины для расчёта;
 - при отсутствии `exclude_periods_<abonentId>` legacy `defaultExcludes` может использоваться только как read-only migration source, после чего должен быть записан валидный JSON-массив в `exclude_periods_<abonentId>`;
+- canonical key `exclude_periods_<abonentId>` никогда не может хранить пустую строку;
+- отсутствие исключённых периодов хранится только как `[]`;
+- пустая строка в существующем canonical key считается повреждением данных и подлежит repair только при точном `raw === ""`;
+- repair пустой строки обязан заменить значение на `[]` и не должен молча лечить другой битый JSON, например `{`;
 - transfer/merge/create нового абонента не копирует исключённые периоды старого абонента (`defaultExcludes`, `excludes`, `excludePeriods`, `specialExcludes`);
 - новый абонент стартует с `exclude_periods_<newAbonentId> = []`;
 - повреждённый canonical JSON в `exclude_periods_<abonentId>` блокирует расчёт пени до исправления;

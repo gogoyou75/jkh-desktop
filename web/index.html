@@ -702,6 +702,25 @@ function renderIndexRowsReadonly(){
     render();
 }
 
+let __indexExcludeRepairOwnerKey = "";
+
+function repairIndexEmptyExcludeKeysOnce(){
+    try {
+        var st = window.JKH_UI_STATE && window.JKH_UI_STATE.data;
+        var ready = !!(st && (st.status === "ready" || st.status === "empty"));
+        if (!ready) return;
+        var ownerKey = String(st.ownerId || st.owner || __indexOwnerId());
+        var repairKey = String(st.status || "") + "|" + ownerKey + "|" + String(st.loadedAt || st.updatedAt || "");
+        if (!ownerKey || repairKey === __indexExcludeRepairOwnerKey) return;
+        __indexExcludeRepairOwnerKey = repairKey;
+        if (window.Data && typeof window.Data.repairEmptyExcludePeriodsKeys === "function") {
+            window.Data.repairEmptyExcludePeriodsKeys();
+        }
+    } catch (e) {
+        console.warn("[excludes][repair-empty-canonical] failed", e);
+    }
+}
+
 function initIndexPage(){
     var uiState = (window.JKH_UI_STATE && typeof window.JKH_UI_STATE === "object")
         ? window.JKH_UI_STATE
@@ -721,6 +740,7 @@ function initIndexPage(){
         return;
     }
     syncLoadingWarning();
+    repairIndexEmptyExcludeKeysOnce();
     showIndexAccrualsReadonlyStatus();
     if (!indexTableInitDone){
         initFilters();
@@ -768,6 +788,7 @@ window.addEventListener("JKH_UI_STATE_CHANGED", function(){
     __indexUiRenderScheduled = true;
     setTimeout(function(){
         __indexUiRenderScheduled = false;
+        repairIndexEmptyExcludeKeysOnce();
         clearIndexLedgerReadCache();
         showIndexAccrualsReadonlyStatus();
         renderIndexRowsReadonly();
