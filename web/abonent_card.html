@@ -1028,6 +1028,7 @@ async function applyPremiseMerge(){
 let __abonentCardInitStarted = false;
 let __paymentTableLoading = false;
 let __paymentTableLoadScheduled = false;
+let __abonentCardServerRepairDone = false;
 
 function __isExcludesFatalError(e){
     const code = String(e && e.code || "");
@@ -1056,10 +1057,15 @@ function __clearBrokenExcludesAndReload(){
     const key = "exclude_periods_" + String(id || "").trim();
     storeSet(key, JSON.stringify([]));
     __hideExcludesFatalBox();
-    if (window.__loadPaymentTable) window.__loadPaymentTable("clear-broken-excludes");
+    __safeLoadPaymentTableOnce("clear-broken-excludes");
 }
 
 function __safeLoadPaymentTableOnce(reason){
+    if (!__abonentCardServerRepairDone) {
+        try { console.warn('[abonent_card] payment table load skipped before server repair:', reason); } catch(e){}
+        return;
+    }
+
     if (__paymentTableLoading || __paymentTableLoadScheduled) {
         try { if (window.JKH_DEBUG_PAYMENT_KEY) console.debug('[abonent_card] payment table load coalesced:', reason); } catch(e){}
         return;
@@ -1086,6 +1092,11 @@ function __safeLoadPaymentTableOnce(reason){
 
 function __runAutoAccrualRepairOnce(){
     try {
+        if (!__abonentCardServerRepairDone) {
+            try { console.warn('[abonent_card] skip autoaccrual before server repair'); } catch(e){}
+            return;
+        }
+
         const id = getAbonentIdFromURL();
         if (!id) return;
 
@@ -1116,22 +1127,46 @@ function __runAutoAccrualRepairOnce(){
     }
 }
 
-function __repairEmptyExcludePeriodsKeysBeforeCalc(){
+async function __uploadRepairedExcludePeriodsToServer(){
+    if (window.Data && typeof Data.flushDbToServer === "function") {
+        await Data.flushDbToServer();
+        return true;
+    }
+    if (window.JKHRemoteSync && typeof JKHRemoteSync.uploadNow === "function") {
+        await JKHRemoteSync.uploadNow();
+        return true;
+    }
+    return false;
+}
+
+async function __repairEmptyExcludePeriodsKeysAfterServerLoad(){
+    let repaired = 0;
     try {
         if (window.Data && typeof Data.repairEmptyExcludePeriodsKeys === "function") {
-            const repaired = Data.repairEmptyExcludePeriodsKeys();
-            console.log("[abonent-card][excludes-repair-before-calc]", { repaired });
+            const result = Data.repairEmptyExcludePeriodsKeys();
+            repaired = (result && typeof result.then === "function") ? await result : result;
+            if (typeof repaired !== "number") repaired = 0;
+        }
+        console.log("[abonent-card][excludes-repair-after-server-load]", { repaired });
+        if (repaired > 0) {
+            try {
+                await __uploadRepairedExcludePeriodsToServer();
+            } catch(uploadErr) {
+                try { console.warn("[abonent-card][excludes-repair-after-server-load] upload failed", uploadErr); } catch(_){}
+            }
         }
     } catch(e) {
-        try { console.warn("[abonent-card][excludes-repair-before-calc] failed", e); } catch(_){}
+        try { console.warn("[abonent-card][excludes-repair-after-server-load] failed", e); } catch(_){}
+    } finally {
+        __abonentCardServerRepairDone = true;
     }
 }
 
-function __initAbonentCardSafe(){
+async function __initAbonentCardSafe(){
     if (__abonentCardInitStarted) return;
     __abonentCardInitStarted = true;
 
-    __repairEmptyExcludePeriodsKeysBeforeCalc();
+    await __repairEmptyExcludePeriodsKeysAfterServerLoad();
 
     try { fillAbonentCard(); } catch(e) { try { console.error('[abonent_card] fill failed', e); } catch(_){} }
 
@@ -1155,6 +1190,19 @@ function __isAbonentCardDataReady() {
     }
 }
 
+function __isAbonentCardServerFirstReady(){
+    try {
+        const st = window.JKH_UI_STATE && window.JKH_UI_STATE.data;
+        if (!st) return false;
+        const status = String(st.status || "");
+        if (status !== "ready" && status !== "empty") return false;
+        if (Object.prototype.hasOwnProperty.call(st, "source") && String(st.source || "") !== "server") return false;
+        return true;
+    } catch(e) {
+        return false;
+    }
+}
+
 function __waitForAbonentCardDataReady(cb) {
     let done = false;
     let tries = 0;
@@ -1164,19 +1212,24 @@ function __waitForAbonentCardDataReady(cb) {
         if (done) return;
         done = true;
         try { window.removeEventListener("JKH_UI_STATE_CHANGED", onState); } catch(e) {}
-        console.log("[abonent_card] data ready init", reason);
+        console.log("[abonent_card] server data ready init", reason);
         cb();
     }
 
     function check(reason) {
-        if (__isAbonentCardDataReady()) {
+        const st = window.JKH_UI_STATE && window.JKH_UI_STATE.data;
+        const status = String((st && st.status) || "");
+        const serverReady = __isAbonentCardServerFirstReady();
+        const abonentReady = __isAbonentCardDataReady();
+
+        if (serverReady && (status === "empty" || abonentReady)) {
             finish(reason);
             return;
         }
 
         tries++;
         if (tries > 80) {
-            console.warn("[abonent_card] data not ready after wait, init blocked");
+            console.warn("[abonent_card] server data not ready after wait, init blocked");
             return;
         }
 
@@ -1186,7 +1239,7 @@ function __waitForAbonentCardDataReady(cb) {
     function onState() {
         const st = window.JKH_UI_STATE && window.JKH_UI_STATE.data;
         if (st && (st.status === "ready" || st.status === "empty")) {
-            const key = String(st.status || "") + "|" + String(st.ownerId || st.owner || "");
+            const key = String(st.status || "") + "|" + String(st.source || "") + "|" + String(st.loadedAt || st.updatedAt || "") + "|" + String(st.ownerId || st.owner || "");
             if (key === lastStateKey) return;
             lastStateKey = key;
             check("JKH_UI_STATE_CHANGED");
@@ -1948,7 +2001,7 @@ async function saveAbonentEdit() {
 
     loadMoratoriumUI();
 
-    if (window.__loadPaymentTable) { try { window.__loadPaymentTable(); __hideExcludesFatalBox(); } catch(e) { if (__isExcludesFatalError(e)) __showExcludesFatalBox(e); else throw e; } }
+    __safeLoadPaymentTableOnce();
 
     alert("Изменения сохранены");
     if (activeRegnum) renderResponsibilityHistory(activeRegnum);
@@ -1985,7 +2038,7 @@ function bindMoratoriumUI(){
             return;
         }
         storeSet(moratoriumKey(id), el.checked ? "1" : "0");
-        if (window.__loadPaymentTable) { try { window.__loadPaymentTable(); __hideExcludesFatalBox(); } catch(e) { if (__isExcludesFatalError(e)) __showExcludesFatalBox(e); else throw e; } }
+        __safeLoadPaymentTableOnce();
     });
 }
 document.addEventListener("DOMContentLoaded", () => {
@@ -2073,14 +2126,14 @@ function bindCalcButtons(){
         if (!isValidPeriod(from, to)) {
             saveCalcPeriod("", "");
             setCalcPeriodActive(false);
-            if (window.__loadPaymentTable) { try { window.__loadPaymentTable(); __hideExcludesFatalBox(); } catch(e) { if (__isExcludesFatalError(e)) __showExcludesFatalBox(e); else throw e; } }
+            __safeLoadPaymentTableOnce();
             return;
         }
 
         saveCalcPeriod(from, to);
         setCalcPeriodActive(true);
 
-        if (window.__loadPaymentTable) { try { window.__loadPaymentTable(); __hideExcludesFatalBox(); } catch(e) { if (__isExcludesFatalError(e)) __showExcludesFatalBox(e); else throw e; } }
+        __safeLoadPaymentTableOnce();
     });
 
     resetBtn.addEventListener("click", () => {
@@ -2089,7 +2142,7 @@ function bindCalcButtons(){
         setCalcPeriodActive(false);
         fromEl.value = "";
         toEl.value = "";
-        if (window.__loadPaymentTable) { try { window.__loadPaymentTable(); __hideExcludesFatalBox(); } catch(e) { if (__isExcludesFatalError(e)) __showExcludesFatalBox(e); else throw e; } }
+        __safeLoadPaymentTableOnce();
     });
 
     repBtn.addEventListener("click", () => {
