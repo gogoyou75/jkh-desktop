@@ -542,9 +542,9 @@ Doc: docs/LOGIC_SPEC_v1.5.3.md
 
         <div class="change-resp-hint">
             <b>Выберите вариант передачи квартиры:</b>
-            <div class="row">✅ <b>С долгом</b> — долг (и начисления/оплаты) остаются «как есть», просто меняем ответственного с указанной даты.</div>
+            <div class="row">✅ <b>С долгом</b> — frozen debt старого переносится новому как стартовое сальдо с даты передачи.</div>
             <div class="row">✅ <b>Без долга</b> — фиксируем долг у старого владельца, а у нового владельца долг считается с нуля <u>с даты передачи</u>.</div>
-            <div class="row" style="margin-top:8px;"><b>Важно:</b> сейчас мы записываем режим передачи, а следующий шаг — научить расчёт реально учитывать «обнуление» в таблице оплат.</div>
+            <div class="row" style="margin-top:8px;"><b>Важно:</b> оба режима выполняются через канонический сервис Data.transferResponsibility(...).</div>
         </div>
 
         <label>Новый ответственный (лицевой счёт)</label>
@@ -1575,42 +1575,6 @@ async function applyChangeResponsible(mode) {
         return;
     }
 
-    // сохраняем метаданные режима передачи (для будущего шага расчётов)
-    __saveTransferMeta(newId, regnum, dateFrom, mode);
-
-
-    // ✅ 1) вычисляем "долг + пеня" у старого на дату передачи (до передачи)
-    // Старый заканчивает накануне даты передачи.
-    const freezeISO = __isoMinusOne(dateFrom);
-
-    let oldPrincipal = 0;
-    let oldPenalty = 0;
-
-    try{
-      const oldPaymentsRaw = (window.JKHStore && JKHStore.getRaw) ? JKHStore.getRaw("payments_" + String(id)) : null;
-      const oldRows = oldPaymentsRaw ? JSON.parse(oldPaymentsRaw) : [];
-      if (window.JKHCalcEngine && typeof window.JKHCalcEngine.calcTotalsAsOfAdjusted === "function"){
-        const tot = window.JKHCalcEngine.calcTotalsAsOfAdjusted(oldRows, new Date(freezeISO + "T12:00:00"), {
-          abonentId: String(id),
-          applyAdvanceOffset: true,
-          allowNegativePrincipal: false
-        });
-        oldPrincipal = Number(tot?.principal || 0);
-        oldPenalty   = Number(tot?.penaltyDebt || 0);
-      }
-    }catch(e){}
-
-    // ✅ 2) замораживаем старого (пеня перестанет расти после freezeISO)
-    __saveFreezeTo(String(id), freezeISO);
-
-    // ✅ 3) если передача "С ДОЛГОМ" — записываем стартовое сальдо новому
-    if (String(mode) === "WITH_DEBT"){
-      __saveTransferBalance(String(newId), String(regnum), String(dateFrom), oldPrincipal, oldPenalty, String(id), "WITH_DEBT");
-    } else {
-      // "БЕЗ ДОЛГА": новому ничего не переносим
-    }
-
-
     const activeList = allLinks.filter(l =>
         String(l.regnum) === String(regnum) && !String(l.dateTo || '').trim()
     );
@@ -1623,51 +1587,27 @@ async function applyChangeResponsible(mode) {
         return;
     }
 
-    // фиксируем окончание расчёта у старого абонента
-    activeList.forEach(l => {
-        const oldAb = db[String(l.abonentId)];
-        if (!oldAb) return;
-        oldAb.calcEndDate = dateFrom;
-        if (window.Data && typeof window.Data.upsertAbonent === 'function') {
-            window.Data.upsertAbonent(Object.assign({}, oldAb, { id: String(l.abonentId) }));
-        }
-    });
-
-    // закрыть активные links по квартире
-    activeList.forEach(l => {
-        if (window.Data && typeof window.Data.unlinkAbonentFromPremise === 'function') {
-            window.Data.unlinkAbonentFromPremise(String(l.abonentId), String(regnum));
-        }
-        if (window.Data && typeof window.Data.linkAbonentToPremise === 'function') {
-            window.Data.linkAbonentToPremise(String(l.abonentId), String(regnum), String(l.dateFrom || ''), String(dateFrom));
-        }
-    });
-
-    // открыть link новому
-    if (window.Data && typeof window.Data.linkAbonentToPremise === 'function') {
-        window.Data.linkAbonentToPremise(String(newId), String(regnum), String(dateFrom), '');
+    if (!currentActiveId) {
+        alert('По квартире не найден текущий активный ответственный. Передача ответственности невозможна.');
+        return;
     }
 
-    // старт расчёта у нового
-    const newAb = db[String(newId)];
-    if (newAb) {
-        newAb.calcStartDate = dateFrom;
-        newAb.calcEndDate = "";
+    if (!(window.Data && typeof window.Data.transferResponsibility === 'function')) {
+        alert('Сервис передачи ответственности недоступен.');
+        return;
     }
 
-    // подтянуть адресные поля из premises (как было)
-    const premise = (p || getPremisesDb()[String(regnum)] || {});
-    if (newAb) {
-        newAb.regnum = String(regnum);
-        if (premise.city)   newAb.city = premise.city;
-        if (premise.street) newAb.street = premise.street;
-        if (premise.house)  newAb.house = premise.house;
-        if (premise.flat)   newAb.flat = premise.flat;
-        if (premise.square !== undefined && premise.square !== null && premise.square !== "") newAb.square = premise.square;
+    const transferred = window.Data.transferResponsibility({
+        oldAbonentId: currentActiveId,
+        newAbonentId: String(newId),
+        regnum: String(regnum),
+        transferDate: String(dateFrom),
+        transferMode: String(mode || 'WITH_DEBT')
+    });
 
-        if (window.Data && typeof window.Data.upsertAbonent === 'function') {
-            window.Data.upsertAbonent(Object.assign({}, newAb, { id: String(newId), premiseRegnum: String(regnum) }));
-        }
+    if (transferred !== true) {
+        alert('Передача ответственности не выполнена. Проверьте дату, выбранного абонента и расчёт frozen debt.');
+        return;
     }
 
     await Data.flushDbToServer();

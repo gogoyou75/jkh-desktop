@@ -1275,6 +1275,144 @@
     }
   }
 
+
+
+  function __normalizeTransferMode(mode){
+    var raw = String(mode || "WITH_DEBT").trim();
+    if (raw === "NO_DEBT" || raw === "WITHOUT_DEBT") return "WITHOUT_DEBT";
+    return "WITH_DEBT";
+  }
+
+  function transferResponsibility(options){
+    if (!Data.ensureWriteOrExplain()) return false;
+    var db = window.AbonentsDB;
+    if (!db || !db.abonents) return false;
+
+    var opts = options || {};
+    var oldId = String(opts.oldAbonentId || "").trim();
+    var newId = String(opts.newAbonentId || "").trim();
+    var rn = normalizeRegnumValue(opts.regnum);
+    var td = String(opts.transferDate || opts.dateFrom || "").trim();
+    var mode = __normalizeTransferMode(opts.transferMode || opts.mode);
+    var legacyMode = (mode === "WITH_DEBT") ? "WITH_DEBT" : "NO_DEBT";
+    var freezeISO = __isoYesterday(td);
+
+    if (!oldId || !newId || !rn || !/^\d{4}-\d{2}-\d{2}$/.test(td) || !freezeISO) return false;
+    if (!db.abonents[oldId] || !db.abonents[newId]) return false;
+    if (!Array.isArray(db.links)) db.links = [];
+
+    var activeLinks = db.links.filter(function(l){
+      return normalizeRegnumValue(l && l.regnum) === rn && !String(l && l.dateTo || "").trim();
+    });
+    var oldActive = activeLinks.find(function(l){ return String(l && l.abonentId || "").trim() === oldId; });
+    if (!oldActive) return false;
+    var alreadyNewActive = activeLinks.find(function(l){ return String(l && l.abonentId || "").trim() === newId; });
+    if (alreadyNewActive) return false;
+
+    var snapshot = deepClone(db);
+    var transferKeys = [
+      "jkh_freeze_to_v1:" + oldId,
+      "jkh_frozen_debt_v1:" + oldId + ":" + freezeISO,
+      "jkh_transfer_to_v1:" + newId,
+      "jkh_transfer_balance_v1:" + newId + ":" + rn
+    ];
+    var transferRawSnapshot = {};
+    transferKeys.forEach(function(k){ transferRawSnapshot[k] = _getProjectRaw(k); });
+    try{
+      if (prepareDebtTransfer(oldId, newId, rn, td, legacyMode) !== true) throw new Error("TRANSFER_PREPARE_FAILED");
+
+      activeLinks.forEach(function(l){
+        l.dateTo = freezeISO;
+        var id = String(l && l.abonentId || "").trim();
+        if (id && db.abonents && db.abonents[id]) {
+          db.abonents[id].calcEndDate = freezeISO;
+          db.abonents[id].frozenDebtDate = freezeISO;
+        }
+      });
+
+      var existing = db.links.find(function(l){
+        return String(l && l.abonentId || "").trim() === newId && normalizeRegnumValue(l && l.regnum) === rn;
+      });
+      if (existing) {
+        existing.dateFrom = td;
+        existing.dateTo = "";
+      } else {
+        db.links.push({ abonentId: newId, regnum: rn, dateFrom: td, dateTo: "" });
+      }
+
+      var newA = db.abonents[newId];
+      var premise = db.premises && db.premises[rn] ? db.premises[rn] : {};
+      newA.regnum = rn;
+      newA.premiseRegnum = rn;
+      newA.calcStartDate = td;
+      newA.calcEndDate = "";
+      newA.debtTransferredFrom = (mode === "WITH_DEBT") ? oldId : null;
+      if (premise.city) newA.city = premise.city;
+      if (premise.street) newA.street = premise.street;
+      if (premise.house) newA.house = premise.house;
+      if (premise.flat) newA.flat = premise.flat;
+      if (premise.square !== undefined && premise.square !== null && premise.square !== "") newA.square = premise.square;
+
+      var oldA = db.abonents[oldId];
+      if (oldA) {
+        if (!Array.isArray(oldA.history)) oldA.history = [];
+        oldA.history.push({
+          type: "responsibility_closed",
+          date: (new Date()).toISOString().slice(0, 10),
+          closeTo: freezeISO,
+          regnum: rn,
+          note: "Период ответственности закрыт при передаче квартиры"
+        });
+      }
+
+      var transferMeta = {
+        type: "premise_transfer",
+        regnum: rn,
+        fromAbonentId: oldId,
+        fromFio: String(oldA && oldA.fio || ""),
+        transferMode: mode,
+        newRespFrom: td,
+        oldRespTo: freezeISO,
+        transferDebtApplied: mode === "WITH_DEBT",
+        createdAt: (new Date()).toISOString().slice(0, 10)
+      };
+      newA.transferMeta = transferMeta;
+
+      if (!Array.isArray(db.premiseEvents)) db.premiseEvents = [];
+      db.premiseEvents.push({
+        id: "evt_" + Date.now() + "_" + Math.floor(Math.random() * 1000000),
+        type: "RESPONSIBILITY_TRANSFER",
+        date: td,
+        fromRegnums: [rn],
+        toRegnums: [rn],
+        oldAbonentId: oldId,
+        newAbonentId: newId,
+        transferMode: mode,
+        oldRespTo: freezeISO,
+        newRespFrom: td,
+        createdAt: (new Date()).toISOString(),
+        createdBy: _ownerId()
+      });
+
+      return !!window.saveAbonentsDB && window.saveAbonentsDB();
+    }catch(e){
+      window.AbonentsDB = snapshot;
+      transferKeys.forEach(function(k){
+        try{
+          if (transferRawSnapshot[k] === null || transferRawSnapshot[k] === undefined) _removeProjectRaw(k);
+          else _setProjectRaw(k, transferRawSnapshot[k]);
+        }catch(storageErr){}
+      });
+      try{ if (window.saveAbonentsDB) window.saveAbonentsDB(); }catch(saveErr){}
+      if (__isDebtTransferError(e)) {
+        __logDebtTransferAbort(e);
+      } else {
+        try{ console.error("[transfer-responsibility][aborted]", e); }catch(logErr){}
+      }
+      return false;
+    }
+  }
+
   function getAbonentTransferInfo(abonentId){
     try{
       var id = String(abonentId||"").trim();
@@ -1302,6 +1440,7 @@
 
   // Экспорт в Service-layer API
   Data.prepareDebtTransfer = prepareDebtTransfer;
+  Data.transferResponsibility = transferResponsibility;
   Data.getAbonentTransferInfo = getAbonentTransferInfo;
 
 window.Data = Data;

@@ -611,127 +611,13 @@ function r2(n){
    ========================= */
 let __jkhTransferConfirmed = false;
 let __transferMode = 'NO_DEBT'; // 'WITH_DEBT' | 'NO_DEBT'
-let __transferCtx = null; // { regnum, oldId, oldFio, oldDebtSnapshot, oldPenaltySnapshot, oldLink, transferDate }
-
-function __getDebtAndPenaltySnapshotByCalc(oldId, asOfIso){
-  try{
-    if (!window.JKHCalcEngine) return null;
-
-    // предпочтительно: calculateFrozenDebt (у нас она считает principal + penaltyDebt)
-    if (typeof window.JKHCalcEngine.calculateFrozenDebt === 'function'){
-      const fd = window.JKHCalcEngine.calculateFrozenDebt(String(oldId), String(asOfIso));
-      if (fd){
-        return { principal: Number(fd.principal)||0, penalty: Number(fd.penalty)||0 };
-      }
-    }
-
-    if (typeof window.JKHCalcEngine.calcTotalsAsOfAdjusted !== 'function') return null;
-    const pKey = (typeof window.getPaymentsKeyForAbonent === "function") ? window.getPaymentsKeyForAbonent(String(oldId)) : ("payments_" + String(oldId));
-    try { console.log("[payment-key] read", { abonentId: String(oldId), key: pKey }); } catch(e) {}
-    const rawRows = storeGet(pKey);
-    const rows = rawRows ? (JSON.parse(rawRows) || []) : [];
-    const d = new Date(String(asOfIso) + "T12:00:00");
-    const tot = window.JKHCalcEngine.calcTotalsAsOfAdjusted(rows, d, {
-      abonentId: String(oldId),
-      applyAdvanceOffset: true,
-      allowNegativePrincipal: false
-    });
-    const p = Number(tot?.principal);
-    const pen = Number(tot?.penaltyDebt);
-    if (!Number.isFinite(p) && !Number.isFinite(pen)) return null;
-    return { principal: Number.isFinite(p)?p:0, penalty: Number.isFinite(pen)?pen:0 };
-  }catch(e){ return null; }
-}
+let __transferCtx = null; // { regnum, oldId, oldFio, oldLink, transferDate }
 
 function __updateNewDebtStartPreview(){
   const el = document.getElementById('newDebtStart');
   if (!el) return;
   const checked = (String(__transferMode||'NO_DEBT') === 'WITH_DEBT');
-  const ctx = __transferCtx;
-
-  if (ctx) {
-    const total = r2((ctx.oldDebtSnapshot || 0) + (ctx.oldPenaltySnapshot || 0));
-    el.innerHTML = (checked ? total : 0).toFixed(2) +
-      ` ₽ <span style="font-size:11px; opacity:0.7;">(долг: ${Number(ctx.oldDebtSnapshot||0).toFixed(2)} + пеня: ${Number(ctx.oldPenaltySnapshot||0).toFixed(2)})</span>`;
-  } else {
-    el.textContent = '0.00';
-  }
-}
-
-
-/* перенос долга (опционально) */
-function hasDebtTransferDuplicate(db, regnum, oldId, newId){
-  try{
-    const arr = Array.isArray(db.adjustments) ? db.adjustments : [];
-    const r = String(regnum||'').trim();
-    const o = String(oldId||'').trim();
-    const n = String(newId||'').trim();
-    return arr.some(x =>
-      String(x?.reason||'').includes('Перенос задолженности') &&
-      String(x?.regnum||'').trim()===r &&
-      String(x?.from||'').trim()===o &&
-      String(x?.to||'').trim()===n
-    );
-  }catch(e){ return false; }
-}
-function applyDebtTransfer(db, regnum, oldId, newId, amount, dateIso){
-  const a = Math.max(0, r2(amount));
-  if (!(a>0)) return { ok:true, skipped:true, reason:'zero' };
-  if (!Array.isArray(db.adjustments)) db.adjustments = [];
-  if (hasDebtTransferDuplicate(db, regnum, oldId, newId)) return { ok:true, skipped:true, reason:'dup' };
-
-  db.adjustments.push({
-    regnum: String(regnum||'').trim(),
-    from: String(oldId||'').trim(),
-    to: String(newId||'').trim(),
-    amount: a,
-    date: String(dateIso||getTodayIso()),
-    reason: 'Перенос задолженности при передаче квартиры'
-  });
-
-  try{
-    const oldA = db.abonents && db.abonents[oldId];
-    const newA = db.abonents && db.abonents[newId];
-    if (oldA){
-      if (Number.isFinite(Number(oldA.totalDebt))) oldA.totalDebt = Math.max(0, r2(Number(oldA.totalDebt) - a));
-      if (Number.isFinite(Number(oldA.mainDebtTotal))) oldA.mainDebtTotal = Math.max(0, r2(Number(oldA.mainDebtTotal) - a));
-    }
-    if (newA){
-      if (!Number.isFinite(Number(newA.totalDebt))) newA.totalDebt = 0;
-      if (!Number.isFinite(Number(newA.mainDebtTotal))) newA.mainDebtTotal = 0;
-      newA.totalDebt = r2(Number(newA.totalDebt) + a);
-      newA.mainDebtTotal = r2(Number(newA.mainDebtTotal) + a);
-    }
-  }catch(e){}
-
-  return { ok:true, skipped:false, reason:'ok' };
-}
-
-/* главное: закрыть период старого и “заморозить” начисления */
-function closeOldResponsibilityAndFreeze(db, oldId, closeToIso){
-  try{
-    const oldA = db.abonents?.[oldId];
-    if (!oldA) return false;
-
-    // ставим конец расчёта = дата закрытия ответственности
-    oldA.calcEndDate = String(closeToIso || '').trim();
-
-    // фиксируем снапшот долга (для карточки/истории)
-    const snap = getAbonentDebtAmount(oldA);
-    oldA.lastDebtSnapshot = r2(snap);
-    oldA.lastDebtSnapshotDate = String(closeToIso || '').trim();
-
-    // пометка (не обязательно, но удобно)
-    if (!oldA.history) oldA.history = [];
-    oldA.history.push({
-      type: "responsibility_closed",
-      date: String(getTodayIso()),
-      closeTo: String(closeToIso || '').trim(),
-      note: "Период ответственности закрыт при передаче квартиры"
-    });
-
-    return true;
-  }catch(e){ return false; }
+  el.textContent = (__transferCtx && checked) ? 'будет рассчитан сервисом transfer' : '0.00';
 }
 
 function refreshDebtTransferBox() {
@@ -758,37 +644,19 @@ function refreshDebtTransferBox() {
 
   const oldId = String(oldObj.id || '').trim();
 
-  // РАСЧЁТ ДОЛГА С УЧЁТОМ ПЕНИ (если есть calc_engine.js)
-  let totalDebt = 0;
-  let totalPenalty = 0;
-
-  const snap = __getDebtAndPenaltySnapshotByCalc(oldId, closeTo0);
-  if (snap){
-    totalDebt = r2(snap.principal || 0);
-    totalPenalty = r2(snap.penalty || 0);
-  } else {
-    // fallback: только основной долг по старой логике (без пени)
-    totalDebt = r2(getAbonentDebtAmount(oldA) || 0);
-    totalPenalty = 0;
-  }
-
   const oldFio = String(oldA.fio || oldId).trim();
 
   __transferCtx = {
     regnum,
     oldId,
     oldFio,
-    oldDebtSnapshot: r2(totalDebt),
-    oldPenaltySnapshot: r2(totalPenalty),
     oldLink: active,
     transferDate: df0
   };
 
   info.innerHTML = `
     <div><b>Текущий ответственный:</b> ${oldFio} (ЛС: ${oldId})</div>
-    <div><b>Долг на ${closeTo0}:</b> ${totalDebt.toFixed(2)} ₽</div>
-    <div><b>Пеня на ${closeTo0}:</b> ${totalPenalty.toFixed(2)} ₽</div>
-    <div><b>Итого к передаче:</b> ${(totalDebt + totalPenalty).toFixed(2)} ₽</div>
+    <div class="muted">Frozen debt будет рассчитан каноническим сервисом передачи при выборе режима.</div>
   `;
 
   // Превью дат
@@ -1100,6 +968,7 @@ async function createAbonent() {
 
     const dbRoot = window.AbonentsDB;
     if (!dbRoot || !dbRoot.abonents) { setCreateStatus("База AbonentsDB не найдена."); return; }
+    const dbSnapshotBeforeCreate = JSON.parse(JSON.stringify(dbRoot));
 
     const regnum = String(document.getElementById("na_regnum").value || "").trim();
     if (!regnum) { setCreateStatus("Квартира не выбрана. Выберите квартиру из списка."); return; }
@@ -1182,88 +1051,34 @@ async function createAbonent() {
     storeSet(newPaymentsKey, JSON.stringify([]));
     try { console.log('[payment-key] create-empty', { abonentId: String(ls), uid: String(uid), key: newPaymentsKey, mode: 'uid' }); } catch(e) {}
 
-    // ====== если была передача — закрываем старого и фиксируем его долг ======
-    let transferMeta = null;
     if (prevActive && __jkhTransferConfirmed && __transferCtx && __transferCtx.oldId){
-      const closeTo = getYesterdayIso(respStart);
-
-      // 1) закрыть link старого
-      prevActive.dateTo = closeTo;
-
-      // 2) “заморозить” старого (чтобы авто-начисления дальше не шли)
-      closeOldResponsibilityAndFreeze(dbRoot, __transferCtx.oldId, closeTo);
-
-      // 3) мета для карточки нового (покажем рядом с “передача долга” в abonent_card.html следующим патчем)
-      transferMeta = {
-        type: "premise_transfer",
-        regnum: regnum,
-        fromAbonentId: String(__transferCtx.oldId),
-        fromFio: String(__transferCtx.oldFio || ''),
-        oldDebtSnapshot: r2(__transferCtx.oldDebtSnapshot || 0),
-        oldPenaltySnapshot: r2(__transferCtx.oldPenaltySnapshot || 0),
-        transferMode: String(__transferMode || 'NO_DEBT'),
-        newRespFrom: String(respStart),
-        oldRespTo: String(closeTo),
-        transferDebtApplied: false,
-        createdAt: String(today)
-      };
-    }
-
-    // 4) новый link
-    dbRoot.links.push({
-      abonentId: String(ls),
-      regnum,
-      dateFrom: respStart,
-      dateTo: ""
-    });
-
-    // 5) Перенос долга/пени (CANON TRANSFER v1.7)
-    // ВАЖНО: перенос делаем через scoped store-ключ "jkh_transfer_balance_v1:<newId>:<regnum>",
-    // чтобы calc_engine.js продолжал начислять пеню после даты передачи на остаток долга.
-    const transferChecked = (String(__transferMode||'NO_DEBT') === 'WITH_DEBT');
-
-    // всегда фиксируем "заморозку" старого (чтобы расчёт у него остановился)
-    if (transferMeta){
-      try{
-        storeSet('jkh_freeze_to_v1:' + String(transferMeta.fromAbonentId), String(transferMeta.oldRespTo || ''));
-        // сохраняем снимок долга/пени на дату заморозки (для справок/отладки)
-        const frozenKey = 'jkh_frozen_debt_v1:' + String(transferMeta.fromAbonentId) + ':' + String(transferMeta.oldRespTo || '');
-        storeSet(frozenKey, JSON.stringify({
-          principal: r2(transferMeta.oldDebtSnapshot || 0),
-          penalty: r2(transferMeta.oldPenaltySnapshot || 0),
-          calculatedAt: String(transferMeta.oldRespTo || ''),
-          regnum: String(transferMeta.regnum || regnum || ''),
-          mode: String(__transferMode || 'NO_DEBT')
-        }));
-      }catch(e){}
-    }
-
-    if (transferMeta && transferChecked){
-      const p0 = r2(transferMeta.oldDebtSnapshot || 0);
-      const pen0 = r2(transferMeta.oldPenaltySnapshot || 0);
-      const key = 'jkh_transfer_balance_v1:' + String(ls) + ':' + String(regnum);
-      try{
-        storeSet(key, JSON.stringify({
-          startDate: String(respStart),
-          principal: p0,
-          penalty: pen0,
-          regnum: String(regnum),
-          fromAbonentId: String(transferMeta.fromAbonentId || ''),
-          mode: 'WITH_DEBT'
-        }));
-        transferMeta.transferDebtApplied = ((p0 + pen0) > 0);
-      }catch(e){
-        transferMeta.transferDebtApplied = false;
+      if (!(window.Data && typeof window.Data.transferResponsibility === 'function')) {
+        window.AbonentsDB = dbSnapshotBeforeCreate;
+        setCreateStatus('Сервис передачи ответственности недоступен. Абонент не создан.');
+        return;
       }
-    } else if (transferMeta){
-      // режим БЕЗ ДОЛГА
-      transferMeta.transferDebtApplied = false;
-    }
 
+      const transferred = window.Data.transferResponsibility({
+        oldAbonentId: String(__transferCtx.oldId),
+        newAbonentId: String(ls),
+        regnum: String(regnum),
+        transferDate: String(respStart),
+        transferMode: String(__transferMode || 'NO_DEBT')
+      });
 
-    // сохраняем мету передачи в нового абонента (для карточки)
-    if (transferMeta){
-      dbRoot.abonents[ls].transferMeta = transferMeta;
+      if (transferred !== true) {
+        window.AbonentsDB = dbSnapshotBeforeCreate;
+        try { if (window.saveAbonentsDB) window.saveAbonentsDB(); } catch(e) {}
+        setCreateStatus('Передача ответственности не выполнена. Абонент не создан. Проверьте дату и расчёт frozen debt.');
+        return;
+      }
+    } else {
+      dbRoot.links.push({
+        abonentId: String(ls),
+        regnum,
+        dateFrom: respStart,
+        dateTo: ""
+      });
     }
 
     // ✅ если из импорта — переносим оплаты
