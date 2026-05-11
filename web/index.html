@@ -454,8 +454,9 @@ function getAbonentNote(id, a){
 }
 
 function getPaymentsForAbonent(id){
-    const key = ((typeof window.getPaymentsKeyForAbonent === "function") ? window.getPaymentsKeyForAbonent(id) : ("payments_" + id));
-    return getPaymentRowsByStorageKeyCached(key);
+    if (window.Data && typeof window.Data.readPaymentLedger === "function") return window.Data.readPaymentLedger(id);
+    const key = ((typeof window.getPaymentsKeyForAbonent === "function") ? window.getPaymentsKeyForAbonent(id) : "");
+    return key ? getPaymentRowsByStorageKeyCached(key) : [];
 }
 
 // Итоги + даты:
@@ -682,8 +683,12 @@ function rebuildIndexRows(){
 
 function hasUsablePaymentLedger(abonentId){
     try {
-        const key = ((typeof window.getPaymentsKeyForAbonent === "function") ? window.getPaymentsKeyForAbonent(abonentId) : ("payments_" + abonentId));
-        const arr = getPaymentRowsByStorageKeyCached(key);
+        const arr = (window.Data && typeof window.Data.readPaymentLedger === "function")
+            ? window.Data.readPaymentLedger(abonentId)
+            : (function(){
+                const key = ((typeof window.getPaymentsKeyForAbonent === "function") ? window.getPaymentsKeyForAbonent(abonentId) : "");
+                return key ? getPaymentRowsByStorageKeyCached(key) : [];
+            })();
         if (!Array.isArray(arr)) return false;
         for (const row of arr){
             if (toNum(row && row.accrued) > 0 || toNum(row && row.paid) > 0) return true;

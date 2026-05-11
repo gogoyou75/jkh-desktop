@@ -483,8 +483,11 @@ function isLedgerJsonInvalidError(e){ return !!(e && e.code === 'LEDGER_JSON_INV
 function payKeyByUid(uid){
   const u = normStr(uid);
   if (!u) return '';
-  console.info('[import_xls][payment-key] uid', { uid: u, key: 'payments_' + u });
-  return 'payments_' + u;
+  const key = (window.Data && typeof window.Data.resolvePaymentLedgerKey === 'function')
+    ? window.Data.resolvePaymentLedgerKey(u)
+    : ('payments_' + u);
+  console.info('[import_xls][payment-key] uid', { uid: u, key: key });
+  return key;
 }
 function getPaymentsByUid(uid){
   const key = payKeyByUid(uid);
@@ -492,19 +495,11 @@ function getPaymentsByUid(uid){
     console.warn('[import_xls][payment-key] blocked', { uid: normStr(uid), reason: 'UID_REQUIRED' });
     return [];
   }
-  if (!window.JKHStore || typeof JKHStore.getRaw !== 'function') return [];
-  const raw = JKHStore.getRaw(key, null);
-  if (raw === null || raw === undefined) return [];
-  try{
-    const arr = JSON.parse(raw);
-    if (Array.isArray(arr)) return arr;
-    logLedgerJsonInvalid(key, 'parsed value is not an array');
-    throw makeLedgerJsonInvalidError(key, 'parsed value is not an array');
-  }catch(e){
-    if (isLedgerJsonInvalidError(e)) throw e;
-    logLedgerJsonInvalid(key, e);
-    throw makeLedgerJsonInvalidError(key, e);
+  if (window.Data && typeof window.Data.readPaymentLedger === 'function') {
+    return window.Data.readPaymentLedger(normStr(uid));
   }
+  console.warn('[import_xls][payment-key] blocked', { uid: normStr(uid), reason: 'DATA_LEDGER_READER_REQUIRED' });
+  return [];
 }
 function setPaymentsByUid(uid, arr){
   const key = payKeyByUid(uid);
@@ -512,8 +507,12 @@ function setPaymentsByUid(uid, arr){
     console.warn('[import_xls][payment-key] blocked', { uid: normStr(uid), reason: 'UID_REQUIRED' });
     throw new Error('PAYMENT_UID_REQUIRED');
   }
-  if (!window.JKHStore || !JKHStore.setJSON) throw new Error('Нет JKHStore.setJSON');
-  return JKHStore.setJSON(key, arr, null);
+  if (window.Data && typeof window.Data.writePaymentLedger === 'function') {
+    const ok = window.Data.writePaymentLedger(normStr(uid), Array.isArray(arr) ? arr : [], { eventType: 'IMPORT_XLS_LEDGER_RESTORE' });
+    if (ok === false) throw new Error('PAYMENT_LEDGER_WRITE_BLOCKED');
+    return ok;
+  }
+  throw new Error('Data.writePaymentLedger is not available');
 }
 
 function parseYearMonthFromAny(v){

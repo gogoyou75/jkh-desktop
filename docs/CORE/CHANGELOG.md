@@ -337,3 +337,11 @@ rg -n "splitPremise|premise-transform\]\[split|type: ['\"]split" web LOGIC_SPEC.
 - Предпросмотр импорта сохраняет результат A15 validation и восстанавливается после возврата на страницу без повторного выбора исходного файла.
 - Старые draft без A15 validation блокируются до повторной загрузки файла.
 - После применения платежей таблица предпросмотра не очищается: применённые строки помечаются как «применено», остальные остаются доступными; очистка выполняется только кнопкой «Сбросить предпросмотр».
+
+## 2026-05-11 — Financial modes: canonical service boundary
+
+- Financial modes сгруппированы и частично объединены в canonical service layer `Data`.
+- UI write-path для ledger/transfer постепенно закрывается через `Data.readPaymentLedger`, `Data.writePaymentLedger`, `Data.createEmptyPaymentLedger` и `Data.transferResponsibility`.
+- `payments_<uid>` закреплён как единственный write-path ledger.
+- Legacy `payments_<LS>` оставлен только для read fallback внутри service layer.
+- Добавлены нормализация `WITH_DEBT` / `WITHOUT_DEBT` / `NO_DEBT` и минимальный financial event log.

@@ -1452,3 +1452,23 @@ Fatal-правила:
 - новый абонент стартует с `exclude_periods_<newAbonentId> = []`;
 - повреждённый canonical JSON в `exclude_periods_<abonentId>` блокирует расчёт пени до исправления;
 - запрещено хранить пустую строку вместо JSON-массива.
+
+## 16. Canonical Financial Modes
+
+Единый финансовый слой нужен, чтобы все операции с ledger, frozen debt и transfer balance проходили через один проверяемый write-path и не расходились между страницами UI.
+
+Правила:
+- UI не имеет права самостоятельно считать долг, balance, frozen debt или transfer balance.
+- UI не имеет права напрямую писать financial ledger.
+- Единственный write-path ledger: `payments_<uid>`.
+- `payments_<LS>` разрешён только как read-only legacy fallback внутри service layer.
+- `Data.resolvePaymentLedgerKey(abonentOrId)` определяет canonical key по UID.
+- `Data.readPaymentLedger(abonentOrId)` является canonical ledger reader и единственным местом, где допустим legacy read fallback.
+- `Data.writePaymentLedger(abonentOrId, rows, options)` является canonical ledger writer и обязан блокировать запись в `payments_<LS>`, если LS не является UID.
+- `Data.createEmptyPaymentLedger(abonentOrId)` создаёт пустой ledger нового абонента только через canonical writer.
+- `Data.normalizeFinancialMode(mode)` нормализует режимы `WITH_DEBT`, `WITHOUT_DEBT`; входной alias `NO_DEBT` считается `WITHOUT_DEBT`.
+- `Data.transferResponsibility(...)` является canonical transfer entrypoint.
+- Frozen debt (`jkh_frozen_debt_v1:*`) и transfer balance (`jkh_transfer_balance_v1:*`) создаются только service layer.
+- `jkh_freeze_to_v1:*` и `jkh_transfer_to_v1:*` записываются только service layer в рамках transfer transaction.
+- Financial event log обязателен для ledger/transfer write-path и хранит минимум: `type`, `mode`, `sourceAbonentId`, `targetAbonentId`, `premiseId/regnum`, `date`, `ownerId`, `createdAt`, `debtAmount`, `balanceAmount` при наличии.
+- Merge/split должны быть приведены к тому же responsibility transaction boundary; `SPLIT_PREMISES` пока является документированным будущим режимом без бизнес-логики split.

@@ -187,6 +187,13 @@
       return '';
     }
 
+    if (window.Data && typeof window.Data.resolvePaymentLedgerKey === 'function') {
+      const dataKey = String(window.Data.resolvePaymentLedgerKey(id) || '').trim();
+      if (dataKey) return dataKey;
+      console.warn('[autoaccrual][payment-key] blocked', { abonentId: id, reason: 'EMPTY_KEY_FROM_DATA_RESOLVER' });
+      return '';
+    }
+
     if (typeof window.getPaymentsKeyForAbonent === 'function') {
       const key = String(window.getPaymentsKeyForAbonent(id) || '').trim();
       if (key) return key;
@@ -209,6 +216,9 @@
   }
 
   function loadPayments(abonentId, ownerId){
+    if (window.Data && typeof window.Data.readPaymentLedger === 'function') {
+      return window.Data.readPaymentLedger(abonentId);
+    }
     const key = resolvePaymentsKeyForAbonent(abonentId);
     if (!key) return [];
     const raw = storeGetRaw(key, ownerId);
@@ -225,9 +235,11 @@
     }
   }
   function savePayments(abonentId, arr, ownerId){
-    const key = resolvePaymentsKeyForAbonent(abonentId);
-    if (!key) return;
-    storeSetRaw(key, JSON.stringify(arr||[]), ownerId);
+    if (window.Data && typeof window.Data.writePaymentLedger === 'function') {
+      window.Data.writePaymentLedger(abonentId, arr || [], { eventType: 'AUTOACCRUAL_WRITE' });
+      return;
+    }
+    throw new Error('Data.writePaymentLedger is not available');
   }
 
   // ----------------------------

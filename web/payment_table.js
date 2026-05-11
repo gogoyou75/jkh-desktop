@@ -87,8 +87,13 @@
     return rows.map(function(r){ return (r && typeof r === 'object') ? Object.assign({}, r) : r; });
   }
 
-  function readPaymentLedgerRowsCached(key){
+  function readPaymentLedgerRowsCached(key, abonentId){
     ensurePaymentLedgerReadCacheFresh();
+    const serviceAbonentId = String(abonentId || getAbonentId() || "");
+    if (window.Data && typeof window.Data.readPaymentLedger === "function") {
+      return cloneLedgerRows(window.Data.readPaymentLedger(serviceAbonentId));
+    }
+
     const cacheKey = currentOwnerIdForPaymentCache() + '::' + String(key || '');
     const raw = storeGetRaw(key);
     if (raw === null || raw === undefined) return [];
@@ -550,9 +555,9 @@ function splitAccrualByOwnership(accr, year, month, history) {
 
   function paymentsKey() {
     const id = String(getAbonentId() || "");
-    const key = window.getPaymentsKeyForAbonent
-      ? window.getPaymentsKeyForAbonent(id)
-      : "";
+    const key = (window.Data && typeof window.Data.resolvePaymentLedgerKey === "function")
+      ? window.Data.resolvePaymentLedgerKey(id)
+      : (window.getPaymentsKeyForAbonent ? window.getPaymentsKeyForAbonent(id) : "");
 
     if (!key) {
       logPaymentKeyReadOnce({ abonentId: id, reason: "ABONENT_NOT_READY" });
@@ -696,13 +701,13 @@ function splitAccrualByOwnership(accr, year, month, history) {
     // (год, месяц) из таблицы оплат и считаем это датой начала расчёта.
     // Это даёт автоперерасчёт начислений сразу после импорта.
     try {
-      const pKey = (typeof window.getPaymentsKeyForAbonent === "function") ? window.getPaymentsKeyForAbonent(id) : "";
+      const pKey = (window.Data && typeof window.Data.resolvePaymentLedgerKey === "function") ? window.Data.resolvePaymentLedgerKey(id) : ((typeof window.getPaymentsKeyForAbonent === "function") ? window.getPaymentsKeyForAbonent(id) : "");
       if (!pKey) {
         logPaymentKeyReadOnce({ abonentId: id, reason: "ABONENT_NOT_READY_OR_UID_MISSING" });
         return null;
       }
       logPaymentKeyReadOnce({ abonentId: id, key: pKey });
-      const arr = readPaymentLedgerRowsCached(pKey);
+      const arr = readPaymentLedgerRowsCached(pKey, id);
       if (Array.isArray(arr) && arr.length) {
           let minY = null, minM = null;
           for (const r of arr) {
@@ -1254,10 +1259,11 @@ for (const p of parts) {
     try {
       normalizePaymentRows(arr);
 
-      // локальная запись
-      const key = paymentsKey();
-      if (!key) return;
-      storeSetRaw(key, JSON.stringify(arr));
+      // локальная запись через canonical service boundary
+      const abonentId = String(getAbonentId() || "");
+      if (!(window.Data && typeof window.Data.writePaymentLedger === "function")) throw new Error("Data.writePaymentLedger not available");
+      const savedLedger = window.Data.writePaymentLedger(abonentId, arr, { eventType: "PAYMENT_TABLE_WRITE" });
+      if (savedLedger === false) throw new Error("PAYMENT_LEDGER_WRITE_BLOCKED");
       clearPaymentLedgerReadCache('save-payments');
 
       // ОБЯЗАТЕЛЬНО: сервер

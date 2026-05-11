@@ -1331,67 +1331,23 @@ function storeCurrentScopePrefix(){
   return "";
 }
 
+function __readFinancialTransferInfo(abonentId, regnum){
+  if (window.Data && typeof window.Data.getFinancialTransferInfo === "function") {
+    return window.Data.getFinancialTransferInfo(abonentId, regnum) || { incoming:null, freezeDate:"", outgoing:[] };
+  }
+  return { incoming:null, freezeDate:"", outgoing:[] };
+}
 function __getFreezeToISO(abonentId){
-  try{
-    const v = String(storeGet("jkh_freeze_to_v1:" + String(abonentId)) || "").trim();
-    return /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : "";
-  }catch(e){ return ""; }
+  const info = __readFinancialTransferInfo(abonentId, "");
+  return String(info.freezeDate || "").trim();
 }
-
 function __getIncomingTransfer(abonentId, regnum){
-  try{
-    const key = "jkh_transfer_balance_v1:" + String(abonentId) + ":" + String(regnum);
-    const raw = storeGet(key);
-    if (!raw) return null;
-    const obj = JSON.parse(raw);
-    if (!obj || typeof obj !== "object") return null;
-    const startDate = String(obj.startDate || "").trim();
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(startDate)) return null;
-    return {
-      startDate,
-      principal: __r2(obj.principal),
-      penalty: __r2(obj.penalty),
-      fromAbonentId: String(obj.fromAbonentId || "").trim(),
-      regnum: String(obj.regnum || regnum || "").trim(),
-      mode: String(obj.mode || "").trim()
-    };
-  }catch(e){ return null; }
+  const info = __readFinancialTransferInfo(abonentId, regnum);
+  return info.incoming || null;
 }
-
 function __findOutgoingTransfers(fromAbonentId){
-  const out = [];
-  try{
-    const keys = storeKeysForOwner((window.JKHStore && JKHStore.getOwnerId) ? JKHStore.getOwnerId() : undefined);
-    const prefix = storeCurrentScopePrefix();
-    for (let i=0;i<keys.length;i++){
-      const kScoped = keys[i];
-      if (!kScoped) continue;
-      const k = (prefix && kScoped.indexOf(prefix) === 0) ? kScoped.slice(prefix.length) : kScoped;
-      if (!k) continue;
-      if (k.indexOf("jkh_transfer_balance_v1:") !== 0) continue;
-
-      const raw = storeGet(k);
-      if (!raw) continue;
-
-      let obj = null;
-      try{ obj = JSON.parse(raw); } catch(e){ obj = null; }
-      if (!obj || typeof obj !== "object") continue;
-
-      if (String(obj.fromAbonentId || "").trim() !== String(fromAbonentId).trim()) continue;
-
-      out.push({
-        key: k,
-        toAbonentId: (k.split(":")[1] || "").trim(),
-        regnum: (k.split(":").slice(2).join(":") || "").trim(),
-        startDate: String(obj.startDate || "").trim(),
-        principal: __r2(obj.principal),
-        penalty: __r2(obj.penalty),
-        mode: String(obj.mode || "").trim()
-      });
-    }
-  }catch(e){}
-  out.sort((a,b) => String(b.startDate||"").localeCompare(String(a.startDate||"")));
-  return out;
+  const info = __readFinancialTransferInfo(fromAbonentId, "");
+  return Array.isArray(info.outgoing) ? info.outgoing : [];
 }
 
 function renderTransferInfo(abonentId, regnum){
@@ -1571,18 +1527,12 @@ function closeChangeResponsibleModal() {
 
 /* ✅ NEW: applyChangeResponsible(mode)
    mode = 'WITH_DEBT' | 'NO_DEBT'
-   Запоминаем режим передачи (для следующего шага в расчётах) */
-function __saveTransferMeta(newId, regnum, dateFrom, mode){
-    try{
-        const key = 'jkh_transfer_v1:' + String(newId) + ':' + String(regnum);
-        storeSet(key, JSON.stringify({
-            mode: String(mode || 'WITH_DEBT'),
-            dateFrom: String(dateFrom || ''),
-            regnum: String(regnum || ''),
-            ts: new Date().toISOString()
-        }));
-    }catch(e){}
+   UI does not write transfer/frozen raw keys directly; Data.transferResponsibility is the canonical entrypoint. */
+function __saveTransferMeta(){
+    console.warn('Direct transfer meta writes are disabled; use Data.transferResponsibility.');
+    return false;
 }
+
 function __isoMinusOne(iso){
   try{
     const d = new Date(iso + "T12:00:00");
@@ -1594,25 +1544,14 @@ function __isoMinusOne(iso){
   }catch(e){ return iso; }
 }
 
-function __saveFreezeTo(oldId, freezeISO){
-  try{
-    storeSet("jkh_freeze_to_v1:" + String(oldId), String(freezeISO || ""));
-  }catch(e){}
+function __saveFreezeTo(){
+  console.warn('Direct freeze writes are disabled; use Data.transferResponsibility.');
+  return false;
 }
 
-function __saveTransferBalance(newId, regnum, startISO, principal, penalty, fromOldId, mode){
-  try{
-    const key = "jkh_transfer_balance_v1:" + String(newId) + ":" + String(regnum);
-    storeSet(key, JSON.stringify({
-      startDate: String(startISO || ""),
-      principal: Number(principal || 0),
-      penalty: Number(penalty || 0),
-      fromAbonentId: String(fromOldId || ""),
-      regnum: String(regnum || ""),
-      mode: String(mode || "WITH_DEBT"),
-      ts: new Date().toISOString()
-    }));
-  }catch(e){}
+function __saveTransferBalance(){
+  console.warn('Direct transfer balance writes are disabled; use Data.transferResponsibility.');
+  return false;
 }
 
 function __deepCloneJSONSafe(obj){

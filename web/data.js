@@ -171,8 +171,11 @@
     "report_period_",
     "payments_ui_collapsed_",
     "jkh_transfer_v1:",
+    "jkh_transfer_to_v1:",
     "jkh_transfer_balance_v1:",
-    "jkh_freeze_to_v1:"
+    "jkh_frozen_debt_v1:",
+    "jkh_freeze_to_v1:",
+    "jkh_financial_events_v1"
   ];
 
   const PROJECT_KEY_EXACT = [
@@ -409,6 +412,157 @@
     if (!techId) return '';
     return 'payments_' + techId;
   }
+
+
+  function _parseLedgerRows(raw, key) {
+    if (raw === null || raw === undefined || raw === "") return [];
+    try {
+      var parsed = JSON.parse(String(raw));
+      if (Array.isArray(parsed)) return parsed;
+      throw new Error("payments ledger is not an array");
+    } catch (e) {
+      var err = new Error("Данные платежей повреждены. Расчёт/импорт остановлен, чтобы не потерять историю платежей.");
+      err.code = "LEDGER_JSON_INVALID";
+      err.key = key || "";
+      err.cause = e;
+      throw err;
+    }
+  }
+
+  function _cloneLedgerRows(rows) {
+    if (!Array.isArray(rows)) return [];
+    return rows.map(function (r) { return (r && typeof r === "object") ? Object.assign({}, r) : r; });
+  }
+
+  function _findAbonentByIdOrUid(abonentOrId) {
+    var db = window.AbonentsDB || {};
+    var abonents = db && db.abonents && typeof db.abonents === "object" ? db.abonents : {};
+    if (abonentOrId && typeof abonentOrId === "object") {
+      var objId = String(abonentOrId.id || "").trim();
+      if (objId && abonents[objId]) return { id: objId, abonent: abonents[objId] };
+      var objUid = String(abonentOrId.uid || "").trim();
+      if (objUid) {
+        var byObjUid = Object.keys(abonents).find(function (id) { return String(abonents[id] && abonents[id].uid || "").trim() === objUid; });
+        if (byObjUid) return { id: byObjUid, abonent: abonents[byObjUid] };
+      }
+      return objId || objUid ? { id: objId || "", abonent: abonentOrId } : null;
+    }
+
+    var raw = String(abonentOrId || "").trim();
+    if (!raw) return null;
+    if (abonents[raw]) return { id: raw, abonent: abonents[raw] };
+    var byUid = Object.keys(abonents).find(function (id) { return String(abonents[id] && abonents[id].uid || "").trim() === raw; });
+    if (byUid) return { id: byUid, abonent: abonents[byUid] };
+    return { id: raw, abonent: null };
+  }
+
+  function resolvePaymentLedgerKey(abonentOrId, options) {
+    var opts = options || {};
+    var found = _findAbonentByIdOrUid(abonentOrId);
+    var id = String(found && found.id || (typeof abonentOrId === "object" ? abonentOrId && abonentOrId.id : abonentOrId) || "").trim();
+    var abonent = found && found.abonent ? found.abonent : null;
+    var uid = String(abonent && abonent.uid || "").trim();
+    if (uid) return "payments_" + uid;
+    if (opts && opts.allowLegacyRead === true && id) return "payments_" + id;
+    return "";
+  }
+
+  function readPaymentLedger(abonentOrId) {
+    var found = _findAbonentByIdOrUid(abonentOrId);
+    var id = String(found && found.id || (typeof abonentOrId === "object" ? abonentOrId && abonentOrId.id : abonentOrId) || "").trim();
+    var canonicalKey = resolvePaymentLedgerKey(abonentOrId);
+    if (canonicalKey) {
+      var raw = _getProjectRaw(canonicalKey);
+      if (raw !== null && raw !== undefined) return _cloneLedgerRows(_parseLedgerRows(raw, canonicalKey));
+    }
+
+    // Legacy read-only fallback: payments_<LS> may still exist for old localStorage data.
+    var legacyKey = id ? ("payments_" + id) : "";
+    if (legacyKey && legacyKey !== canonicalKey) {
+      var legacyRaw = _getProjectRaw(legacyKey);
+      if (legacyRaw !== null && legacyRaw !== undefined) return _cloneLedgerRows(_parseLedgerRows(legacyRaw, legacyKey));
+    }
+    return [];
+  }
+
+  function writePaymentLedger(abonentOrId, rows, options) {
+    if (!Data.ensureWriteOrExplain()) return false;
+    var opts = options || {};
+    var found = _findAbonentByIdOrUid(abonentOrId);
+    var id = String(found && found.id || (typeof abonentOrId === "object" ? abonentOrId && abonentOrId.id : abonentOrId) || "").trim();
+    var abonent = found && found.abonent ? found.abonent : null;
+    var uid = String(abonent && abonent.uid || "").trim();
+    var key = resolvePaymentLedgerKey(abonentOrId);
+    if (!key || !uid) {
+      console.warn("[financial][ledger-write-blocked]", { abonentId: id, reason: "UID_REQUIRED" });
+      return false;
+    }
+    if (key !== "payments_" + uid || (id && id !== uid && key === "payments_" + id)) {
+      console.warn("[financial][ledger-write-blocked]", { abonentId: id, uid: uid, key: key, reason: "LS_LEDGER_WRITE_FORBIDDEN" });
+      return false;
+    }
+    var payload = JSON.stringify(Array.isArray(rows) ? rows : []);
+    var ok = _setProjectRaw(key, payload);
+    if (ok !== false && opts.event !== false) {
+      recordFinancialEvent(Object.assign({
+        type: opts.eventType || "LEDGER_WRITE",
+        sourceAbonentId: id,
+        targetAbonentId: id,
+        mode: opts.mode || "",
+        date: opts.date || ""
+      }, opts.event || {}));
+    }
+    return ok;
+  }
+
+  function createEmptyPaymentLedger(abonentOrId) {
+    return writePaymentLedger(abonentOrId, [], { eventType: "LEDGER_CREATE_EMPTY" });
+  }
+
+  function normalizeFinancialMode(mode) {
+    var raw = String(mode || "WITH_DEBT").trim().toUpperCase();
+    if (raw === "NO_DEBT" || raw === "WITHOUT_DEBT") return "WITHOUT_DEBT";
+    if (raw === "SPLIT_PREMISES") return "SPLIT_PREMISES";
+    return "WITH_DEBT";
+  }
+
+  function recordFinancialEvent(event) {
+    try {
+      var ev = event && typeof event === "object" ? Object.assign({}, event) : {};
+      var now = (new Date()).toISOString();
+      var owner = _ownerId();
+      var db = window.AbonentsDB || {};
+      var sourceId = String(ev.sourceAbonentId || ev.oldAbonentId || "").trim();
+      var targetId = String(ev.targetAbonentId || ev.newAbonentId || "").trim();
+      var source = sourceId && db.abonents ? db.abonents[sourceId] : null;
+      var target = targetId && db.abonents ? db.abonents[targetId] : null;
+      ev.type = String(ev.type || "FINANCIAL_EVENT");
+      ev.mode = ev.mode ? normalizeFinancialMode(ev.mode) : "";
+      ev.sourceAbonentId = sourceId;
+      ev.targetAbonentId = targetId;
+      ev.premiseId = String(ev.premiseId || ev.regnum || (target && (target.premiseRegnum || target.regnum)) || (source && (source.premiseRegnum || source.regnum)) || "").trim();
+      ev.regnum = String(ev.regnum || ev.premiseId || "").trim();
+      ev.date = String(ev.date || "").trim();
+      ev.ownerId = String(ev.ownerId || owner || "");
+      ev.createdAt = String(ev.createdAt || now);
+      if (ev.debtAmount !== undefined) ev.debtAmount = Number(ev.debtAmount) || 0;
+      if (ev.balanceAmount !== undefined) ev.balanceAmount = Number(ev.balanceAmount) || 0;
+      var key = "jkh_financial_events_v1";
+      var raw = _getProjectRaw(key);
+      var arr = [];
+      if (raw) {
+        try { arr = JSON.parse(raw); } catch (e) { arr = []; }
+      }
+      if (!Array.isArray(arr)) arr = [];
+      arr.push(ev);
+      _setProjectRaw(key, JSON.stringify(arr));
+      return ev;
+    } catch (e) {
+      try { console.warn("[financial][event-log-failed]", e); } catch (e2) {}
+      return null;
+    }
+  }
+
 
   window.JKHDebugListLegacyPaymentKeys = function() {
     try {
@@ -745,6 +899,18 @@
     readCanonicalExcludePeriods: readCanonicalExcludePeriods,
     writeCanonicalExcludePeriods: writeCanonicalExcludePeriods,
     repairEmptyExcludePeriodsKeys: repairEmptyExcludePeriodsKeys,
+    resolvePaymentLedgerKey: resolvePaymentLedgerKey,
+    readPaymentLedger: readPaymentLedger,
+    writePaymentLedger: writePaymentLedger,
+    createEmptyPaymentLedger: createEmptyPaymentLedger,
+    normalizeFinancialMode: normalizeFinancialMode,
+    recordFinancialEvent: recordFinancialEvent,
+    financialModes: {
+      WITH_DEBT: "WITH_DEBT",
+      WITHOUT_DEBT: "WITHOUT_DEBT",
+      NO_DEBT: "WITHOUT_DEBT",
+      SPLIT_PREMISES: "SPLIT_PREMISES"
+    },
 
     // READ
     getDb: function () {
@@ -946,6 +1112,8 @@
       return !!window.saveAbonentsDB && window.saveAbonentsDB();
     },
     mergePremises: async function (options) {
+      // TODO/CRITICAL: merge changes responsibility links and creates a new abonent;
+      // it must be moved under the same canonical responsibility transaction boundary as Data.transferResponsibility.
       if (!this.ensureWriteOrExplain()) return false;
       if (!window.AbonentsDB) throw new Error("DB_NOT_READY");
       console.log("[premise-transform] merge start");
@@ -1131,6 +1299,7 @@
         removeLegacyExcludeFields(newAbonent);
         db.abonents[generatedNewId] = newAbonent;
         writeCanonicalExcludePeriods(generatedNewId, []);
+        createEmptyPaymentLedger(generatedNewId);
         console.log("[premise-transform][excludes] new abonent initialized empty", { abonentId: generatedNewId });
         console.log("[premise-transform] new abonent generated", generatedNewId, "from", newResp);
         console.log("[premise-transform] old LS preserved", newResp);
@@ -1269,7 +1438,8 @@
       var newId = String(newAbonentId||"").trim();
       var rn    = String(regnum||"").trim();
       var td    = String(transferDate||"").trim();
-      var mode  = (String(transferMode||"WITH_DEBT").trim() === "NO_DEBT") ? "NO_DEBT" : "WITH_DEBT";
+      var mode  = normalizeFinancialMode(transferMode || "WITH_DEBT");
+      var legacyMode = (mode === "WITH_DEBT") ? "WITH_DEBT" : "NO_DEBT";
 
       if (!oldId || !newId || !rn || !/^\d{4}-\d{2}-\d{2}$/.test(td)) return false;
 
@@ -1293,13 +1463,7 @@
           try{
             var rows = (window.JKHCalcEngine.loadPaymentsForAbonent)
               ? window.JKHCalcEngine.loadPaymentsForAbonent(oldId)
-              : (function(){
-                  var raw = _getProjectRaw("payments_" + oldId);
-                  if (!raw) return [];
-                  var arr = JSON.parse(raw);
-                  if (!Array.isArray(arr)) throw new Error("payments ledger is not an array");
-                  return arr;
-                })();
+              : readPaymentLedger(oldId);
             var d = new Date(String(freezeISO)+"T12:00:00");
             var tot = window.JKHCalcEngine.calcTotalsAsOfAdjusted(rows, d, { abonentId: oldId, applyAdvanceOffset:true, allowNegativePrincipal:false });
             var principal = Number(tot && tot.principal);
@@ -1355,10 +1519,32 @@
         }));
 
         __validateFrozenDebt(__parseDebtJson(_getProjectRaw(transferBalanceKey), "TRANSFER_BALANCE_JSON_INVALID", transferBalanceKey), "TRANSFER_BALANCE_JSON_INVALID", transferBalanceKey);
+        recordFinancialEvent({
+          type: "TRANSFER_WITH_DEBT",
+          mode: "WITH_DEBT",
+          sourceAbonentId: oldId,
+          targetAbonentId: newId,
+          premiseId: rn,
+          regnum: rn,
+          date: td,
+          debtAmount: (Number(frozenDebt.principal) || 0) + (Number(frozenDebt.penalty) || 0),
+          balanceAmount: (Number(frozenDebt.principal) || 0) + (Number(frozenDebt.penalty) || 0)
+        });
       } else {
         // NO_DEBT: снимаем возможные хвосты переноса на нового (на всякий случай)
         try{ _removeProjectRaw("jkh_transfer_to_v1:" + newId); }catch(e){}
         try{ _removeProjectRaw("jkh_transfer_balance_v1:" + newId + ":" + rn); }catch(e){}
+        recordFinancialEvent({
+          type: "TRANSFER_WITHOUT_DEBT",
+          mode: "WITHOUT_DEBT",
+          sourceAbonentId: oldId,
+          targetAbonentId: newId,
+          premiseId: rn,
+          regnum: rn,
+          date: td,
+          debtAmount: 0,
+          balanceAmount: 0
+        });
       }
 
       // 4) Обновить поля периодов расчёта в AbonentsDB
@@ -1388,9 +1574,7 @@
 
 
   function __normalizeTransferMode(mode){
-    var raw = String(mode || "WITH_DEBT").trim();
-    if (raw === "NO_DEBT" || raw === "WITHOUT_DEBT") return "WITHOUT_DEBT";
-    return "WITH_DEBT";
+    return normalizeFinancialMode(mode);
   }
 
   function transferResponsibility(options){
@@ -1532,6 +1716,72 @@
     }
   }
 
+
+  function getFinancialTransferInfo(abonentId, regnum){
+    var id = String(abonentId || "").trim();
+    var rn = normalizeRegnumValue(regnum);
+    var info = { incoming: null, freezeDate: "", frozenDebt: null, outgoing: [] };
+    if (!id) return info;
+    try {
+      var incomingKey = rn ? ("jkh_transfer_balance_v1:" + id + ":" + rn) : "";
+      var incomingRaw = incomingKey ? _getProjectRaw(incomingKey) : null;
+      if (incomingRaw) {
+        var incomingObj = JSON.parse(incomingRaw);
+        if (incomingObj && typeof incomingObj === "object") {
+          info.incoming = {
+            startDate: String(incomingObj.startDate || "").trim(),
+            principal: Number(incomingObj.principal) || 0,
+            penalty: Number(incomingObj.penalty) || 0,
+            fromAbonentId: String(incomingObj.fromAbonentId || "").trim(),
+            regnum: String(incomingObj.regnum || rn || "").trim(),
+            mode: normalizeFinancialMode(incomingObj.mode || incomingObj.transferMode || "WITH_DEBT")
+          };
+        }
+      }
+    } catch (e1) {}
+
+    try {
+      var freezeISO = String(_getProjectRaw("jkh_freeze_to_v1:" + id) || "").trim();
+      if (/^\d{4}-\d{2}-\d{2}$/.test(freezeISO)) {
+        info.freezeDate = freezeISO;
+        var debtRaw = _getProjectRaw("jkh_frozen_debt_v1:" + id + ":" + freezeISO);
+        if (debtRaw) {
+          try { info.frozenDebt = JSON.parse(debtRaw); } catch (e2) { info.frozenDebt = null; }
+        }
+      }
+    } catch (e3) {}
+
+    try {
+      var keys = _adminKeysForOwner(_ownerId()) || [];
+      var prefix = (window.JKHStorage && typeof JKHStorage.scopePrefixFor === "function")
+        ? JKHStorage.scopePrefixFor(_ownerId())
+        : ("jkhdb::" + String(_ownerId()) + "::");
+      keys.forEach(function(scopedKey){
+        var key = String(scopedKey || "");
+        if (prefix && key.indexOf(prefix) === 0) key = key.slice(prefix.length);
+        if (key.indexOf("jkh_transfer_balance_v1:") !== 0) return;
+        var raw = _getProjectRaw(key);
+        if (!raw) return;
+        var obj = null;
+        try { obj = JSON.parse(raw); } catch (e4) { obj = null; }
+        if (!obj || typeof obj !== "object") return;
+        if (String(obj.fromAbonentId || "").trim() !== id) return;
+        var parts = key.split(":");
+        info.outgoing.push({
+          key: key,
+          toAbonentId: String(parts[1] || "").trim(),
+          regnum: String(parts.slice(2).join(":") || obj.regnum || "").trim(),
+          startDate: String(obj.startDate || "").trim(),
+          principal: Number(obj.principal) || 0,
+          penalty: Number(obj.penalty) || 0,
+          mode: normalizeFinancialMode(obj.mode || obj.transferMode || "WITH_DEBT")
+        });
+      });
+      info.outgoing.sort(function(a,b){ return String(b.startDate || "").localeCompare(String(a.startDate || "")); });
+    } catch (e5) {}
+    return info;
+  }
+
   function getAbonentTransferInfo(abonentId){
     try{
       var id = String(abonentId||"").trim();
@@ -1561,6 +1811,7 @@
   Data.prepareDebtTransfer = prepareDebtTransfer;
   Data.transferResponsibility = transferResponsibility;
   Data.getAbonentTransferInfo = getAbonentTransferInfo;
+  Data.getFinancialTransferInfo = getFinancialTransferInfo;
 
 window.Data = Data;
 window.JKHBoot?.markReady?.('data');
