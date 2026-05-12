@@ -396,6 +396,24 @@
     }
   }
 
+  function cardUrlForAbonent(abonentId){
+    const id = String(abonentId || "").trim();
+    return id ? ("abonent_card.html?abonent=" + encodeURIComponent(id)) : "#";
+  }
+
+  function setupBackToCard(ctx){
+    const back = $("backToCard");
+    if (!back) return;
+    const id = String(ctx && ctx.abonentId || "").trim();
+    back.href = cardUrlForAbonent(id);
+    back.addEventListener("click", function(ev){
+      if (!id) {
+        ev.preventDefault();
+        showFatal("Не передан параметр abonent в URL. Возврат к карточке невозможен.");
+      }
+    });
+  }
+
   document.addEventListener("DOMContentLoaded", function () {
     (async function () {
       const eng = window.JKHCalcEngine;
@@ -417,6 +435,7 @@
 
       try {
       const ctx = getContext();
+      setupBackToCard(ctx);
       if (!ctx.abonentId) {
         showFatal("Не передан параметр abonent в URL.");
         return;

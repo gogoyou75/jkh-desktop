@@ -384,7 +384,7 @@ function daysInMonth(year, month1to12) {
 // history = [{ abonentId, from:'YYYY-MM-DD', to:'YYYY-MM-DD|null' }]
 function splitAccrualByOwnership(accr, year, month, history) {
   if (!Array.isArray(history) || history.length === 0) {
-    return [{ abonentId: null, amount: accr }];
+    return [];
   }
 
   const dim = daysInMonth(year, month);
@@ -412,14 +412,20 @@ function splitAccrualByOwnership(accr, year, month, history) {
     });
   }
 
-  // компенсация копеек
-  const sum = r2(parts.reduce((s,p)=>s+p.amount,0));
-  const diff = r2(accr - sum);
-  if (diff !== 0 && parts.length) {
-    parts[0].amount = r2(parts[0].amount + diff);
-  }
-
   return parts;
+}
+
+function prorateAccrualByRange(accr, year, month, range) {
+  const dim = daysInMonth(year, month);
+  const mStart = new Date(year, month - 1, 1);
+  const mEnd = new Date(year, month - 1, dim);
+  const from = range && range.from ? new Date(range.from) : mStart;
+  const to = range && range.to ? new Date(range.to) : mEnd;
+  const a = new Date(Math.max(from, mStart));
+  const b = new Date(Math.min(to, mEnd));
+  if (b < a) return 0;
+  const days = Math.floor((b - a) / 86400000) + 1;
+  return r2(accr * days / dim);
 }
 
   // =========================
@@ -1024,10 +1030,17 @@ const parts = splitAccrualByOwnership(
 
 // сумма, относящаяся ИМЕННО к текущему абоненту
 let accr = 0;
-for (const p of parts) {
-  if (String(p.abonentId) === String(getAbonentId())) {
-    accr = r2(accr + p.amount);
+if (parts.length) {
+  let matchedOwnerPart = false;
+  for (const p of parts) {
+    if (String(p.abonentId) === String(getAbonentId())) {
+      matchedOwnerPart = true;
+      accr = r2(accr + p.amount);
+    }
   }
+  if (!matchedOwnerPart) accr = prorateAccrualByRange(totalAccr, Number(mm.year), Number(mm.month), range);
+} else {
+  accr = prorateAccrualByRange(totalAccr, Number(mm.year), Number(mm.month), range);
 }
 
 

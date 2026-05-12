@@ -547,21 +547,28 @@
     if (!daysByAbonent.size) return [];
 
     const out = [];
-    let sum = 0;
-
     for (const [abonentId, days] of daysByAbonent.entries()){
-      const amt = r2(total * (days / dim));
-      sum = r2(sum + amt);
-      out.push({ abonentId, amount: amt, days });
-    }
-
-    const target = r2(out.reduce((acc,x)=>acc + x.amount, 0));
-    const diff = r2(target - sum);
-    if (out.length && Math.abs(diff) >= 0.01){
-      out[out.length-1].amount = r2(out[out.length-1].amount + diff);
+      out.push({ abonentId, amount: r2(total * (days / dim)), days });
     }
 
     return out;
+  }
+
+  function prorateAccrualByRange(total, year, month, range){
+    const y = Number(year);
+    const m = Number(month);
+    const dim = daysInMonth(y, m);
+    const monthStart = new Date(y, m-1, 1, 12,0,0,0);
+    const monthEndExcl = new Date(y, m-1, dim+1, 12,0,0,0);
+    const fromD = parseISOToDate(range && range.from);
+    if (!fromD) return r2(total);
+    const toD0 = range && range.to ? parseISOToDate(range.to) : null;
+    const toExcl = toD0 ? new Date(toD0.getFullYear(), toD0.getMonth(), toD0.getDate()+1, 12,0,0,0) : monthEndExcl;
+    const start = (fromD > monthStart) ? fromD : monthStart;
+    const endExcl = (toExcl < monthEndExcl) ? toExcl : monthEndExcl;
+    if (endExcl <= start) return 0;
+    const days = Math.round((endExcl - start) / DAY_MS);
+    return r2(total * (days / dim));
   }
 
   function nextPaymentId(arr){
@@ -613,11 +620,16 @@
       let accr = 0;
       if (totalAccr > 0 && ownershipHistory.length){
         const parts = splitAccrualByOwnership(totalAccr, Number(mm.year), Number(mm.month), ownershipHistory);
+        let matchedOwnerPart = false;
         for (const p of parts){
-          if (String(p.abonentId) === String(ls)) accr = r2(accr + p.amount);
+          if (String(p.abonentId) === String(ls)) {
+            matchedOwnerPart = true;
+            accr = r2(accr + p.amount);
+          }
         }
+        if (!matchedOwnerPart) accr = prorateAccrualByRange(totalAccr, Number(mm.year), Number(mm.month), range);
       } else {
-        accr = totalAccr;
+        accr = prorateAccrualByRange(totalAccr, Number(mm.year), Number(mm.month), range);
       }
 
       if (!rows.length){

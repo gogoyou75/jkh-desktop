@@ -186,12 +186,19 @@ Doc: docs/LOGIC_SPEC_v1.5.3.md
     .org-header > div { margin: 2px 0; }
     .sign-mp { width: 100%; justify-content: center; }
     .sign-footer { width: 100%; }
+    .spravka-actions { margin: 0 auto 12px auto; width: 960px; padding: 10px 10px 0 10px; box-sizing: border-box; }
+    .spravka-back { display: inline-block; border: 2px solid #000; padding: 6px 12px; color: #000; text-decoration: none; background: #e5e5e5; }
+    @media print { .spravka-actions { display: none !important; } }
 </style>
 </head>
 
 <body>
 
 <script>renderLayout();</script>
+
+<div class="spravka-actions">
+    <a href="#" class="spravka-back" id="backToCard">⬅ назад к карточке</a>
+</div>
 
 <div class="sheet-wrapper">
 

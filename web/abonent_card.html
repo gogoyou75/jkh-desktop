@@ -662,7 +662,10 @@ function getAbonentIdFromURL() {
     const uid = String(params.get("uid") || "").trim();
     const fromUrl = String(params.get("abonent") || "").trim();
 
-    // 1) если открыли по uid — найдём ЛС (текущий ключ) по uid
+    if (fromUrl) return fromUrl;
+
+    // если открыли по uid — найдём ЛС (текущий ключ) по uid;
+    // если данные ещё не готовы, вернём пусто и дождёмся повторной инициализации.
     if (uid) {
         const db = window.AbonentsDB?.abonents || {};
         for (const id of Object.keys(db)) {
@@ -670,12 +673,30 @@ function getAbonentIdFromURL() {
         }
     }
 
-    // 2) иначе — как раньше (по ЛС)
-    if (fromUrl) return fromUrl;
+    return "";
+}
 
-    const db = window.AbonentsDB?.abonents || {};
-    const first = Object.keys(db)[0];
-    return first || "27";
+function hasExplicitAbonentCardContext() {
+    const params = new URLSearchParams(window.location.search || "");
+    return !!String(params.get("abonent") || params.get("uid") || "").trim();
+}
+
+function showAbonentCardContextError(reason) {
+    const msg = reason === "not_found"
+        ? "Абонент не найден в текущей базе. Откройте карточку из списка абонентов."
+        : "Не передан параметр abonent в URL. Откройте карточку из списка абонентов.";
+    try { console.warn("[abonent_card] init blocked", { reason: reason || "missing_abonent", url: window.location.href }); } catch(e) {}
+
+    const title = document.getElementById("abonentTitle");
+    if (title) title.textContent = "Карточка абонента недоступна";
+
+    const tbody = document.getElementById("abonentInfoBody");
+    if (tbody) tbody.innerHTML = '<tr><td colspan="14" style="color:#b00000;font-weight:bold;">' + msg + '</td></tr>';
+
+    const payBody = document.getElementById("paymentTableBody");
+    if (payBody) payBody.innerHTML = '<tr><td colspan="12" style="color:#b00000;font-weight:bold;">' + msg + '</td></tr>';
+
+    try { alert(msg); } catch(e) {}
 }
 
 function getDb() {
@@ -740,9 +761,9 @@ function getActiveLinkForPremise(regnum){
 }
 
 function getCurrentAbonent() {
-    const id = String(getAbonentIdFromURL());
+    const id = String(getAbonentIdFromURL() || "").trim();
     const db = getDb();
-    return { id, a: db[id] || null };
+    return { id, a: id ? (db[id] || null) : null };
 }
 
 function splitFio(fio) {
@@ -784,7 +805,14 @@ async function copyUidFromCard(){
 /* ✅ FIX: fillAbonentCard() — убраны лишние скобки, логика выполняется корректно */
 function fillAbonentCard() {
     const { id, a } = getCurrentAbonent();
-    if (!a) return;
+    if (!id) {
+        showAbonentCardContextError("missing_abonent");
+        return;
+    }
+    if (!a) {
+        showAbonentCardContextError("not_found");
+        return;
+    }
 
     const { regnum, p } = getPremiseForAbonent(id, a);
     const premise = p || {};
@@ -1108,7 +1136,7 @@ function __runAutoAccrualRepairOnce(){
             return;
         }
 
-        const gk = 'jkh_autoaccrual_repair_once_v1:' + String(id);
+        const gk = 'jkh_autoaccrual_repair_once_v2_partial_month:' + String(id);
         if (sessionStorage.getItem(gk) === '1') return;
         sessionStorage.setItem(gk, '1');
 
@@ -1166,6 +1194,11 @@ async function __repairEmptyExcludePeriodsKeysAfterServerLoad(){
 
 async function __initAbonentCardSafe(){
     if (__abonentCardInitStarted) return;
+    if (!hasExplicitAbonentCardContext()) {
+        __abonentCardInitStarted = true;
+        showAbonentCardContextError("missing_abonent");
+        return;
+    }
     __abonentCardInitStarted = true;
 
     await __repairEmptyExcludePeriodsKeysAfterServerLoad();
@@ -1180,6 +1213,7 @@ async function __initAbonentCardSafe(){
 
 function __isAbonentCardDataReady() {
     try {
+        if (!hasExplicitAbonentCardContext()) return true;
         const id = String(getAbonentIdFromURL() || "").trim();
         const db = (window.Data && typeof Data.getDb === "function") ? Data.getDb() : null;
         const abonents = db && db.abonents ? db.abonents : null;
@@ -1219,6 +1253,10 @@ function __waitForAbonentCardDataReady(cb) {
     }
 
     function check(reason) {
+        if (!hasExplicitAbonentCardContext()) {
+            finish("missing_abonent");
+            return;
+        }
         const st = window.JKH_UI_STATE && window.JKH_UI_STATE.data;
         const status = String((st && st.status) || "");
         const serverReady = __isAbonentCardServerFirstReady();
