@@ -485,6 +485,12 @@
     return [];
   }
 
+  function _logLedgerInit(payload) {
+    try {
+      console.log("[ledger-init]", payload || {});
+    } catch (e) { }
+  }
+
   function writePaymentLedger(abonentOrId, rows, options) {
     if (!Data.ensureWriteOrExplain()) return false;
     var opts = options || {};
@@ -501,6 +507,15 @@
       console.warn("[financial][ledger-write-blocked]", { abonentId: id, uid: uid, key: key, reason: "LS_LEDGER_WRITE_FORBIDDEN" });
       return false;
     }
+    var currentRaw = _getProjectRaw(key);
+    if (currentRaw !== null && currentRaw !== undefined) {
+      try {
+        _parseLedgerRows(currentRaw, key);
+      } catch (e) {
+        console.warn("[financial][ledger-write-blocked]", { abonentId: id, uid: uid, key: key, reason: "LEDGER_JSON_INVALID" });
+        return false;
+      }
+    }
     var payload = JSON.stringify(Array.isArray(rows) ? rows : []);
     var ok = _setProjectRaw(key, payload);
     if (ok !== false && opts.event !== false) {
@@ -516,7 +531,43 @@
   }
 
   function createEmptyPaymentLedger(abonentOrId) {
-    return writePaymentLedger(abonentOrId, [], { eventType: "LEDGER_CREATE_EMPTY" });
+    if (!Data.ensureWriteOrExplain()) return false;
+    var found = _findAbonentByIdOrUid(abonentOrId);
+    var id = String(found && found.id || (typeof abonentOrId === "object" ? abonentOrId && abonentOrId.id : abonentOrId) || "").trim();
+    var abonent = found && found.abonent ? found.abonent : null;
+    var uid = String(abonent && abonent.uid || "").trim();
+    var key = resolvePaymentLedgerKey(abonentOrId);
+    if (!key || !uid) {
+      _logLedgerInit({ abonentId: id, uid: uid, key: key || "", result: "blocked", reason: "UID_REQUIRED" });
+      return false;
+    }
+    if (key !== "payments_" + uid || (id && id !== uid && key === "payments_" + id)) {
+      _logLedgerInit({ abonentId: id, uid: uid, key: key, result: "blocked", reason: "LS_LEDGER_CREATE_FORBIDDEN" });
+      return false;
+    }
+
+    var raw = _getProjectRaw(key);
+    if (raw !== null && raw !== undefined) {
+      try {
+        _parseLedgerRows(raw, key);
+      } catch (e) {
+        _logLedgerInit({ abonentId: id, uid: uid, key: key, result: "blocked", reason: "LEDGER_JSON_INVALID" });
+        return false;
+      }
+      _logLedgerInit({ abonentId: id, uid: uid, key: key, result: "exists" });
+      return true;
+    }
+
+    var ok = _setProjectRaw(key, "[]");
+    _logLedgerInit({ abonentId: id, uid: uid, key: key, result: ok === false ? "failed" : "created" });
+    if (ok !== false) {
+      recordFinancialEvent({
+        type: "LEDGER_CREATE_EMPTY",
+        sourceAbonentId: id,
+        targetAbonentId: id
+      });
+    }
+    return ok;
   }
 
   function normalizeFinancialMode(mode) {
@@ -1299,7 +1350,7 @@
         removeLegacyExcludeFields(newAbonent);
         db.abonents[generatedNewId] = newAbonent;
         writeCanonicalExcludePeriods(generatedNewId, []);
-        createEmptyPaymentLedger(generatedNewId);
+        if (createEmptyPaymentLedger(generatedNewId) !== true) throw new Error("MERGE_LEDGER_INIT_FAILED");
         console.log("[premise-transform][excludes] new abonent initialized empty", { abonentId: generatedNewId });
         console.log("[premise-transform] new abonent generated", generatedNewId, "from", newResp);
         console.log("[premise-transform] old LS preserved", newResp);
@@ -1748,6 +1799,7 @@
       console.log("[transfer][excludes] skipped legacy copy", { abonentId: newId });
       writeCanonicalExcludePeriods(newId, []);
       console.log("[transfer][excludes] new initialized empty", { abonentId: newId });
+      if (createEmptyPaymentLedger(newId) !== true) throw new Error("TRANSFER_LEDGER_INIT_FAILED");
       var premise = db.premises && db.premises[rn] ? db.premises[rn] : {};
       newA.regnum = rn;
       newA.premiseRegnum = rn;
