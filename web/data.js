@@ -1601,6 +1601,43 @@
     };
   }
 
+  function __paymentRowYmForTransferCheck(row){
+    if (!row || typeof row !== "object") return "";
+    var y = parseInt(String(row.year || row.y || ""), 10);
+    var m = parseInt(String(row.month || row.m || ""), 10);
+    if (y && m >= 1 && m <= 12) return String(y) + "-" + (m < 10 ? "0" + m : String(m));
+    var ym = String(row.ym || row.yearMonth || row.y_m || "").trim();
+    if (/^\d{4}-\d{2}$/.test(ym)) return ym;
+    return "";
+  }
+
+  function __paymentAmountForTransferCheck(v){
+    var n = parseFloat(String(v == null ? "" : v).replace(/\s+/g, "").replace(",", "."));
+    return Number.isFinite(n) ? n : 0;
+  }
+
+  function __verifyNoAccrualBeforeTransferMonth(abonentId, transferDate){
+    var id = String(abonentId || "").trim();
+    var td = String(transferDate || "").trim();
+    var transferYm = /^\d{4}-\d{2}-\d{2}$/.test(td) ? td.slice(0, 7) : "";
+    if (!id || !transferYm) return { ok:false, reason:"INVALID_ARGUMENTS" };
+
+    var rows = readPaymentLedger(id) || [];
+    var bad = [];
+    rows.forEach(function(r){
+      var ym = __paymentRowYmForTransferCheck(r);
+      if (ym && ym < transferYm && __paymentAmountForTransferCheck(r && r.accrued) > 0) {
+        bad.push({ ym: ym, accrued: __paymentAmountForTransferCheck(r && r.accrued), rowId: r && r.id });
+      }
+    });
+
+    if (bad.length) {
+      console.warn("[transfer-responsibility][ledger-range-invalid]", { abonentId: id, transferDate: td, rows: bad });
+      return { ok:false, reason:"NEW_LEDGER_HAS_ACCRUAL_BEFORE_TRANSFER", rows: bad };
+    }
+    return { ok:true, rows: rows.length };
+  }
+
   function __scheduleTransferFlushToServer(){
     try {
       if (!(window.Data && typeof window.Data.flushDbToServer === "function")) return;
@@ -1745,6 +1782,9 @@
 
       var recalc = __forceResponsibilityLedgerRecalc([oldId, newId]);
       if (!recalc || recalc.ok !== true) throw new Error("TRANSFER_LEDGER_RECALC_FAILED");
+
+      var newLedgerRangeCheck = __verifyNoAccrualBeforeTransferMonth(newId, td);
+      if (!newLedgerRangeCheck || newLedgerRangeCheck.ok !== true) throw new Error("TRANSFER_NEW_LEDGER_RANGE_INVALID");
 
       var saved = !!window.saveAbonentsDB && window.saveAbonentsDB();
       if (saved) __scheduleTransferFlushToServer();

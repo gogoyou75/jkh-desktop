@@ -590,15 +590,21 @@
     const regnum = getPremiseRegnumForAbonent(ls);
     const ownershipHistory = regnum ? getOwnershipHistoryForRegnum(regnum) : [];
 
-    const allowedYm = new Set(months.map(m => `${m.year}-${m.month}`));
+    const allowedMonths = months.map(m => `${m.year}-${m.month}`);
+    const allowedYm = new Set(allowedMonths);
+    const zeroedMonthsSet = new Set();
+    const recalculatedMonthsSet = new Set();
     let changed = false;
 
     for (const r of arr){
       const key = rowToYM(r);
       if (!key) continue;
-      if (!allowedYm.has(key) && toNum(r.accrued) > 0){
-        r.accrued = 0;
-        changed = true;
+      if (!allowedYm.has(key)){
+        if (toNum(r.accrued) !== 0){
+          r.accrued = 0;
+          changed = true;
+        }
+        zeroedMonthsSet.add(key);
       }
     }
 
@@ -634,6 +640,8 @@
       } else {
         accr = prorateAccrualByRange(totalAccr, Number(mm.year), Number(mm.month), range);
       }
+
+      recalculatedMonthsSet.add(key);
 
       if (!rows.length){
         arr.push({
@@ -673,7 +681,17 @@
       }
     }
 
-    return { changed, reason:'OK' };
+    const diagnostics = {
+      abonentId: String(ls || ''),
+      from: range.from || '',
+      to: range.to || '',
+      allowedMonths: allowedMonths,
+      zeroedMonths: Array.from(zeroedMonthsSet).sort(),
+      recalculatedMonths: Array.from(recalculatedMonthsSet).sort()
+    };
+    try { console.log('[autoaccrual][responsibility-range]', diagnostics); } catch(e) {}
+
+    return { changed, reason:'OK', diagnostics: diagnostics };
   }
 
   function recalcForAbonent(ls, opts){

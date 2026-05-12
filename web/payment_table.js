@@ -1173,6 +1173,65 @@ if (parts.length) {
     });
   }
 
+  function responsibilityAllowedYmSet(){
+    const range = getActiveResponsibilityRangeISO();
+    if (!range || !range.from) return null;
+    const months = monthIter(range.from, range.to);
+    if (!months.length) return null;
+    return new Set(months.map(m => `${m.year}-${m.month}`));
+  }
+
+  function clonePaymentRowForView(r){
+    return (r && typeof r === "object") ? Object.assign({}, r) : r;
+  }
+
+  function applyResponsibilityRangeToView(arr){
+    if (!Array.isArray(arr) || !arr.length) return arr;
+
+    let allowedYm = null;
+    try {
+      allowedYm = responsibilityAllowedYmSet();
+    } catch(e) {
+      console.error(e);
+      throw e;
+    }
+    if (!allowedYm || !allowedYm.size) return arr;
+
+    const abonentId = String(getAbonentId() || "");
+    const out = [];
+    const loggedHidden = {};
+
+    for (const row of arr){
+      const ym = ymKeyOfRow(row);
+      const outOfRange = ym && !allowedYm.has(ym);
+      if (!outOfRange) {
+        out.push(row);
+        continue;
+      }
+
+      const paid = toNum(row && row.paid);
+      if (paid <= 0.0000001) {
+        if (!loggedHidden[ym]) {
+          loggedHidden[ym] = true;
+          try {
+            console.log('[payment-table][hide-out-of-responsibility]', {
+              abonentId: abonentId,
+              ym: ym,
+              reason: 'OUT_OF_RESPONSIBILITY_RANGE'
+            });
+          } catch(e) {}
+        }
+        continue;
+      }
+
+      const visiblePaymentRow = clonePaymentRowForView(row);
+      if (visiblePaymentRow && typeof visiblePaymentRow === "object") visiblePaymentRow.accrued = 0;
+      out.push(visiblePaymentRow);
+    }
+
+    return out;
+  }
+
   function getPayments() {
     const key = paymentsKey();
     if (!key) return [];
@@ -1963,7 +2022,7 @@ function applyRunningTotals(viewRows) {
       calcRowBase(r);
     });
 
-    const view = applyCalcFilter(arr).slice();
+    const view = applyResponsibilityRangeToView(applyCalcFilter(arr)).slice();
     try {
       applyRunningTotals(view);
     } catch (e) {
@@ -2055,7 +2114,7 @@ function applyRunningTotals(viewRows) {
       calcRowBase(r);
     });
 
-    const view = applyCalcFilter(arr).slice();
+    const view = applyResponsibilityRangeToView(applyCalcFilter(arr)).slice();
     try {
       applyRunningTotals(view);
     } catch (e) {
