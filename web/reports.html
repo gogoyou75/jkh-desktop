@@ -2,7 +2,14 @@
 <html lang="ru">
 <head>
     <meta charset="UTF-8">
-    
+    <script src="auth.js"></script>
+    <script src="storage.js"></script>
+    <script src="critical_guard.js" defer></script>
+    <title>Справки</title>
+    <link rel="stylesheet" href="style.css">
+
+    <script src="constants.js"></script>
+
     <!-- JKH CANON FIX: suppress false "Guest: read-only" dialogs for logged-in users (must run BEFORE data.js) -->
     <script>
     (function(){
@@ -43,10 +50,6 @@
       };
     })();
     </script>
-<script src="critical_guard.js" defer></script>
-    <title>Справки</title>
-    <link rel="stylesheet" href="style.css">
-
     <script src="data.js"></script>
     <script src="layout.js"></script>
 
@@ -215,8 +218,17 @@ function getAbonentIdFromURL() {
     return String(params.get("abonent") || "").trim();
 }
 
-function showMissingAbonentError() {
-    const msg = "Не передан параметр abonent в URL. Откройте справки из карточки абонента.";
+function setBackLink(id) {
+    const back = document.getElementById("backToCard");
+    if (back && id) back.href = "abonent_card.html?abonent=" + encodeURIComponent(id);
+}
+
+function showReportsError(reason) {
+    const hasId = !!getAbonentIdFromURL();
+    const isNotFound = reason === "ABONENT_NOT_FOUND";
+    const msg = isNotFound
+        ? "Абонент не найден после загрузки данных с сервера. Вернитесь в карточку и попробуйте снова."
+        : "Не передан параметр abonent в URL. Откройте справки из карточки абонента.";
     const title = document.getElementById("abonentTitle");
     if (title) title.textContent = "Справки недоступны";
     const tbody = document.getElementById("abonentInfoBody");
@@ -225,8 +237,58 @@ function showMissingAbonentError() {
     if (openBtn) openBtn.disabled = true;
     const chooseBtn = document.getElementById("repChooseBtn");
     if (chooseBtn) chooseBtn.disabled = true;
-    try { console.warn("[reports] init blocked", { reason: "MISSING_ABONENT_ID" }); } catch(e) {}
+    try { console.warn("[reports] init blocked", { reason: isNotFound ? "ABONENT_NOT_FOUND" : "MISSING_ABONENT_ID", abonent: hasId ? getAbonentIdFromURL() : "" }); } catch(e) {}
     try { alert(msg); } catch(e) {}
+}
+
+function showMissingAbonentError() { showReportsError("MISSING_ABONENT_ID"); }
+function showAbonentNotFoundError() { showReportsError("ABONENT_NOT_FOUND"); }
+
+function getReportsDataState() {
+    return (window.JKH_UI_STATE && window.JKH_UI_STATE.data) ? window.JKH_UI_STATE.data : null;
+}
+
+function isServerFirstReady() {
+    const st = getReportsDataState();
+    if (!st) return false;
+    const status = String(st.status || "");
+    if (status !== "ready" && status !== "empty") return false;
+    if (Object.prototype.hasOwnProperty.call(st, "source") && String(st.source || "") !== "server") return false;
+    return true;
+}
+
+function getAbonentFromData(id) {
+    if (!id || !(window.Data && typeof window.Data.getDb === "function")) return null;
+    const db = window.Data.getDb();
+    return (db && db.abonents) ? (db.abonents[String(id)] || null) : null;
+}
+
+function waitForServerFirstAbonent(id, timeoutMs) {
+    return new Promise((resolve) => {
+        const started = Date.now();
+        let done = false;
+        let timer = null;
+
+        function finish(result) {
+            if (done) return;
+            done = true;
+            try { window.removeEventListener("JKH_UI_STATE_CHANGED", check); } catch(e) {}
+            if (timer) clearInterval(timer);
+            resolve(result);
+        }
+
+        function check() {
+            if (!isServerFirstReady()) {
+                if (Date.now() - started >= timeoutMs) finish(null);
+                return;
+            }
+            finish(getAbonentFromData(id));
+        }
+
+        try { window.addEventListener("JKH_UI_STATE_CHANGED", check); } catch(e) {}
+        timer = setInterval(check, 100);
+        check();
+    });
 }
 
 function calcPeriodKey(id){ return "calc_period_" + id; }
@@ -234,17 +296,12 @@ function reportPeriodKey(id){ return "report_period_" + id; }
 function storeGet(key){ try { return (window.JKHStore && JKHStore.getRaw) ? JKHStore.getRaw(key) : null; } catch { return null; } }
 function storeSet(key, value){ try { if (window.JKHStore && JKHStore.setRaw) JKHStore.setRaw(key, value); } catch {} }
 
-function fillAbonentCardHeader() {
-    const id = getAbonentIdFromURL();
+function fillAbonentCardHeader(id, a) {
     if (!id) { showMissingAbonentError(); return false; }
-    const db = window.AbonentsDB?.abonents || {};
-    const a = db[id];
-    if (!a) { showMissingAbonentError(); return false; }
+    if (!a) { showAbonentNotFoundError(); return false; }
 
-    // заголовок
     document.getElementById("abonentTitle").textContent = "Общие данные " + (a.fio || "");
 
-    // таблица
     const fioParts = (a.fio || "").split(" ");
     const last = fioParts[0] || "";
     const name = fioParts[1] || "";
@@ -269,9 +326,7 @@ function fillAbonentCardHeader() {
       </tr>
     `;
 
-    // кнопка "назад" — сохранить абонента в URL
-    const back = document.getElementById("backToCard");
-    back.href = "abonent_card.html?abonent=" + encodeURIComponent(id);
+    setBackLink(id);
     return true;
 }
 
@@ -281,7 +336,6 @@ function loadAutoPeriod() {
     const fromEl = document.getElementById("repFrom");
     const toEl = document.getElementById("repTo");
 
-    // 1) если уже выбирали период на странице справок — берём его
     try {
         const rawR = storeGet(reportPeriodKey(id));
         if (rawR) {
@@ -292,7 +346,6 @@ function loadAutoPeriod() {
         }
     } catch {}
 
-    // 2) иначе — берем период из карточки абонента (если он выбран)
     try {
         const raw = storeGet(calcPeriodKey(id));
         if (!raw) { fromEl.value = ""; toEl.value = ""; return; }
@@ -317,8 +370,13 @@ function saveReportPeriod(from, to){
     storeSet(reportPeriodKey(id), JSON.stringify({from: from || "", to: to || ""}));
 }
 
-document.addEventListener("DOMContentLoaded", () => {
-    if (!fillAbonentCardHeader()) return;
+async function initReportsPage() {
+    const id = getAbonentIdFromURL();
+    if (!id) { showMissingAbonentError(); return; }
+    setBackLink(id);
+
+    const abonent = await waitForServerFirstAbonent(id, 10000);
+    if (!fillAbonentCardHeader(id, abonent)) return;
     loadAutoPeriod();
 
     document.getElementById("repChooseBtn").addEventListener("click", () => {
@@ -338,23 +396,28 @@ document.addEventListener("DOMContentLoaded", () => {
         const id = getAbonentIdFromURL();
         if (!id) { showMissingAbonentError(); return; }
 
-	        // ✅ FIX: если страница открыта в рамках конкретной базы (namespaced key),
-	        // прокидываем её в spravka_sud.html через параметр &db=...
-	        // Это предотвращает выбор "не той" базы при одновременном наличии нескольких баз в localStorage.
-	        let dbKey = "";
-	        try{
-	            const p = new URLSearchParams(location.search);
-	            dbKey = String(p.get("db") || "").trim();
-	        }catch(e){ dbKey = ""; }
+        let dbKey = "";
+        try{
+            const p = new URLSearchParams(location.search);
+            dbKey = String(p.get("db") || "").trim();
+        }catch(e){ dbKey = ""; }
         const from = document.getElementById("repFrom").value;
         const to   = document.getElementById("repTo").value;
 
-        // сохраняем выбранный период (если нет — сохраняем пусто)
         if (isValidPeriod(from, to)) saveReportPeriod(from, to);
         else saveReportPeriod("", "");
 
-	        // открываем страницу справки (если она есть в проекте)
-	        location.href = "spravka_sud.html?abonent=" + encodeURIComponent(id) + (dbKey ? ("&db=" + encodeURIComponent(dbKey)) : "");
+        let href = "spravka_sud.html?abonent=" + encodeURIComponent(id) + "&from=" + encodeURIComponent(from || "") + "&to=" + encodeURIComponent(to || "");
+        if (dbKey) href += "&db=" + encodeURIComponent(dbKey);
+        location.href = href;
+    });
+}
+
+document.addEventListener("DOMContentLoaded", () => {
+    initReportsPage().catch((e) => {
+        try { console.error("[reports] init failed", e); } catch(_) {}
+        if (getAbonentIdFromURL()) showAbonentNotFoundError();
+        else showMissingAbonentError();
     });
 });
 </script>

@@ -1577,6 +1577,46 @@
     return normalizeFinancialMode(mode);
   }
 
+  function __forceResponsibilityLedgerRecalc(ids){
+    var unique = [];
+    (ids || []).forEach(function(id){
+      var v = String(id || "").trim();
+      if (v && unique.indexOf(v) < 0) unique.push(v);
+    });
+    if (!unique.length) return { ok:true, changed:false, results:[] };
+    if (!(window.JKHAutoAccrual && typeof window.JKHAutoAccrual.recalcForMany === "function")) {
+      console.warn("[transfer-responsibility][ledger-recalc-skipped]", { reason:"AUTOACCRUAL_ENGINE_UNAVAILABLE", abonentIds: unique });
+      return { ok:false, reason:"AUTOACCRUAL_ENGINE_UNAVAILABLE", results:[] };
+    }
+    var results = window.JKHAutoAccrual.recalcForMany(unique) || [];
+    var failed = results.filter(function(r){ return !r || r.ok !== true; });
+    if (failed.length) {
+      console.warn("[transfer-responsibility][ledger-recalc-failed]", { abonentIds: unique, failed: failed });
+      return { ok:false, reason:"RECALC_FAILED", results: results };
+    }
+    return {
+      ok: true,
+      changed: results.some(function(r){ return !!(r && r.changed); }),
+      results: results
+    };
+  }
+
+  function __scheduleTransferFlushToServer(){
+    try {
+      if (!(window.Data && typeof window.Data.flushDbToServer === "function")) return;
+      setTimeout(function(){
+        try {
+          var p = window.Data.flushDbToServer();
+          if (p && typeof p.catch === "function") {
+            p.catch(function(e){ console.warn("[transfer-responsibility][flush-failed]", e); });
+          }
+        } catch(e) {
+          console.warn("[transfer-responsibility][flush-failed]", e);
+        }
+      }, 0);
+    } catch(e) {}
+  }
+
   function transferResponsibility(options){
     if (!Data.ensureWriteOrExplain()) return false;
     var db = window.AbonentsDB;
@@ -1612,6 +1652,12 @@
       excludePeriodsStorageKey(newId),
       excludePeriodsStorageKey(oldId)
     ];
+    try {
+      var oldLedgerKey = resolvePaymentLedgerKey(oldId);
+      var newLedgerKey = resolvePaymentLedgerKey(newId);
+      if (oldLedgerKey) transferKeys.push(oldLedgerKey);
+      if (newLedgerKey && transferKeys.indexOf(newLedgerKey) < 0) transferKeys.push(newLedgerKey);
+    } catch(e) {}
     var transferRawSnapshot = {};
     transferKeys.forEach(function(k){ transferRawSnapshot[k] = _getProjectRaw(k); });
     try{
@@ -1697,7 +1743,12 @@
         createdBy: _ownerId()
       });
 
-      return !!window.saveAbonentsDB && window.saveAbonentsDB();
+      var recalc = __forceResponsibilityLedgerRecalc([oldId, newId]);
+      if (!recalc || recalc.ok !== true) throw new Error("TRANSFER_LEDGER_RECALC_FAILED");
+
+      var saved = !!window.saveAbonentsDB && window.saveAbonentsDB();
+      if (saved) __scheduleTransferFlushToServer();
+      return saved;
     }catch(e){
       window.AbonentsDB = snapshot;
       transferKeys.forEach(function(k){

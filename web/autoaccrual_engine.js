@@ -446,6 +446,9 @@
   }
 
   function getDb(){
+    if (window.Data && typeof window.Data.getDb === 'function') {
+      return window.Data.getDb() || { abonents:{}, premises:{}, links:[] };
+    }
     return window.AbonentsDB || { abonents:{}, premises:{}, links:[] };
   }
 
