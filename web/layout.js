@@ -342,6 +342,33 @@ function htmlToElement(html) {
   return t.content.firstElementChild;
 }
 
+function getLayoutAbonentIdFromURL() {
+  try {
+    const p = new URLSearchParams(window.location.search || "");
+    return String(p.get("abonent") || "").trim();
+  } catch (e) {
+    return "";
+  }
+}
+
+function openCurrentAbonentFromLayout() {
+  const id = getLayoutAbonentIdFromURL();
+  if (id) {
+    location.href = "abonent_card.html?abonent=" + encodeURIComponent(id);
+    return;
+  }
+  alert("Откройте карточку через список абонентов или поиск.");
+}
+
+function openReportsFromLayout() {
+  const id = getLayoutAbonentIdFromURL();
+  if (id) {
+    location.href = "reports.html?abonent=" + encodeURIComponent(id);
+    return;
+  }
+  alert("Откройте справки из карточки конкретного абонента.");
+}
+
 function renderLayout() {
   window.__layoutStartScript = document.currentScript;
 
@@ -353,7 +380,7 @@ function renderLayout() {
   <div class="menu-item" onclick="location.href='index.html'">
     <span class="icon">🏠</span><span class="label">Главная</span>
   </div>
-  <div class="menu-item" onclick="location.href='abonent_card.html'">
+  <div class="menu-item" onclick="openCurrentAbonentFromLayout()">
     <span class="icon">👤</span><span class="label">Абонент</span>
   </div>
   <div class="menu-item" onclick="location.href='new_abonent.html'">
@@ -374,7 +401,7 @@ function renderLayout() {
   <div class="menu-item" onclick="location.href='refinancing.html'">
     <span class="icon">📈</span><span class="label">Ставки</span>
   </div>
-  <div class="menu-item" onclick="location.href='reports.html'">
+  <div class="menu-item" onclick="openReportsFromLayout()">
     <span class="icon">📘</span><span class="label">Справки</span>
   </div>
 </div>

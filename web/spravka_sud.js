@@ -200,23 +200,14 @@
     }
 
     try {
-      if (typeof window.getPaymentsKeyForAbonent === "function") {
-        const key = String(window.getPaymentsKeyForAbonent(abonentId) || "").trim();
+      if (window.Data && typeof window.Data.resolvePaymentLedgerKey === "function") {
+        const key = String(window.Data.resolvePaymentLedgerKey(abonentId) || "").trim();
         if (key) {
           logSpravkaPaymentKeyOnce({ abonentId: abonentId, key: key });
           return key;
         }
       }
     } catch (e) {}
-
-    const dbRoot = getDbRootForContext(ctx);
-    const abonent = dbRoot && dbRoot.abonents ? dbRoot.abonents[abonentId] : null;
-    const uid = String((abonent && abonent.uid) || "").trim();
-    if (uid) {
-      const key = "payments_" + uid;
-      logSpravkaPaymentKeyOnce({ abonentId: abonentId, key: key });
-      return key;
-    }
 
     logSpravkaPaymentKeyOnce({ abonentId: abonentId, reason: "UID_REQUIRED" });
     return "";
@@ -405,6 +396,24 @@
     }
   }
 
+  function cardUrlForAbonent(abonentId){
+    const id = String(abonentId || "").trim();
+    return id ? ("abonent_card.html?abonent=" + encodeURIComponent(id)) : "#";
+  }
+
+  function setupBackToCard(ctx){
+    const back = $("backToCard");
+    if (!back) return;
+    const id = String(ctx && ctx.abonentId || "").trim();
+    back.href = cardUrlForAbonent(id);
+    back.addEventListener("click", function(ev){
+      if (!id) {
+        ev.preventDefault();
+        showFatal("Не передан параметр abonent в URL. Возврат к карточке невозможен.");
+      }
+    });
+  }
+
   document.addEventListener("DOMContentLoaded", function () {
     (async function () {
       const eng = window.JKHCalcEngine;
@@ -426,6 +435,7 @@
 
       try {
       const ctx = getContext();
+      setupBackToCard(ctx);
       if (!ctx.abonentId) {
         showFatal("Не передан параметр abonent в URL.");
         return;
@@ -537,7 +547,9 @@
         }
         return false;
       }
-      let allRowsRaw = safeLedgerJSON(paymentsKey, [], ctx.readOwner);
+      let allRowsRaw = (window.Data && typeof window.Data.readPaymentLedger === "function")
+        ? window.Data.readPaymentLedger(ctx.abonentId)
+        : safeLedgerJSON(paymentsKey, [], ctx.readOwner);
       let allRows = Array.isArray(allRowsRaw) ? allRowsRaw : [];
       const hasLedger = hasUsableLedgerRows(allRows);
       console.log('[spravka_sud][ledger-check] id=' + ctx.abonentId + ' len=' + allRows.length);

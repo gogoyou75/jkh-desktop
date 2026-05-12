@@ -1244,9 +1244,24 @@ Split v1.9.1 — следующий крупный этап после `UID-only
   - первичные данные (ФИО/площадь) автоматически не изменяются;
   - импортируются только платежи;
   - payment_period формируется как `2009-MM`.
+- При импорте шаблонных Excel-файлов система обязана определять, найден ли абонент в базе и закрыт ли его период ответственности.
+- Если абонент найден, но расчёт остановлен, строка предпросмотра получает статус `STOPPED` / «УЧТЁН / РАСЧЁТ ОСТАНОВЛЕН».
+- `STOPPED` не является ошибкой первичной идентификации.
+- Система запрещает создавать нового абонента вместо найденного остановленного.
+- Система не предлагает открыть квартиру/расчёт для правки площади из импорта.
+- Платежи после даты остановки расчёта должны блокироваться.
+- Платежи до даты остановки могут проходить обычную проверку.
+- Импорт не имеет права менять `dateTo`, reopen расчёт или изменять историю `links`.
 - Состояние импорта должно сохраняться при переходах на создание абонента и изменение квартиры.
 - Чекбоксы оператора должны восстанавливаться после возврата на страницу импорта.
 - Строки без UID не блокируют импорт платежей валидных строк с UID.
+- Импорт платежей обязан отличать новые платежи от уже существующих.
+- Дубликаты не должны блокировать импорт других новых платежей.
+- Если в Excel найдено 20 платежей, из них 19 уже есть в базе и 1 новый, система должна показать к добавлению только 1 платёж.
+- Кнопка применения платежей должна активироваться, если количество новых платежей больше 0.
+- Счётчик кнопки и фактическая отправка на сервер должны использовать один и тот же сборщик данных.
+- Дубликаты, конфликты, ошибки и STOPPED-платежи после `dateTo` не должны попадать в отправку.
+- STOPPED-строки и дубликаты не должны блокировать новые платежи других абонентов.
 - Конфликт площади решается вручную через страницу квартиры; импорт только показывает подсказку оператору.
 
 ## 12. Import XLS A15 Year Validation and Draft Preview Rule
@@ -1452,3 +1467,23 @@ Fatal-правила:
 - новый абонент стартует с `exclude_periods_<newAbonentId> = []`;
 - повреждённый canonical JSON в `exclude_periods_<abonentId>` блокирует расчёт пени до исправления;
 - запрещено хранить пустую строку вместо JSON-массива.
+
+## 16. Canonical Financial Modes
+
+Единый финансовый слой нужен, чтобы все операции с ledger, frozen debt и transfer balance проходили через один проверяемый write-path и не расходились между страницами UI.
+
+Правила:
+- UI не имеет права самостоятельно считать долг, balance, frozen debt или transfer balance.
+- UI не имеет права напрямую писать financial ledger.
+- Единственный write-path ledger: `payments_<uid>`.
+- `payments_<LS>` разрешён только как read-only legacy fallback внутри service layer.
+- `Data.resolvePaymentLedgerKey(abonentOrId)` определяет canonical key по UID.
+- `Data.readPaymentLedger(abonentOrId)` является canonical ledger reader и единственным местом, где допустим legacy read fallback.
+- `Data.writePaymentLedger(abonentOrId, rows, options)` является canonical ledger writer и обязан блокировать запись в `payments_<LS>`, если LS не является UID.
+- `Data.createEmptyPaymentLedger(abonentOrId)` создаёт пустой ledger нового абонента только через canonical writer.
+- `Data.normalizeFinancialMode(mode)` нормализует режимы `WITH_DEBT`, `WITHOUT_DEBT`; входной alias `NO_DEBT` считается `WITHOUT_DEBT`.
+- `Data.transferResponsibility(...)` является canonical transfer entrypoint.
+- Frozen debt (`jkh_frozen_debt_v1:*`) и transfer balance (`jkh_transfer_balance_v1:*`) создаются только service layer.
+- `jkh_freeze_to_v1:*` и `jkh_transfer_to_v1:*` записываются только service layer в рамках transfer transaction.
+- Financial event log обязателен для ledger/transfer write-path и хранит минимум: `type`, `mode`, `sourceAbonentId`, `targetAbonentId`, `premiseId/regnum`, `date`, `ownerId`, `createdAt`, `debtAmount`, `balanceAmount` при наличии.
+- Merge/split должны быть приведены к тому же responsibility transaction boundary; `SPLIT_PREMISES` пока является документированным будущим режимом без бизнес-логики split.

@@ -332,6 +332,115 @@ function isPaymentBeforeAbonentStart(ab, paymentPeriod){
   return payYm < startYm;
 }
 
+
+function parseImportAnyDateToISO(value){
+  if (value==null) return '';
+  const s = normStr(value);
+  if (!s) return '';
+
+  let m;
+
+  m = s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (m) return m[1] + '-' + m[2] + '-' + m[3];
+
+  m = s.match(/^(\d{2})\.(\d{2})\.(\d{4})$/);
+  if (m) return m[3] + '-' + m[2] + '-' + m[1];
+
+  if (/^\d+(\.\d+)?$/.test(s)){
+    try{
+      const dc = XLSX.SSF.parse_date_code(Number(s));
+      if (dc && dc.y && dc.m && dc.d){
+        return String(dc.y) + '-' + String(dc.m).padStart(2,'0') + '-' + String(dc.d).padStart(2,'0');
+      }
+    }catch(e){}
+  }
+
+  return '';
+}
+
+function getImportAbonentResponsibilityStatus(db, abonentId, abonent){
+  const id = normStr(abonentId);
+  const ab = abonent || {};
+  const regnum = normStr(
+    ab.regnum ||
+    ab.premiseRegnum ||
+    ab.premise_regnum ||
+    ab.regNumber ||
+    ab.reg_no ||
+    ab.flat ||
+    ''
+  );
+  const result = { stopped:false, from:'', to:'', regnum:regnum, reason:'' };
+  const abonentLs = normStr(ab.id);
+  const linksRaw = db && Array.isArray(db.links) ? db.links : [];
+
+  if (linksRaw.length){
+    const ownLinks = [];
+    for (let i=0;i<linksRaw.length;i++){
+      const l = linksRaw[i] || {};
+      const linkId = normStr(l.abonentId || l.abonent_id || l.abonent || l.accountId || l.ls || l.personalAccount);
+      const linkRegnum = normStr(l.regnum || l.premiseRegnum || l.premise_regnum || l.regNumber || l.reg_no);
+      const idMatches = !!id && (linkId === id || (!!abonentLs && linkId === abonentLs));
+      const regMatches = !regnum || linkRegnum === regnum;
+      if (idMatches && regMatches) ownLinks.push(l);
+    }
+
+    const activeLink = ownLinks.find(function(l){
+      return !normStr(l && (l.dateTo || l.to || l.end || l.endDate || l.date_end || l.respTo));
+    });
+    const closedLinks = ownLinks.filter(function(l){
+      return !!normStr(l && (l.dateTo || l.to || l.end || l.endDate || l.date_end || l.respTo));
+    }).map(function(l){
+      return {
+        from: parseImportAnyDateToISO(l && (l.dateFrom || l.from || l.start || l.startDate || l.date_start || l.respFrom)),
+        to: parseImportAnyDateToISO(l && (l.dateTo || l.to || l.end || l.endDate || l.date_end || l.respTo)),
+        raw: l
+      };
+    }).filter(function(l){ return !!l.to; });
+
+    if (!activeLink && closedLinks.length){
+      closedLinks.sort(function(a, b){ return a.to < b.to ? 1 : (a.to > b.to ? -1 : 0); });
+      result.stopped = true;
+      result.from = closedLinks[0].from || '';
+      result.to = closedLinks[0].to || '';
+      result.reason = 'NO_ACTIVE_LINK_WITH_CLOSED_LINK';
+      return result;
+    }
+
+    return result;
+  }
+
+  const fallbackTo = parseImportAnyDateToISO(ab.calcEndDate || ab.dateTo || ab.endDate || '');
+  if (fallbackTo){
+    result.stopped = true;
+    result.from = parseImportAnyDateToISO(ab.calcStartDate || ab.dateFrom || ab.startDate || '');
+    result.to = fallbackTo;
+    result.reason = 'ABONENT_END_DATE';
+  }
+  return result;
+}
+
+function isPaymentAfterResponsibilityStop(stopTo, paymentPeriod){
+  const to = normStr(stopTo);
+  const payYm = normStr(paymentPeriod);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(to) || !/^\d{4}-\d{2}$/.test(payYm)) return false;
+  return (payYm + '-01') > to;
+}
+
+function logImportResponsibilityStopped(row, abonentId, abonent, statusInfo){
+  try{
+    console.log('[import_xls][responsibility-stopped]', {
+      excelRow: row && row.excelRow,
+      abonentId: normStr(abonentId),
+      uid: normStr((abonent && abonent.uid) || getResolvedUid(row)),
+      regnum: normStr(statusInfo && statusInfo.regnum),
+      from: normStr(statusInfo && statusInfo.from),
+      to: normStr(statusInfo && statusInfo.to),
+      mode: mode
+    });
+  }catch(e){}
+}
+
 function ensureImportRowUidFields(row){
   if (!row) return row;
   if (typeof row.excelUid === 'undefined') row.excelUid = normStr(row.uid);
@@ -483,8 +592,11 @@ function isLedgerJsonInvalidError(e){ return !!(e && e.code === 'LEDGER_JSON_INV
 function payKeyByUid(uid){
   const u = normStr(uid);
   if (!u) return '';
-  console.info('[import_xls][payment-key] uid', { uid: u, key: 'payments_' + u });
-  return 'payments_' + u;
+  const key = (window.Data && typeof window.Data.resolvePaymentLedgerKey === 'function')
+    ? window.Data.resolvePaymentLedgerKey(u)
+    : ('payments_' + u);
+  console.info('[import_xls][payment-key] uid', { uid: u, key: key });
+  return key;
 }
 function getPaymentsByUid(uid){
   const key = payKeyByUid(uid);
@@ -492,19 +604,11 @@ function getPaymentsByUid(uid){
     console.warn('[import_xls][payment-key] blocked', { uid: normStr(uid), reason: 'UID_REQUIRED' });
     return [];
   }
-  if (!window.JKHStore || typeof JKHStore.getRaw !== 'function') return [];
-  const raw = JKHStore.getRaw(key, null);
-  if (raw === null || raw === undefined) return [];
-  try{
-    const arr = JSON.parse(raw);
-    if (Array.isArray(arr)) return arr;
-    logLedgerJsonInvalid(key, 'parsed value is not an array');
-    throw makeLedgerJsonInvalidError(key, 'parsed value is not an array');
-  }catch(e){
-    if (isLedgerJsonInvalidError(e)) throw e;
-    logLedgerJsonInvalid(key, e);
-    throw makeLedgerJsonInvalidError(key, e);
+  if (window.Data && typeof window.Data.readPaymentLedger === 'function') {
+    return window.Data.readPaymentLedger(normStr(uid));
   }
+  console.warn('[import_xls][payment-key] blocked', { uid: normStr(uid), reason: 'DATA_LEDGER_READER_REQUIRED' });
+  return [];
 }
 function setPaymentsByUid(uid, arr){
   const key = payKeyByUid(uid);
@@ -512,8 +616,12 @@ function setPaymentsByUid(uid, arr){
     console.warn('[import_xls][payment-key] blocked', { uid: normStr(uid), reason: 'UID_REQUIRED' });
     throw new Error('PAYMENT_UID_REQUIRED');
   }
-  if (!window.JKHStore || !JKHStore.setJSON) throw new Error('Нет JKHStore.setJSON');
-  return JKHStore.setJSON(key, arr, null);
+  if (window.Data && typeof window.Data.writePaymentLedger === 'function') {
+    const ok = window.Data.writePaymentLedger(normStr(uid), Array.isArray(arr) ? arr : [], { eventType: 'IMPORT_XLS_LEDGER_RESTORE' });
+    if (ok === false) throw new Error('PAYMENT_LEDGER_WRITE_BLOCKED');
+    return ok;
+  }
+  throw new Error('Data.writePaymentLedger is not available');
 }
 
 function parseYearMonthFromAny(v){
@@ -1991,7 +2099,19 @@ function evaluatePrimaryRow(db, row){
     status='ERROR'; critical=true; messages.push('Ошибки: "Общая площадь" должна быть числом > 0.');
   }
 
-  if (getCreatedUid(row) && !getExcelUid(row)){
+  const responsibilityStatus = found && found.abonent ? getImportAbonentResponsibilityStatus(db, found.key, found.abonent) : null;
+  const isStoppedAbonent = !!(responsibilityStatus && responsibilityStatus.stopped);
+
+  if (isStoppedAbonent){
+    status='STOPPED';
+    critical=false;
+    messages.push('Абонент найден в базе и учтён.');
+    messages.push('Расчёт остановлен с ' + (responsibilityStatus.to || 'неизвестной даты') + '.');
+    messages.push('Новые начисления для этого абонента не должны создаваться после даты остановки.');
+    logImportResponsibilityStopped(row, found.key, found.abonent, responsibilityStatus);
+    const stoppedUid = normStr((found.abonent && found.abonent.uid) || found.uid || getResolvedUid(row));
+    if (stoppedUid) action = { type:'COPY_UID', uid: stoppedUid };
+  } else if (getCreatedUid(row) && !getExcelUid(row)){
     status='WARNING_CREATED';
     critical=false;
     messages.push('Абонент создан. Скопируйте UID в Excel и перезагрузите файл.');
@@ -2016,12 +2136,12 @@ function evaluatePrimaryRow(db, row){
     const premise = reg && db.premises ? db.premises[reg] : null;
     const dbSq = normNum(premise ? premise.square : found.abonent.square);
     if (Number.isFinite(dbSq) && Number.isFinite(row.square) && dbSq !== row.square){
-      status = (status==='ERROR') ? 'ERROR' : 'UPDATED';
+      status = (status==='ERROR' || status==='STOPPED') ? status : 'UPDATED';
       warnings.push('Площадь в квартире: ' + dbSq + '. Площадь в Excel: ' + row.square + '.');
       if ($('optAllowSquareUpdate').checked && mode==='primary' && premise){
         warnings.push('Площадь будет обновлена: было ' + dbSq + ', станет ' + row.square + '.');
       }
-      if (premise && found.type !== 'UID_STRUCTURAL_CONFLICT' && found.type !== 'UID_MISMATCH'){
+      if (!isStoppedAbonent && premise && found.type !== 'UID_STRUCTURAL_CONFLICT' && found.type !== 'UID_MISMATCH'){
         const openCheck = verifyPremiseOpenContext(db, row, found, reg);
         logImportPremiseOpenCheck(row, reg, openCheck.ok ? (openCheck.result || 'ok') : 'blocked', openCheck.reason);
         if (openCheck.ok){
@@ -2038,103 +2158,289 @@ function evaluatePrimaryRow(db, row){
   return { status, critical, action, found, details: messages.concat(warnings) };
 }
 
+function getPaymentCollectionRow(result, row){
+  const key = String(row && row.excelRow);
+  return (result && result.byExcelRow && result.byExcelRow[key]) || {
+    ls: normStr(row && row.ls),
+    uid: getResolvedUid(row),
+    newCount:0,
+    duplicateCount:0,
+    conflictCount:0,
+    errorCount:0,
+    foundCount:paymentPairsCount(row),
+    skippedCount:0,
+    reasons:[]
+  };
+}
+
+function makeEmptyImportPaymentsCollection(){
+  return {
+    rows: [],
+    totalNew: 0,
+    totalDuplicate: 0,
+    totalConflict: 0,
+    totalError: 0,
+    byExcelRow: {}
+  };
+}
+
+function collectImportPaymentsToApply(db, options){
+  const opts = options || {};
+  const sourceRows = Array.isArray(opts.rows) ? opts.rows : dataRows;
+  const result = makeEmptyImportPaymentsCollection();
+
+  function ensureExcelRow(row){
+    const excelRow = String(row && row.excelRow);
+    if (!result.byExcelRow[excelRow]){
+      result.byExcelRow[excelRow] = {
+        ls: normStr(row && row.ls),
+        uid: getResolvedUid(row),
+        newCount: 0,
+        duplicateCount: 0,
+        conflictCount: 0,
+        errorCount: 0,
+        foundCount: 0,
+        skippedCount: 0,
+        reasons: []
+      };
+    }
+    return result.byExcelRow[excelRow];
+  }
+  function addReason(info, text){
+    const t = normStr(text);
+    if (t) info.reasons.push(t);
+  }
+  function addError(info, text){
+    info.errorCount++;
+    result.totalError++;
+    addReason(info, text);
+  }
+  function addConflict(info, text){
+    info.conflictCount++;
+    result.totalConflict++;
+    addReason(info, text);
+  }
+  function addDuplicate(info){
+    info.duplicateCount++;
+    result.totalDuplicate++;
+  }
+  function addNew(info){
+    info.newCount++;
+    result.totalNew++;
+  }
+
+  if (!db || !db.abonents){
+    if (!opts.silent){
+      console.log('[import_xls][payments-collect]', {
+        totalNew: result.totalNew,
+        totalDuplicate: result.totalDuplicate,
+        totalConflict: result.totalConflict,
+        totalError: result.totalError,
+        mode: mode,
+        parseMode: parseMeta && parseMeta.mode,
+        fileYearBlocked: isImportBlockedByFileYear(),
+        templateModeBlocked: isApplyBlockedByTemplateMode(),
+        canEnterPayments: canEnterPaymentsMode(),
+        byExcelRow: result.byExcelRow
+      });
+    }
+    return result;
+  }
+
+  for (let i=0;i<sourceRows.length;i++){
+    const row = sourceRows[i] || {};
+    const info = ensureExcelRow(row);
+    if (row.paymentsImportStatus === 'applied'){
+      addReason(info, 'Импорт выполнен: строка применена.');
+      continue;
+    }
+
+    const payments = Array.isArray(row.payments) ? row.payments : [];
+    const expectedFound = paymentPairsCount(row);
+    const uid = getResolvedUid(row);
+    const foundU = uid ? findAbonentByUid(db, uid) : null;
+    const ab = foundU ? foundU.abonent : null;
+
+    if (!uid){
+      if (expectedFound > 0){
+        info.foundCount += expectedFound;
+        for (let e=0;e<expectedFound;e++) addError(info, 'Создайте абонента в программе; для созданного из импорта UID будет использован как внутренний createdUid/resolvedUid.');
+      } else {
+        addReason(info, 'Платежей в строке нет.');
+      }
+      continue;
+    }
+    if (!ab){
+      if (expectedFound > 0){
+        info.foundCount += expectedFound;
+        for (let e=0;e<expectedFound;e++) addError(info, 'UID из Excel не найден в базе.');
+      } else {
+        addReason(info, 'Платежей в строке нет.');
+      }
+      continue;
+    }
+
+    const primaryFoundForPayment = findAbonentByRules(db, row);
+    if (primaryFoundForPayment && (primaryFoundForPayment.type === 'UID_STRUCTURAL_CONFLICT' || primaryFoundForPayment.type === 'UID_MISMATCH')){
+      if (expectedFound > 0){
+        info.foundCount += expectedFound;
+        for (let e=0;e<expectedFound;e++) addConflict(info, primaryFoundForPayment.msg);
+      } else {
+        addReason(info, primaryFoundForPayment.msg);
+      }
+      continue;
+    }
+    if (primaryFoundForPayment && primaryFoundForPayment.type === 'UID_SOFT_MISMATCH'){
+      addReason(info, UID_SOFT_MISMATCH_TEXT);
+    }
+
+    const responsibilityStatus = getImportAbonentResponsibilityStatus(db, foundU.key, ab);
+    if (responsibilityStatus.stopped){
+      addReason(info, 'Абонент найден в базе и учтён.');
+      addReason(info, 'Расчёт остановлен с ' + (responsibilityStatus.to || 'неизвестной даты') + '.');
+      logImportResponsibilityStopped(row, foundU.key, ab, responsibilityStatus);
+    }
+    if (parseMeta.mode === 'strict-template-customer-2009'){
+      const lsExcel = normStr(row.ls);
+      const lsDb = normStr(ab.id);
+      if ((lsExcel && lsDb && lsExcel !== lsDb) || !softFioMatch(row, ab)){
+        addReason(info, UID_SOFT_MISMATCH_TEXT);
+      }
+    }
+
+    const uidKey = normStr(ab.uid || getResolvedUid(row));
+    let existing = [];
+    try{
+      existing = getPaymentsByUid(uidKey);
+    }catch(e){
+      if (isLedgerJsonInvalidError(e)) throw e;
+      if (expectedFound > 0){
+        info.foundCount += expectedFound;
+        for (let er=0;er<expectedFound;er++) addError(info, 'Ошибка чтения платежей по UID.');
+      }
+      continue;
+    }
+
+    for (let p=0;p<payments.length;p++){
+      const pay = payments[p] || {};
+      const amount = normNum(pay.amount);
+      if (!Number.isFinite(amount) || amount <= 0) continue;
+      info.foundCount++;
+
+      const resolvedPeriod = resolveExplicitPaymentPeriod(pay, row);
+      if (!resolvedPeriod.ok){
+        logPaymentPeriodContract(resolvedPeriod.code, { excelRow: row && row.excelRow, sourceIndex: pay && pay.sourceIndex });
+        addError(info, PAYMENT_PERIOD_MISSING_MESSAGE + ' (' + resolvedPeriod.code + ')');
+        continue;
+      }
+      const year = resolvedPeriod.year;
+      const month = resolvedPeriod.month;
+      const paymentPeriod = resolvedPeriod.period;
+      if (isPaymentBeforeAbonentStart(ab, paymentPeriod)){
+        addError(info, 'Ошибка: платёж за ' + paymentPeriod + ' раньше даты начала расчёта абонента (' + getAbonentStartDate(ab) + ').');
+        continue;
+      }
+      if (responsibilityStatus.stopped && isPaymentAfterResponsibilityStop(responsibilityStatus.to, paymentPeriod)){
+        addError(info, 'Платёж относится к периоду после остановки расчёта абонента.');
+        continue;
+      }
+
+      const paidDate = normalizePaidDateStrict(pay.paidDateRaw);
+      if (!paidDate){
+        addError(info, 'Ошибка: отсутствует точная дата платежа. Период ' + month + '.' + year + ' не является датой оплаты.');
+        continue;
+      }
+
+      const dup = existing.some(function(x){
+        const ym = getLedgerYearMonth(x);
+        const paid = getLedgerPaidAmount(x);
+        if (!ym || !Number.isFinite(paid)) return false;
+        return ym.year === year &&
+          ym.month === month &&
+          getLedgerPaidDate(x) === paidDate &&
+          paid === amount;
+      });
+      if (dup){
+        addDuplicate(info);
+        continue;
+      }
+
+      const sameMonthSameDateDiff = existing.find(function(x){
+        const ym = getLedgerYearMonth(x);
+        const paid = getLedgerPaidAmount(x);
+        if (!ym || !Number.isFinite(paid) || paid <= 0) return false;
+        return ym.year === year && ym.month === month && getLedgerPaidDate(x) === paidDate && paid !== amount;
+      });
+      if (sameMonthSameDateDiff){
+        addConflict(info, 'Конфликт: на эту дату уже есть платеж с другой суммой.');
+        continue;
+      }
+
+      try{
+        result.rows.push(buildServerPaymentRow(row, pay, ab));
+        addNew(info);
+      }catch(e){
+        const code = normStr(e && e.code) || 'UNKNOWN';
+        addError(info, 'Импорт остановлен: ошибка контракта ' + code + '.');
+      }
+    }
+
+    info.skippedCount = info.duplicateCount + info.conflictCount + info.errorCount;
+    if (info.newCount > 0) addReason(info, 'OK: добавится дополнительный платеж.');
+    if (info.duplicateCount > 0) addReason(info, 'Дубликаты: ' + info.duplicateCount + '.');
+    if (info.conflictCount > 0) addReason(info, 'Конфликтов: ' + info.conflictCount + '.');
+    if (info.errorCount > 0) addReason(info, 'Ошибок: ' + info.errorCount + '.');
+    if (info.foundCount === 0) addReason(info, 'Платежей в строке нет.');
+  }
+
+  if (!opts.silent){
+    console.log('[import_xls][payments-collect]', {
+      totalNew: result.totalNew,
+      totalDuplicate: result.totalDuplicate,
+      totalConflict: result.totalConflict,
+      totalError: result.totalError,
+      mode: mode,
+      parseMode: parseMeta && parseMeta.mode,
+      fileYearBlocked: isImportBlockedByFileYear(),
+      templateModeBlocked: isApplyBlockedByTemplateMode(),
+      canEnterPayments: canEnterPaymentsMode(),
+      byExcelRow: result.byExcelRow
+    });
+  }
+  return result;
+}
+
 function evaluatePaymentsRow(db, row){
   const details = [];
   if (row && row.paymentsImportStatus === 'applied'){
-    return { status:'APPLIED', critical:false, details:['Импорт выполнен: строка применена.'], conflicts:0, unresolved:0, adds:0, dups:0, found:paymentPairsCount(row), skipped:0 };
-  }
-  let status='OK', critical=false;
-  const uid = getResolvedUid(row);
-  const foundU = uid ? findAbonentByUid(db, uid) : null;
-  const ab = foundU ? foundU.abonent : null;
-
-  if (!uid){
-    return { status:'ERROR', critical:true, details:['Создайте абонента в программе; для созданного из импорта UID будет использован как внутренний createdUid/resolvedUid.'], conflicts:0, unresolved:0, adds:0, dups:0, found:paymentPairsCount(row), skipped:0 };
-  }
-  if (!ab){
-    return { status:'ERROR', critical:true, details:['UID из Excel не найден в базе.'], conflicts:0, unresolved:0, adds:0, dups:0, found:paymentPairsCount(row), skipped:0 };
-  }
-  const primaryFoundForPayment = findAbonentByRules(db, row);
-  if (primaryFoundForPayment && (primaryFoundForPayment.type === 'UID_STRUCTURAL_CONFLICT' || primaryFoundForPayment.type === 'UID_MISMATCH')){
-    return { status:'ERROR', critical:true, details:[primaryFoundForPayment.msg], conflicts:0, unresolved:1, adds:0, dups:0, found:paymentPairsCount(row), skipped:paymentPairsCount(row) };
-  }
-  if (primaryFoundForPayment && primaryFoundForPayment.type === 'UID_SOFT_MISMATCH'){
-    details.push(UID_SOFT_MISMATCH_TEXT);
-  }
-  if (parseMeta.mode === 'strict-template-customer-2009'){
-    const lsExcel = normStr(row.ls);
-    const lsDb = normStr(ab.id);
-    if ((lsExcel && lsDb && lsExcel !== lsDb) || !softFioMatch(row, ab)){
-      details.push(UID_SOFT_MISMATCH_TEXT);
-    }
+    return { status:'APPLIED', critical:false, details:['Импорт выполнен: строка применена.'], conflicts:0, unresolved:0, adds:0, dups:0, found:paymentPairsCount(row), skipped:0, errors:0 };
   }
 
-  const uidKey = normStr(ab.uid || getResolvedUid(row));
-  const existing = getPaymentsByUid(uidKey);
-  let conflicts=0, unresolved=0, errs=0, dups=0, adds=0, found=0;
+  const collection = collectImportPaymentsToApply(db, { rows:[row], silent:true });
+  const info = getPaymentCollectionRow(collection, row);
+  const found = Number(info.foundCount || 0);
+  const adds = Number(info.newCount || 0);
+  const dups = Number(info.duplicateCount || 0);
+  const conflicts = Number(info.conflictCount || 0);
+  const errs = Number(info.errorCount || 0);
 
-  for (let i=0;i<row.payments.length;i++){
-    const p = row.payments[i];
-    const amount = normNum(p.amount);
-    if (!Number.isFinite(amount) || amount <= 0) continue;
-    found++;
-    const resolvedPeriod = resolveExplicitPaymentPeriod(p, row);
-    if (!resolvedPeriod.ok){
-      errs++;
-      logPaymentPeriodContract(resolvedPeriod.code, { excelRow: row && row.excelRow, sourceIndex: p && p.sourceIndex });
-      details.push(PAYMENT_PERIOD_MISSING_MESSAGE + ' (' + resolvedPeriod.code + ')');
-      continue;
-    }
-    const year = resolvedPeriod.year;
-    const month = resolvedPeriod.month;
-    const paymentPeriod = resolvedPeriod.period;
-    if (isPaymentBeforeAbonentStart(ab, paymentPeriod)){
-      errs++;
-      details.push(
-        'Ошибка: платёж за ' + paymentPeriod +
-        ' раньше даты начала расчёта абонента (' + getAbonentStartDate(ab) + ').'
-      );
-      continue;
-    }
-    const paidDate = normalizePaidDateStrict(p.paidDateRaw);
-    if (!paidDate){
-      errs++;
-      details.push('Ошибка: отсутствует точная дата платежа. Период ' + month + '.' + year + ' не является датой оплаты.');
-      continue;
-    }
-    const dup = existing.some(function(x){
-      const ym = getLedgerYearMonth(x);
-      const paid = getLedgerPaidAmount(x);
-      if (!ym || !Number.isFinite(paid)) return false;
-      return ym.year === year &&
-        ym.month === month &&
-        getLedgerPaidDate(x) === paidDate &&
-        paid === amount;
-    });
-    if (dup){ dups++; continue; }
+  let status = 'OK';
+  let critical = false;
+  if (errs > 0){ status = 'ERROR'; critical = true; }
+  else if (conflicts > 0){ status = 'CONFLICT'; }
+  else if (adds === 0 && dups > 0){ status = 'SKIP_DUPLICATE'; }
 
-    const sameMonthSameDateDiff = existing.find(function(x){
-      const ym = getLedgerYearMonth(x);
-      const paid = getLedgerPaidAmount(x);
-      if (!ym || !Number.isFinite(paid) || paid <= 0) return false;
-      return ym.year === year && ym.month === month && getLedgerPaidDate(x) === paidDate && paid !== amount;
-    });
-    if (sameMonthSameDateDiff){
-      conflicts++;
-      unresolved++;
-      continue;
-    }
-    adds++;
-  }
-
-  if (errs>0){ status='ERROR'; critical=true; details.push('Есть ошибки платежей: нужен корректный явный год/месяц и сумма > 0.'); }
-  if (conflicts>0){ status = (status==='ERROR' ? status : 'CONFLICT'); details.push('Конфликт: на эту дату уже есть платеж с другой суммой.'); }
-  if (!errs && !conflicts && adds===0 && dups>0){ status='SKIP_DUPLICATE'; details.push('Дубликат: уже есть такой платеж.'); }
-  if (!errs && !conflicts && adds>0){ status='OK'; details.push('OK: добавится дополнительный платеж.'); }
-  if (!errs && !conflicts && adds===0 && dups===0){ details.push('Платежей в строке нет.'); }
+  const reasons = Array.isArray(info.reasons) ? info.reasons : [];
+  for (let i=0;i<reasons.length;i++) details.push(reasons[i]);
+  if (adds > 0 && !reasons.some(function(x){ return String(x).indexOf('OK: добавится') === 0; })) details.push('OK: добавится дополнительный платеж.');
+  if (!found && !details.length) details.push('Платежей в строке нет.');
+  details.push('Новых платежей к добавлению: ' + adds + '.');
+  details.push('Дубликатов: ' + dups + '.');
+  details.push('Конфликтов: ' + conflicts + '.');
+  details.push('Ошибок: ' + errs + '.');
   details.push('Найдено в Excel: ' + found + '; добавится: ' + adds + '; дубликаты: ' + dups + '; конфликты: ' + conflicts + '.');
 
-  return { status, critical, details, conflicts, unresolved, adds, dups, found, skipped: dups + conflicts };
+  return { status, critical, details, conflicts, unresolved:conflicts, adds, dups, found, skipped: dups + conflicts + errs, errors:errs };
 }
 
 function buildPreview(){
@@ -2200,20 +2506,21 @@ function buildPreview(){
   renderPreview();
 }
 
-function statusRU(s){ return ({OK:'ОК', ERROR:'ОШИБКА', UPDATED:'ПРЕДУПРЕЖДЕНИЕ', WARNING_CREATED:'СОЗДАН', SKIP_DUPLICATE:'ДУБЛИКАТ', CONFLICT:'КОНФЛИКТ', APPLIED:'ПРИМЕНЕНО'})[s] || s; }
-function statusClass(s){ return ({OK:'status-ok', ERROR:'status-err', UPDATED:'status-warn', WARNING_CREATED:'status-created', SKIP_DUPLICATE:'status-skip', CONFLICT:'status-conflict', APPLIED:'status-ok'})[s] || ''; }
+function statusRU(s){ return ({OK:'ОК', ERROR:'ОШИБКА', UPDATED:'ПРЕДУПРЕЖДЕНИЕ', STOPPED:'УЧТЁН / РАСЧЁТ ОСТАНОВЛЕН', WARNING_CREATED:'СОЗДАН', SKIP_DUPLICATE:'ДУБЛИКАТ', CONFLICT:'КОНФЛИКТ', APPLIED:'ПРИМЕНЕНО'})[s] || s; }
+function statusClass(s){ return ({OK:'status-ok', ERROR:'status-err', UPDATED:'status-warn', STOPPED:'status-warn', WARNING_CREATED:'status-created', SKIP_DUPLICATE:'status-skip', CONFLICT:'status-conflict', APPLIED:'status-ok'})[s] || ''; }
 
 function renderPreview(){
   const body = $('previewBody');
   body.innerHTML = '';
   if (!preview.length){ body.innerHTML = '<tr><td colspan="7" class="small">Нет предпросмотра</td></tr>'; updateRestoredFileInfo(); updateStateLine(); setButtons(); return; }
 
-  let ok=0, err=0, warn=0, dup=0, conf=0;
+  let ok=0, err=0, warn=0, stopped=0, dup=0, conf=0;
   for (let i=0;i<preview.length;i++){
     const r = preview[i];
     if (r.status==='OK') ok++;
     if (r.status==='ERROR') err++;
     if (r.status==='UPDATED' || r.status==='WARNING_CREATED') warn++;
+    if (r.status==='STOPPED') stopped++;
     if (r.status==='SKIP_DUPLICATE') dup++;
     if (r.status==='CONFLICT') conf++;
 
@@ -2279,7 +2586,7 @@ function renderPreview(){
   }
 
   $('summaryLine').textContent = 'Режим: ' + (mode==='primary'?'Шаг 1 — Первичка':'Шаг 2 — Платежи') +
-    ' | ОК=' + ok + ' | ПРЕДУПРЕЖДЕНИЕ=' + warn + ' | ОШИБКА=' + err + ' | ДУБЛИКАТ=' + dup + ' | КОНФЛИКТ=' + conf + ' | Всего=' + preview.length;
+    ' | ОК=' + ok + ' | ПРЕДУПРЕЖДЕНИЕ=' + warn + ' | ОСТАНОВЛЕН=' + stopped + ' | ОШИБКА=' + err + ' | ДУБЛИКАТ=' + dup + ' | КОНФЛИКТ=' + conf + ' | Всего=' + preview.length;
 
   let diag = '';
   if (err){ diag = '<span class="danger">Есть ошибки, проверь строки со статусом ОШИБКА.</span>'; }
@@ -2319,6 +2626,14 @@ function renderPreview(){
   } else if (parseMeta.mode === 'strict-template-customer-2009'){
     diag += '<br><span class="ok">Распознан CUSTOMER_2009: карта 0–77 найдена, рабочие поля читаются по служебной строке 15.</span>';
     diag += '<br><span class="mono">Служебная строка: 15; карта полей: 0–77.</span>';
+  }
+  if (mode === 'payments'){
+    const db = getDB();
+    const paymentsCollect = db && db.abonents ? collectImportPaymentsToApply(db, { silent:true }) : makeEmptyImportPaymentsCollection();
+    diag += '<br><span class="mono">Новых платежей к добавлению: ' + Number(paymentsCollect.totalNew || 0) + '</span>';
+    diag += '<br><span class="mono">Дубликатов: ' + Number(paymentsCollect.totalDuplicate || 0) + '</span>';
+    diag += '<br><span class="mono">Конфликтов: ' + Number(paymentsCollect.totalConflict || 0) + '</span>';
+    diag += '<br><span class="mono">Ошибок: ' + Number(paymentsCollect.totalError || 0) + '</span>';
   }
   $('errorsBox').innerHTML = diag;
 
@@ -2375,13 +2690,7 @@ function hasUnresolvedConflicts(){
 function getPaymentsToApplyCount(){
   const db = getDB();
   if (!db || !db.abonents) return 0;
-  let adds = 0;
-  for (let i=0;i<dataRows.length;i++){
-    if (dataRows[i] && dataRows[i].paymentsImportStatus === 'applied') continue;
-    const p = evaluatePaymentsRow(db, dataRows[i]);
-    adds += Number(p.adds || 0);
-  }
-  return adds;
+  return Number(collectImportPaymentsToApply(db).totalNew || 0);
 }
 
 function updateStateLine(){
@@ -2556,6 +2865,11 @@ async function applyPrimary(){
     if (!Number.isFinite(row.square) || row.square<=0) continue;
 
     let a = found.abonent;
+    const responsibilityStatus = getImportAbonentResponsibilityStatus(db, found.key, a);
+    if (responsibilityStatus.stopped){
+      logImportResponsibilityStopped(row, found.key, a, responsibilityStatus);
+      continue;
+    }
     if (!getExcelUid(row)){
       const applyMatch = abonentMatchesExcelRow(a, row, false);
       if (!applyMatch.ok){
@@ -2624,105 +2938,24 @@ async function applyPayments(){
   const db = getDB();
   if (!db || !db.abonents){ setImportStatus('База абонентов не загружена.', 'err'); setImportBusy(false); if (window.JKHBusy && typeof JKHBusy.hide === 'function') JKHBusy.hide(); return; }
 
-  const rows = [];
-  const appliedExcelRows = {};
-  const contractMessages = {
-    ACCOUNT_UID_REQUIRED: 'Импорт остановлен: отсутствует UID (account_uid).',
-    ACCOUNT_NUMBER_REQUIRED: 'Импорт остановлен: отсутствует лицевой счёт (account_number).',
-    PAYMENT_DATE_REQUIRED: 'Импорт остановлен: отсутствует дата платежа.',
-    PAYMENT_DATE_INVALID: 'Импорт остановлен: некорректная дата платежа (требуется YYYY-MM-DD).',
-    PAYMENT_YEAR_REQUIRED: PAYMENT_PERIOD_MISSING_MESSAGE,
-    PAYMENT_PERIOD_REQUIRED: PAYMENT_PERIOD_MISSING_MESSAGE,
-    PAYMENT_PERIOD_INVALID: 'Импорт остановлен: некорректный период платежа (требуется YYYY-MM).',
-    AMOUNT_INVALID: 'Импорт остановлен: некорректная сумма платежа.',
-    SOURCE_INDEX_INVALID: 'Импорт остановлен: некорректный source_index (целое число >= 1).'
-  };
-  for (let i=0;i<dataRows.length;i++){
-    const row = dataRows[i];
-    const primaryFoundForPayment = findAbonentByRules(db, row);
-    if (primaryFoundForPayment && (primaryFoundForPayment.type === 'UID_STRUCTURAL_CONFLICT' || primaryFoundForPayment.type === 'UID_MISMATCH')) continue;
-    const uid = getResolvedUid(row);
-    const foundU = uid ? findAbonentByUid(db, uid) : null;
-    const ab = foundU ? foundU.abonent : null;
-    const accountUid = uid || '';
-    const accountNumber = normStr(ab && ab.id ? ab.id : row.ls);
-
-    for (let p=0;p<(row.payments || []).length;p++){
-      const pay = row.payments[p];
-      const resolvedPeriod = resolveExplicitPaymentPeriod(pay, row);
-      if (!resolvedPeriod.ok){
-        logPaymentPeriodContract(resolvedPeriod.code, { excelRow: row && row.excelRow, sourceIndex: pay && pay.sourceIndex });
-        const msg = contractMessages[resolvedPeriod.code] || ('Импорт остановлен: ошибка контракта ' + resolvedPeriod.code + '.');
-        setImportStatus(msg, 'err');
-        setImportBusy(false);
-        if (window.JKHBusy && typeof JKHBusy.hide === 'function') JKHBusy.hide();
-        return;
-      }
-      const year = resolvedPeriod.year;
-      const month = resolvedPeriod.month;
-      const amountNum = normNum(pay.amount);
-      const paidDateDisplay = normalizePaidDateStrict(pay.paidDateRaw);
-      const paymentPeriod = resolvedPeriod.period;
-      if (isPaymentBeforeAbonentStart(ab, paymentPeriod)){
-        setImportStatus(
-          'Импорт остановлен: платёж за ' + paymentPeriod +
-          ' раньше даты начала расчёта абонента (' + getAbonentStartDate(ab) + ').',
-          'err'
-        );
-        setImportBusy(false);
-        if (window.JKHBusy && typeof JKHBusy.hide === 'function') JKHBusy.hide();
-        return;
-      }
-      const previewRow = evaluatePaymentsRow(db, row);
-      if (!previewRow || previewRow.status==='ERROR') continue;
-      const paymentUid = normStr(ab && ab.uid ? ab.uid : getResolvedUid(row));
-      if (!paymentUid){ setImportStatus('Для импорта платежей нужен UID.', 'err'); setImportBusy(false); if (window.JKHBusy && typeof JKHBusy.hide === 'function') JKHBusy.hide(); return; }
-      let existing;
-      try{
-        existing = getPaymentsByUid(paymentUid);
-      }catch(e){
-        if (isLedgerJsonInvalidError(e)){
-          setImportStatus(LEDGER_FATAL_MESSAGE, 'err');
-          setImportBusy(false);
-          if (window.JKHBusy && typeof JKHBusy.hide === 'function') JKHBusy.hide();
-          return;
-        }
-        throw e;
-      }
-      const isDup = existing.some(function(x){
-        const ym = getLedgerYearMonth(x);
-        const paid = getLedgerPaidAmount(x);
-        return ym && ym.year===year && ym.month===month && getLedgerPaidDate(x)===paidDateDisplay && paid===amountNum;
-      });
-      const isConflict = existing.some(function(x){
-        const ym = getLedgerYearMonth(x);
-        const paid = getLedgerPaidAmount(x);
-        return ym && ym.year===year && ym.month===month && getLedgerPaidDate(x)===paidDateDisplay && Number.isFinite(paid) && paid!==amountNum;
-      });
-      if (isDup || isConflict) continue;
-      if (isPaymentBeforeAbonentStart(ab, paymentPeriod)){
-        setImportStatus(
-          'Импорт остановлен: платёж за ' + paymentPeriod +
-          ' раньше даты начала расчёта абонента (' + getAbonentStartDate(ab) + ').',
-          'err'
-        );
-        setImportBusy(false);
-        if (window.JKHBusy && typeof JKHBusy.hide === 'function') JKHBusy.hide();
-        return;
-      }
-      try{
-        rows.push(buildServerPaymentRow(row, pay, ab));
-        appliedExcelRows[String(row.excelRow)] = true;
-      }catch(e){
-        const code = normStr(e && e.code) || 'UNKNOWN';
-        const msg = contractMessages[code] || ('Импорт остановлен: ошибка контракта ' + code + '.');
-        setImportStatus(msg, 'err');
-        setImportBusy(false);
-        if (window.JKHBusy && typeof JKHBusy.hide === 'function') JKHBusy.hide();
-        return;
-      }
+  let collection;
+  try{
+    collection = collectImportPaymentsToApply(db);
+  }catch(e){
+    if (isLedgerJsonInvalidError(e)){
+      setImportStatus(LEDGER_FATAL_MESSAGE, 'err');
+      setImportBusy(false);
+      if (window.JKHBusy && typeof JKHBusy.hide === 'function') JKHBusy.hide();
+      return;
     }
+    throw e;
   }
+  const rows = Array.isArray(collection.rows) ? collection.rows : [];
+  const appliedExcelRows = {};
+  const byExcelRow = collection.byExcelRow || {};
+  Object.keys(byExcelRow).forEach(function(excelRow){
+    if (Number(byExcelRow[excelRow] && byExcelRow[excelRow].newCount || 0) > 0) appliedExcelRows[String(excelRow)] = true;
+  });
 
   if (!rows.length){ setImportStatus('Нет платежей для добавления.', 'err'); setImportBusy(false); if (window.JKHBusy && typeof JKHBusy.hide === 'function') JKHBusy.hide(); return; }
 

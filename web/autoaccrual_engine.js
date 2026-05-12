@@ -187,6 +187,13 @@
       return '';
     }
 
+    if (window.Data && typeof window.Data.resolvePaymentLedgerKey === 'function') {
+      const dataKey = String(window.Data.resolvePaymentLedgerKey(id) || '').trim();
+      if (dataKey) return dataKey;
+      console.warn('[autoaccrual][payment-key] blocked', { abonentId: id, reason: 'EMPTY_KEY_FROM_DATA_RESOLVER' });
+      return '';
+    }
+
     if (typeof window.getPaymentsKeyForAbonent === 'function') {
       const key = String(window.getPaymentsKeyForAbonent(id) || '').trim();
       if (key) return key;
@@ -209,6 +216,9 @@
   }
 
   function loadPayments(abonentId, ownerId){
+    if (window.Data && typeof window.Data.readPaymentLedger === 'function') {
+      return window.Data.readPaymentLedger(abonentId);
+    }
     const key = resolvePaymentsKeyForAbonent(abonentId);
     if (!key) return [];
     const raw = storeGetRaw(key, ownerId);
@@ -225,9 +235,11 @@
     }
   }
   function savePayments(abonentId, arr, ownerId){
-    const key = resolvePaymentsKeyForAbonent(abonentId);
-    if (!key) return;
-    storeSetRaw(key, JSON.stringify(arr||[]), ownerId);
+    if (window.Data && typeof window.Data.writePaymentLedger === 'function') {
+      window.Data.writePaymentLedger(abonentId, arr || [], { eventType: 'AUTOACCRUAL_WRITE' });
+      return;
+    }
+    throw new Error('Data.writePaymentLedger is not available');
   }
 
   // ----------------------------
@@ -434,6 +446,9 @@
   }
 
   function getDb(){
+    if (window.Data && typeof window.Data.getDb === 'function') {
+      return window.Data.getDb() || { abonents:{}, premises:{}, links:[] };
+    }
     return window.AbonentsDB || { abonents:{}, premises:{}, links:[] };
   }
 
@@ -535,21 +550,28 @@
     if (!daysByAbonent.size) return [];
 
     const out = [];
-    let sum = 0;
-
     for (const [abonentId, days] of daysByAbonent.entries()){
-      const amt = r2(total * (days / dim));
-      sum = r2(sum + amt);
-      out.push({ abonentId, amount: amt, days });
-    }
-
-    const target = r2(out.reduce((acc,x)=>acc + x.amount, 0));
-    const diff = r2(target - sum);
-    if (out.length && Math.abs(diff) >= 0.01){
-      out[out.length-1].amount = r2(out[out.length-1].amount + diff);
+      out.push({ abonentId, amount: r2(total * (days / dim)), days });
     }
 
     return out;
+  }
+
+  function prorateAccrualByRange(total, year, month, range){
+    const y = Number(year);
+    const m = Number(month);
+    const dim = daysInMonth(y, m);
+    const monthStart = new Date(y, m-1, 1, 12,0,0,0);
+    const monthEndExcl = new Date(y, m-1, dim+1, 12,0,0,0);
+    const fromD = parseISOToDate(range && range.from);
+    if (!fromD) return r2(total);
+    const toD0 = range && range.to ? parseISOToDate(range.to) : null;
+    const toExcl = toD0 ? new Date(toD0.getFullYear(), toD0.getMonth(), toD0.getDate()+1, 12,0,0,0) : monthEndExcl;
+    const start = (fromD > monthStart) ? fromD : monthStart;
+    const endExcl = (toExcl < monthEndExcl) ? toExcl : monthEndExcl;
+    if (endExcl <= start) return 0;
+    const days = Math.round((endExcl - start) / DAY_MS);
+    return r2(total * (days / dim));
   }
 
   function nextPaymentId(arr){
@@ -568,15 +590,21 @@
     const regnum = getPremiseRegnumForAbonent(ls);
     const ownershipHistory = regnum ? getOwnershipHistoryForRegnum(regnum) : [];
 
-    const allowedYm = new Set(months.map(m => `${m.year}-${m.month}`));
+    const allowedMonths = months.map(m => `${m.year}-${m.month}`);
+    const allowedYm = new Set(allowedMonths);
+    const zeroedMonthsSet = new Set();
+    const recalculatedMonthsSet = new Set();
     let changed = false;
 
     for (const r of arr){
       const key = rowToYM(r);
       if (!key) continue;
-      if (!allowedYm.has(key) && toNum(r.accrued) > 0){
-        r.accrued = 0;
-        changed = true;
+      if (!allowedYm.has(key)){
+        if (toNum(r.accrued) !== 0){
+          r.accrued = 0;
+          changed = true;
+        }
+        zeroedMonthsSet.add(key);
       }
     }
 
@@ -601,12 +629,19 @@
       let accr = 0;
       if (totalAccr > 0 && ownershipHistory.length){
         const parts = splitAccrualByOwnership(totalAccr, Number(mm.year), Number(mm.month), ownershipHistory);
+        let matchedOwnerPart = false;
         for (const p of parts){
-          if (String(p.abonentId) === String(ls)) accr = r2(accr + p.amount);
+          if (String(p.abonentId) === String(ls)) {
+            matchedOwnerPart = true;
+            accr = r2(accr + p.amount);
+          }
         }
+        if (!matchedOwnerPart) accr = prorateAccrualByRange(totalAccr, Number(mm.year), Number(mm.month), range);
       } else {
-        accr = totalAccr;
+        accr = prorateAccrualByRange(totalAccr, Number(mm.year), Number(mm.month), range);
       }
+
+      recalculatedMonthsSet.add(key);
 
       if (!rows.length){
         arr.push({
@@ -646,7 +681,17 @@
       }
     }
 
-    return { changed, reason:'OK' };
+    const diagnostics = {
+      abonentId: String(ls || ''),
+      from: range.from || '',
+      to: range.to || '',
+      allowedMonths: allowedMonths,
+      zeroedMonths: Array.from(zeroedMonthsSet).sort(),
+      recalculatedMonths: Array.from(recalculatedMonthsSet).sort()
+    };
+    try { console.log('[autoaccrual][responsibility-range]', diagnostics); } catch(e) {}
+
+    return { changed, reason:'OK', diagnostics: diagnostics };
   }
 
   function recalcForAbonent(ls, opts){

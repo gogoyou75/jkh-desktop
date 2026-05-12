@@ -230,6 +230,8 @@
 | Конфликты должны решаться сервером | ❌ | evaluatePaymentsRow | 🔴 | |
 | Должен быть rollback гарантированный | ❌ | rollbackAfterFlushError | 🔴 | |
 | Должен быть audit лог импорта | ❌ | отсутствует | 🔴 | |
+| IMPORT-RESP-STOPPED: Импорт Excel обязан различать найденного активного абонента и найденного остановленного абонента | LOGIC_SPEC → Import XLS Strict Template Rule | web/import_xls.html: `getImportAbonentResponsibilityStatus(...)`; статус `STOPPED`; лог `[import_xls][responsibility-stopped]`; блокировка платежей после `dateTo` | ✅ OK | Проверка: шаблон 2009; ЛС 1005; период ответственности закрыт до 2026-04-30; предпросмотр показывает «УЧТЁН / РАСЧЁТ ОСТАНОВЛЕН»; платежи после 2026-04-30 не применяются. |
+| IMPORT-PAYMENTS-NEW-ONLY: Импорт Excel применяет только новые платежи, а уже существующие платежи распознаёт как дубликаты и не записывает повторно. | LOGIC_SPEC → Import XLS Strict Template Rule | web/import_xls.html: `collectImportPaymentsToApply(db, options)`; `getPaymentsToApplyCount()`; `applyPayments()`; лог `[import_xls][payments-collect]` | ✅ OK | Проверка: загрузить шаблон 2009; часть платежей уже есть в базе; добавить нового абонента ЛС 1007 с UID и новым платежом; перейти в «Шаг 2 — Платежи»; кнопка показывает «Применить: добавить 1 платежей» или фактическое количество новых; после применения в `payments_<uid>` добавляются только новые платежи; дубликаты повторно не создаются. |
 
 ## 🧩 Блок: Tariffs (Accrual Source)
 
@@ -286,3 +288,20 @@
 | Импорт платежей требует явный `payment_period` `YYYY-MM`; текущий год не используется как fallback | LOGIC_SPEC 15.6 | import payments validation | ✅ OK | commit a2ce9a0 Require explicit payment import period |
 | Перенос долга `WITH_DEBT` требует успешный frozen debt calculation; ошибка расчёта/JSON не становится `principal: 0` / `penalty: 0` | LOGIC_SPEC 15.7 | debt transfer / frozen debt calculation | ✅ OK | commit Prevent unsafe zero debt transfer fallback |
 
+
+## 🧩 Блок: Canonical Financial Modes
+
+| Правило | Где в ТЗ | Где в коде | Статус | Комментарий |
+| --- | --- | --- | --- | --- |
+| UID-first ledger write-path | LOGIC_SPEC → Canonical Financial Modes | web/data.js / Data.writePaymentLedger | ✅ OK | Запись разрешена только в `payments_<uid>` |
+| Canonical ledger reader | LOGIC_SPEC → Canonical Financial Modes | web/data.js / Data.readPaymentLedger | ✅ OK | Legacy `payments_<LS>` оставлен только read-only fallback |
+| Canonical ledger writer | LOGIC_SPEC → Canonical Financial Modes | web/data.js / Data.writePaymentLedger | ✅ OK | UI вызывает service boundary |
+| Transfer with debt | LOGIC_SPEC → Canonical Financial Modes | web/data.js / Data.transferResponsibility, prepareDebtTransfer | ✅ OK | Создаёт frozen debt и transfer balance |
+| Transfer without debt | LOGIC_SPEC → Canonical Financial Modes | web/data.js / Data.transferResponsibility, prepareDebtTransfer | ✅ OK | `NO_DEBT` нормализуется в `WITHOUT_DEBT` |
+| Frozen debt | LOGIC_SPEC → Canonical Financial Modes | web/data.js / `jkh_frozen_debt_v1:*` | ✅ OK | Запись только service layer |
+| Transfer balance | LOGIC_SPEC → Canonical Financial Modes | web/data.js / `jkh_transfer_balance_v1:*` | ✅ OK | Запись только service layer |
+| Financial event log | LOGIC_SPEC → Canonical Financial Modes | web/data.js / Data.recordFinancialEvent | ✅ OK | Минимальный event log добавлен |
+| Duplicate protection | LOGIC_SPEC → Canonical Financial Modes | web/import_xls.html, web/new_abonent.html | 🟡 PARTIAL | Существующие проверки сохранены, общий service-level duplicate API не вводился |
+| Rollback protection | LOGIC_SPEC → Canonical Financial Modes | web/data.js / transfer rollback snapshots | ✅ OK | Transfer snapshots raw keys и DB |
+| Merge premises responsibility boundary | LOGIC_SPEC → Canonical Financial Modes | web/data.js / Data.mergePremises TODO/CRITICAL | 🟡 PARTIAL | Merge работает, boundary отмечен к унификации |
+| Split premises future mode | LOGIC_SPEC → Canonical Financial Modes | web/data.js / Data.financialModes.SPLIT_PREMISES | ⚪ IDEA | Только enum/документационный режим, бизнес-логики split нет |

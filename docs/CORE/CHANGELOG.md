@@ -1,5 +1,21 @@
 # CHANGELOG
 
+## 2026-05-12 — Import XLS: единый сборщик новых платежей
+
+- import_xls: добавлен единый сборщик платежей `collectImportPaymentsToApply(...)`.
+- Предпросмотр, счётчик кнопки и применение платежей теперь используют одну логику.
+- Дубликаты больше не блокируют импорт новых платежей других абонентов.
+- При смешанном файле система добавляет только новые платежи и не создаёт повторные записи.
+- Добавлен диагностический лог `[import_xls][payments-collect]`.
+
+## 2026-05-12 — Import XLS: диагностика остановленного расчёта
+
+- import_xls: добавлена диагностика остановленного расчёта при импорте Excel.
+- Найденный остановленный абонент теперь отображается отдельным статусом `STOPPED` / «УЧТЁН / РАСЧЁТ ОСТАНОВЛЕН».
+- Первичка не создаёт дубль и не изменяет остановленный расчёт.
+- Платежи после даты остановки расчёта блокируются.
+- Добавлен лог `[import_xls][responsibility-stopped]`.
+
 ## 2026-05-10 — Responsibility transfer unified through Data.transferResponsibility
 
 - Зафиксирован единый финансовый канон передачи ответственности.
@@ -337,3 +353,11 @@ rg -n "splitPremise|premise-transform\]\[split|type: ['\"]split" web LOGIC_SPEC.
 - Предпросмотр импорта сохраняет результат A15 validation и восстанавливается после возврата на страницу без повторного выбора исходного файла.
 - Старые draft без A15 validation блокируются до повторной загрузки файла.
 - После применения платежей таблица предпросмотра не очищается: применённые строки помечаются как «применено», остальные остаются доступными; очистка выполняется только кнопкой «Сбросить предпросмотр».
+
+## 2026-05-11 — Financial modes: canonical service boundary
+
+- Financial modes сгруппированы и частично объединены в canonical service layer `Data`.
+- UI write-path для ledger/transfer постепенно закрывается через `Data.readPaymentLedger`, `Data.writePaymentLedger`, `Data.createEmptyPaymentLedger` и `Data.transferResponsibility`.
+- `payments_<uid>` закреплён как единственный write-path ledger.
+- Legacy `payments_<LS>` оставлен только для read fallback внутри service layer.
+- Добавлены нормализация `WITH_DEBT` / `WITHOUT_DEBT` / `NO_DEBT` и минимальный financial event log.

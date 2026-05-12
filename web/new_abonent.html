@@ -689,7 +689,11 @@ function clearDraftNewAbonent(){
    ИМПОРТ ОПЛАТ (как было)
    ========================= */
 function paymentsKeyForUid(uid){
-  return 'payments_' + String(uid || '').trim();
+  const u = String(uid || '').trim();
+  if (!u) return '';
+  return (window.Data && typeof window.Data.resolvePaymentLedgerKey === 'function')
+    ? window.Data.resolvePaymentLedgerKey(u)
+    : ('payments_' + u);
 }
 function storeGet(key){ try { return (window.JKHStore && JKHStore.getRaw) ? JKHStore.getRaw(key) : null; } catch { return null; } }
 function storeSet(key, value){ try { if (window.JKHStore && JKHStore.setRaw) JKHStore.setRaw(key, value); } catch {} }
@@ -697,10 +701,11 @@ function loadPaymentsForUid(uid){
   try {
     const key = paymentsKeyForUid(uid);
     try { console.log('[payment-key] read', { abonentId: String(uid || ''), key: key }); } catch(e) {}
-    const raw = storeGet(key);
-    if (!raw) return [];
-    const arr = JSON.parse(raw);
-    return Array.isArray(arr) ? arr : [];
+    if (window.Data && typeof window.Data.readPaymentLedger === 'function') {
+      return window.Data.readPaymentLedger(String(uid || '').trim());
+    }
+    console.warn('[new_abonent][payment-key] blocked', { uid: String(uid || '').trim(), reason: 'DATA_LEDGER_READER_REQUIRED' });
+    return [];
   } catch {
     return [];
   }
@@ -709,7 +714,9 @@ function savePaymentsForUid(uid, arr){
   try {
     const key = paymentsKeyForUid(uid);
     try { console.log('[payment-key] write', { abonentId: String(uid || ''), key: key }); } catch(e) {}
-    storeSet(key, JSON.stringify(Array.isArray(arr) ? arr : []));
+    if (!(window.Data && typeof window.Data.writePaymentLedger === 'function')) throw new Error('Data.writePaymentLedger is not available');
+    const ok = window.Data.writePaymentLedger(String(uid || '').trim(), Array.isArray(arr) ? arr : [], { eventType: 'NEW_ABONENT_IMPORT_PAYMENTS' });
+    if (ok === false) throw new Error('PAYMENT_LEDGER_WRITE_BLOCKED');
   } catch (e){
     console.warn('[new_abonent] savePaymentsForUid error', e);
   }
@@ -1054,8 +1061,19 @@ async function createAbonent() {
       }
     } catch(e) {}
 
-    const newPaymentsKey = 'payments_' + String(uid || '').trim();
-    storeSet(newPaymentsKey, JSON.stringify([]));
+    const newPaymentsKey = (window.Data && typeof window.Data.resolvePaymentLedgerKey === 'function') ? window.Data.resolvePaymentLedgerKey(String(ls)) : ('payments_' + String(uid || '').trim());
+    if (window.Data && typeof window.Data.createEmptyPaymentLedger === 'function') {
+      const createdLedger = window.Data.createEmptyPaymentLedger(String(ls));
+      if (createdLedger === false) {
+        window.AbonentsDB = dbSnapshotBeforeCreate;
+        setCreateStatus('Не удалось создать canonical ledger для нового абонента. Абонент не создан.');
+        return;
+      }
+    } else {
+      window.AbonentsDB = dbSnapshotBeforeCreate;
+      setCreateStatus('Сервис ledger недоступен. Абонент не создан.');
+      return;
+    }
     try { console.log('[payment-key] create-empty', { abonentId: String(ls), uid: String(uid), key: newPaymentsKey, mode: 'uid' }); } catch(e) {}
 
     if (prevActive && __jkhTransferConfirmed && __transferCtx && __transferCtx.oldId){
@@ -1080,12 +1098,12 @@ async function createAbonent() {
         return;
       }
     } else {
-      dbRoot.links.push({
-        abonentId: String(ls),
-        regnum,
-        dateFrom: respStart,
-        dateTo: ""
-      });
+      if (!(window.Data && typeof window.Data.linkAbonentToPremise === 'function')) {
+        window.AbonentsDB = dbSnapshotBeforeCreate;
+        setCreateStatus('Сервис привязки помещения недоступен. Абонент не создан.');
+        return;
+      }
+      window.Data.linkAbonentToPremise(String(ls), regnum, respStart, "");
     }
 
     // ✅ если из импорта — переносим оплаты
