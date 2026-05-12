@@ -230,6 +230,7 @@
 | Конфликты должны решаться сервером | ❌ | evaluatePaymentsRow | 🔴 | |
 | Должен быть rollback гарантированный | ❌ | rollbackAfterFlushError | 🔴 | |
 | Должен быть audit лог импорта | ❌ | отсутствует | 🔴 | |
+| IMPORT-RESP-STOPPED: Импорт Excel обязан различать найденного активного абонента и найденного остановленного абонента | LOGIC_SPEC → Import XLS Strict Template Rule | web/import_xls.html: `getImportAbonentResponsibilityStatus(...)`; статус `STOPPED`; лог `[import_xls][responsibility-stopped]`; блокировка платежей после `dateTo` | ✅ OK | Проверка: шаблон 2009; ЛС 1005; период ответственности закрыт до 2026-04-30; предпросмотр показывает «УЧТЁН / РАСЧЁТ ОСТАНОВЛЕН»; платежи после 2026-04-30 не применяются. |
 
 ## 🧩 Блок: Tariffs (Accrual Source)
 
