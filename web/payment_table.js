@@ -1181,16 +1181,17 @@ if (parts.length) {
     return new Set(months.map(m => `${m.year}-${m.month}`));
   }
 
-  function clonePaymentRowForView(r){
-    return (r && typeof r === "object") ? Object.assign({}, r) : r;
-  }
-
   function applyResponsibilityRangeToView(arr){
     if (!Array.isArray(arr) || !arr.length) return arr;
 
+    let range = null;
     let allowedYm = null;
     try {
-      allowedYm = responsibilityAllowedYmSet();
+      range = getActiveResponsibilityRangeISO();
+      if (range && range.from) {
+        const months = monthIter(range.from, range.to);
+        if (months.length) allowedYm = new Set(months.map(m => `${m.year}-${m.month}`));
+      }
     } catch(e) {
       console.error(e);
       throw e;
@@ -1203,30 +1204,29 @@ if (parts.length) {
 
     for (const row of arr){
       const ym = ymKeyOfRow(row);
-      const outOfRange = ym && !allowedYm.has(ym);
+      const paid = toNum(row && row.paid);
+      const paidDateISO = parseAnyDateToISO(row && row.paid_date);
+      const paymentBeforeRange = paid > 0.0000001 && paidDateISO && range && range.from && paidDateISO < range.from;
+      const outOfRange = (ym && !allowedYm.has(ym)) || paymentBeforeRange;
       if (!outOfRange) {
         out.push(row);
         continue;
       }
 
-      const paid = toNum(row && row.paid);
-      if (paid <= 0.0000001) {
-        if (!loggedHidden[ym]) {
-          loggedHidden[ym] = true;
-          try {
-            console.log('[payment-table][hide-out-of-responsibility]', {
-              abonentId: abonentId,
-              ym: ym,
-              reason: 'OUT_OF_RESPONSIBILITY_RANGE'
-            });
-          } catch(e) {}
-        }
-        continue;
+      const logKey = ym + ':' + String(row && row.id || '') + ':' + String(row && row.paid_date || '');
+      if (!loggedHidden[logKey]) {
+        loggedHidden[logKey] = true;
+        try {
+          console.log('[payment-table][hide-payment-out-of-responsibility]', {
+            abonentId: abonentId,
+            ym: ym,
+            paid: paid,
+            paid_date: String(row && row.paid_date || ''),
+            reason: 'PAYMENT_OUT_OF_RESPONSIBILITY_RANGE'
+          });
+        } catch(e) {}
       }
-
-      const visiblePaymentRow = clonePaymentRowForView(row);
-      if (visiblePaymentRow && typeof visiblePaymentRow === "object") visiblePaymentRow.accrued = 0;
-      out.push(visiblePaymentRow);
+      continue;
     }
 
     return out;
@@ -1657,7 +1657,7 @@ function asOfForRow(r) {
 }
 
 function applyRunningTotals(viewRows) {
-  const allRows = getPayments();
+  const allRows = Array.isArray(viewRows) ? viewRows : getPayments();
 
 // ✅ Если активен расчёт "взыскиваемой суммы за период",
   // то считаем долги/остатки ТОЛЬКО внутри выбранного периода,

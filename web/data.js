@@ -1616,6 +1616,16 @@
     return Number.isFinite(n) ? n : 0;
   }
 
+  function __paymentDateISOForTransferCheck(v){
+    var s = String(v || "").trim();
+    if (!s) return "";
+    var iso = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+    if (iso) return iso[1] + "-" + iso[2] + "-" + iso[3];
+    var dmy = s.match(/^(\d{1,2})\.(\d{1,2})\.(\d{4})$/);
+    if (dmy) return dmy[3] + "-" + String(dmy[2]).padStart(2, "0") + "-" + String(dmy[1]).padStart(2, "0");
+    return "";
+  }
+
   function __verifyNoAccrualBeforeTransferMonth(abonentId, transferDate){
     var id = String(abonentId || "").trim();
     var td = String(transferDate || "").trim();
@@ -1623,17 +1633,28 @@
     if (!id || !transferYm) return { ok:false, reason:"INVALID_ARGUMENTS" };
 
     var rows = readPaymentLedger(id) || [];
-    var bad = [];
+    var badAccrual = [];
+    var badPayments = [];
     rows.forEach(function(r){
       var ym = __paymentRowYmForTransferCheck(r);
       if (ym && ym < transferYm && __paymentAmountForTransferCheck(r && r.accrued) > 0) {
-        bad.push({ ym: ym, accrued: __paymentAmountForTransferCheck(r && r.accrued), rowId: r && r.id });
+        badAccrual.push({ ym: ym, accrued: __paymentAmountForTransferCheck(r && r.accrued), rowId: r && r.id });
+      }
+
+      var paid = __paymentAmountForTransferCheck(r && r.paid);
+      var paidDate = __paymentDateISOForTransferCheck(r && r.paid_date);
+      if (paid > 0 && paidDate && paidDate < td) {
+        badPayments.push({ ym: ym, paid: paid, paid_date: paidDate, rowId: r && r.id });
       }
     });
 
-    if (bad.length) {
-      console.warn("[transfer-responsibility][ledger-range-invalid]", { abonentId: id, transferDate: td, rows: bad });
-      return { ok:false, reason:"NEW_LEDGER_HAS_ACCRUAL_BEFORE_TRANSFER", rows: bad };
+    if (badAccrual.length) {
+      console.warn("[transfer-responsibility][ledger-range-invalid]", { abonentId: id, transferDate: td, rows: badAccrual });
+      return { ok:false, reason:"NEW_LEDGER_HAS_ACCRUAL_BEFORE_TRANSFER", rows: badAccrual };
+    }
+    if (badPayments.length) {
+      console.warn("[transfer-responsibility][new-ledger-has-old-payments]", { newAbonentId: id, transferDate: td, rows: badPayments });
+      return { ok:false, reason:"NEW_LEDGER_HAS_PAYMENTS_BEFORE_TRANSFER", rows: badPayments };
     }
     return { ok:true, rows: rows.length };
   }
