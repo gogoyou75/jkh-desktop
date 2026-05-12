@@ -459,6 +459,122 @@ function getPaymentsForAbonent(id){
     return key ? getPaymentRowsByStorageKeyCached(key) : [];
 }
 
+function dateToISO(d){
+    if (!d || d.toString() === "Invalid Date") return "";
+    return `${d.getFullYear()}-${pad2(d.getMonth()+1)}-${pad2(d.getDate())}`;
+}
+
+function parseAnyDateToISO(value){
+    const d = parseDateAnyToDate(value);
+    return d ? dateToISO(d) : "";
+}
+
+function getRowYmKey(row){
+    const y = Number(row?.year) || 0;
+    const m = Number(row?.month) || 0;
+    if (y > 0 && m >= 1 && m <= 12) return `${y}-${pad2(m)}`;
+
+    const paidD = parseDateAnyToDate(row?.paid_date);
+    if (paidD) return `${paidD.getFullYear()}-${pad2(paidD.getMonth()+1)}`;
+
+    return "";
+}
+
+function getResponsibilityRangeForIndex(abonentId){
+    const id = String(abonentId || "").trim();
+    const db = window.AbonentsDB || {};
+    const abonents = db.abonents || {};
+    const a = abonents[id] || {};
+    const regnum = String(a.regnum || a.premiseRegnum || a.premise_regnum || a.regNumber || a.reg_no || a.flat || "").trim();
+    const linksRaw = Array.isArray(db.links) ? db.links : (Array.isArray(db.abonentPremiseLinks) ? db.abonentPremiseLinks : []);
+
+    const links = (linksRaw || []).filter(l => {
+        const linkId = String(l?.abonentId ?? l?.abonent_id ?? l?.abonent ?? l?.accountId ?? l?.ls ?? l?.personalAccount ?? "").trim();
+        const linkRegnum = String(l?.regnum ?? l?.premiseRegnum ?? l?.premise_regnum ?? l?.regNumber ?? l?.reg_no ?? "").trim();
+        if (linkId !== id) return false;
+        return !regnum || linkRegnum === regnum;
+    }).map(l => ({
+        from: parseAnyDateToISO(l?.dateFrom ?? l?.from ?? l?.start ?? l?.startDate ?? l?.date_start ?? l?.respFrom),
+        to:   parseAnyDateToISO(l?.dateTo   ?? l?.to   ?? l?.end   ?? l?.endDate   ?? l?.date_end   ?? l?.respTo)
+    })).filter(l => l.from);
+
+    if (links.length) {
+        const pick = (arr) => arr.slice().sort((x, y) => (x.from < y.from ? 1 : -1))[0];
+        const active = links.filter(l => !l.to);
+        const chosen = active.length ? pick(active) : pick(links);
+        return { from: chosen.from, to: chosen.to || "" };
+    }
+
+    const from = parseAnyDateToISO(
+        a.dateFrom ?? a.date_from ?? a.calcFrom ?? a.calc_from ?? a.startCalc ?? a.start_calc ??
+        a.dateStartCalc ?? a.date_start_calc ?? a.responsibilityFrom ?? a.respFrom
+    );
+    const to = parseAnyDateToISO(
+        a.dateTo ?? a.date_to ?? a.calcTo ?? a.calc_to ?? a.endCalc ?? a.end_calc ??
+        a.dateEndCalc ?? a.date_end_calc ?? a.responsibilityTo ?? a.respTo
+    );
+    return { from: from || "", to: to || "" };
+}
+
+function filterLedgerRowsByResponsibility(abonentId, arr){
+    if (!Array.isArray(arr) || !arr.length) return [];
+
+    const range = getResponsibilityRangeForIndex(abonentId);
+    if (!range || !range.from) {
+        const sumAccAll = arr.reduce((sum, r) => sum + toNum(r?.accrued), 0);
+        const sumPaidAll = arr.reduce((sum, r) => sum + toNum(r?.paid), 0);
+        try {
+            console.log('[index][responsibility-filter]', {
+                abonentId: String(abonentId || ''),
+                from: '',
+                to: '',
+                rowsBefore: arr.length,
+                rowsAfter: arr.length,
+                hiddenRows: 0,
+                sumAcc: Number(sumAccAll.toFixed(2)),
+                sumPaid: Number(sumPaidAll.toFixed(2))
+            });
+        } catch(e) {}
+        return arr.slice();
+    }
+
+    const todayISO = dateToISO(new Date());
+    const effectiveTo = range.to || todayISO;
+    const fromMonthKey = range.from.slice(0, 7);
+    const toMonthKey = effectiveTo.slice(0, 7);
+
+    const viewRows = arr.filter(row => {
+        const ym = getRowYmKey(row);
+        const paid = toNum(row?.paid);
+        const paidDateISO = parseAnyDateToISO(row?.paid_date);
+
+        if (ym && ym < fromMonthKey) return false;
+        if (ym && ym > toMonthKey) return false;
+        if (paid > 0.0000001 && paidDateISO && paidDateISO < range.from) return false;
+        if (paid > 0.0000001 && paidDateISO && paidDateISO > effectiveTo) return false;
+
+        return true;
+    });
+
+    const sumAcc = viewRows.reduce((sum, r) => sum + toNum(r?.accrued), 0);
+    const sumPaid = viewRows.reduce((sum, r) => sum + toNum(r?.paid), 0);
+
+    try {
+        console.log('[index][responsibility-filter]', {
+            abonentId: String(abonentId || ''),
+            from: range.from,
+            to: effectiveTo,
+            rowsBefore: arr.length,
+            rowsAfter: viewRows.length,
+            hiddenRows: arr.length - viewRows.length,
+            sumAcc: Number(sumAcc.toFixed(2)),
+            sumPaid: Number(sumPaid.toFixed(2))
+        });
+    } catch(e) {}
+
+    return viewRows;
+}
+
 // Итоги + даты:
 // - Начислено/Оплачено: суммы accrued/paid
 // - Пеня/Всего: из строки с максимальным total_debt (нарастающий итог)
@@ -470,10 +586,14 @@ function calcTotalsFromPayments(id, abonentObj){
     const arr = getPaymentsForAbonent(id);
     if (!arr.length) return null;
 
+    const viewRows = filterLedgerRowsByResponsibility(id, arr);
+    const responsibilityRange = getResponsibilityRangeForIndex(id);
+    const asOf = parseDateAnyToDate(responsibilityRange?.to) || new Date();
+
     let sumAcc = 0;
     let sumPaid = 0;
 
-    for (const r of arr){
+    for (const r of viewRows){
         sumAcc += toNum(r.accrued);
         sumPaid += toNum(r.paid);
     }
@@ -498,10 +618,9 @@ function calcTotalsFromPayments(id, abonentObj){
             // - calcTotalsAsOfCore() отдаёт "начисленную пеню" (penaltyAccruedTotal) — это ДРУГОЕ.
             // - нам нужна "пеня к взысканию / задолженность по пени" (penaltyDebt),
             //   которая согласована с карточкой и справкой.
-            const asOf = new Date(); // дата окончания расчёта на главной = сегодня
             if (typeof window.JKHCalcEngine.calcTotalsAsOfAdjusted === 'function') {
                 const adj = window.JKHCalcEngine.calcTotalsAsOfAdjusted(
-                    arr,
+                    viewRows,
                     asOf,
                     { abonentId: id, applyAdvanceOffset: true, allowNegativePrincipal: true }
                 );
@@ -530,7 +649,7 @@ function calcTotalsFromPayments(id, abonentObj){
         let bestIsAccr = false;
         let bestId = -Infinity;
 
-        for (const r of arr){
+        for (const r of viewRows){
             const y = Number(r.year) || 0;
             const m = Number(r.month) || 0;
             const key = (y * 12) + m;
@@ -564,17 +683,16 @@ function calcTotalsFromPayments(id, abonentObj){
     }
 
 
-    // ✅ дата начала расчёта = дата регистрации абонента (если задана)
+    // ✅ дата начала расчёта = dateFrom текущего периода ответственности.
     let startDate = "";
-    const regRaw = abonentObj?.regDate || abonentObj?.registrationDate || abonentObj?.reg_date || abonentObj?.date_reg || abonentObj?.registeredAt;
-    const regD = parseDateAnyToDate(regRaw);
-    if (regD) startDate = formatDMY(regD);
+    const respFromD = parseDateAnyToDate(responsibilityRange?.from);
+    if (respFromD) startDate = formatDMY(respFromD);
 
-    // запасной вариант, если регистрации нет: берём первый месяц из данных
+    // запасной вариант, если периода ответственности нет: берём первый месяц из отфильтрованных данных
     if (!startDate){
         let minKey = Infinity;
         let minY = 0, minM = 0;
-        for (const r of arr){
+        for (const r of viewRows){
             const y = Number(r.year) || 0;
             const m = Number(r.month) || 0;
             const key = (y * 12) + m;
@@ -588,8 +706,8 @@ function calcTotalsFromPayments(id, abonentObj){
         }
     }
 
-    // ✅ дата окончания расчёта всегда текущая дата
-    const endDate = formatDMY(new Date());
+    // ✅ дата окончания расчёта = dateTo периода ответственности, либо текущая дата для открытого периода
+    const endDate = formatDMY(asOf);
 
     return {
         nachisleno: Math.abs(sumAcc)  > 0.0000001 ? sumAcc.toFixed(2)  : "",
