@@ -231,6 +231,7 @@
 | Должен быть rollback гарантированный | ❌ | rollbackAfterFlushError | 🔴 | |
 | Должен быть audit лог импорта | ❌ | отсутствует | 🔴 | |
 | IMPORT-RESP-STOPPED: Импорт Excel обязан различать найденного активного абонента и найденного остановленного абонента | LOGIC_SPEC → Import XLS Strict Template Rule | web/import_xls.html: `getImportAbonentResponsibilityStatus(...)`; статус `STOPPED`; лог `[import_xls][responsibility-stopped]`; блокировка платежей после `dateTo` | ✅ OK | Проверка: шаблон 2009; ЛС 1005; период ответственности закрыт до 2026-04-30; предпросмотр показывает «УЧТЁН / РАСЧЁТ ОСТАНОВЛЕН»; платежи после 2026-04-30 не применяются. |
+| IMPORT-PAYMENTS-NEW-ONLY: Импорт Excel применяет только новые платежи, а уже существующие платежи распознаёт как дубликаты и не записывает повторно. | LOGIC_SPEC → Import XLS Strict Template Rule | web/import_xls.html: `collectImportPaymentsToApply(db, options)`; `getPaymentsToApplyCount()`; `applyPayments()`; лог `[import_xls][payments-collect]` | ✅ OK | Проверка: загрузить шаблон 2009; часть платежей уже есть в базе; добавить нового абонента ЛС 1007 с UID и новым платежом; перейти в «Шаг 2 — Платежи»; кнопка показывает «Применить: добавить 1 платежей» или фактическое количество новых; после применения в `payments_<uid>` добавляются только новые платежи; дубликаты повторно не создаются. |
 
 ## 🧩 Блок: Tariffs (Accrual Source)
 
