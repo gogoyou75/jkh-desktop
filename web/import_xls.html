@@ -332,6 +332,115 @@ function isPaymentBeforeAbonentStart(ab, paymentPeriod){
   return payYm < startYm;
 }
 
+
+function parseImportAnyDateToISO(value){
+  if (value==null) return '';
+  const s = normStr(value);
+  if (!s) return '';
+
+  let m;
+
+  m = s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (m) return m[1] + '-' + m[2] + '-' + m[3];
+
+  m = s.match(/^(\d{2})\.(\d{2})\.(\d{4})$/);
+  if (m) return m[3] + '-' + m[2] + '-' + m[1];
+
+  if (/^\d+(\.\d+)?$/.test(s)){
+    try{
+      const dc = XLSX.SSF.parse_date_code(Number(s));
+      if (dc && dc.y && dc.m && dc.d){
+        return String(dc.y) + '-' + String(dc.m).padStart(2,'0') + '-' + String(dc.d).padStart(2,'0');
+      }
+    }catch(e){}
+  }
+
+  return '';
+}
+
+function getImportAbonentResponsibilityStatus(db, abonentId, abonent){
+  const id = normStr(abonentId);
+  const ab = abonent || {};
+  const regnum = normStr(
+    ab.regnum ||
+    ab.premiseRegnum ||
+    ab.premise_regnum ||
+    ab.regNumber ||
+    ab.reg_no ||
+    ab.flat ||
+    ''
+  );
+  const result = { stopped:false, from:'', to:'', regnum:regnum, reason:'' };
+  const abonentLs = normStr(ab.id);
+  const linksRaw = db && Array.isArray(db.links) ? db.links : [];
+
+  if (linksRaw.length){
+    const ownLinks = [];
+    for (let i=0;i<linksRaw.length;i++){
+      const l = linksRaw[i] || {};
+      const linkId = normStr(l.abonentId || l.abonent_id || l.abonent || l.accountId || l.ls || l.personalAccount);
+      const linkRegnum = normStr(l.regnum || l.premiseRegnum || l.premise_regnum || l.regNumber || l.reg_no);
+      const idMatches = !!id && (linkId === id || (!!abonentLs && linkId === abonentLs));
+      const regMatches = !regnum || linkRegnum === regnum;
+      if (idMatches && regMatches) ownLinks.push(l);
+    }
+
+    const activeLink = ownLinks.find(function(l){
+      return !normStr(l && (l.dateTo || l.to || l.end || l.endDate || l.date_end || l.respTo));
+    });
+    const closedLinks = ownLinks.filter(function(l){
+      return !!normStr(l && (l.dateTo || l.to || l.end || l.endDate || l.date_end || l.respTo));
+    }).map(function(l){
+      return {
+        from: parseImportAnyDateToISO(l && (l.dateFrom || l.from || l.start || l.startDate || l.date_start || l.respFrom)),
+        to: parseImportAnyDateToISO(l && (l.dateTo || l.to || l.end || l.endDate || l.date_end || l.respTo)),
+        raw: l
+      };
+    }).filter(function(l){ return !!l.to; });
+
+    if (!activeLink && closedLinks.length){
+      closedLinks.sort(function(a, b){ return a.to < b.to ? 1 : (a.to > b.to ? -1 : 0); });
+      result.stopped = true;
+      result.from = closedLinks[0].from || '';
+      result.to = closedLinks[0].to || '';
+      result.reason = 'NO_ACTIVE_LINK_WITH_CLOSED_LINK';
+      return result;
+    }
+
+    return result;
+  }
+
+  const fallbackTo = parseImportAnyDateToISO(ab.calcEndDate || ab.dateTo || ab.endDate || '');
+  if (fallbackTo){
+    result.stopped = true;
+    result.from = parseImportAnyDateToISO(ab.calcStartDate || ab.dateFrom || ab.startDate || '');
+    result.to = fallbackTo;
+    result.reason = 'ABONENT_END_DATE';
+  }
+  return result;
+}
+
+function isPaymentAfterResponsibilityStop(stopTo, paymentPeriod){
+  const to = normStr(stopTo);
+  const payYm = normStr(paymentPeriod);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(to) || !/^\d{4}-\d{2}$/.test(payYm)) return false;
+  return (payYm + '-01') > to;
+}
+
+function logImportResponsibilityStopped(row, abonentId, abonent, statusInfo){
+  try{
+    console.log('[import_xls][responsibility-stopped]', {
+      excelRow: row && row.excelRow,
+      abonentId: normStr(abonentId),
+      uid: normStr((abonent && abonent.uid) || getResolvedUid(row)),
+      regnum: normStr(statusInfo && statusInfo.regnum),
+      from: normStr(statusInfo && statusInfo.from),
+      to: normStr(statusInfo && statusInfo.to),
+      mode: mode
+    });
+  }catch(e){}
+}
+
 function ensureImportRowUidFields(row){
   if (!row) return row;
   if (typeof row.excelUid === 'undefined') row.excelUid = normStr(row.uid);
@@ -1990,7 +2099,19 @@ function evaluatePrimaryRow(db, row){
     status='ERROR'; critical=true; messages.push('Ошибки: "Общая площадь" должна быть числом > 0.');
   }
 
-  if (getCreatedUid(row) && !getExcelUid(row)){
+  const responsibilityStatus = found && found.abonent ? getImportAbonentResponsibilityStatus(db, found.key, found.abonent) : null;
+  const isStoppedAbonent = !!(responsibilityStatus && responsibilityStatus.stopped);
+
+  if (isStoppedAbonent){
+    status='STOPPED';
+    critical=false;
+    messages.push('Абонент найден в базе и учтён.');
+    messages.push('Расчёт остановлен с ' + (responsibilityStatus.to || 'неизвестной даты') + '.');
+    messages.push('Новые начисления для этого абонента не должны создаваться после даты остановки.');
+    logImportResponsibilityStopped(row, found.key, found.abonent, responsibilityStatus);
+    const stoppedUid = normStr((found.abonent && found.abonent.uid) || found.uid || getResolvedUid(row));
+    if (stoppedUid) action = { type:'COPY_UID', uid: stoppedUid };
+  } else if (getCreatedUid(row) && !getExcelUid(row)){
     status='WARNING_CREATED';
     critical=false;
     messages.push('Абонент создан. Скопируйте UID в Excel и перезагрузите файл.');
@@ -2015,12 +2136,12 @@ function evaluatePrimaryRow(db, row){
     const premise = reg && db.premises ? db.premises[reg] : null;
     const dbSq = normNum(premise ? premise.square : found.abonent.square);
     if (Number.isFinite(dbSq) && Number.isFinite(row.square) && dbSq !== row.square){
-      status = (status==='ERROR') ? 'ERROR' : 'UPDATED';
+      status = (status==='ERROR' || status==='STOPPED') ? status : 'UPDATED';
       warnings.push('Площадь в квартире: ' + dbSq + '. Площадь в Excel: ' + row.square + '.');
       if ($('optAllowSquareUpdate').checked && mode==='primary' && premise){
         warnings.push('Площадь будет обновлена: было ' + dbSq + ', станет ' + row.square + '.');
       }
-      if (premise && found.type !== 'UID_STRUCTURAL_CONFLICT' && found.type !== 'UID_MISMATCH'){
+      if (!isStoppedAbonent && premise && found.type !== 'UID_STRUCTURAL_CONFLICT' && found.type !== 'UID_MISMATCH'){
         const openCheck = verifyPremiseOpenContext(db, row, found, reg);
         logImportPremiseOpenCheck(row, reg, openCheck.ok ? (openCheck.result || 'ok') : 'blocked', openCheck.reason);
         if (openCheck.ok){
@@ -2060,6 +2181,12 @@ function evaluatePaymentsRow(db, row){
   if (primaryFoundForPayment && primaryFoundForPayment.type === 'UID_SOFT_MISMATCH'){
     details.push(UID_SOFT_MISMATCH_TEXT);
   }
+  const responsibilityStatus = getImportAbonentResponsibilityStatus(db, foundU.key, ab);
+  if (responsibilityStatus.stopped){
+    details.push('Абонент найден в базе и учтён.');
+    details.push('Расчёт остановлен с ' + (responsibilityStatus.to || 'неизвестной даты') + '.');
+    logImportResponsibilityStopped(row, foundU.key, ab, responsibilityStatus);
+  }
   if (parseMeta.mode === 'strict-template-customer-2009'){
     const lsExcel = normStr(row.ls);
     const lsDb = normStr(ab.id);
@@ -2093,6 +2220,11 @@ function evaluatePaymentsRow(db, row){
         'Ошибка: платёж за ' + paymentPeriod +
         ' раньше даты начала расчёта абонента (' + getAbonentStartDate(ab) + ').'
       );
+      continue;
+    }
+    if (responsibilityStatus.stopped && isPaymentAfterResponsibilityStop(responsibilityStatus.to, paymentPeriod)){
+      errs++;
+      details.push('Платёж относится к периоду после остановки расчёта абонента.');
       continue;
     }
     const paidDate = normalizePaidDateStrict(p.paidDateRaw);
@@ -2199,20 +2331,21 @@ function buildPreview(){
   renderPreview();
 }
 
-function statusRU(s){ return ({OK:'ОК', ERROR:'ОШИБКА', UPDATED:'ПРЕДУПРЕЖДЕНИЕ', WARNING_CREATED:'СОЗДАН', SKIP_DUPLICATE:'ДУБЛИКАТ', CONFLICT:'КОНФЛИКТ', APPLIED:'ПРИМЕНЕНО'})[s] || s; }
-function statusClass(s){ return ({OK:'status-ok', ERROR:'status-err', UPDATED:'status-warn', WARNING_CREATED:'status-created', SKIP_DUPLICATE:'status-skip', CONFLICT:'status-conflict', APPLIED:'status-ok'})[s] || ''; }
+function statusRU(s){ return ({OK:'ОК', ERROR:'ОШИБКА', UPDATED:'ПРЕДУПРЕЖДЕНИЕ', STOPPED:'УЧТЁН / РАСЧЁТ ОСТАНОВЛЕН', WARNING_CREATED:'СОЗДАН', SKIP_DUPLICATE:'ДУБЛИКАТ', CONFLICT:'КОНФЛИКТ', APPLIED:'ПРИМЕНЕНО'})[s] || s; }
+function statusClass(s){ return ({OK:'status-ok', ERROR:'status-err', UPDATED:'status-warn', STOPPED:'status-warn', WARNING_CREATED:'status-created', SKIP_DUPLICATE:'status-skip', CONFLICT:'status-conflict', APPLIED:'status-ok'})[s] || ''; }
 
 function renderPreview(){
   const body = $('previewBody');
   body.innerHTML = '';
   if (!preview.length){ body.innerHTML = '<tr><td colspan="7" class="small">Нет предпросмотра</td></tr>'; updateRestoredFileInfo(); updateStateLine(); setButtons(); return; }
 
-  let ok=0, err=0, warn=0, dup=0, conf=0;
+  let ok=0, err=0, warn=0, stopped=0, dup=0, conf=0;
   for (let i=0;i<preview.length;i++){
     const r = preview[i];
     if (r.status==='OK') ok++;
     if (r.status==='ERROR') err++;
     if (r.status==='UPDATED' || r.status==='WARNING_CREATED') warn++;
+    if (r.status==='STOPPED') stopped++;
     if (r.status==='SKIP_DUPLICATE') dup++;
     if (r.status==='CONFLICT') conf++;
 
@@ -2278,7 +2411,7 @@ function renderPreview(){
   }
 
   $('summaryLine').textContent = 'Режим: ' + (mode==='primary'?'Шаг 1 — Первичка':'Шаг 2 — Платежи') +
-    ' | ОК=' + ok + ' | ПРЕДУПРЕЖДЕНИЕ=' + warn + ' | ОШИБКА=' + err + ' | ДУБЛИКАТ=' + dup + ' | КОНФЛИКТ=' + conf + ' | Всего=' + preview.length;
+    ' | ОК=' + ok + ' | ПРЕДУПРЕЖДЕНИЕ=' + warn + ' | ОСТАНОВЛЕН=' + stopped + ' | ОШИБКА=' + err + ' | ДУБЛИКАТ=' + dup + ' | КОНФЛИКТ=' + conf + ' | Всего=' + preview.length;
 
   let diag = '';
   if (err){ diag = '<span class="danger">Есть ошибки, проверь строки со статусом ОШИБКА.</span>'; }
@@ -2555,6 +2688,11 @@ async function applyPrimary(){
     if (!Number.isFinite(row.square) || row.square<=0) continue;
 
     let a = found.abonent;
+    const responsibilityStatus = getImportAbonentResponsibilityStatus(db, found.key, a);
+    if (responsibilityStatus.stopped){
+      logImportResponsibilityStopped(row, found.key, a, responsibilityStatus);
+      continue;
+    }
     if (!getExcelUid(row)){
       const applyMatch = abonentMatchesExcelRow(a, row, false);
       if (!applyMatch.ok){
@@ -2643,6 +2781,8 @@ async function applyPayments(){
     const uid = getResolvedUid(row);
     const foundU = uid ? findAbonentByUid(db, uid) : null;
     const ab = foundU ? foundU.abonent : null;
+    const responsibilityStatus = ab ? getImportAbonentResponsibilityStatus(db, foundU.key, ab) : { stopped:false, to:'' };
+    if (responsibilityStatus.stopped) logImportResponsibilityStopped(row, foundU.key, ab, responsibilityStatus);
     const accountUid = uid || '';
     const accountNumber = normStr(ab && ab.id ? ab.id : row.ls);
 
@@ -2668,6 +2808,12 @@ async function applyPayments(){
           ' раньше даты начала расчёта абонента (' + getAbonentStartDate(ab) + ').',
           'err'
         );
+        setImportBusy(false);
+        if (window.JKHBusy && typeof JKHBusy.hide === 'function') JKHBusy.hide();
+        return;
+      }
+      if (responsibilityStatus.stopped && isPaymentAfterResponsibilityStop(responsibilityStatus.to, paymentPeriod)){
+        setImportStatus('Платёж относится к периоду после остановки расчёта абонента.', 'err');
         setImportBusy(false);
         if (window.JKHBusy && typeof JKHBusy.hide === 'function') JKHBusy.hide();
         return;
@@ -2705,6 +2851,12 @@ async function applyPayments(){
           ' раньше даты начала расчёта абонента (' + getAbonentStartDate(ab) + ').',
           'err'
         );
+        setImportBusy(false);
+        if (window.JKHBusy && typeof JKHBusy.hide === 'function') JKHBusy.hide();
+        return;
+      }
+      if (responsibilityStatus.stopped && isPaymentAfterResponsibilityStop(responsibilityStatus.to, paymentPeriod)){
+        setImportStatus('Платёж относится к периоду после остановки расчёта абонента.', 'err');
         setImportBusy(false);
         if (window.JKHBusy && typeof JKHBusy.hide === 'function') JKHBusy.hide();
         return;
