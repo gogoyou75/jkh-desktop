@@ -315,3 +315,13 @@
 | Legacy calc-period cleanup is non-destructive | DB and card migrations remove legacy keys only after canonical same-value read-back. | `node --check web/data.js` |
 | Cleanup waits for server-first data readiness | `migrateLegacyCalcPeriodKeysForDb(db)` requires ready/empty UI data state, server source when present, parseable `abonents_db_v1`, and `db.abonents`. | `node --check web/data.js` |
 | Invalid UID startup detection/repair | Startup scan logs invalid placeholders and repairs only when no related payments/calc/report/moratorium/transfer/frozen keys exist. | `node --check web/data.js` |
+
+## 2026-05-13 — CalcEngine performance audit without financial fork
+
+| Требование | Канонический источник | Реализация | Статус | Проверка |
+| --- | --- | --- | --- | --- |
+| CalcEngine остаётся единственным источником долга/пени | LOGIC_SPEC → CalcEngine performance audit canonical boundary | `web/calc_engine.js` / `calcTotalsAsOfAdjusted`, `calcTotalsAsOfCore`, `prepareLedgerState` | ✅ OK | UI wrapper throws if CalcEngine API is missing |
+| UI не содержит отдельный FIFO/penalty engine | LOGIC_SPEC → запрет parallel financial truth | `web/payment_table.js` / `calcTotalsAsOf` delegates to `window.JKHCalcEngine` only; `web/index.html` does not fallback to row totals | ✅ OK | Removed local FIFO/penalty fallback from payment table and index totals fallback |
+| Timing logs для bottleneck-аудита | LOGIC_SPEC → Диагностика производительности | `[calc][perf]`, `[fifo][perf]`, `[penalty][perf]`, `[ledger][perf]` | ✅ OK | `rg -n "\\[calc\\]\\[perf\\]|\\[fifo\\]\\[perf\\]|\\[penalty\\]\\[perf\\]|\\[ledger\\]\\[perf\\]" web` |
+| Prepared ledger state не меняет формулы | LOGIC_SPEC → Canonical prepared state | `CalcEngine.prepareLedgerState(rows, opts)` caches parse/sort and prebuilt events; payment table and spravka still call CalcEngine totals/breakdown APIs | ✅ OK | `node --check web/calc_engine.js`; `node --check web/spravka_sud.js` |
+| Количество `calcTotalsAsOf` за render измеряется | LOGIC_SPEC → Диагностика производительности | `web/payment_table.js` logs calls/memo hits/misses under `[calc][perf]` after chunked running totals | ✅ OK | `node --check web/payment_table.js` |

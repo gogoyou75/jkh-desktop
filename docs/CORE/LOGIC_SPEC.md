@@ -1500,3 +1500,29 @@ Rules:
 - failed read-back leaves legacy data untouched and logs `[calc-period][cleanup-skipped-readback-failed]`;
 - successful read-back logs `[calc-period][canonical-readback-ok]` before cleanup;
 - startup invalid UID scan logs `[uid][invalid-placeholder-detected]` and performs automatic UID repair only when related storage keys can be proven absent.
+
+## 2026-05-13 — CalcEngine performance audit canonical boundary
+
+### Цель
+Ускорение расчётов больших ledger выполняется без появления второй финансовой модели.
+
+### Канон
+1. `web/calc_engine.js` остаётся единственным источником финансовой истины для долга, FIFO-распределения и пени.
+2. `payment_table.js`, `spravka_sud.js`, reports и UI не дублируют расчёт долга/пени и вызывают только API `window.JKHCalcEngine`.
+3. Оптимизации разрешены только внутри канонического расчётного контура: memoization, caching, prepared ledger state, indexed rates, prebuilt payment events, avoidance повторного parse/sort.
+4. `CalcEngine.prepareLedgerState(rows, opts)` является read-only подготовленным состоянием: оно предварительно собирает исключения, ставки, obligations и payment events, но не меняет формулы FIFO/пени.
+5. Prepared state является производным immutable state и не является отдельным financial engine.
+
+### Диагностика производительности
+CalcEngine и таблица платежей логируют timing по каноническим тегам:
+- `[calc][perf]` — общий расчёт и количество вызовов `calcTotalsAsOf` в render таблицы;
+- `[fifo][perf]` — время FIFO allocation;
+- `[penalty][perf]` — время daily penalty loop;
+- `[ledger][perf]` — подготовка ledger state, cache hit, parse/sort ставок и исключений.
+
+### Запрещено
+- менять финансовые формулы;
+- менять FIFO-правило;
+- менять penalty math;
+- создавать parallel financial truth в UI;
+- считать долг/пеню отдельно в `payment_table.js`, `spravka_sud.js`, reports или другом UI.

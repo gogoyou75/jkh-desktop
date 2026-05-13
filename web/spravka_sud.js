@@ -709,12 +709,16 @@
       let curMonthPaidCum = 0;
 
       let penaltyBySourceMonth = {};
+      let preparedLedgerState = null;
       try {
+        if (typeof eng.prepareLedgerState === "function") {
+          preparedLedgerState = eng.prepareLedgerState(baseRows, { abonentId: ctx.abonentId });
+        }
         if (typeof eng.calcPenaltyBreakdownBySourceMonth === "function") {
           penaltyBySourceMonth = eng.calcPenaltyBreakdownBySourceMonth(
             baseRows,
             asOfFinal,
-            { abonentId: ctx.abonentId, applyAdvanceOffset: true, allowNegativePrincipal: true }
+            { abonentId: ctx.abonentId, applyAdvanceOffset: true, allowNegativePrincipal: true, preparedState: preparedLedgerState }
           ) || {};
         }
       } catch (e) {
@@ -733,7 +737,9 @@
           showFatal(EXCLUDES_FATAL_MESSAGE);
           return;
         }
-        penaltyBySourceMonth = {};
+        console.error("[spravka_sud] penalty breakdown failed", e);
+        showFatal("Ошибка расчёта: не удалось вычислить разбивку пени через CalcEngine.");
+        return;
       }
 
       function isFirstRowOfMonth(mk){ return curMonthKey !== mk; }
@@ -790,7 +796,8 @@
         finalTotals = eng.calcTotalsAsOfAdjusted(baseRows, asOfFinal, {
           abonentId: ctx.abonentId,
           applyAdvanceOffset: true,
-          allowNegativePrincipal: true
+          allowNegativePrincipal: true,
+          preparedState: preparedLedgerState
         });
       } catch (e) {
         if (isRatesFatalError(e)) {

@@ -368,3 +368,14 @@ rg -n "splitPremise|premise-transform\]\[split|type: ['\"]split" web LOGIC_SPEC.
 - `payments_<uid>` закреплён как единственный write-path ledger.
 - Legacy `payments_<LS>` оставлен только для read fallback внутри service layer.
 - Добавлены нормализация `WITH_DEBT` / `WITHOUT_DEBT` / `NO_DEBT` и минимальный financial event log.
+
+## 2026-05-13 — CalcEngine performance audit without financial fork
+
+- Добавлена каноническая диагностика производительности расчётов: `[calc][perf]`, `[fifo][perf]`, `[penalty][perf]`, `[ledger][perf]`.
+- В `web/calc_engine.js` добавлен read-only `CalcEngine.prepareLedgerState(rows, opts)` для кэширования подготовленных obligations/payment events, исключений и ставок без изменения FIFO/penalty math.
+- `rateOnDate()` ускорен через day-cache и binary lookup по уже отсортированным ставкам; отсутствие ставки по-прежнему остаётся fatal через существующий путь.
+- `web/payment_table.js` больше не содержит fallback-расчёт долга/пени: UI делегирует расчёт только `window.JKHCalcEngine` и логирует количество вызовов `calcTotalsAsOf` за render.
+- Финансовые формулы, FIFO-правило, penalty daily loop и структура ledger не изменялись.
+- `web/index.html` больше не использует fallback по последней строке ledger или `начислено - оплачено`; при ошибке CalcEngine итог не подменяется локальной UI-моделью.
+- `web/spravka_sud.js` переиспользует тот же `preparedState` CalcEngine для breakdown и final totals, не создавая отдельный расчётный контур.
+- `web/spravka_sud.js` не обнуляет breakdown пени при неизвестной ошибке CalcEngine; вместо silent fallback показывает fatal-сообщение.

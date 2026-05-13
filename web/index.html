@@ -601,9 +601,7 @@ function calcTotalsFromPayments(id, abonentObj){
     // ✅ Итоговые "Всего задолженность" и "ПЕНЯ за период" должны совпадать с логикой карточки.
     // Важно: в LS строки payments_<id> могут НЕ содержать актуальные total_debt/pay_penalty,
     // потому что карточка пересчитывает это "на лету".
-    // Поэтому:
-    //   1) если доступен calc_engine (JKHCalcEngine) — считаем итог прямо сейчас (это самый надёжный вариант)
-    //   2) иначе — fallback к данным из последней строки последнего месяца.
+    // Поэтому итог считается только через calc_engine (JKHCalcEngine); fallback по строкам запрещён.
 
     let totalDebt = 0;
     let penalty = 0;
@@ -643,43 +641,10 @@ function calcTotalsFromPayments(id, abonentObj){
             throw new Error('no JKHCalcEngine');
         }
     } catch (e) {
-        // (2) fallback — последняя строка последнего месяца (как раньше)
-        let endRow = null;
-        let bestKey = -Infinity;
-        let bestIsAccr = false;
-        let bestId = -Infinity;
-
-        for (const r of viewRows){
-            const y = Number(r.year) || 0;
-            const m = Number(r.month) || 0;
-            const key = (y * 12) + m;
-            const isAccr = Math.abs(toNum(r.accrued)) > 0.0000001;
-
-            const rid = Number(r.id) || 0;
-
-            const better =
-                (key > bestKey) ||
-                (key === bestKey && isAccr && !bestIsAccr) ||
-                (key === bestKey && isAccr === bestIsAccr && rid >= bestId);
-
-            if (better){
-                bestKey = key;
-                bestIsAccr = isAccr;
-                bestId = rid;
-                endRow = r;
-            }
-        }
-
-        totalDebt = endRow ? toNum(endRow.total_debt) : 0;
-        penalty   = endRow ? toNum(endRow.pay_penalty) : 0;
-
-    }
-
-    // ✅ страховка: если total_debt в строках не заполнен (0), всё равно можем показать аванс/долг по суммам
-    // principalNet = начислено - оплачено (может быть < 0)
-    const principalNet = sumAcc - sumPaid;
-    if (Math.abs(totalDebt) <= 0.0000001 && Math.abs(principalNet) > 0.0000001) {
-        totalDebt = principalNet + penalty;
+        // CRITICAL: главная не имеет права считать долг/пеню по строкам как fallback.
+        // При ошибке канонического CalcEngine итог не подменяется второй финансовой моделью.
+        console.error('[index][calc_engine_required]', { id: String(id || ''), error: e });
+        return null;
     }
 
 

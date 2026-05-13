@@ -57,6 +57,17 @@
   function pad2(n){ return String(n).padStart(2,"0"); }
   function r2(x){ return Math.round(x * 100) / 100; }
   function toNum(v){ const n = parseFloat(String(v ?? "").replace(/\s+/g,"").replace(",", ".")); return Number.isFinite(n) ? n : 0; }
+  function perfNow(){
+    try { return (window.performance && typeof window.performance.now === "function") ? window.performance.now() : Date.now(); } catch(e) { return Date.now(); }
+  }
+  function perfLog(tag, stage, startedAt, payload){
+    const ms = Math.round(Math.max(0, perfNow() - startedAt));
+    try {
+      const data = Object.assign({ stage: String(stage || ""), ms: ms }, payload || {});
+      console.log(String(tag || "[calc][perf]"), data);
+    } catch(e) {}
+    return ms;
+  }
   function isDataReady(){
     const legacyReady = (window.JKH_DATA_READY === true);
     const uiStatus = String((window.JKH_UI_STATE && window.JKH_UI_STATE.data && window.JKH_UI_STATE.data.status) || "");
@@ -366,10 +377,56 @@
   function moratoriumKey(abonentId){ return "moratorium_" + String(abonentId || getAbonentIdFromUrl()); }
   function isMoratoriumActive(abonentId){ return storeGetRaw(moratoriumKey(abonentId)) === "1"; }
 
+  const __excludesCache = new Map();
+  const __ratesCache = new Map();
+  const __preparedLedgerCache = new WeakMap();
+
+  function calcOwnerCachePrefix(){
+    try {
+      if (window.JKHStore && typeof JKHStore.getOwnerId === "function") return String(JKHStore.getOwnerId() || "");
+      if (window.Auth && typeof Auth.getActiveDbOwnerId === "function") return String(Auth.getActiveDbOwnerId() || "");
+    } catch(e) {}
+    return "";
+  }
+
+  function rowsContentSignature(rows){
+    const arr = Array.isArray(rows) ? rows : [];
+    let h = 2166136261;
+    function addPart(v){
+      const str = String(v ?? "");
+      for (let i = 0; i < str.length; i++) {
+        h ^= str.charCodeAt(i);
+        h = Math.imul(h, 16777619) >>> 0;
+      }
+      h ^= 124;
+      h = Math.imul(h, 16777619) >>> 0;
+    }
+    addPart(arr.length);
+    for (const r of arr){
+      if (!r || typeof r !== "object") { addPart("null"); continue; }
+      addPart(r.id); addPart(r.year); addPart(r.month); addPart(r.accrued); addPart(r.paid); addPart(r.paid_date);
+      addPart(r.use_period ? 1 : 0); addPart(r.period_from); addPart(r.period_to); addPart(r.pay_period_from); addPart(r.pay_period_to);
+      addPart(r.for_period_from); addPart(r.for_period_to); addPart(r.periodFrom); addPart(r.periodTo);
+      addPart(r.from_period); addPart(r.to_period); addPart(r.from); addPart(r.to);
+    }
+    return arr.length + ":" + h.toString(16);
+  }
+
   function loadExcludes(abonentId){
+    const startedAt = perfNow();
     const key = excludePeriodsKey(abonentId);
     const raw = storeGetRaw(key);
-    if (raw === null || raw === undefined) return [];
+    const cacheKey = calcOwnerCachePrefix() + "::" + key;
+    const cached = __excludesCache.get(cacheKey);
+    if (cached && cached.raw === raw && Array.isArray(cached.value)) {
+      perfLog("[ledger][perf]", "excludes-cache-hit", startedAt, { key: key, count: cached.value.length });
+      return cached.value;
+    }
+    if (raw === null || raw === undefined) {
+      __excludesCache.set(cacheKey, { raw: raw, value: [] });
+      perfLog("[ledger][perf]", "excludes-load", startedAt, { key: key, count: 0 });
+      return [];
+    }
 
     let arr;
     try{
@@ -399,7 +456,7 @@
     const startDay = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate(), 0,0,0,0);
     const endDay   = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate(), 23,59,59,999);
 
-    return arr.map((x, index) => {
+    const out = arr.map((x, index) => {
       if (!x || typeof x !== "object") {
         throwExcludesFatal("EXCLUDES_INVALID", key, { index: index, reason: "EXCLUDE_NOT_OBJECT" });
       }
@@ -415,6 +472,9 @@
 
       return { from: startDay(from), to: endDay(to) };
     });
+    __excludesCache.set(cacheKey, { raw: raw, value: out });
+    perfLog("[ledger][perf]", "excludes-load", startedAt, { key: key, count: out.length });
+    return out;
   }
 
   function isExcludedDay(d, excludes){
@@ -432,8 +492,15 @@
 
 
   function loadRates(abonentId){
+    const startedAt = perfNow();
     const key = isMoratoriumActive(abonentId) ? REFI_KEY_MORA : REFI_KEY_NORMAL;
     const raw = storeGetRaw(key);
+    const cacheKey = calcOwnerCachePrefix() + "::" + key;
+    const cached = __ratesCache.get(cacheKey);
+    if (cached && cached.raw === raw && Array.isArray(cached.value)) {
+      perfLog("[ledger][perf]", "rates-cache-hit", startedAt, { key: key, count: cached.value.length });
+      return cached.value;
+    }
     if (raw === null || raw === undefined){
       throwRatesFatal("RATES_MISSING", key, { reason: "RATES_KEY_MISSING" });
     }
@@ -453,15 +520,21 @@
       // CRITICAL: ставки рефинансирования = GLOBAL-справочник с сервера.
       // Запрещено подставлять fallback-ставку: это может дать юридически неверный расчёт пени.
       console.warn("[calc_engine][ref_rates] empty GLOBAL rates key=", key);
+      __ratesCache.set(cacheKey, { raw: raw, value: [] });
+      perfLog("[ledger][perf]", "rates-load", startedAt, { key: key, count: 0 });
       return [];
     }
 
-    return arr.map(x => ({
+    const out = arr.map(x => ({
       from: parseDateAnyToDate(x.from ?? x.dateFrom ?? x.start ?? x.fromISO ?? x.from_iso),
       rate: Number(String((x.rate ?? x.value ?? "")).replace(",", "."))
     }))
       .filter(x => x.from && x.from.getTime && Number.isFinite(x.rate))
       .sort((a,b)=>a.from.getTime()-b.from.getTime());
+    out.__rateByDay = new Map();
+    __ratesCache.set(cacheKey, { raw: raw, value: out });
+    perfLog("[ledger][perf]", "rates-load", startedAt, { key: key, count: out.length });
+    return out;
   }
 
 
@@ -469,6 +542,10 @@
   const t = d && d.getTime ? d.getTime() : NaN;
   if (!Number.isFinite(t)) return null;
   if (!Array.isArray(rates) || rates.length === 0) return null;
+
+  const dayKey = startOfDay(d).getTime();
+  if (!rates.__rateByDay) rates.__rateByDay = new Map();
+  if (rates.__rateByDay.has(dayKey)) return rates.__rateByDay.get(dayKey);
 
   const first = rates.find(function(r){
     return r && r.from && r.from.getTime && Number.isFinite(r.rate);
@@ -482,16 +559,26 @@
       firstRateDate: toISODateString(first.from),
       reason: "DATE_BEFORE_FIRST_RATE"
     });
+    rates.__rateByDay.set(dayKey, null);
     return null;
   }
 
+  let lo = 0;
+  let hi = rates.length - 1;
   let cur = null;
-  for (const r of rates){
-    if (!r || !r.from || !r.from.getTime) continue;
-    if (r.from.getTime() <= t) cur = r.rate;
-    else break;
+  while (lo <= hi){
+    const mid = Math.floor((lo + hi) / 2);
+    const r = rates[mid];
+    const rt = r && r.from && r.from.getTime ? r.from.getTime() : NaN;
+    if (Number.isFinite(rt) && rt <= t){
+      cur = Number.isFinite(r.rate) ? r.rate : cur;
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
   }
 
+  rates.__rateByDay.set(dayKey, cur);
   return cur;
 }
 
@@ -912,21 +999,29 @@
     return penalty;
   }
 
-  // --------- CORE TOTALS ----------
-  function calcTotalsAsOfCore(rows, asOfDate, opts){
-    const abonentId = opts?.abonentId || getAbonentIdFromUrl();
-    const excludes = loadExcludes(abonentId);
-    const rates = loadRates(abonentId);
+  function clonePreparedObligations(prepared, asOfYm){
+    const list = prepared && Array.isArray(prepared.allObligations) ? prepared.allObligations : [];
+    const out = [];
+    for (const ob of list){
+      if (String(ob.key || "") > asOfYm) continue;
+      out.push({ key: ob.key, amount: ob.amount, dueDate: ob.dueDate, applications: [] });
+    }
+    return out;
+  }
 
-    // ✅ FREEZE: если абонент "закрыт", пеня и итоги считаются только до freezeTo
-    let asOfEff = asOfDate;
-    const freezeISO = getFreezeToISO(abonentId);
-    if (freezeISO){
-      const fd = parseDateAnyToDate(freezeISO);
-      if (fd) asOfEff = minDateObj(asOfEff, fd);
+  function prepareLedgerState(rows, opts){
+    const startedAt = perfNow();
+    const abonentId = opts?.abonentId || getAbonentIdFromUrl();
+    const arr = Array.isArray(rows) ? rows : [];
+    const sig = rowsContentSignature(arr) + "::" + String(abonentId || "");
+    const cached = __preparedLedgerCache.get(arr);
+    if (cached && cached.signature === sig) {
+      perfLog("[ledger][perf]", "prepare-cache-hit", startedAt, { abonentId: String(abonentId || ""), rows: arr.length });
+      return cached.state;
     }
 
-    const asOfDay = startOfDay(asOfEff);
+    const excludes = loadExcludes(abonentId);
+    const rates = loadRates(abonentId);
 
     let allowedYm = null;
     try{
@@ -937,14 +1032,48 @@
       }
     }catch(e){}
 
-    const allObligations = buildObligationsFromRows(rows, allowedYm);
-    const asOfYm = `${asOfEff.getFullYear()}-${pad2(asOfEff.getMonth()+1)}`;
-    const obligations = allObligations.filter(ob => String(ob.key || "") <= asOfYm);
+    const allObligations = buildObligationsFromRows(arr, allowedYm).map(function(ob){
+      return { key: ob.key, amount: ob.amount, dueDate: ob.dueDate };
+    });
+    const paymentsAll = buildPaymentEventsFromRows(arr, abonentId);
+    const state = Object.freeze({
+      signature: sig,
+      abonentId: String(abonentId || ""),
+      excludes: excludes,
+      rates: rates,
+      allowedYm: allowedYm,
+      allObligations: Object.freeze(allObligations),
+      paymentsAll: Object.freeze(paymentsAll),
+      rowsCount: arr.length
+    });
+    __preparedLedgerCache.set(arr, { signature: sig, state: state });
+    perfLog("[ledger][perf]", "prepare", startedAt, { abonentId: String(abonentId || ""), rows: arr.length, obligations: allObligations.length, payments: paymentsAll.length });
+    return state;
+  }
 
-    const paymentsAll = buildPaymentEventsFromRows(rows, abonentId);
-    // asOfDay computed above
-    const payments = paymentsAll.filter(p => p && p.date && p.date.getTime() <= asOfDay.getTime());
+  // --------- CORE TOTALS ----------
+  function calcTotalsAsOfCore(rows, asOfDate, opts){
+    const startedAt = perfNow();
+    const abonentId = opts?.abonentId || getAbonentIdFromUrl();
+    const prepared = (opts && opts.preparedState) ? opts.preparedState : prepareLedgerState(rows, { abonentId: abonentId });
+    const excludes = prepared.excludes;
+    const rates = prepared.rates;
+
+    // ✅ FREEZE: если абонент "закрыт", пеня и итоги считаются только до freezeTo
+    let asOfEff = asOfDate;
+    const freezeISO = getFreezeToISO(abonentId);
+    if (freezeISO){
+      const fd = parseDateAnyToDate(freezeISO);
+      if (fd) asOfEff = minDateObj(asOfEff, fd);
+    }
+
+    const asOfDay = startOfDay(asOfEff);
+    const asOfYm = `${asOfEff.getFullYear()}-${pad2(asOfEff.getMonth()+1)}`;
+    const obligations = clonePreparedObligations(prepared, asOfYm);
+    const payments = prepared.paymentsAll.filter(p => p && p.date && p.date.getTime() <= asOfDay.getTime());
+    const fifoStartedAt = perfNow();
     const advances = allocatePaymentsFIFO(obligations, payments);
+    perfLog("[fifo][perf]", "allocate", fifoStartedAt, { obligations: obligations.length, payments: payments.length, advances: advances.length });
     const advanceUpTo = r2((advances || []).reduce((sum, a) => {
       if (a && a.date && a.date.getTime() <= asOfDay.getTime()) return sum + toNum(a.amount);
       return sum;
@@ -952,6 +1081,7 @@
 
     let principalTotal = 0;
     let penaltyTotal = 0;
+    const penaltyStartedAt = perfNow();
 
     for (const ob of obligations){
       sortApplications(ob);
@@ -962,15 +1092,19 @@
 
       penaltyTotal += calcPenaltyForObligation(ob, asOfEff, excludes, rates);
     }
+    perfLog("[penalty][perf]", "daily-loop", penaltyStartedAt, { obligations: obligations.length });
 
     const applyAdvanceOffset = !!(opts && opts.applyAdvanceOffset);
     const principalAdj = applyAdvanceOffset ? r2(principalTotal - advanceUpTo) : r2(principalTotal);
 
-    return { principalAdj, penaltyAccruedTotal: r2(penaltyTotal), advanceUpTo: r2(advanceUpTo) };
+    const out = { principalAdj, penaltyAccruedTotal: r2(penaltyTotal), advanceUpTo: r2(advanceUpTo) };
+    perfLog("[calc][perf]", "core", startedAt, { abonentId: String(abonentId || ""), rows: prepared.rowsCount, obligations: obligations.length, payments: payments.length });
+    return out;
   }
 
   // правило: переплата сначала гасит основной, потом пени
   function calcTotalsAsOfAdjusted(rows, asOfDate, opts){
+    const startedAt = perfNow();
     const core = calcTotalsAsOfCore(rows, asOfDate, opts);
     let principal = core.principalAdj;              // может быть отрицательным (аванс)
     let penaltyDebt = core.penaltyAccruedTotal;
@@ -1004,13 +1138,15 @@
       }
     }
 
-    return {
+    const out = {
       principal: r2(principal),
       penaltyDebt: r2(penaltyDebt),
       total: r2(principal + penaltyDebt),
       penaltyAccruedTotal: core.penaltyAccruedTotal,
       advanceUpTo: r2(core.advanceUpTo || 0)
     };
+    perfLog("[calc][perf]", "adjusted", startedAt, { rows: Array.isArray(rows) ? rows.length : 0 });
+    return out;
   }
 
   // --- helper for court view: first payment merged with accrued
@@ -1071,34 +1207,29 @@
   // Возвращает объект { "YYYY-MM": penaltyAccruedAsOf } по тем же правилам, что и карточка (с льготными 30 днями),
   // с учетом ставок/исключений и распределения оплат FIFO.
   function calcPenaltyBreakdownBySourceMonth(rows, asOfDate, opts){
+    const startedAt = perfNow();
     const abonentId = opts?.abonentId || getAbonentIdFromUrl();
-    const excludes = loadExcludes(abonentId);
-    const rates = loadRates(abonentId);
+    const prepared = (opts && opts.preparedState) ? opts.preparedState : prepareLedgerState(rows, { abonentId: abonentId });
+    const excludes = prepared.excludes;
+    const rates = prepared.rates;
 
     const asOfDay = startOfDay(asOfDate);
-
-    let allowedYm = null;
-    try{
-      const range = getActiveResponsibilityRangeISO(abonentId);
-      if (range?.from){
-        const ms = monthIter(range.from, range.to);
-        allowedYm = new Set(ms.map(m => `${m.year}-${m.month}`));
-      }
-    }catch(e){}
-
-    const allObligations = buildObligationsFromRows(rows, allowedYm);
     const asOfYm = `${asOfDate.getFullYear()}-${pad2(asOfDate.getMonth()+1)}`;
-    const obligations = allObligations.filter(ob => String(ob.key || "") <= asOfYm);
+    const obligations = clonePreparedObligations(prepared, asOfYm);
 
-    const paymentsAll = buildPaymentEventsFromRows(rows, abonentId);
-    const payments = paymentsAll.filter(p => p && p.date && p.date.getTime() <= asOfDay.getTime());
+    const payments = prepared.paymentsAll.filter(p => p && p.date && p.date.getTime() <= asOfDay.getTime());
+    const fifoStartedAt = perfNow();
     allocatePaymentsFIFO(obligations, payments);
+    perfLog("[fifo][perf]", "breakdown-allocate", fifoStartedAt, { obligations: obligations.length, payments: payments.length });
 
     const out = Object.create(null);
+    const penaltyStartedAt = perfNow();
     for (const ob of obligations){
       const pen = r2(calcPenaltyForObligation(ob, asOfDate, excludes, rates));
       out[String(ob.key)] = pen;
     }
+    perfLog("[penalty][perf]", "breakdown-daily-loop", penaltyStartedAt, { obligations: obligations.length });
+    perfLog("[calc][perf]", "penalty-breakdown", startedAt, { abonentId: String(abonentId || ""), rows: prepared.rowsCount });
     return out;
   }
 
@@ -1116,6 +1247,7 @@
     isExcludesFatalError,
     logExcludesFatal,
     loadRates,
+    prepareLedgerState,
     calcTotalsAsOfAdjusted,
     calcTotalsAsOfCore,
     buildCourtViewRows,

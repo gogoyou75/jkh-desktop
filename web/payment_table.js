@@ -1430,245 +1430,24 @@ function ymKey(y, m){ return `${String(y)}-${pad2(m)}`; }
 // берём суммы accrued > 0 и агрегируем по (год/месяц).
 // allowedYm: необязательный Set вида {"2026-01", } — если задан,
 // то в расчёт попадают ТОЛЬКО месяцы ответственности текущего ЛС.
-function buildObligationsFromRows(rows, allowedYm){
-  const map = new Map();
-  for (const r of rows){
-    const acc = toNum(r.accrued);
-    const y = parseInt(r.year, 10);
-    const m = parseInt(r.month, 10);
-    if (!y || !m) continue;
-    if (acc <= 0) continue;
-
-    if (allowedYm && allowedYm.size){
-      const k = ymKey(y, m);
-      if (!allowedYm.has(k)) continue;
-    }
-
-    const key = ymKey(y, m);
-    map.set(key, (map.get(key) || 0) + acc);
-  }
-
-  const obligations = [];
-  for (const [key, amount] of map.entries()){
-    const [yy, mm] = key.split("-");
-    const y = parseInt(yy, 10);
-    const m = parseInt(mm, 10);
-
-    // срок оплаты за месяц (y,m) — до 10 числа СЛЕДУЮЩЕГО месяца
-    const nm = nextMonthYear(y, m);
-    const due = new Date(nm.y, nm.m - 1, 10);
-
-    obligations.push({
-      key,
-      serviceYear: y,
-      serviceMonth: m,
-      amount: r2(amount),
-      dueDate: startOfDay(due),
-      applications: [] // сюда распределим оплаты (FIFO)
-    });
-  }
-
-  obligations.sort((a,b)=>a.dueDate - b.dueDate);
-  return obligations;
-}
-
-// Платежи: берём paid > 0 и paid_date (иначе распределять не можем).
-function buildPaymentEventsFromRows(rows){
-  const pays = [];
-  for (const r of rows){
-    const paid = toNum(r.paid);
-    if (paid <= 0) continue;
-
-    const d = parseDateAnyToDate(r.paid_date);
-    if (!d) continue;
-
-    pays.push({
-      date: startOfDay(d),
-      amount: r2(paid),
-      rowId: r.id
-    });
-  }
-  pays.sort((a,b)=>a.date - b.date || (Number(a.rowId)||0)-(Number(b.rowId)||0));
-  return pays;
-}
-
-// FIFO-распределение оплат по долгам: на самый ранний непогашенный долг.
-function allocatePaymentsFIFO(obligations, payments){
-  let oi = 0;
-  const advances = []; // переплата (аванс), если оплат больше, чем начислений на дату
-
-  function remaining(ob){
-    const applied = ob.applications.reduce((s,x)=>s + x.amount, 0);
-    return Math.max(ob.amount - applied, 0);
-  }
-
-  for (const p of payments){
-    let left = p.amount;
-
-    while (left > 0.0000001 && oi < obligations.length){
-      const ob = obligations[oi];
-      const rem = remaining(ob);
-      if (rem <= 0.0000001){
-        oi += 1;
-        continue;
-      }
-
-      const take = Math.min(rem, left);
-      ob.applications.push({ date: p.date, amount: r2(take) });
-      left = r2(left - take);
-
-      if (remaining(ob) <= 0.0000001) oi += 1;
-    }
-
-    // ✅ если оплат больше, чем долга — фиксируем переплату (аванс)
-    if (left > 0.0000001){
-      advances.push({ date: p.date, amount: r2(left) });
-    }
-  }
-
-  return advances;
-}
-
-function sumAppliedUpTo(ob, day){
-  const t = day.getTime();
-  let s = 0;
-  for (const a of ob.applications){
-    if (a.date.getTime() <= t) s += a.amount;
-    else break;
-  }
-  return s;
-}
-
-function sortApplications(ob){
-  ob.applications.sort((a,b)=>a.date - b.date);
-}
-
-// Расчёт пени по ОДНОМУ долгу (обязательству) до даты asOf (включительно)
-function calcPenaltyForObligation(ob, asOf, excludes, rates){
-  const asOfDay = startOfDay(asOf);
-  if (asOfDay <= ob.dueDate) return 0;
-
-  sortApplications(ob);
-
-  let penalty = 0;
-  let overdueIndex = 0;
-
-  // начинаем считать дни просрочки с дня, следующего за dueDate
-  let day = addDays(ob.dueDate, 1);
-
-  const hardLimit = addDays(ob.dueDate, 3650);
-  const end = (asOfDay < hardLimit) ? asOfDay : hardLimit;
-
-  while (day <= end){
-    if (!isExcludedDay(day, excludes)){
-      overdueIndex += 1;
-
-      // остаток долга на ЭТОТ день.
-      // Важно: считаем, что платёж, датированный day, уменьшает долг "с этого дня".
-      const applied = sumAppliedUpTo(ob, day);
-      const principal = Math.max(ob.amount - applied, 0);
-
-      if (principal > 0.0000001 && overdueIndex > 30){
-        const denom = (overdueIndex <= 90) ? 300 : 130;
-        const rawRate = rateOnDate(day, rates);
-        if (!Number.isFinite(rawRate)) {
-          throwRatesFatal("MISSING_REQUIRED_RATE", "", { date: toISODateString(day), reason: "MISSING_REQUIRED_RATE" });
-        }
-        const rate = capRateUntil2027(day, rawRate);
-        penalty += principal * (rate / 100) / denom;
-      }
-    }
-    day = addDays(day, 1);
-  }
-
-  return penalty;
-}
-
+// Финансовые расчёты (FIFO, долг, пеня) намеренно не реализуются в UI.
+// Единственный источник расчёта — window.JKHCalcEngine из calc_engine.js.
 function calcTotalsAsOf(rows, asOfDate){
-  // ✅ Variant B (единый движок): если подключён calc_engine.js (window.JKHCalcEngine),
-  // то считаем через него — чтобы карточка и справка совпадали 1:1.
-  try {
-    const eng = window.JKHCalcEngine;
-    if (eng && typeof eng.calcTotalsAsOfAdjusted === 'function') {
-      const t = eng.calcTotalsAsOfAdjusted(rows, asOfDate, { abonentId: getAbonentId(), applyAdvanceOffset: true, allowNegativePrincipal: true });
-      // 🔒 CRITICAL-ASSERT (DEV): долги не должны быть отрицательными
-      if (typeof CRITICAL_ASSERT === 'function') {
-        CRITICAL_ASSERT(Number.isFinite(t.principal), 'Card: principal is not finite', { principal: t.principal, asOfDate });
-        CRITICAL_ASSERT(Number.isFinite(t.penaltyDebt), 'Card: penalty is not finite', { penalty: t.penaltyDebt, asOfDate });
-      }
-      return { principal: t.principal, penalty: t.penaltyDebt, total: t.total };
-    }
-  } catch (e) {
-    if (isRatesFatalError(e)) {
-      logRatesFatal(e);
-      throw e;
-    }
-    if (isExcludesFatalError(e)) {
-      logExcludesFatal(e);
-      throw e;
-    }
-    /* fallback to local calc */
+  __paymentTableCalcCalls += 1;
+  const startedAt = perfNow();
+  const eng = window.JKHCalcEngine;
+  if (!eng || typeof eng.calcTotalsAsOfAdjusted !== 'function') {
+    throw new Error('CalcEngine is required: UI must not calculate debt/penalty separately');
   }
 
-  const excludes = loadExcludes();
-  const rates = loadRates();
-
-  // ⚖️ Разделение долга при смене собственника:
-  // в расчёт обязательств попадают ТОЛЬКО месяцы ответственности текущего ЛС.
-  // (диапазон берём из AbonentsDB.links, а если задано — ещё и из abonent.calcStartDate/calcEndDate)
-  let allowedYm = null;
-  try {
-    const range = getActiveResponsibilityRangeISO();
-    if (range?.from) {
-      const ms = monthIter(range.from, range.to);
-      allowedYm = new Set(ms.map(m => `${m.year}-${m.month}`));
-    }
-  } catch(e) { console.error(e); throw e; }
-
-  // ---------------------------------------------------------
-  // 🔐 CRITICAL (Нулевой старт + помесячная история):
-  // НЕЛЬЗЯ включать в "долг на дату" начисления будущих месяцев.
-  // Иначе в самом первом месяце (например, Январь 2025) появится
-  // огромная "начальная задолженность" из 2026 и далее.
-  //
-  // Поэтому для расчёта на дату asOfDate берём обязательства
-  // только за месяцы <= месяца asOfDate.
-  // ---------------------------------------------------------
-  const allObligations = buildObligationsFromRows(rows, allowedYm);
-  const asOfYm = `${asOfDate.getFullYear()}-${pad2(asOfDate.getMonth() + 1)}`;
-  const obligations = allObligations.filter(ob => String(ob.key || "") <= asOfYm);
-
-  const payments = buildPaymentEventsFromRows(rows);
-  const advances = allocatePaymentsFIFO(obligations, payments);
-
-  // Переплата (аванс) на дату asOfDate уменьшает задолженность по обяз.
-  // Если аванс превышает долг — задолженность становится отрицательной.
-  const asOfDay = startOfDay(asOfDate);
-  const advanceUpTo = r2((advances || []).reduce((sum, a) => {
-    if (a && a.date && a.date.getTime() <= asOfDay.getTime()) return sum + toNum(a.amount);
-    return sum;
-  }, 0));
-
-  let principalTotal = 0;
-  let penaltyTotal = 0;
-
-  for (const ob of obligations){
-    sortApplications(ob);
-
-    const applied = sumAppliedUpTo(ob, startOfDay(asOfDate));
-    const principal = Math.max(ob.amount - applied, 0);
-    principalTotal += principal;
-
-    penaltyTotal += calcPenaltyForObligation(ob, asOfDate, excludes, rates);
+  const t = eng.calcTotalsAsOfAdjusted(rows, asOfDate, { abonentId: getAbonentId(), applyAdvanceOffset: true, allowNegativePrincipal: true });
+  // 🔒 CRITICAL-ASSERT (DEV): долги должны быть конечными числами.
+  if (typeof CRITICAL_ASSERT === 'function') {
+    CRITICAL_ASSERT(Number.isFinite(t.principal), 'Card: principal is not finite', { principal: t.principal, asOfDate });
+    CRITICAL_ASSERT(Number.isFinite(t.penaltyDebt), 'Card: penalty is not finite', { penalty: t.penaltyDebt, asOfDate });
   }
-
-    const principalAdj = r2(principalTotal - advanceUpTo);
-
-  return {
-    principal: principalAdj,
-    penalty: r2(penaltyTotal),
-    total: r2(principalAdj + penaltyTotal)
-  };
+  perfLog('calcTotalsAsOf', startedAt, { source: 'CalcEngine' });
+  return { principal: t.principal, penalty: t.penaltyDebt, total: t.total };
 }
 
 // Совместимость: раньше были "базовые" расчёты по строке.
@@ -1683,15 +1462,37 @@ const __paymentTotalsMemo = new Map();
 let __paymentTableRenderedSignature = "";
 let __paymentTableCalcToken = 0;
 let __paymentTableCalcTimerActive = false;
+let __paymentTableCalcCalls = 0;
+let __paymentTableCalcMemoHits = 0;
+let __paymentTableCalcMemoMisses = 0;
 
 function perfNow(){
   try { return (window.performance && typeof window.performance.now === "function") ? window.performance.now() : Date.now(); } catch(e) { return Date.now(); }
 }
 
-function perfLog(stage, startedAt){
+function perfLog(stage, startedAt, payload){
   const ms = Math.round(Math.max(0, perfNow() - startedAt));
-  try { console.log(`[payment-table][perf] ${stage} ms=${ms}`); } catch(e) {}
+  try { console.log('[payment-table][perf]', Object.assign({ stage: String(stage || ''), ms: ms }, payload || {})); } catch(e) {}
   return ms;
+}
+
+function resetCalcPerfCounters(){
+  __paymentTableCalcCalls = 0;
+  __paymentTableCalcMemoHits = 0;
+  __paymentTableCalcMemoMisses = 0;
+}
+
+function logCalcPerfCounters(stage, startedAt){
+  try {
+    console.log('[calc][perf]', {
+      stage: String(stage || 'payment-table-render'),
+      ms: Math.round(Math.max(0, perfNow() - startedAt)),
+      calcTotalsAsOfCalls: __paymentTableCalcCalls,
+      memoHits: __paymentTableCalcMemoHits,
+      memoMisses: __paymentTableCalcMemoMisses,
+      memoSize: __paymentTotalsMemo.size
+    });
+  } catch(e) {}
 }
 
 function ledgerSignatureForRows(rows){
@@ -1729,7 +1530,8 @@ function memoKeyForTotals(ledgerSignature, asOfDate){
 function calcTotalsAsOfMemoized(rows, asOfDate, ledgerSignature){
   const key = memoKeyForTotals(ledgerSignature, asOfDate);
   const cached = __paymentTotalsMemo.get(key);
-  if (cached) return cached;
+  if (cached) { __paymentTableCalcMemoHits += 1; return cached; }
+  __paymentTableCalcMemoMisses += 1;
   const t = calcTotalsAsOf(rows, asOfDate);
   const out = { principal: t.principal, penalty: t.penalty, total: t.total };
   __paymentTotalsMemo.set(key, out);
@@ -1832,6 +1634,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
   const calcRows = Array.isArray(baseRows) ? baseRows : rows;
   const token = ++__paymentTableCalcToken;
   const startedAt = perfNow();
+  resetCalcPerfCounters();
   if (__paymentTableCalcTimerActive) { try { console.timeEnd('[payment-table] calc-totals'); } catch(e) {} }
   __paymentTableCalcTimerActive = true;
   try { console.time('[payment-table] calc-totals'); } catch(e) {}
@@ -1849,6 +1652,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
     if (__paymentTableCalcTimerActive) { try { console.timeEnd('[payment-table] calc-totals'); } catch(e) {} }
     __paymentTableCalcTimerActive = false;
     perfLog('calc', startedAt);
+    logCalcPerfCounters('payment-table-running-totals', startedAt);
   }
 
   function step(){
@@ -1909,177 +1713,8 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
     return parseDateAnyToDate(dmy);
   }
 
-  function loadExcludes(){
-    const key = excludePeriodsKey();
-    const raw = storeGetRaw(key);
-    if (raw === null || raw === undefined) return [];
+  // UI не содержит локального расчёта пени/ставок: все суммы приходят только из CalcEngine.
 
-    let arr;
-    try{
-      arr = JSON.parse(raw);
-    }catch(e){
-      throwExcludesFatal("EXCLUDES_JSON_INVALID", key, { reason: "JSON_PARSE_FAILED" }, e);
-    }
-
-    if (!Array.isArray(arr)) {
-      throwExcludesFatal("EXCLUDES_JSON_INVALID", key, { reason: "EXCLUDES_NOT_ARRAY" });
-    }
-
-    // Нормализуем даты исключения: from = начало дня, to = конец дня (включительно)
-    const startDay = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate(), 0,0,0,0);
-    const endDay   = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate(), 23,59,59,999);
-
-    return arr.map((x, index) => {
-      if (!x || typeof x !== "object") {
-        throwExcludesFatal("EXCLUDES_INVALID", key, { index: index, reason: "EXCLUDE_NOT_OBJECT" });
-      }
-
-      const fromRaw = x.from ?? x.dateFrom ?? x.start ?? x.fromISO ?? x.from_iso;
-      const toRaw   = x.to   ?? x.dateTo   ?? x.end   ?? x.toISO   ?? x.to_iso;
-
-      const from = parseDateAnyToDate(fromRaw);
-      const to   = parseDateAnyToDate(toRaw);
-
-      if (!from || !to || endDay(to) < startDay(from)) {
-        throwExcludesFatal("EXCLUDES_INVALID", key, { index: index, reason: "EXCLUDE_DATE_INVALID", from: fromRaw, to: toRaw });
-      }
-
-      return {
-        from: startDay(from),
-        to:   endDay(to),
-        reason: String(x.reason || x.note || x.comment || "")
-      };
-    });
-  }
-
-  function isExcludedDay(d, excludes){
-    const t = d.getTime();
-    for (const p of excludes){
-      if (t >= p.from.getTime() && t <= p.to.getTime()) return true;
-    }
-    return false;
-  }
-
-  function loadRates(){
-    const key = isMoratoriumActive() ? REFI_KEY_MORA : REFI_KEY_NORMAL;
-    const raw = storeGetRaw(key);
-    if (raw === null || raw === undefined){
-      throwRatesFatal("RATES_MISSING", key, { reason: "RATES_KEY_MISSING" });
-    }
-
-    let arr;
-    try{
-      arr = JSON.parse(raw);
-    }catch(e){
-      throwRatesFatal("RATES_JSON_INVALID", key, { reason: "RATES_JSON_PARSE_FAILED", error: e && e.message ? e.message : String(e) });
-    }
-
-    if (!Array.isArray(arr)){
-      throwRatesFatal("RATES_JSON_INVALID", key, { reason: "RATES_JSON_NOT_ARRAY" });
-    }
-
-    const parsed = arr
-      .map(x => ({
-        from: parseDMY(x.from),
-        rate: Number(String(x.rate ?? "").replace(",", "."))
-      }))
-      .filter(x => x.from && Number.isFinite(x.rate))
-      .sort((a,b)=>a.from-b.from);
-    return parsed;
-  }
-
-  function rateOnDate(d, rates){
-    const t = d && d.getTime ? d.getTime() : NaN;
-    if (!Number.isFinite(t)) return null;
-    if (!Array.isArray(rates) || rates.length === 0) return null;
-
-    const first = rates.find(function(r){
-      return r && r.from && r.from.getTime && Number.isFinite(r.rate);
-    });
-    if (!first) return null;
-    if (t < first.from.getTime()) return null;
-
-    let cur = null;
-    for (const r of rates){
-      if (!r || !r.from || !r.from.getTime) continue;
-      if (r.from.getTime() <= t) cur = r.rate;
-      else break;
-    }
-    return cur;
-  }
-
-  function capRateUntil2027(dateObj, rate){
-    const cutoff = new Date("2027-01-01");
-    if (dateObj < cutoff) return Math.min(9.5, rate);
-    return rate;
-  }
-
-  // ✅ FIX #1: month index (в JS месяцы 0..11)
-  function dueDateForRow(r){
-    const y = parseInt(r.year, 10);
-    const m = parseInt(r.month, 10);
-    if (!y || !m) return null;
-    return new Date(y, (m - 1), 10); // было: new Date(y, m, 10)
-  }
-
-  // ✅ FIX #2: если долг НЕ закрыт полностью — пеня считается до сегодняшнего дня,
-  // даже если paid_date заполнена (частичная оплата / дата первой оплаты)
-  function endDateForRow(r){
-    const acc = toNum(r.accrued);
-    const paid = toNum(r.paid);
-    const hasDebt = (acc - paid) > 0.0000001;
-
-    if (hasDebt) return new Date();
-
-    const d = parseDateAnyToDate(r.paid_date);
-    return d ? d : new Date();
-  }
-
-  function addDays(d, n){
-    const x = new Date(d.getTime());
-    x.setDate(x.getDate() + n);
-    return x;
-  }
-
-  function calcPenaltyForRow(r){
-    const debt = toNum(r.pay_main);
-    if (debt <= 0) return 0;
-
-    const due = dueDateForRow(r);
-    if (!due) return 0;
-
-    const end = endDateForRow(r);
-    if (end <= due) return 0;
-
-    const excludes = loadExcludes();
-    const rates = loadRates();
-
-    let penalty = 0;
-    let day = addDays(due, 1);
-    let overdueIndex = 0;
-
-    const hardLimit = addDays(due, 3650);
-
-    while (day <= end && day <= hardLimit){
-      if (!isExcludedDay(day, excludes)){
-        overdueIndex += 1;
-
-        if (overdueIndex > 30){
-          const denom = (overdueIndex <= 90) ? 300 : 130;
-          const rawRate = rateOnDate(day, rates);
-          if (!Number.isFinite(rawRate)) {
-            throwRatesFatal("MISSING_REQUIRED_RATE", "", { date: toISODateString(day), reason: "MISSING_REQUIRED_RATE" });
-          }
-          const rate = capRateUntil2027(day, rawRate);
-
-          penalty += debt * (rate / 100) / denom;
-        }
-      }
-      day = addDays(day, 1);
-    }
-
-    return penalty;
-  }
 
   // ===== МЕСЯЦА ДЛЯ СЕЛЕКТОВ периода (01-12) =====
   const PERIOD_MONTHS = Array.from({ length: 12 }, (_, i) => pad2(i + 1));
