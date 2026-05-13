@@ -830,6 +830,7 @@
   function migrateLegacyCalcPeriodKeysForDb(db) {
     if (!db || !db.abonents || typeof db.abonents !== "object") return 0;
     var migrated = 0;
+    var ownerId = _ownerId();
     Object.keys(db.abonents).forEach(function (abonentId) {
       var a = db.abonents[abonentId] || {};
       var uid = String(a.uid || "").trim();
@@ -843,12 +844,12 @@
           var suffix = String(alias || "").trim();
           if (!suffix || suffix === uid) return;
           var legacyKey = meta.prefix + suffix;
-          var val = _getRawScoped(legacyKey);
+          var val = _getRawScoped(legacyKey, ownerId);
           if (val !== null && val !== undefined) {
-            if (_getRawScoped(meta.canonicalKey) === null) _setRawScoped(meta.canonicalKey, val);
-            _removeRawScoped(legacyKey);
+            if (_getRawScoped(meta.canonicalKey, ownerId) === null) _setRawScoped(meta.canonicalKey, val, ownerId);
+            _removeRawScoped(legacyKey, ownerId);
             migrated++;
-            try { console.warn("[calc-period][migrate-legacy-key]", { from: legacyKey, to: meta.canonicalKey }); } catch (e) {}
+            try { console.warn("[calc-period][legacy-cleanup]", { from: legacyKey, to: meta.canonicalKey, ownerId: ownerId, abonentId: String(abonentId || ""), uid: uid }); } catch (e) {}
           }
         });
       });

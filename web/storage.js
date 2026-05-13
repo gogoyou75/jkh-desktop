@@ -959,9 +959,10 @@
         var canonicalKey = info.prefix + uid;
         if (!Object.prototype.hasOwnProperty.call(dumpObj, canonicalKey)) dumpObj[canonicalKey] = dumpObj[key];
         delete dumpObj[key];
-        try { console.warn("[calc-period][migrate-legacy-key-from-dump]", { from: key, to: canonicalKey }); } catch (e) {}
+        try { console.warn("[calc-period][legacy-cleanup]", { from: key, to: canonicalKey, ownerId: String(ownerId || ""), abonentId: info.suffix, uid: uid }); } catch (e) {}
       } else {
         delete dumpObj[key];
+        try { console.warn("[calc-period][legacy-drop]", { key: key, ownerId: String(ownerId || ""), reason: "UID_ALIAS_NOT_FOUND" }); } catch (eDrop) {}
         try { console.error("[fatal][calc-period-non-uid-key-blocked]", { key: key, suffix: info.suffix, ownerId: String(ownerId || ""), source: "server-dump" }); } catch (e2) {}
       }
     });
