@@ -857,11 +857,27 @@
     return !!(db && db.abonents && typeof db.abonents === "object");
   }
 
+  function _currentAbonentIdFromLocation() {
+    try {
+      var params = new URLSearchParams(window.location && window.location.search || "");
+      return String(params.get("abonent") || "").trim();
+    } catch (e) {
+      return "";
+    }
+  }
+
+  function _calcPeriodMigrationIdsForDb(db) {
+    var abonents = db && db.abonents && typeof db.abonents === "object" ? db.abonents : {};
+    var currentId = _currentAbonentIdFromLocation();
+    if (currentId && abonents[currentId]) return [currentId];
+    return Object.keys(abonents);
+  }
+
   function migrateLegacyCalcPeriodKeysForDb(db) {
     if (!_isCalcPeriodCleanupServerDataReady(db)) return 0;
     var migrated = 0;
     var ownerId = _ownerId();
-    Object.keys(db.abonents).forEach(function (abonentId) {
+    _calcPeriodMigrationIdsForDb(db).forEach(function (abonentId) {
       var a = db.abonents[abonentId] || {};
       var uid = String(a.uid || "").trim();
       if (!isValidUid(uid)) {
@@ -869,9 +885,10 @@
         return;
       }
       [
-        { prefix: "calc_period_", canonicalKey: "calc_period_" + uid },
-        { prefix: "calc_period_active_", canonicalKey: "calc_period_active_" + uid }
+        { prefix: "calc_period_", canonicalKey: resolveCalcPeriodStorageKey(a) },
+        { prefix: "calc_period_active_", canonicalKey: resolveCalcPeriodActiveStorageKey(a) }
       ].forEach(function (meta) {
+        if (!meta.canonicalKey) return;
         var aliases = [abonentId, a.id, a.ls, a.account, a.accountNumber, a.personalAccount, a.regnum, a.premiseRegnum];
         aliases.forEach(function (alias) {
           var suffix = String(alias || "").trim();

@@ -44,8 +44,25 @@
     if (!(window.JKHStore && typeof window.JKHStore.getRaw === "function")) return null;
     try { return JKHStore.getRaw(String(key)); } catch { return null; }
   }
+  const __calcPeriodLogOnce = new Set();
+  function logCalcPeriodOnce(tag, payload){
+    try {
+      const key = String(tag || "") + ":" + String(payload && (payload.key || payload.storageKey || payload.activeKey || payload.reason) || "");
+      if (__calcPeriodLogOnce.has(key)) return;
+      __calcPeriodLogOnce.add(key);
+      console.log(tag, payload || {});
+    } catch(e) {}
+  }
+  function isLegacyCalcPeriodKey(key){
+    const k = String(key || "");
+    return /^calc_period_(active_)?(?!uid_)/.test(k);
+  }
   function storeSetRaw(key, value){
     if (!(window.JKHStore && typeof window.JKHStore.setRaw === "function")) return;
+    if (isLegacyCalcPeriodKey(key)) {
+      logCalcPeriodOnce("[calc-period][legacy-write-prevented]", { key: String(key || ""), source: "payment_table.storeSetRaw" });
+      return;
+    }
     try { JKHStore.setRaw(String(key), value); } catch(e) { console.error(e); throw e; }
   }
   function storeRemoveRaw(key){
@@ -1100,22 +1117,37 @@ if (parts.length) {
 
 
   // ===== ФИЛЬТР ПО ПЕРИОДУ ДЛЯ "РАСЧЁТ ВЗЫСКИВАЕМОЙ СУММЫ" =====
-  function calcPeriodKey() {
+  let __calcPeriodMetaCache = null;
+  function calcPeriodStorageMeta(){
     const id = String(getAbonentId() || "");
-    const abonent = (window.Data && typeof window.Data.getAbonent === "function") ? window.Data.getAbonent(id) : null;
-    const key = (window.Data && typeof window.Data.resolveCalcPeriodStorageKey === "function")
-      ? window.Data.resolveCalcPeriodStorageKey(abonent || id)
-      : (window.getCalcPeriodStorageKey ? window.getCalcPeriodStorageKey(abonent || id) : "");
-    return key || "";
+    const owner = currentOwnerIdForPaymentCache();
+    const cacheKey = id + "|" + owner;
+    if (__calcPeriodMetaCache && __calcPeriodMetaCache.cacheKey === cacheKey) return __calcPeriodMetaCache;
+
+    if (!(window.Data && typeof window.Data.resolveCalcPeriodStorageKey === "function" && typeof window.Data.resolveCalcPeriodActiveStorageKey === "function")) {
+      logCalcPeriodOnce("[calc-period][save-skipped-no-canonical-key]", { abonentId: id, reason: "DATA_NOT_READY", source: "payment_table" });
+      return { cacheKey: cacheKey, storageKey: "", activeStorageKey: "", abonentId: id };
+    }
+
+    const abonent = (typeof window.Data.getAbonent === "function") ? window.Data.getAbonent(id) : null;
+    if (!abonent) {
+      logCalcPeriodOnce("[calc-period][save-skipped-no-canonical-key]", { abonentId: id, reason: "ABONENT_NOT_READY", source: "payment_table" });
+      return { cacheKey: cacheKey, storageKey: "", activeStorageKey: "", abonentId: id };
+    }
+
+    const storageKey = String(window.Data.resolveCalcPeriodStorageKey(abonent) || "");
+    const activeStorageKey = String(window.Data.resolveCalcPeriodActiveStorageKey(abonent) || "");
+    if (!storageKey || !activeStorageKey) {
+      logCalcPeriodOnce("[calc-period][save-skipped-no-canonical-key]", { abonentId: id, reason: "CANONICAL_KEY_NOT_READY", source: "payment_table" });
+      return { cacheKey: cacheKey, storageKey: "", activeStorageKey: "", abonentId: id };
+    }
+
+    __calcPeriodMetaCache = { cacheKey: cacheKey, storageKey: storageKey, activeStorageKey: activeStorageKey, abonentId: id };
+    logCalcPeriodOnce("[calc-period][canonical-key-used]", { abonentId: id, storageKey: storageKey, activeKey: activeStorageKey, source: "payment_table" });
+    return __calcPeriodMetaCache;
   }
-  function calcPeriodActiveKey() {
-    const id = String(getAbonentId() || "");
-    const abonent = (window.Data && typeof window.Data.getAbonent === "function") ? window.Data.getAbonent(id) : null;
-    const key = (window.Data && typeof window.Data.resolveCalcPeriodActiveStorageKey === "function")
-      ? window.Data.resolveCalcPeriodActiveStorageKey(abonent || id)
-      : (window.getCalcPeriodActiveStorageKey ? window.getCalcPeriodActiveStorageKey(abonent || id) : "");
-    return key || "";
-  }
+  function calcPeriodKey() { return calcPeriodStorageMeta().storageKey || ""; }
+  function calcPeriodActiveKey() { return calcPeriodStorageMeta().activeStorageKey || ""; }
 
   function lastAddedPaymentKey() { return "last_added_payment_" + getAbonentId(); }
   function setLastAddedPaymentId(id) {
@@ -1130,7 +1162,9 @@ if (parts.length) {
 
   function getCalcPeriod() {
     try {
-      const raw = storeGetRaw(calcPeriodKey());
+      const key = calcPeriodKey();
+      if (!key) return null;
+      const raw = storeGetRaw(key);
       if (!raw) return null;
       const p = JSON.parse(raw);
       const from = String(p?.from || "");
@@ -1143,14 +1177,17 @@ if (parts.length) {
   }
 
   function isCalcPeriodActive() {
-    return storeGetRaw(calcPeriodActiveKey()) === "1";
+    const key = calcPeriodActiveKey();
+    if (!key) return false;
+    return storeGetRaw(key) === "1";
   }
 
   // ✅ ФИЛЬТР: показываем оплаты, у которых "Дата оплаты" попадает в выбранный период
-  function applyCalcFilter(arr) {
-    if (!isCalcPeriodActive()) return arr;
+  function applyCalcFilter(arr, activeOverride, periodOverride) {
+    const active = (typeof activeOverride === "boolean") ? activeOverride : isCalcPeriodActive();
+    if (!active) return arr;
 
-    const p = getCalcPeriod();
+    const p = periodOverride || getCalcPeriod();
     if (!p) return arr;
 
     const fromD = parseDateAnyToDate(p.from);
@@ -2036,7 +2073,9 @@ function applyRunningTotals(viewRows) {
       calcRowBase(r);
     });
 
-    const view = applyResponsibilityRangeToView(applyCalcFilter(arr)).slice();
+    const periodActive = isCalcPeriodActive();
+    const selectedPeriod = periodActive ? getCalcPeriod() : null;
+    const view = applyResponsibilityRangeToView(applyCalcFilter(arr, periodActive, selectedPeriod)).slice();
     try {
       applyRunningTotals(view);
     } catch (e) {
@@ -2128,7 +2167,9 @@ function applyRunningTotals(viewRows) {
       calcRowBase(r);
     });
 
-    const view = applyResponsibilityRangeToView(applyCalcFilter(arr)).slice();
+    const periodActive = isCalcPeriodActive();
+    const selectedPeriod = periodActive ? getCalcPeriod() : null;
+    const view = applyResponsibilityRangeToView(applyCalcFilter(arr, periodActive, selectedPeriod)).slice();
     try {
       applyRunningTotals(view);
     } catch (e) {
@@ -2179,10 +2220,12 @@ function applyRunningTotals(viewRows) {
 
       return (Number(a.id) || 0) - (Number(b.id) || 0);
     });
-tbody.innerHTML = "";
+    tbody.innerHTML = "";
+    const frag = document.createDocumentFragment();
     view.forEach(r => {
-      tbody.appendChild(makeRow(r));
+      frag.appendChild(makeRow(r));
     });
+    tbody.appendChild(frag);
 
     clearLastAddedPaymentId();
   }
@@ -2192,7 +2235,15 @@ tbody.innerHTML = "";
   let __paymentTableLoadRunAgain = false;
 
   function requestLoadPaymentTable(reason){
-    if (__paymentTableLoadScheduled) return;
+    if (__paymentTableLoadScheduled) {
+      try { console.log("[payment-table][init-skipped-inflight]", { reason: String(reason || "scheduled"), phase: "scheduled" }); } catch(e) {}
+      return;
+    }
+    if (__paymentTableLoadRunning) {
+      __paymentTableLoadRunAgain = true;
+      try { console.log("[payment-table][init-skipped-inflight]", { reason: String(reason || "scheduled"), phase: "running" }); } catch(e) {}
+      return;
+    }
     __paymentTableLoadScheduled = true;
     setTimeout(function(){
       __paymentTableLoadScheduled = false;
@@ -2208,7 +2259,9 @@ tbody.innerHTML = "";
     }
     __paymentTableLoadRunning = true;
     try {
+      console.log("[payment-table][init-start]", { reason: String(reason || "") });
       await loadPaymentTableImpl();
+      console.log("[payment-table][init-done]", { reason: String(reason || "") });
     } finally {
       __paymentTableLoadRunning = false;
       if (__paymentTableLoadRunAgain) {
@@ -2803,24 +2856,20 @@ tbody.innerHTML = "";
   let started = false;
 
   function tryStart(){
-    if (started) return;
+    if (started) {
+      try { console.log("[payment-table][init-skipped-inflight]", { reason: "already-started" }); } catch(e) {}
+      return;
+    }
 
     if (isDataReady()) {
       started = true;
-      try { if (window.JKH_DEBUG_PAYMENT_KEY) console.debug("[payment-table] start after data-ready"); } catch(e) {}
+      try { window.removeEventListener("JKH_UI_STATE_CHANGED", tryStart); } catch(e) {}
       requestLoadPaymentTable('data-ready');
     }
   }
 
   tryStart();
-
-  window.addEventListener("JKH_UI_STATE_CHANGED", tryStart);
-
-  let tries = 0;
-  const t = setInterval(() => {
-    tryStart();
-    if (started || tries++ > 20) clearInterval(t);
-  }, 300);
+  if (!started) window.addEventListener("JKH_UI_STATE_CHANGED", tryStart);
 })();
 
 

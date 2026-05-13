@@ -1353,8 +1353,17 @@ function __fmt2(n){
 function storeGet(key, ownerId){
   try { return (window.JKHStore && JKHStore.getRaw) ? JKHStore.getRaw(key, ownerId) : null; } catch(e){ return null; }
 }
+function __isLegacyCalcPeriodWriteKey(key){
+  return /^calc_period_(active_)?(?!uid_)/.test(String(key || ""));
+}
 function storeSet(key, value, ownerId){
-  try { if (window.JKHStore && JKHStore.setRaw) JKHStore.setRaw(key, value, ownerId); } catch(e){}
+  try {
+    if (__isLegacyCalcPeriodWriteKey(key)) {
+      console.warn("[calc-period][legacy-write-prevented]", { key: String(key || ""), ownerId: String(ownerId || ""), source: "abonent_card.storeSet" });
+      return;
+    }
+    if (window.JKHStore && JKHStore.setRaw) JKHStore.setRaw(key, value, ownerId);
+  } catch(e){}
 }
 function storeRemove(key, ownerId){
   try { if (window.JKHStore && JKHStore.removeRaw) JKHStore.removeRaw(key, ownerId); } catch(e){}
@@ -1772,10 +1781,13 @@ function migrateLocalKeys(oldId, newId) {
         return;
     }
 
+    const calcCanonicalKey = (window.Data && typeof Data.resolveCalcPeriodStorageKey === "function") ? String(Data.resolveCalcPeriodStorageKey(abonent) || "") : "";
+    const calcActiveCanonicalKey = (window.Data && typeof Data.resolveCalcPeriodActiveStorageKey === "function") ? String(Data.resolveCalcPeriodActiveStorageKey(abonent) || "") : "";
     [
-        { legacyPrefix: "calc_period_", canonicalKey: "calc_period_" + uid },
-        { legacyPrefix: "calc_period_active_", canonicalKey: "calc_period_active_" + uid }
+        { legacyPrefix: "calc_period_", canonicalKey: calcCanonicalKey },
+        { legacyPrefix: "calc_period_active_", canonicalKey: calcActiveCanonicalKey }
     ].forEach((item) => {
+        if (!item.canonicalKey) return;
         [String(oldId), String(newId)].forEach((id) => {
             if (!id || id === uid) return;
             const legacyKey = item.legacyPrefix + id;
@@ -2075,6 +2087,19 @@ function saveNotes() {
     alert("Примечание сохранено");
 }
 
+const __calcPeriodNoCanonicalLogged = {};
+function __logCalcPeriodNoCanonicalOnce(payload){
+    try {
+        const key = String((payload && payload.abonentId) || (payload && payload.requestedId) || "") + "|" + String((payload && payload.reason) || "");
+        if (__calcPeriodNoCanonicalLogged[key]) return;
+        __calcPeriodNoCanonicalLogged[key] = true;
+        console.warn("[calc-period][save-skipped-no-canonical-key]", payload || {});
+    } catch (e) {}
+}
+function __logCalcPeriodCanonicalUsed(payload){
+    try { console.log("[calc-period][canonical-key-used]", payload || {}); } catch (e) {}
+}
+
 function getCalcPeriodOwnerId(){
     try {
         if (window.JKHStore && typeof JKHStore.getOwnerId === "function") return String(JKHStore.getOwnerId() || "").trim();
@@ -2088,9 +2113,13 @@ function getCalcPeriodStorageMeta(){
     const db = getDb() || {};
     const abonent = db[requestedId] || null;
     const resolvedUid = String(abonent?.uid || '').trim();
-    const storageKey = (window.getCalcPeriodStorageKey && abonent) ? String(window.getCalcPeriodStorageKey(abonent) || '') : '';
-    const activeStorageKey = (window.getCalcPeriodActiveStorageKey && abonent) ? String(window.getCalcPeriodActiveStorageKey(abonent) || '') : '';
+    const hasResolvers = !!(window.Data && typeof Data.resolveCalcPeriodStorageKey === "function" && typeof Data.resolveCalcPeriodActiveStorageKey === "function");
+    const storageKey = (hasResolvers && abonent) ? String(Data.resolveCalcPeriodStorageKey(abonent) || '') : '';
+    const activeStorageKey = (hasResolvers && abonent) ? String(Data.resolveCalcPeriodActiveStorageKey(abonent) || '') : '';
     const ownerId = getCalcPeriodOwnerId();
+    if (storageKey && activeStorageKey) {
+        __logCalcPeriodCanonicalUsed({ requestedId: String(requestedId || ''), resolvedUid: resolvedUid, ownerId: ownerId, storageKey: storageKey, activeStorageKey: activeStorageKey, source: "abonent_card" });
+    }
     return {
         requestedId: String(requestedId || ''),
         resolvedUid: resolvedUid,
@@ -2108,6 +2137,12 @@ function loadCalcPeriodUI(){
     const fromEl = document.getElementById("calcFrom");
     const toEl   = document.getElementById("calcTo");
     if (!fromEl || !toEl) return;
+    if (!meta.storageKey || !meta.activeStorageKey || !meta.resolvedUid) {
+        __logCalcPeriodNoCanonicalOnce({ requestedId: meta.requestedId, abonentId: meta.requestedId, resolvedUid: meta.resolvedUid, ownerId: meta.ownerId, reason: "CANONICAL_KEY_NOT_READY", source: "abonent_card.load" });
+        fromEl.value = "";
+        toEl.value = "";
+        return;
+    }
 
     try {
         const raw = meta.storageKey ? storeGet(meta.storageKey, meta.ownerId) : null;
@@ -2181,6 +2216,7 @@ function saveCalcPeriod(from, to){
 
     if (!meta.storageKey || !meta.activeStorageKey || !meta.resolvedUid) {
         saveCalcPeriod.lastError = "UID_REQUIRED";
+        __logCalcPeriodNoCanonicalOnce({ requestedId: meta.requestedId, abonentId: meta.requestedId, resolvedUid: meta.resolvedUid, ownerId: meta.ownerId, reason: "UID_REQUIRED", source: "abonent_card.save" });
         try {
             console.warn("[calc-period][save]", {
                 requestedId: meta.requestedId,
