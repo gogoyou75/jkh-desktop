@@ -383,7 +383,7 @@
     }
 
     const uid = String(a.uid || '').trim();
-    if (uid) {
+    if (isValidUid(uid)) {
       __paymentKeyResolveCache.set(id, { uid: uid, key: 'payments_' + uid, found: true });
       _logPaymentKeyResolve('debug', {
         abonentId: id,
@@ -434,6 +434,19 @@
     return rows.map(function (r) { return (r && typeof r === "object") ? Object.assign({}, r) : r; });
   }
 
+
+  function isValidUid(uid) {
+    var s = String(uid === null || uid === undefined ? "" : uid).trim();
+    if (!s) return false;
+    var low = s.toLowerCase();
+    if (s === "..." || s === "-" || s === "0" || low === "null" || low === "undefined") return false;
+    return /^uid_[a-z0-9][a-z0-9_-]*$/i.test(s);
+  }
+
+  function _logInvalidUidCanonicalBlocked(payload) {
+    try { console.warn("[uid][canonical-blocked-invalid]", payload || {}); } catch (e) {}
+  }
+
   function _findAbonentByIdOrUid(abonentOrId) {
     var db = window.AbonentsDB || {};
     var abonents = db && db.abonents && typeof db.abonents === "object" ? db.abonents : {};
@@ -441,7 +454,7 @@
       var objId = String(abonentOrId.id || "").trim();
       if (objId && abonents[objId]) return { id: objId, abonent: abonents[objId] };
       var objUid = String(abonentOrId.uid || "").trim();
-      if (objUid) {
+      if (isValidUid(objUid)) {
         var byObjUid = Object.keys(abonents).find(function (id) { return String(abonents[id] && abonents[id].uid || "").trim() === objUid; });
         if (byObjUid) return { id: byObjUid, abonent: abonents[byObjUid] };
       }
@@ -451,8 +464,10 @@
     var raw = String(abonentOrId || "").trim();
     if (!raw) return null;
     if (abonents[raw]) return { id: raw, abonent: abonents[raw] };
-    var byUid = Object.keys(abonents).find(function (id) { return String(abonents[id] && abonents[id].uid || "").trim() === raw; });
-    if (byUid) return { id: byUid, abonent: abonents[byUid] };
+    if (isValidUid(raw)) {
+      var byUid = Object.keys(abonents).find(function (id) { return String(abonents[id] && abonents[id].uid || "").trim() === raw; });
+      if (byUid) return { id: byUid, abonent: abonents[byUid] };
+    }
     return { id: raw, abonent: null };
   }
 
@@ -462,7 +477,10 @@
     var found = _findAbonentByIdOrUid(abonentOrId);
     var abonent = found && found.abonent ? found.abonent : null;
     var uid = String(abonent && abonent.uid || "").trim();
-    if (!uid) return "";
+    if (!isValidUid(uid)) {
+      _logInvalidUidCanonicalBlocked({ abonentId: String(found && found.id || ""), uid: uid, key: "calc_period" + suffix, source: "resolveCalcPeriodStorageKey" });
+      return "";
+    }
     return "calc_period" + suffix + "_" + uid;
   }
 
@@ -476,7 +494,8 @@
     var id = String(found && found.id || (typeof abonentOrId === "object" ? abonentOrId && abonentOrId.id : abonentOrId) || "").trim();
     var abonent = found && found.abonent ? found.abonent : null;
     var uid = String(abonent && abonent.uid || "").trim();
-    if (uid) return "payments_" + uid;
+    if (isValidUid(uid)) return "payments_" + uid;
+    if (uid) _logInvalidUidCanonicalBlocked({ abonentId: id, uid: uid, key: "payments_", source: "resolvePaymentLedgerKey" });
     if (opts && opts.allowLegacyRead === true && id) return "payments_" + id;
     return "";
   }
@@ -513,7 +532,7 @@
     var abonent = found && found.abonent ? found.abonent : null;
     var uid = String(abonent && abonent.uid || "").trim();
     var key = resolvePaymentLedgerKey(abonentOrId);
-    if (!key || !uid) {
+    if (!key || !isValidUid(uid)) {
       console.warn("[financial][ledger-write-blocked]", { abonentId: id, reason: "UID_REQUIRED" });
       return false;
     }
@@ -551,7 +570,7 @@
     var abonent = found && found.abonent ? found.abonent : null;
     var uid = String(abonent && abonent.uid || "").trim();
     var key = resolvePaymentLedgerKey(abonentOrId);
-    if (!key || !uid) {
+    if (!key || !isValidUid(uid)) {
       _logLedgerInit({ abonentId: id, uid: uid, key: key || "", result: "blocked", reason: "UID_REQUIRED" });
       return false;
     }
@@ -827,14 +846,28 @@
   }
 
 
+  function _isCalcPeriodCleanupServerDataReady(db) {
+    var st = window.JKH_UI_STATE && window.JKH_UI_STATE.data;
+    if (st && (st.status !== "ready" && st.status !== "empty")) return false;
+    if (st && Object.prototype.hasOwnProperty.call(st, "source") && st.source && st.source !== "server") return false;
+    var rawDb = _getRawScoped(KEY_DB, _ownerId());
+    if (rawDb !== null && rawDb !== undefined && rawDb !== "") {
+      try { JSON.parse(String(rawDb)); } catch (e) { return false; }
+    }
+    return !!(db && db.abonents && typeof db.abonents === "object");
+  }
+
   function migrateLegacyCalcPeriodKeysForDb(db) {
-    if (!db || !db.abonents || typeof db.abonents !== "object") return 0;
+    if (!_isCalcPeriodCleanupServerDataReady(db)) return 0;
     var migrated = 0;
     var ownerId = _ownerId();
     Object.keys(db.abonents).forEach(function (abonentId) {
       var a = db.abonents[abonentId] || {};
       var uid = String(a.uid || "").trim();
-      if (!uid) return;
+      if (!isValidUid(uid)) {
+        if (uid) _logInvalidUidCanonicalBlocked({ abonentId: String(abonentId || ""), uid: uid, source: "migrateLegacyCalcPeriodKeysForDb" });
+        return;
+      }
       [
         { prefix: "calc_period_", canonicalKey: "calc_period_" + uid },
         { prefix: "calc_period_active_", canonicalKey: "calc_period_active_" + uid }
@@ -847,15 +880,22 @@
           var val = _getRawScoped(legacyKey, ownerId);
           if (val !== null && val !== undefined) {
             if (_getRawScoped(meta.canonicalKey, ownerId) === null) _setRawScoped(meta.canonicalKey, val, ownerId);
-            _removeRawScoped(legacyKey, ownerId);
-            migrated++;
-            try { console.warn("[calc-period][legacy-cleanup]", { from: legacyKey, to: meta.canonicalKey, ownerId: ownerId, abonentId: String(abonentId || ""), uid: uid }); } catch (e) {}
+            var check = _getRawScoped(meta.canonicalKey, ownerId);
+            if (check === val) {
+              try { console.warn("[calc-period][canonical-readback-ok]", { from: legacyKey, to: meta.canonicalKey, ownerId: ownerId, abonentId: String(abonentId || ""), uid: uid }); } catch (eOk) {}
+              _removeRawScoped(legacyKey, ownerId);
+              migrated++;
+              try { console.warn("[calc-period][legacy-cleanup]", { from: legacyKey, to: meta.canonicalKey, ownerId: ownerId, abonentId: String(abonentId || ""), uid: uid }); } catch (e) {}
+            } else {
+              try { console.warn("[calc-period][cleanup-skipped-readback-failed]", { from: legacyKey, to: meta.canonicalKey, ownerId: ownerId, abonentId: String(abonentId || ""), uid: uid }); } catch (eFail) {}
+            }
           }
         });
       });
     });
     return migrated;
   }
+
 
   function saveToStorage(db) {
     if (!_canWriteStorage()) return false;
@@ -901,7 +941,11 @@
     } catch (e) {}
 
     if (!a) return { ok: false, uid: "", changed: false, reason: "ABONENT_NOT_FOUND" };
-    if (currentUid) return { ok: true, uid: currentUid, changed: false };
+    if (isValidUid(currentUid)) return { ok: true, uid: currentUid, changed: false };
+    if (currentUid) {
+      _logInvalidUidCanonicalBlocked({ abonentId: id, uid: currentUid, source: String(opts.source || "data") });
+      return { ok: false, uid: currentUid, changed: false, reason: "INVALID_UID" };
+    }
 
     var uid = generateUniqueAbonentUid(db);
     a.uid = uid;
@@ -927,7 +971,7 @@
 
     if (!abonent && abonentOrId && typeof abonentOrId === "object") {
       var objUid = String(abonentOrId.uid || "").trim();
-      if (objUid) {
+      if (isValidUid(objUid)) {
         var byUid = Object.keys(db.abonents).find(function (key) { return String(db.abonents[key] && db.abonents[key].uid || "").trim() === objUid; });
         if (byUid) { id = byUid; abonent = db.abonents[byUid]; }
       }
@@ -1048,6 +1092,46 @@
     });
   }
 
+  function _uidRepairRelatedKeysExist(id, uid, ownerId) {
+    var suffixes = [String(id || "").trim(), String(uid || "").trim()];
+    var prefixes = ["payments_", "calc_period_", "calc_period_active_", "report_period_", "moratorium_"];
+    for (var i = 0; i < suffixes.length; i++) {
+      var s = suffixes[i];
+      if (!s) continue;
+      for (var p = 0; p < prefixes.length; p++) {
+        if (_getRawScoped(prefixes[p] + s, ownerId) !== null) return true;
+      }
+      if (_getRawScoped("jkh_transfer_to_v1:" + s, ownerId) !== null) return true;
+      if (_getRawScoped("jkh_transfer_balance_v1:" + s, ownerId) !== null) return true;
+      if (_getRawScoped("jkh_freeze_to_v1:" + s, ownerId) !== null) return true;
+      if (_getRawScoped("jkh_frozen_debt_v1:" + s, ownerId) !== null) return true;
+    }
+    return false;
+  }
+
+  function scanAndRepairInvalidUids(db) {
+    if (!db || !db.abonents || typeof db.abonents !== "object") return 0;
+    var repaired = 0;
+    var ownerId = _ownerId();
+    Object.keys(db.abonents).forEach(function (id) {
+      var a = db.abonents[id];
+      if (!a || typeof a !== "object") return;
+      var uid = String(a.uid || "").trim();
+      if (isValidUid(uid)) return;
+      try { console.warn("[uid][invalid-placeholder-detected]", { abonentId: String(id || ""), uid: uid }); } catch (eWarn) {}
+      if (_uidRepairRelatedKeysExist(id, uid, ownerId)) {
+        try { console.warn("[uid][repair-skipped-related-keys]", { abonentId: String(id || ""), uid: uid }); } catch (eSkip) {}
+        return;
+      }
+      var next = generateUniqueAbonentUid(db);
+      if (!isValidUid(next)) return;
+      a.uid = next;
+      repaired++;
+      try { console.warn("[uid][repair-generated]", { abonentId: String(id || ""), uid: next, oldUid: uid }); } catch (eOk) {}
+    });
+    return repaired;
+  }
+
   // ============================================================
   // INIT global DB
   // ============================================================
@@ -1055,6 +1139,7 @@
   if (!_isAllMode()) window.JKH_DATA_READY = !!stored;
   window.AbonentsDB = stored ? mergePreferStored(BASE_DB, stored) : deepClone(BASE_DB);
   normalizeDb(window.AbonentsDB);
+  scanAndRepairInvalidUids(window.AbonentsDB);
   migrateLegacyCalcPeriodKeysForDb(window.AbonentsDB);
   if (stored && _canWriteStorage()) saveToStorage(window.AbonentsDB);
   _resetPaymentKeyResolveCache('initial-load');
@@ -1090,6 +1175,7 @@
     readCanonicalExcludePeriods: readCanonicalExcludePeriods,
     writeCanonicalExcludePeriods: writeCanonicalExcludePeriods,
     repairEmptyExcludePeriodsKeys: repairEmptyExcludePeriodsKeys,
+    isValidUid: isValidUid,
     migrateLegacyCalcPeriodKeysForDb: migrateLegacyCalcPeriodKeysForDb,
     ensureAbonentUid: ensureAbonentUid,
     resolveCalcPeriodStorageKey: resolveCalcPeriodStorageKey,

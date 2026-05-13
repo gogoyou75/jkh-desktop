@@ -305,3 +305,13 @@
 | Rollback protection | LOGIC_SPEC → Canonical Financial Modes | web/data.js / transfer rollback snapshots | ✅ OK | Transfer snapshots raw keys и DB |
 | Merge premises responsibility boundary | LOGIC_SPEC → Canonical Financial Modes | web/data.js / Data.mergePremises TODO/CRITICAL | 🟡 PARTIAL | Merge работает, boundary отмечен к унификации |
 | Split premises future mode | LOGIC_SPEC → Canonical Financial Modes | web/data.js / Data.financialModes.SPLIT_PREMISES | ⚪ IDEA | Только enum/документационный режим, бизнес-логики split нет |
+
+## 2026-05-13 — calc_period UID migration safety
+
+| Requirement | Implementation | Verification |
+| --- | --- | --- |
+| Invalid UID must not produce canonical keys | `Data.isValidUid(uid)` gates calc-period/payment canonical key resolution and storage guards. | `node --check web/data.js`; `node --check web/storage.js` |
+| `UID_ALIAS_NOT_FOUND` is warning-only | Server dump normalization keeps legacy calc-period keys and logs `[calc-period][legacy-keep-no-alias]`. | `node --check web/storage.js` |
+| Legacy calc-period cleanup is non-destructive | DB and card migrations remove legacy keys only after canonical same-value read-back. | `node --check web/data.js` |
+| Cleanup waits for server-first data readiness | `migrateLegacyCalcPeriodKeysForDb(db)` requires ready/empty UI data state, server source when present, parseable `abonents_db_v1`, and `db.abonents`. | `node --check web/data.js` |
+| Invalid UID startup detection/repair | Startup scan logs invalid placeholders and repairs only when no related payments/calc/report/moratorium/transfer/frozen keys exist. | `node --check web/data.js` |

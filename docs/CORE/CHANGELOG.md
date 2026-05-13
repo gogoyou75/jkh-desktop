@@ -1,3 +1,10 @@
+## 2026-05-13 — calc_period UID migration safety
+
+- Added canonical UID validation via `Data.isValidUid(uid)` and blocked canonical calc-period/payment keys for invalid UID placeholders with `[uid][canonical-blocked-invalid]`.
+- Made server dump calc-period migration non-destructive: `UID_ALIAS_NOT_FOUND` now keeps legacy keys and logs `[calc-period][legacy-keep-no-alias]` instead of fatal/drop.
+- Made legacy calc-period cleanup read-back confirmed before deletion, with `[calc-period][canonical-readback-ok]` and `[calc-period][cleanup-skipped-readback-failed]` diagnostics.
+- Added startup invalid UID scan with safe repair only when related storage keys are absent.
+
 # CHANGELOG
 
 ## 2026-05-12 — Import XLS: единый сборщик новых платежей

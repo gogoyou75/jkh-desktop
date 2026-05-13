@@ -199,6 +199,19 @@
   };
 
 
+
+  function _isValidUid(uid) {
+    var s = String(uid === null || uid === undefined ? "" : uid).trim();
+    if (!s) return false;
+    var low = s.toLowerCase();
+    if (s === "..." || s === "-" || s === "0" || low === "null" || low === "undefined") return false;
+    return /^uid_[a-z0-9][a-z0-9_-]*$/i.test(s);
+  }
+
+  function _warnInvalidUidCanonicalBlocked(payload) {
+    try { console.warn("[uid][canonical-blocked-invalid]", payload || {}); } catch (e) {}
+  }
+
   function _calcPeriodKeyInfo(baseKey) {
     var key = String(baseKey || "");
     if (key.indexOf("calc_period_active_") === 0) {
@@ -220,7 +233,7 @@
       var ids = Object.keys(abonents);
       for (var i = 0; i < ids.length; i++) {
         var uid = String(abonents[ids[i]] && abonents[ids[i]].uid || "").trim();
-        if (uid) out[uid] = true;
+        if (_isValidUid(uid)) out[uid] = true;
       }
     } catch (e) {}
     return out;
@@ -236,22 +249,24 @@
     var uidKeys = Object.keys(uidSet);
     if (uidKeys.length > 0) return !!uidSet[suffix];
 
-    // Safe fallback before DB is available: legacy LS/abonentId keys are numeric.
-    return !/^\d+$/.test(suffix);
+    if (!_isValidUid(suffix)) {
+      _warnInvalidUidCanonicalBlocked({ key: String(baseKey || ""), suffix: suffix, ownerId: String(ownerId || getActiveOwnerId()), source: "calc-period-write-guard" });
+      return false;
+    }
+
+    return true;
   }
 
   function _guardCalcPeriodWrite(baseKey, ownerId, source) {
     var info = _calcPeriodKeyInfo(baseKey);
     if (!info) return true;
     if (_calcPeriodKeyAllowed(baseKey, ownerId)) return true;
-    try {
-      console.error("[fatal][calc-period-non-uid-key-blocked]", {
-        key: String(baseKey || ""),
-        suffix: info.suffix,
-        ownerId: String(ownerId || getActiveOwnerId()),
-        source: String(source || "storage")
-      });
-    } catch (e) {}
+    _warnInvalidUidCanonicalBlocked({
+      key: String(baseKey || ""),
+      suffix: info.suffix,
+      ownerId: String(ownerId || getActiveOwnerId()),
+      source: String(source || "storage")
+    });
     return false;
   }
 
@@ -758,7 +773,7 @@
       out.push("exclude_periods_" + id);
       out.push("note_" + id);
       var uid = String(abonents[id] && abonents[id].uid || "").trim();
-      if (uid) {
+      if (_isValidUid(uid)) {
         out.push("calc_period_" + uid);
         out.push("calc_period_active_" + uid);
       }
@@ -886,7 +901,7 @@
       _lsSetDirect(k(kx, "GLOBAL"), v);
       return;
     }
-    window.JKHStore.setRaw(kx, v, ownerId);
+    _lsSetDirect(k(kx, ownerId), v);
   }
 
   function _projectKeysFromDump(dumpObj) {
@@ -941,7 +956,10 @@
     Object.keys(abonents).forEach(function (id) {
       var a = abonents[id] || {};
       var uid = String(a.uid || "").trim();
-      if (!uid) return;
+      if (!_isValidUid(uid)) {
+        if (uid) _warnInvalidUidCanonicalBlocked({ abonentId: String(id || ""), uid: uid, ownerId: String(ownerId || ""), source: "server-dump" });
+        return;
+      }
       uidSet[uid] = true;
       aliases[String(id || "").trim()] = uid;
       [a.id, a.ls, a.account, a.accountNumber, a.personalAccount, a.regnum, a.premiseRegnum].forEach(function (v) {
@@ -953,21 +971,26 @@
     Object.keys(dumpObj).forEach(function (key) {
       var info = _calcPeriodKeyInfo(key);
       if (!info) return;
+      if (!_isValidUid(info.suffix) && !aliases[info.suffix]) {
+        try { console.warn("[calc-period][legacy-keep-no-alias]", { key: key, ownerId: String(ownerId || ""), reason: "UID_ALIAS_NOT_FOUND" }); } catch (eNoAlias) {}
+        return;
+      }
       if (uidSet[info.suffix]) return;
       var uid = aliases[info.suffix];
-      if (uid) {
+      if (uid && _isValidUid(uid)) {
         var canonicalKey = info.prefix + uid;
         if (!Object.prototype.hasOwnProperty.call(dumpObj, canonicalKey)) dumpObj[canonicalKey] = dumpObj[key];
-        delete dumpObj[key];
-        try { console.warn("[calc-period][legacy-cleanup]", { from: key, to: canonicalKey, ownerId: String(ownerId || ""), abonentId: info.suffix, uid: uid }); } catch (e) {}
+        if (Object.prototype.hasOwnProperty.call(dumpObj, canonicalKey)) {
+          delete dumpObj[key];
+          try { console.warn("[calc-period][legacy-migrated-in-dump]", { from: key, to: canonicalKey, ownerId: String(ownerId || ""), abonentId: info.suffix, uid: uid }); } catch (e) {}
+        }
       } else {
-        delete dumpObj[key];
-        try { console.warn("[calc-period][legacy-drop]", { key: key, ownerId: String(ownerId || ""), reason: "UID_ALIAS_NOT_FOUND" }); } catch (eDrop) {}
-        try { console.error("[fatal][calc-period-non-uid-key-blocked]", { key: key, suffix: info.suffix, ownerId: String(ownerId || ""), source: "server-dump" }); } catch (e2) {}
+        try { console.warn("[calc-period][legacy-keep-no-alias]", { key: key, ownerId: String(ownerId || ""), reason: "UID_ALIAS_NOT_FOUND" }); } catch (eDrop) {}
       }
     });
     return dumpObj;
   }
+
 
   function _replaceOwnerProjectScopeFromDump(ownerId, dumpObj) {
     if (!window.JKHStore) return { removed: 0, written: 0, invalidAbonentsDb: false };

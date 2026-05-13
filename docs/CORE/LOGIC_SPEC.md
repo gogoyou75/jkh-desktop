@@ -1487,3 +1487,16 @@ Fatal-правила:
 - `jkh_freeze_to_v1:*` и `jkh_transfer_to_v1:*` записываются только service layer в рамках transfer transaction.
 - Financial event log обязателен для ledger/transfer write-path и хранит минимум: `type`, `mode`, `sourceAbonentId`, `targetAbonentId`, `premiseId/regnum`, `date`, `ownerId`, `createdAt`, `debtAmount`, `balanceAmount` при наличии.
 - Merge/split должны быть приведены к тому же responsibility transaction boundary; `SPLIT_PREMISES` пока является документированным будущим режимом без бизнес-логики split.
+
+### 16.1. Non-destructive calc_period UID migration
+
+Canonical calc period keys are `calc_period_<uid>` and `calc_period_active_<uid>`, where `<uid>` must pass `Data.isValidUid(uid)`.
+
+Rules:
+- invalid UID values (`""`, `"..."`, `"-"`, `"0"`, `"null"`, `"undefined"`, or non-canonical UID format) must not be used for canonical storage keys;
+- when UID is invalid, calc period migration, canonical writes, and legacy cleanup are blocked with `[uid][canonical-blocked-invalid]` warning;
+- server dump migration keeps legacy `calc_period_<LS>` / `calc_period_active_<LS>` keys if UID alias cannot be found; `UID_ALIAS_NOT_FOUND` is warning-only and never fatal;
+- legacy calc period keys may be removed only after canonical key has been written and confirmed by same-value read-back;
+- failed read-back leaves legacy data untouched and logs `[calc-period][cleanup-skipped-readback-failed]`;
+- successful read-back logs `[calc-period][canonical-readback-ok]` before cleanup;
+- startup invalid UID scan logs `[uid][invalid-placeholder-detected]` and performs automatic UID repair only when related storage keys can be proven absent.

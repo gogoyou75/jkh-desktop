@@ -1767,7 +1767,10 @@ function migrateLocalKeys(oldId, newId) {
     const abonent = db[String(newId)] || db[String(oldId)] || null;
     const uid = String(abonent?.uid || '').trim();
     const ownerId = getCalcPeriodOwnerId();
-    if (!uid) return;
+    if (!window.Data || typeof Data.isValidUid !== 'function' || !Data.isValidUid(uid)) {
+        try { console.warn("[uid][canonical-blocked-invalid]", { abonentId: String(newId || oldId || ""), uid: uid, source: "abonent_card.migrateLocalKeys" }); } catch (e) {}
+        return;
+    }
 
     [
         { legacyPrefix: "calc_period_", canonicalKey: "calc_period_" + uid },
@@ -1781,8 +1784,14 @@ function migrateLocalKeys(oldId, newId) {
                 storeSet(item.canonicalKey, val, ownerId);
             }
             if (val !== null) {
-                storeRemove(legacyKey, ownerId);
-                try { console.warn("[calc-period][legacy-cleanup]", { from: legacyKey, to: item.canonicalKey, ownerId: ownerId, abonentId: String(newId || oldId || ""), uid: uid }); } catch (e) {}
+                const check = storeGet(item.canonicalKey, ownerId);
+                if (check === val) {
+                    try { console.warn("[calc-period][canonical-readback-ok]", { from: legacyKey, to: item.canonicalKey, ownerId: ownerId, abonentId: String(newId || oldId || ""), uid: uid }); } catch (eOk) {}
+                    storeRemove(legacyKey, ownerId);
+                    try { console.warn("[calc-period][legacy-cleanup]", { from: legacyKey, to: item.canonicalKey, ownerId: ownerId, abonentId: String(newId || oldId || ""), uid: uid }); } catch (e) {}
+                } else {
+                    try { console.warn("[calc-period][cleanup-skipped-readback-failed]", { from: legacyKey, to: item.canonicalKey, ownerId: ownerId, abonentId: String(newId || oldId || ""), uid: uid }); } catch (eFail) {}
+                }
             }
         });
     });
