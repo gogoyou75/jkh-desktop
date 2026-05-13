@@ -291,10 +291,78 @@ function waitForServerFirstAbonent(id, timeoutMs) {
     });
 }
 
-function calcPeriodKey(id){ return "calc_period_" + id; }
-function reportPeriodKey(id){ return "report_period_" + id; }
-function storeGet(key){ try { return (window.JKHStore && JKHStore.getRaw) ? JKHStore.getRaw(key) : null; } catch { return null; } }
-function storeSet(key, value){ try { if (window.JKHStore && JKHStore.setRaw) JKHStore.setRaw(key, value); } catch {} }
+function getReportsUrlParams(){
+    try { return new URLSearchParams(window.location.search || ""); } catch(e) { return new URLSearchParams(""); }
+}
+
+function extractOwnerFromScopedDbKey(scoped){
+    const m = String(scoped || "").match(/^jkhdb::(.+?)::abonents_db_v1$/);
+    return m ? String(m[1] || "") : "";
+}
+
+function getReportsOwnerId(){
+    const params = getReportsUrlParams();
+    const dbKey = String(params.get("db") || "").trim();
+    const ownerParam = String(params.get("owner") || "").trim();
+    const ownerFromDb = extractOwnerFromScopedDbKey(dbKey);
+    if (ownerFromDb) return ownerFromDb;
+    if (ownerParam) return ownerParam;
+    try {
+        if (window.JKHStore && typeof JKHStore.getOwnerId === "function") return String(JKHStore.getOwnerId() || "").trim();
+    } catch(e) {}
+    return "";
+}
+
+function appendReportsContextToHref(href){
+    const params = getReportsUrlParams();
+    const dbKey = String(params.get("db") || "").trim();
+    const ownerParam = String(params.get("owner") || "").trim();
+    if (dbKey) href += "&db=" + encodeURIComponent(dbKey);
+    if (ownerParam) href += "&owner=" + encodeURIComponent(ownerParam);
+    return href;
+}
+
+function storeGetCanonical(key, ownerId){
+    try { return (window.JKHStore && JKHStore.getRaw) ? JKHStore.getRaw(key, ownerId) : null; } catch(e) { return null; }
+}
+
+function storeSetCanonical(key, value, ownerId){
+    try { return (window.JKHStore && JKHStore.setRaw) ? JKHStore.setRaw(key, value, ownerId) : false; } catch(e) { return false; }
+}
+
+function getCanonicalAbonent(id){
+    if (!id || !(window.Data && typeof window.Data.getDb === "function")) return null;
+    const db = window.Data.getDb();
+    return (db && db.abonents) ? (db.abonents[String(id)] || null) : null;
+}
+
+async function ensureCanonicalAbonent(id){
+    let abonent = getCanonicalAbonent(id);
+    if (abonent && !String(abonent.uid || "").trim()) {
+        if (window.Data && typeof Data.ensureAbonentUid === "function") {
+            await Data.ensureAbonentUid(id, { source: "reports" });
+            abonent = getCanonicalAbonent(id);
+        }
+    }
+    return abonent;
+}
+
+function getCanonicalPeriodMeta(id, abonent){
+    const ownerId = getReportsOwnerId();
+    const periodKey = (window.Data && typeof Data.resolveCalcPeriodStorageKey === "function")
+        ? String(Data.resolveCalcPeriodStorageKey(abonent) || "").trim()
+        : "";
+    const activeKey = (window.Data && typeof Data.resolveCalcPeriodActiveStorageKey === "function")
+        ? String(Data.resolveCalcPeriodActiveStorageKey(abonent) || "").trim()
+        : "";
+    return {
+        abonentId: String(id || "").trim(),
+        uid: String(abonent && abonent.uid || "").trim(),
+        ownerId: ownerId,
+        periodKey: periodKey,
+        activeKey: activeKey
+    };
+}
 
 function fillAbonentCardHeader(id, a) {
     if (!id) { showMissingAbonentError(); return false; }
@@ -330,29 +398,21 @@ function fillAbonentCardHeader(id, a) {
     return true;
 }
 
-function loadAutoPeriod() {
+function loadAutoPeriod(abonent) {
     const id = getAbonentIdFromURL();
     if (!id) return;
     const fromEl = document.getElementById("repFrom");
     const toEl = document.getElementById("repTo");
+    if (!fromEl || !toEl) return;
 
+    const meta = getCanonicalPeriodMeta(id, abonent);
     try {
-        const rawR = storeGet(reportPeriodKey(id));
-        if (rawR) {
-            const p = JSON.parse(rawR);
-            fromEl.value = p.from || "";
-            toEl.value   = p.to || "";
-            return;
-        }
-    } catch {}
-
-    try {
-        const raw = storeGet(calcPeriodKey(id));
+        const raw = meta.periodKey ? storeGetCanonical(meta.periodKey, meta.ownerId) : null;
         if (!raw) { fromEl.value = ""; toEl.value = ""; return; }
         const p = JSON.parse(raw);
         fromEl.value = p.from || "";
         toEl.value   = p.to || "";
-    } catch {
+    } catch(e) {
         fromEl.value = "";
         toEl.value = "";
     }
@@ -364,10 +424,58 @@ function isValidPeriod(from, to){
     return a.toString() !== "Invalid Date" && b.toString() !== "Invalid Date" && a <= b;
 }
 
-function saveReportPeriod(from, to){
+function saveCanonicalPeriod(abonent, from, to){
     const id = getAbonentIdFromURL();
-    if (!id) return;
-    storeSet(reportPeriodKey(id), JSON.stringify({from: from || "", to: to || ""}));
+    const fromValue = String(from || "").trim();
+    const toValue = String(to || "").trim();
+
+    if (!isValidPeriod(fromValue, toValue)) {
+        alert("Период не выбран или указан неверно.");
+        return false;
+    }
+
+    const meta = getCanonicalPeriodMeta(id, abonent);
+    if (!meta.periodKey || !meta.activeKey || !meta.uid || !meta.ownerId) {
+        try { console.warn("[reports][calc-period][save][missing-canonical-context]", meta); } catch(e) {}
+        alert("Период не выбран или указан неверно.");
+        return false;
+    }
+
+    try {
+        console.log("[reports][calc-period][save]", {
+            abonentId: meta.abonentId,
+            uid: meta.uid,
+            ownerId: meta.ownerId,
+            periodKey: meta.periodKey,
+            activeKey: meta.activeKey,
+            from: fromValue,
+            to: toValue
+        });
+    } catch(e) {}
+
+    const payload = JSON.stringify({ from: fromValue, to: toValue });
+    storeSetCanonical(meta.periodKey, payload, meta.ownerId);
+    storeSetCanonical(meta.activeKey, "1", meta.ownerId);
+
+    const periodRaw = storeGetCanonical(meta.periodKey, meta.ownerId);
+    const activeRaw = storeGetCanonical(meta.activeKey, meta.ownerId);
+    let parsedPeriod = null;
+    try { parsedPeriod = periodRaw ? JSON.parse(periodRaw) : null; } catch(e) { parsedPeriod = null; }
+
+    try {
+        console.log("[reports][calc-period][save-confirm]", {
+            periodRaw: periodRaw,
+            activeRaw: activeRaw,
+            parsedPeriod: parsedPeriod
+        });
+    } catch(e) {}
+
+    if (!parsedPeriod || parsedPeriod.from !== fromValue || parsedPeriod.to !== toValue || activeRaw !== "1") {
+        alert("Период не выбран или указан неверно.");
+        return false;
+    }
+
+    return true;
 }
 
 async function initReportsPage() {
@@ -375,40 +483,30 @@ async function initReportsPage() {
     if (!id) { showMissingAbonentError(); return; }
     setBackLink(id);
 
-    const abonent = await waitForServerFirstAbonent(id, 10000);
+    await waitForServerFirstAbonent(id, 10000);
+    const abonent = await ensureCanonicalAbonent(id);
     if (!fillAbonentCardHeader(id, abonent)) return;
-    loadAutoPeriod();
+    loadAutoPeriod(abonent);
 
     document.getElementById("repChooseBtn").addEventListener("click", () => {
         const from = document.getElementById("repFrom").value;
         const to   = document.getElementById("repTo").value;
 
-        if (!isValidPeriod(from, to)) {
-            saveReportPeriod("", "");
-            alert("Период не выбран.");
-            return;
-        }
-        saveReportPeriod(from, to);
+        if (!saveCanonicalPeriod(abonent, from, to)) return;
         alert("Период для справки выбран: " + from + " — " + to);
     });
 
     document.getElementById("openReport01").addEventListener("click", () => {
-        const id = getAbonentIdFromURL();
-        if (!id) { showMissingAbonentError(); return; }
+        const currentId = getAbonentIdFromURL();
+        if (!currentId) { showMissingAbonentError(); return; }
 
-        let dbKey = "";
-        try{
-            const p = new URLSearchParams(location.search);
-            dbKey = String(p.get("db") || "").trim();
-        }catch(e){ dbKey = ""; }
         const from = document.getElementById("repFrom").value;
         const to   = document.getElementById("repTo").value;
 
-        if (isValidPeriod(from, to)) saveReportPeriod(from, to);
-        else saveReportPeriod("", "");
+        if (!saveCanonicalPeriod(abonent, from, to)) return;
 
-        let href = "spravka_sud.html?abonent=" + encodeURIComponent(id) + "&from=" + encodeURIComponent(from || "") + "&to=" + encodeURIComponent(to || "");
-        if (dbKey) href += "&db=" + encodeURIComponent(dbKey);
+        let href = "spravka_sud.html?abonent=" + encodeURIComponent(currentId) + "&from=" + encodeURIComponent(from || "") + "&to=" + encodeURIComponent(to || "");
+        href = appendReportsContextToHref(href);
         location.href = href;
     });
 }
