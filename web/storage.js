@@ -121,6 +121,7 @@
   }
 
   function setItem(key, value, ownerId) {
+    if (!_guardCalcPeriodWrite(key, ownerId, "setItem")) return false;
     if (isGuestMode()) throw new Error("GUEST_READONLY");
     if (isAllMode()) throw new Error("ALLMODE_READONLY");
     if (isGlobalProjectKey(key) && !_isAdmin()) throw new Error("GLOBAL_ADMIN_ONLY");
@@ -196,6 +197,63 @@
     exact: SYNC_CANON_EXACT.slice(),
     prefix: SYNC_CANON_PREFIX.slice()
   };
+
+
+  function _calcPeriodKeyInfo(baseKey) {
+    var key = String(baseKey || "");
+    if (key.indexOf("calc_period_active_") === 0) {
+      return { prefix: "calc_period_active_", suffix: String(key.slice("calc_period_active_".length) || "").trim() };
+    }
+    if (key.indexOf("calc_period_") === 0) {
+      return { prefix: "calc_period_", suffix: String(key.slice("calc_period_".length) || "").trim() };
+    }
+    return null;
+  }
+
+  function _calcPeriodUidSet(ownerId) {
+    var out = {};
+    try {
+      var raw = _lsGetDirect(k("abonents_db_v1", ownerId));
+      if (!raw) return out;
+      var db = JSON.parse(raw);
+      var abonents = (db && db.abonents && typeof db.abonents === "object") ? db.abonents : {};
+      var ids = Object.keys(abonents);
+      for (var i = 0; i < ids.length; i++) {
+        var uid = String(abonents[ids[i]] && abonents[ids[i]].uid || "").trim();
+        if (uid) out[uid] = true;
+      }
+    } catch (e) {}
+    return out;
+  }
+
+  function _calcPeriodKeyAllowed(baseKey, ownerId) {
+    var info = _calcPeriodKeyInfo(baseKey);
+    if (!info) return true;
+    var suffix = info.suffix;
+    if (!suffix) return false;
+
+    var uidSet = _calcPeriodUidSet(ownerId);
+    var uidKeys = Object.keys(uidSet);
+    if (uidKeys.length > 0) return !!uidSet[suffix];
+
+    // Safe fallback before DB is available: legacy LS/abonentId keys are numeric.
+    return !/^\d+$/.test(suffix);
+  }
+
+  function _guardCalcPeriodWrite(baseKey, ownerId, source) {
+    var info = _calcPeriodKeyInfo(baseKey);
+    if (!info) return true;
+    if (_calcPeriodKeyAllowed(baseKey, ownerId)) return true;
+    try {
+      console.error("[fatal][calc-period-non-uid-key-blocked]", {
+        key: String(baseKey || ""),
+        suffix: info.suffix,
+        ownerId: String(ownerId || getActiveOwnerId()),
+        source: String(source || "storage")
+      });
+    } catch (e) {}
+    return false;
+  }
 
   function _isScopedKeyName(x) {
     return String(x || "").indexOf("jkhdb::") === 0;
@@ -367,6 +425,7 @@
   }
 
   function _adminSetItemForOwner(ownerId, baseKey, value) {
+    if (!_guardCalcPeriodWrite(baseKey, ownerId, "admin.setRawForOwner")) return false;
     var u = _getSessionUser();
     if (!u || u.role !== "admin") throw new Error("ADMIN_ONLY");
     var oid = String(ownerId || "");
@@ -449,6 +508,19 @@
       };
 
       Storage.prototype.setItem = function (key, val) {
+        try {
+          var strictBaseKey = String(key || "");
+          var strictOwnerId;
+          if (_isScopedKeyName(strictBaseKey)) {
+            var strictParts = strictBaseKey.split("::");
+            strictOwnerId = strictParts.length >= 3 ? strictParts[1] : undefined;
+            strictBaseKey = strictParts.length >= 3 ? strictParts.slice(2).join("::") : strictBaseKey;
+          } else {
+            var strictPrefix = scopePrefixFor(getActiveOwnerId());
+            if (strictBaseKey.indexOf(strictPrefix) === 0) strictBaseKey = strictBaseKey.slice(strictPrefix.length);
+          }
+          if (_isProjectDataKey(strictBaseKey) && !_guardCalcPeriodWrite(strictBaseKey, strictOwnerId, "Storage.prototype.setItem")) return undefined;
+        } catch (e0) {}
         try {
           var st = (new Error()).stack || "";
           if (!_isAllowedStack(st)) {
@@ -724,6 +796,8 @@
 
     if (exact.indexOf(key) >= 0) return true;
 
+    if (_calcPeriodKeyInfo(key)) return _guardCalcPeriodWrite(key, ownerId, "upload");
+
     var prefixes = [
       "payments_",
       "exclude_periods_",
@@ -855,8 +929,48 @@
     return removed;
   }
 
+
+  function _normalizeCalcPeriodKeysInDump(dumpObj, ownerId) {
+    if (!dumpObj || typeof dumpObj !== "object" || Array.isArray(dumpObj)) return dumpObj;
+    var rawDb = Object.prototype.hasOwnProperty.call(dumpObj, KEY_DB) ? dumpObj[KEY_DB] : _readLocalCompat(KEY_DB, ownerId);
+    var db = null;
+    try { db = rawDb ? JSON.parse(String(rawDb)) : null; } catch (e) { db = null; }
+    var abonents = (db && db.abonents && typeof db.abonents === "object") ? db.abonents : {};
+    var aliases = {};
+    var uidSet = {};
+    Object.keys(abonents).forEach(function (id) {
+      var a = abonents[id] || {};
+      var uid = String(a.uid || "").trim();
+      if (!uid) return;
+      uidSet[uid] = true;
+      aliases[String(id || "").trim()] = uid;
+      [a.id, a.ls, a.account, a.accountNumber, a.personalAccount, a.regnum, a.premiseRegnum].forEach(function (v) {
+        var s = String(v || "").trim();
+        if (s) aliases[s] = uid;
+      });
+    });
+
+    Object.keys(dumpObj).forEach(function (key) {
+      var info = _calcPeriodKeyInfo(key);
+      if (!info) return;
+      if (uidSet[info.suffix]) return;
+      var uid = aliases[info.suffix];
+      if (uid) {
+        var canonicalKey = info.prefix + uid;
+        if (!Object.prototype.hasOwnProperty.call(dumpObj, canonicalKey)) dumpObj[canonicalKey] = dumpObj[key];
+        delete dumpObj[key];
+        try { console.warn("[calc-period][migrate-legacy-key-from-dump]", { from: key, to: canonicalKey }); } catch (e) {}
+      } else {
+        delete dumpObj[key];
+        try { console.error("[fatal][calc-period-non-uid-key-blocked]", { key: key, suffix: info.suffix, ownerId: String(ownerId || ""), source: "server-dump" }); } catch (e2) {}
+      }
+    });
+    return dumpObj;
+  }
+
   function _replaceOwnerProjectScopeFromDump(ownerId, dumpObj) {
     if (!window.JKHStore) return { removed: 0, written: 0, invalidAbonentsDb: false };
+    dumpObj = _normalizeCalcPeriodKeysInDump(dumpObj, ownerId);
     var dumpKeys = _projectKeysFromDump(dumpObj);
     var keep = {};
     var i;

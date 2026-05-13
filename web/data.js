@@ -826,8 +826,39 @@
     return parsed && typeof parsed === "object" ? parsed : null;
   }
 
+
+  function migrateLegacyCalcPeriodKeysForDb(db) {
+    if (!db || !db.abonents || typeof db.abonents !== "object") return 0;
+    var migrated = 0;
+    Object.keys(db.abonents).forEach(function (abonentId) {
+      var a = db.abonents[abonentId] || {};
+      var uid = String(a.uid || "").trim();
+      if (!uid) return;
+      [
+        { prefix: "calc_period_", canonicalKey: "calc_period_" + uid },
+        { prefix: "calc_period_active_", canonicalKey: "calc_period_active_" + uid }
+      ].forEach(function (meta) {
+        var aliases = [abonentId, a.id, a.ls, a.account, a.accountNumber, a.personalAccount, a.regnum, a.premiseRegnum];
+        aliases.forEach(function (alias) {
+          var suffix = String(alias || "").trim();
+          if (!suffix || suffix === uid) return;
+          var legacyKey = meta.prefix + suffix;
+          var val = _getRawScoped(legacyKey);
+          if (val !== null && val !== undefined) {
+            if (_getRawScoped(meta.canonicalKey) === null) _setRawScoped(meta.canonicalKey, val);
+            _removeRawScoped(legacyKey);
+            migrated++;
+            try { console.warn("[calc-period][migrate-legacy-key]", { from: legacyKey, to: meta.canonicalKey }); } catch (e) {}
+          }
+        });
+      });
+    });
+    return migrated;
+  }
+
   function saveToStorage(db) {
     if (!_canWriteStorage()) return false;
+    migrateLegacyCalcPeriodKeysForDb(db);
     try {
       _setRawScoped(KEY_DB, JSON.stringify(db));
       return true;
@@ -931,6 +962,9 @@
   const stored = loadFromStorage();
   if (!_isAllMode()) window.JKH_DATA_READY = !!stored;
   window.AbonentsDB = stored ? mergePreferStored(BASE_DB, stored) : deepClone(BASE_DB);
+  normalizeDb(window.AbonentsDB);
+  migrateLegacyCalcPeriodKeysForDb(window.AbonentsDB);
+  if (stored && _canWriteStorage()) saveToStorage(window.AbonentsDB);
   _resetPaymentKeyResolveCache('initial-load');
 
   window.saveAbonentsDB = function () {
@@ -964,6 +998,7 @@
     readCanonicalExcludePeriods: readCanonicalExcludePeriods,
     writeCanonicalExcludePeriods: writeCanonicalExcludePeriods,
     repairEmptyExcludePeriodsKeys: repairEmptyExcludePeriodsKeys,
+    migrateLegacyCalcPeriodKeysForDb: migrateLegacyCalcPeriodKeysForDb,
     resolveCalcPeriodStorageKey: resolveCalcPeriodStorageKey,
     resolveCalcPeriodActiveStorageKey: resolveCalcPeriodActiveStorageKey,
     resolvePaymentLedgerKey: resolvePaymentLedgerKey,

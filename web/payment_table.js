@@ -1100,8 +1100,22 @@ if (parts.length) {
 
 
   // ===== ФИЛЬТР ПО ПЕРИОДУ ДЛЯ "РАСЧЁТ ВЗЫСКИВАЕМОЙ СУММЫ" =====
-  function calcPeriodKey() { return "calc_period_" + getAbonentTechnicalId(); }
-  function calcPeriodActiveKey() { return "calc_period_active_" + getAbonentTechnicalId(); }
+  function calcPeriodKey() {
+    const id = String(getAbonentId() || "");
+    const abonent = (window.Data && typeof window.Data.getAbonent === "function") ? window.Data.getAbonent(id) : null;
+    const key = (window.Data && typeof window.Data.resolveCalcPeriodStorageKey === "function")
+      ? window.Data.resolveCalcPeriodStorageKey(abonent || id)
+      : (window.getCalcPeriodStorageKey ? window.getCalcPeriodStorageKey(abonent || id) : "");
+    return key || "";
+  }
+  function calcPeriodActiveKey() {
+    const id = String(getAbonentId() || "");
+    const abonent = (window.Data && typeof window.Data.getAbonent === "function") ? window.Data.getAbonent(id) : null;
+    const key = (window.Data && typeof window.Data.resolveCalcPeriodActiveStorageKey === "function")
+      ? window.Data.resolveCalcPeriodActiveStorageKey(abonent || id)
+      : (window.getCalcPeriodActiveStorageKey ? window.getCalcPeriodActiveStorageKey(abonent || id) : "");
+    return key || "";
+  }
 
   function lastAddedPaymentKey() { return "last_added_payment_" + getAbonentId(); }
   function setLastAddedPaymentId(id) {
