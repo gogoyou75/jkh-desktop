@@ -396,6 +396,16 @@
     }
   }
 
+  const LEDGER_FATAL_MESSAGE = "Данные платежей повреждены. Расчёт/импорт остановлен, чтобы не потерять историю платежей.";
+
+  function isLedgerJsonInvalidResult(res){
+    return String(res && res.reason || "") === "LEDGER_JSON_INVALID";
+  }
+
+  function isLedgerJsonInvalidError(e){
+    return String(e && e.code || "") === "LEDGER_JSON_INVALID";
+  }
+
   function cardUrlForAbonent(abonentId){
     const id = String(abonentId || "").trim();
     return id ? ("abonent_card.html?abonent=" + encodeURIComponent(id)) : "#";
@@ -525,10 +535,21 @@
         }
       }
 
+      const periodFromD = eng.parseDateAnyToDate(period.from);
+      const periodToD = eng.parseDateAnyToDate(period.to);
+      if (!periodFromD || !periodToD) {
+        showFatal("Некорректный период расчёта.");
+        return;
+      }
+      if (eng.startOfDay(periodFromD) > eng.startOfDay(periodToD)) {
+        showFatal("Такой период невозможен: дата начала не может быть позже даты окончания.");
+        return;
+      }
+
       setText("period_from", fmtDateRuAny(period.from));
       setText("period_to", fmtDateRuAny(period.to));
 
-      const toD = eng.parseDateAnyToDate(period.to) || new Date();
+      const toD = periodToD;
       const asOfFinal = eng.endOfMonth(toD);
 
       setText("stateDate", fmtDateRuAny(asOfFinal));
@@ -547,9 +568,39 @@
         }
         return false;
       }
-      let allRowsRaw = (window.Data && typeof window.Data.readPaymentLedger === "function")
-        ? window.Data.readPaymentLedger(ctx.abonentId)
-        : safeLedgerJSON(paymentsKey, [], ctx.readOwner);
+
+      if (window.JKHAutoAccrual && typeof window.JKHAutoAccrual.recalcForAbonent === "function") {
+        let recalcResult = null;
+        try {
+          recalcResult = window.JKHAutoAccrual.recalcForAbonent(ctx.abonentId);
+        } catch (e) {
+          if (isLedgerJsonInvalidError(e)) {
+            showFatal(LEDGER_FATAL_MESSAGE, { abonentId: ctx.abonentId, error: e });
+            return;
+          }
+          throw e;
+        }
+        if (isLedgerJsonInvalidResult(recalcResult)) {
+          showFatal((recalcResult && recalcResult.message) || LEDGER_FATAL_MESSAGE, { abonentId: ctx.abonentId, result: recalcResult });
+          return;
+        }
+        if (recalcResult && recalcResult.ok && recalcResult.changed && window.Data && typeof window.Data.flushDbToServer === "function") {
+          await window.Data.flushDbToServer();
+        }
+      }
+
+      let allRowsRaw;
+      try {
+        allRowsRaw = (window.Data && typeof window.Data.readPaymentLedger === "function")
+          ? window.Data.readPaymentLedger(ctx.abonentId)
+          : safeLedgerJSON(paymentsKey, [], ctx.readOwner);
+      } catch (e) {
+        if (isLedgerJsonInvalidError(e)) {
+          showFatal(LEDGER_FATAL_MESSAGE, { abonentId: ctx.abonentId, error: e });
+          return;
+        }
+        throw e;
+      }
       let allRows = Array.isArray(allRowsRaw) ? allRowsRaw : [];
       const hasLedger = hasUsableLedgerRows(allRows);
       console.log('[spravka_sud][ledger-check] id=' + ctx.abonentId + ' len=' + allRows.length);
@@ -557,8 +608,6 @@
         console.warn('[readonly][blocked-write-path]', { page: 'spravka_sud', abonentId: ctx.abonentId, reason: 'LEDGER_NOT_PREPARED' });
         showFatal("Начисления не подготовлены. Сначала выполните пересчёт начислений.");
         return;
-      } else {
-        console.log('[spravka_sud][autoaccrual] skipped existing ledger');
       }
 
       if (!allRows.length) {
