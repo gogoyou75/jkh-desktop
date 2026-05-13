@@ -2397,6 +2397,12 @@ function bindCalcButtons(){
 
     repBtn.addEventListener("click", () => {
         const id = getAbonentIdFromURL();
+        const from = fromEl.value;
+        const to = toEl.value;
+        if (from || to) {
+            if (isValidPeriod(from, to)) saveCalcPeriod(from, to);
+            else console.warn("[calc-period][save-skipped-invalid-before-reports]", { abonentId: String(id || ""), from: from || "", to: to || "" });
+        }
         const meta = getCalcPeriodStorageMeta();
         // ✅ FIX: forward active db key (if present) to reports page
         // to keep correct data when multiple bases exist in localStorage.

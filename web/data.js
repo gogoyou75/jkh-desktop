@@ -443,7 +443,36 @@
     return /^uid_[a-z0-9][a-z0-9_-]*$/i.test(s);
   }
 
+  var __invalidUidCanonicalBlockedSeen = {};
+  var __invalidUidCanonicalBlockedSummary = { count: 0, keys: {}, scheduled: false };
+
+  function _flushInvalidUidCanonicalBlockedSummary() {
+    __invalidUidCanonicalBlockedSummary.scheduled = false;
+    if (!__invalidUidCanonicalBlockedSummary.count) return;
+    var keys = Object.keys(__invalidUidCanonicalBlockedSummary.keys);
+    var payload = { count: __invalidUidCanonicalBlockedSummary.count, sampleKeys: keys.slice(0, 10) };
+    __invalidUidCanonicalBlockedSummary.count = 0;
+    __invalidUidCanonicalBlockedSummary.keys = {};
+    try { console.warn("[uid][canonical-blocked-invalid-summary]", payload); } catch (e) {}
+  }
+
   function _logInvalidUidCanonicalBlocked(payload) {
+    payload = payload || {};
+    var key = String(payload.key || "");
+    var source = String(payload.source || "");
+    var isCalcPeriod = key.indexOf("calc_period") === 0 || source.indexOf("calcPeriod") >= 0 || source.indexOf("calc-period") >= 0;
+    var sig = [key, String(payload.uid || ""), String(payload.abonentId || ""), source].join("|");
+    if (__invalidUidCanonicalBlockedSeen[sig] || isCalcPeriod) {
+      __invalidUidCanonicalBlockedSeen[sig] = true;
+      __invalidUidCanonicalBlockedSummary.count++;
+      if (key) __invalidUidCanonicalBlockedSummary.keys[key] = true;
+      if (!__invalidUidCanonicalBlockedSummary.scheduled) {
+        __invalidUidCanonicalBlockedSummary.scheduled = true;
+        try { setTimeout(_flushInvalidUidCanonicalBlockedSummary, 0); } catch (eTimer) { _flushInvalidUidCanonicalBlockedSummary(); }
+      }
+      return;
+    }
+    __invalidUidCanonicalBlockedSeen[sig] = true;
     try { console.warn("[uid][canonical-blocked-invalid]", payload || {}); } catch (e) {}
   }
 
@@ -876,7 +905,10 @@
   function migrateLegacyCalcPeriodKeysForDb(db) {
     if (!_isCalcPeriodCleanupServerDataReady(db)) return 0;
     var migrated = 0;
+    var kept = 0;
+    var skippedForeign = 0;
     var ownerId = _ownerId();
+    var hasCurrentAbonentScope = !!_currentAbonentIdFromLocation();
     _calcPeriodMigrationIdsForDb(db).forEach(function (abonentId) {
       var a = db.abonents[abonentId] || {};
       var uid = String(a.uid || "").trim();
@@ -902,14 +934,19 @@
               try { console.warn("[calc-period][canonical-readback-ok]", { from: legacyKey, to: meta.canonicalKey, ownerId: ownerId, abonentId: String(abonentId || ""), uid: uid }); } catch (eOk) {}
               _removeRawScoped(legacyKey, ownerId);
               migrated++;
-              try { console.warn("[calc-period][legacy-cleanup]", { from: legacyKey, to: meta.canonicalKey, ownerId: ownerId, abonentId: String(abonentId || ""), uid: uid }); } catch (e) {}
             } else {
+              kept++;
               try { console.warn("[calc-period][cleanup-skipped-readback-failed]", { from: legacyKey, to: meta.canonicalKey, ownerId: ownerId, abonentId: String(abonentId || ""), uid: uid }); } catch (eFail) {}
             }
           }
         });
       });
     });
+    if (hasCurrentAbonentScope) {
+      var allAbonents = db && db.abonents && typeof db.abonents === "object" ? Object.keys(db.abonents).length : 0;
+      skippedForeign = Math.max(0, allAbonents - _calcPeriodMigrationIdsForDb(db).length);
+    }
+    try { console.warn("[calc-period][legacy-summary]", { migrated: migrated, kept: kept, skippedForeign: skippedForeign }); } catch (eSummary) {}
     return migrated;
   }
 

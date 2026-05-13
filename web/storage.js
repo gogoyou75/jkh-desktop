@@ -208,7 +208,44 @@
     return /^uid_[a-z0-9][a-z0-9_-]*$/i.test(s);
   }
 
+  var __invalidUidCanonicalBlockedSeen = {};
+  var __invalidUidCanonicalBlockedSummary = { count: 0, keys: {}, scheduled: false };
+
+  function _flushInvalidUidCanonicalBlockedSummary() {
+    __invalidUidCanonicalBlockedSummary.scheduled = false;
+    if (!__invalidUidCanonicalBlockedSummary.count) return;
+    var keys = Object.keys(__invalidUidCanonicalBlockedSummary.keys);
+    var payload = { count: __invalidUidCanonicalBlockedSummary.count, sampleKeys: keys.slice(0, 10) };
+    __invalidUidCanonicalBlockedSummary.count = 0;
+    __invalidUidCanonicalBlockedSummary.keys = {};
+    try { console.warn("[uid][canonical-blocked-invalid-summary]", payload); } catch (e) {}
+  }
+
   function _warnInvalidUidCanonicalBlocked(payload) {
+    payload = payload || {};
+    var key = String(payload.key || "");
+    var source = String(payload.source || "");
+    var isCalcPeriod = key.indexOf("calc_period_") === 0 || source.indexOf("calc-period") >= 0 || source === "upload" || source === "server-dump";
+    var sig = [key, String(payload.suffix || ""), String(payload.uid || ""), String(payload.abonentId || ""), source].join("|");
+    if (__invalidUidCanonicalBlockedSeen[sig]) {
+      __invalidUidCanonicalBlockedSummary.count++;
+      if (key) __invalidUidCanonicalBlockedSummary.keys[key] = true;
+      if (!__invalidUidCanonicalBlockedSummary.scheduled) {
+        __invalidUidCanonicalBlockedSummary.scheduled = true;
+        try { setTimeout(_flushInvalidUidCanonicalBlockedSummary, 0); } catch (eTimer) { _flushInvalidUidCanonicalBlockedSummary(); }
+      }
+      return;
+    }
+    __invalidUidCanonicalBlockedSeen[sig] = true;
+    if (isCalcPeriod) {
+      __invalidUidCanonicalBlockedSummary.count++;
+      if (key) __invalidUidCanonicalBlockedSummary.keys[key] = true;
+      if (!__invalidUidCanonicalBlockedSummary.scheduled) {
+        __invalidUidCanonicalBlockedSummary.scheduled = true;
+        try { setTimeout(_flushInvalidUidCanonicalBlockedSummary, 0); } catch (eCalcTimer) { _flushInvalidUidCanonicalBlockedSummary(); }
+      }
+      return;
+    }
     try { console.warn("[uid][canonical-blocked-invalid]", payload || {}); } catch (e) {}
   }
 
@@ -870,11 +907,19 @@
       filtered.push(key);
     }
 
+    var skippedCalcPeriodUpload = 0;
     filtered = filtered.filter(function (key) {
       if (_isUploadAllowedKey(key, ownerId)) return true;
+      if (_calcPeriodKeyInfo(key)) {
+        skippedCalcPeriodUpload++;
+        return false;
+      }
       console.warn("[JKH sync][skip-upload-not-allowed]", key);
       return false;
     });
+    if (skippedCalcPeriodUpload > 0) {
+      try { console.warn("[JKH sync][skip-upload-not-allowed-summary]", { calcPeriodLegacy: skippedCalcPeriodUpload, ownerId: String(ownerId || "") }); } catch (eSkipSummary) {}
+    }
 
     return filtered;
   }
@@ -945,6 +990,30 @@
   }
 
 
+  function _currentAbonentIdFromLocation() {
+    try {
+      var params = new URLSearchParams(window.location && window.location.search || "");
+      return String(params.get("abonent") || "").trim();
+    } catch (e) {
+      return "";
+    }
+  }
+
+  function _calcPeriodAllowedLegacyAliasesForCurrentAbonent(abonents) {
+    var currentId = _currentAbonentIdFromLocation();
+    var out = { hasScope: false, aliases: {}, uid: "", abonentId: currentId };
+    if (!currentId || !abonents || !abonents[currentId]) return out;
+    var a = abonents[currentId] || {};
+    var uid = String(a.uid || "").trim();
+    out.hasScope = true;
+    out.uid = uid;
+    [currentId, a.id, a.ls, a.account, a.accountNumber, a.personalAccount, a.regnum, a.premiseRegnum, uid].forEach(function (v) {
+      var s = String(v || "").trim();
+      if (s) out.aliases[s] = true;
+    });
+    return out;
+  }
+
   function _normalizeCalcPeriodKeysInDump(dumpObj, ownerId) {
     if (!dumpObj || typeof dumpObj !== "object" || Array.isArray(dumpObj)) return dumpObj;
     var rawDb = Object.prototype.hasOwnProperty.call(dumpObj, KEY_DB) ? dumpObj[KEY_DB] : _readLocalCompat(KEY_DB, ownerId);
@@ -968,26 +1037,41 @@
       });
     });
 
+    var scoped = _calcPeriodAllowedLegacyAliasesForCurrentAbonent(abonents);
+    var summary = { migrated: 0, kept: 0, skippedForeign: 0 };
+
     Object.keys(dumpObj).forEach(function (key) {
       var info = _calcPeriodKeyInfo(key);
       if (!info) return;
-      if (!_isValidUid(info.suffix) && !aliases[info.suffix]) {
-        try { console.warn("[calc-period][legacy-keep-no-alias]", { key: key, ownerId: String(ownerId || ""), reason: "UID_ALIAS_NOT_FOUND" }); } catch (eNoAlias) {}
+      if (uidSet[info.suffix]) return;
+
+      if (scoped.hasScope && !scoped.aliases[info.suffix]) {
+        summary.skippedForeign++;
         return;
       }
-      if (uidSet[info.suffix]) return;
+
+      if (!_isValidUid(info.suffix) && !aliases[info.suffix]) {
+        summary.kept++;
+        return;
+      }
+
       var uid = aliases[info.suffix];
       if (uid && _isValidUid(uid)) {
         var canonicalKey = info.prefix + uid;
         if (!Object.prototype.hasOwnProperty.call(dumpObj, canonicalKey)) dumpObj[canonicalKey] = dumpObj[key];
-        if (Object.prototype.hasOwnProperty.call(dumpObj, canonicalKey)) {
+        var readBackMatches = Object.prototype.hasOwnProperty.call(dumpObj, canonicalKey) && dumpObj[canonicalKey] === dumpObj[key];
+        if (readBackMatches) {
           delete dumpObj[key];
-          try { console.warn("[calc-period][legacy-migrated-in-dump]", { from: key, to: canonicalKey, ownerId: String(ownerId || ""), abonentId: info.suffix, uid: uid }); } catch (e) {}
+          summary.migrated++;
+        } else {
+          summary.kept++;
         }
       } else {
-        try { console.warn("[calc-period][legacy-keep-no-alias]", { key: key, ownerId: String(ownerId || ""), reason: "UID_ALIAS_NOT_FOUND" }); } catch (eDrop) {}
+        summary.kept++;
       }
     });
+
+    try { console.warn("[calc-period][legacy-summary]", summary); } catch (eSummary) {}
     return dumpObj;
   }
 

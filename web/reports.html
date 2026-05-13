@@ -406,15 +406,45 @@ function loadAutoPeriod(abonent) {
     if (!fromEl || !toEl) return;
 
     const meta = getCanonicalPeriodMeta(id, abonent);
+    const params = getReportsUrlParams();
+    const urlFrom = String(params.get("from") || "").trim();
+    const urlTo = String(params.get("to") || "").trim();
+
+    if (urlFrom || urlTo) {
+        fromEl.value = urlFrom;
+        toEl.value = urlTo;
+        if (isValidPeriod(urlFrom, urlTo)) saveCanonicalPeriod(abonent, urlFrom, urlTo, { silent: true, source: "url" });
+        try { console.log("[reports][calc-period][restored]", { source: "url", from: fromEl.value || "", to: toEl.value || "", periodKey: meta.periodKey, activeKey: meta.activeKey }); } catch(eUrlLog) {}
+        return;
+    }
+
+    let raw = null;
+    let activeRaw = null;
+    let p = null;
     try {
-        const raw = meta.periodKey ? storeGetCanonical(meta.periodKey, meta.ownerId) : null;
-        if (!raw) { fromEl.value = ""; toEl.value = ""; return; }
-        const p = JSON.parse(raw);
-        fromEl.value = p.from || "";
-        toEl.value   = p.to || "";
+        raw = meta.periodKey ? storeGetCanonical(meta.periodKey, meta.ownerId) : null;
+        activeRaw = meta.activeKey ? storeGetCanonical(meta.activeKey, meta.ownerId) : null;
+        p = raw ? JSON.parse(raw) : null;
     } catch(e) {
-        fromEl.value = "";
-        toEl.value = "";
+        p = null;
+    }
+
+    try {
+        console.log("[reports][calc-period][load-canonical]", {
+            abonentId: meta.abonentId,
+            uid: meta.uid,
+            ownerId: meta.ownerId,
+            periodKey: meta.periodKey,
+            activeKey: meta.activeKey,
+            activeRaw: activeRaw,
+            periodRaw: raw
+        });
+    } catch(eLoadLog) {}
+
+    if (activeRaw === "1" && p && isValidPeriod(String(p.from || ""), String(p.to || ""))) {
+        fromEl.value = p.from || "";
+        toEl.value = p.to || "";
+        try { console.log("[reports][calc-period][restored]", { source: "canonical", from: fromEl.value || "", to: toEl.value || "", periodKey: meta.periodKey, activeKey: meta.activeKey }); } catch(eRestoreLog) {}
     }
 }
 
@@ -424,20 +454,21 @@ function isValidPeriod(from, to){
     return a.toString() !== "Invalid Date" && b.toString() !== "Invalid Date" && a <= b;
 }
 
-function saveCanonicalPeriod(abonent, from, to){
+function saveCanonicalPeriod(abonent, from, to, options){
+    const opts = options || {};
     const id = getAbonentIdFromURL();
     const fromValue = String(from || "").trim();
     const toValue = String(to || "").trim();
 
     if (!isValidPeriod(fromValue, toValue)) {
-        alert("Период не выбран или указан неверно.");
+        if (!opts.silent) alert("Период не выбран или указан неверно.");
         return false;
     }
 
     const meta = getCanonicalPeriodMeta(id, abonent);
     if (!meta.periodKey || !meta.activeKey || !meta.uid || !meta.ownerId) {
         try { console.warn("[reports][calc-period][save][missing-canonical-context]", meta); } catch(e) {}
-        alert("Период не выбран или указан неверно.");
+        if (!opts.silent) alert("Период не выбран или указан неверно.");
         return false;
     }
 
@@ -449,7 +480,8 @@ function saveCanonicalPeriod(abonent, from, to){
             periodKey: meta.periodKey,
             activeKey: meta.activeKey,
             from: fromValue,
-            to: toValue
+            to: toValue,
+            source: String(opts.source || "manual")
         });
     } catch(e) {}
 
@@ -471,7 +503,7 @@ function saveCanonicalPeriod(abonent, from, to){
     } catch(e) {}
 
     if (!parsedPeriod || parsedPeriod.from !== fromValue || parsedPeriod.to !== toValue || activeRaw !== "1") {
-        alert("Период не выбран или указан неверно.");
+        if (!opts.silent) alert("Период не выбран или указан неверно.");
         return false;
     }
 
