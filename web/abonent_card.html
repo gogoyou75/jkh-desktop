@@ -2103,9 +2103,11 @@ function bindCalcButtons(){
         const to   = toEl.value;
 
         if (!isValidPeriod(from, to)) {
-            saveCalcPeriod("", "");
-            setCalcPeriodActive(false);
-            __safeLoadPaymentTableOnce();
+            if (!from || !to) {
+                alert("Укажите дату начала и дату окончания периода расчёта.");
+            } else {
+                alert("Такой период невозможен: дата начала не может быть позже даты окончания.");
+            }
             return;
         }
 
