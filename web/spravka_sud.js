@@ -103,7 +103,7 @@
     return d.getDate() + " " + months[d.getMonth()] + " " + d.getFullYear() + " года";
   }
 
-  function loadSelectedPeriod(ls, ownerId, abonent){
+  function loadSelectedPeriod(abonentId, ownerId, abonent){
     function parsePeriod(raw){
       try {
         const o = JSON.parse(raw);
@@ -112,23 +112,43 @@
       } catch (e) { return null; }
     }
 
-    const requestedId = String(ls || '').trim();
-    const resolvedUid = String(abonent && abonent.uid || '').trim();
-    const storageKey = (window.getCalcPeriodStorageKey && abonent) ? String(window.getCalcPeriodStorageKey(abonent) || '') : '';
-    const calcPeriod = storageKey ? parsePeriod(storeGet(storageKey, ownerId)) : null;
+    const requestedId = String(abonentId || '').trim();
+    const storageKey = (window.Data && typeof window.Data.resolveCalcPeriodStorageKey === "function")
+      ? String(window.Data.resolveCalcPeriodStorageKey(abonent || requestedId) || '').trim()
+      : '';
+    const activeStorageKey = (window.Data && typeof window.Data.resolveCalcPeriodActiveStorageKey === "function")
+      ? String(window.Data.resolveCalcPeriodActiveStorageKey(abonent || requestedId) || '').trim()
+      : '';
+    if (activeStorageKey) storeGet(activeStorageKey, ownerId);
+    const raw = storageKey ? storeGet(storageKey, ownerId) : null;
+    const calcPeriod = raw ? parsePeriod(raw) : null;
 
     try {
-      console.log("[calc-period][load]", {
-        requestedId: requestedId,
-        resolvedUid: resolvedUid,
-        storageKey: storageKey,
+      console.log("[spravka][calc-period-read]", {
+        abonentId: requestedId,
+        key: storageKey,
         from: calcPeriod ? calcPeriod.from : "",
         to: calcPeriod ? calcPeriod.to : ""
       });
     } catch (e) {}
 
-    const rp = storeGet("report_period_" + requestedId, ownerId);
-    return calcPeriod || parsePeriod(rp);
+    if (!storageKey) {
+      console.warn("[spravka][calc-period-read][missing-canonical-key]", {
+        abonentId: requestedId,
+        key: storageKey
+      });
+      return null;
+    }
+
+    if (!raw || !calcPeriod) {
+      console.warn("[spravka][calc-period-read][missing-canonical-period]", {
+        abonentId: requestedId,
+        key: storageKey
+      });
+      return null;
+    }
+
+    return calcPeriod;
   }
 
   function getUrlParams(){
@@ -539,15 +559,16 @@
       }
 
       let period = loadSelectedPeriod(ctx.abonentId, ctx.readOwner, abonent);
-      let periodSource = period ? "stored report/calc period" : "auto from start date";
+      let periodSource = period ? "stored canonical calc period" : "missing canonical calc period";
       if (!period) {
-        period = { from: eng.toISODateString(abonentStart), to: eng.toISODateString(new Date()) };
-      } else {
-        const pFrom = eng.parseDateAnyToDate(period.from);
-        if (pFrom && eng.startOfDay(pFrom) < abonentStart) {
-          period.from = eng.toISODateString(abonentStart);
-          periodSource += " + clampedToAbonentStart";
-        }
+        showFatal("Период расчёта не найден в canonical UID key. Откройте карточку/расчёт и сохраните период расчёта.");
+        return;
+      }
+
+      const pFrom = eng.parseDateAnyToDate(period.from);
+      if (pFrom && eng.startOfDay(pFrom) < abonentStart) {
+        period.from = eng.toISODateString(abonentStart);
+        periodSource += " + clampedToAbonentStart";
       }
 
       const periodFromD = eng.parseDateAnyToDate(period.from);
