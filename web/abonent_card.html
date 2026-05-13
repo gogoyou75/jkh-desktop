@@ -2114,28 +2114,70 @@ function loadCalcPeriodUI(){
 
 // intentionally local-only: период расчёта это UI-параметр и не отправляется на сервер
 function saveCalcPeriod(from, to){
+    saveCalcPeriod.lastError = "";
     const meta = getCalcPeriodStorageMeta();
+    const fromEl = document.getElementById("calcFrom");
+    const toEl = document.getElementById("calcTo");
+    const fromInputValue = fromEl ? fromEl.value : "";
+    const toInputValue = toEl ? toEl.value : "";
+    const payloadFrom = String(fromInputValue || from || "").trim();
+    const payloadTo = String(toInputValue || to || "").trim();
+
+    try {
+        console.log("[calc-period][save-inputs]", {
+            fromInputValue: fromInputValue,
+            toInputValue: toInputValue
+        });
+    } catch (e) {}
+
+    try {
+        console.log("[calc-period][save-payload]", {
+            from: payloadFrom,
+            to: payloadTo
+        });
+    } catch (e) {}
+
+    if (!payloadFrom || !payloadTo) {
+        saveCalcPeriod.lastError = "PERIOD_REQUIRED";
+        if (meta.storageKey) storeRemove(meta.storageKey);
+        if (meta.activeStorageKey) storeSet(meta.activeStorageKey, "0");
+        try {
+            console.warn("[calc-period][save-blocked]", {
+                requestedId: meta.requestedId,
+                resolvedUid: meta.resolvedUid,
+                storageKey: meta.storageKey,
+                activeStorageKey: meta.activeStorageKey,
+                from: payloadFrom,
+                to: payloadTo,
+                reason: "PERIOD_REQUIRED"
+            });
+        } catch (e) {}
+        alert("Укажите дату начала и дату окончания периода расчёта.");
+        return false;
+    }
+
     if (!meta.storageKey || !meta.resolvedUid) {
+        saveCalcPeriod.lastError = "UID_REQUIRED";
         try {
             console.warn("[calc-period][save]", {
                 requestedId: meta.requestedId,
                 resolvedUid: meta.resolvedUid,
                 storageKey: meta.storageKey,
-                from: from || "",
-                to: to || "",
+                from: payloadFrom,
+                to: payloadTo,
                 reason: "UID_REQUIRED"
             });
         } catch (e) {}
         return false;
     }
-    storeSet(meta.storageKey, JSON.stringify({from: from || "", to: to || ""}));
+    storeSet(meta.storageKey, JSON.stringify({from: payloadFrom, to: payloadTo}));
     try {
         console.log("[calc-period][save]", {
             requestedId: meta.requestedId,
             resolvedUid: meta.resolvedUid,
             storageKey: meta.storageKey,
-            from: from || "",
-            to: to || ""
+            from: payloadFrom,
+            to: payloadTo
         });
     } catch (e) {}
     return true;
@@ -2244,7 +2286,9 @@ function bindCalcButtons(){
         }
 
         if (!saveCalcPeriod(from, to)) {
-            alert("Период расчёта не сохранён: не найден canonical UID key.");
+            if (saveCalcPeriod.lastError !== "PERIOD_REQUIRED") {
+                alert("Период расчёта не сохранён: не найден canonical UID key.");
+            }
             return;
         }
         if (!setCalcPeriodActive(true)) {
@@ -2259,8 +2303,9 @@ function bindCalcButtons(){
 
     resetBtn.addEventListener("click", () => {
         if (!canWriteOrExplainLocal()) return;
-        saveCalcPeriod("", "");
         setCalcPeriodActive(false);
+        const periodKey = calcPeriodKey();
+        if (periodKey) storeRemove(periodKey);
         fromEl.value = "";
         toEl.value = "";
         __safeLoadPaymentTableOnce();
