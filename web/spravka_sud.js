@@ -103,7 +103,7 @@
     return d.getDate() + " " + months[d.getMonth()] + " " + d.getFullYear() + " года";
   }
 
-  function loadSelectedPeriod(ls, ownerId){
+  function loadSelectedPeriod(ls, ownerId, abonent){
     function parsePeriod(raw){
       try {
         const o = JSON.parse(raw);
@@ -111,9 +111,24 @@
         return { from: String(o.from), to: String(o.to) };
       } catch (e) { return null; }
     }
-    const rp = storeGet("report_period_" + ls, ownerId);
-    const cp = storeGet("calc_period_" + ls, ownerId);
-    return parsePeriod(rp) || parsePeriod(cp);
+
+    const requestedId = String(ls || '').trim();
+    const resolvedUid = String(abonent && abonent.uid || '').trim();
+    const storageKey = (window.getCalcPeriodStorageKey && abonent) ? String(window.getCalcPeriodStorageKey(abonent) || '') : '';
+    const calcPeriod = storageKey ? parsePeriod(storeGet(storageKey, ownerId)) : null;
+
+    try {
+      console.log("[calc-period][load]", {
+        requestedId: requestedId,
+        resolvedUid: resolvedUid,
+        storageKey: storageKey,
+        from: calcPeriod ? calcPeriod.from : "",
+        to: calcPeriod ? calcPeriod.to : ""
+      });
+    } catch (e) {}
+
+    const rp = storeGet("report_period_" + requestedId, ownerId);
+    return calcPeriod || parsePeriod(rp);
   }
 
   function getUrlParams(){
@@ -523,7 +538,7 @@
         return;
       }
 
-      let period = loadSelectedPeriod(ctx.abonentId, ctx.readOwner);
+      let period = loadSelectedPeriod(ctx.abonentId, ctx.readOwner, abonent);
       let periodSource = period ? "stored report/calc period" : "auto from start date";
       if (!period) {
         period = { from: eng.toISODateString(abonentStart), to: eng.toISODateString(new Date()) };

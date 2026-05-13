@@ -456,6 +456,20 @@
     return { id: raw, abonent: null };
   }
 
+  function resolveCalcPeriodStorageKey(abonentOrId, options) {
+    var opts = options || {};
+    var suffix = String(opts && opts.suffix || "").trim();
+    var found = _findAbonentByIdOrUid(abonentOrId);
+    var abonent = found && found.abonent ? found.abonent : null;
+    var uid = String(abonent && abonent.uid || "").trim();
+    if (!uid) return "";
+    return "calc_period" + suffix + "_" + uid;
+  }
+
+  function resolveCalcPeriodActiveStorageKey(abonentOrId) {
+    return resolveCalcPeriodStorageKey(abonentOrId, { suffix: "_active" });
+  }
+
   function resolvePaymentLedgerKey(abonentOrId, options) {
     var opts = options || {};
     var found = _findAbonentByIdOrUid(abonentOrId);
@@ -950,6 +964,8 @@
     readCanonicalExcludePeriods: readCanonicalExcludePeriods,
     writeCanonicalExcludePeriods: writeCanonicalExcludePeriods,
     repairEmptyExcludePeriodsKeys: repairEmptyExcludePeriodsKeys,
+    resolveCalcPeriodStorageKey: resolveCalcPeriodStorageKey,
+    resolveCalcPeriodActiveStorageKey: resolveCalcPeriodActiveStorageKey,
     resolvePaymentLedgerKey: resolvePaymentLedgerKey,
     readPaymentLedger: readPaymentLedger,
     writePaymentLedger: writePaymentLedger,
@@ -1977,6 +1993,8 @@
   Data.getAbonentTransferInfo = getAbonentTransferInfo;
   Data.getFinancialTransferInfo = getFinancialTransferInfo;
 
+window.getCalcPeriodStorageKey = resolveCalcPeriodStorageKey;
+window.getCalcPeriodActiveStorageKey = resolveCalcPeriodActiveStorageKey;
 window.Data = Data;
 window.JKHBoot?.markReady?.('data');
 
@@ -2069,8 +2087,11 @@ window.JKHBoot?.markReady?.('data');
 
     // 6) периоды расчёта (пустые, как на скрине)
     ["1006", "1008"].forEach((id) => {
-      _setRawScoped("calc_period_" + id, JSON.stringify({ from: "", to: "" }));
-      _setRawScoped("calc_period_active_" + id, "0");
+      const abonent = demoDb && demoDb.abonents ? demoDb.abonents[id] : null;
+      const calcKey = resolveCalcPeriodStorageKey(abonent);
+      const calcActiveKey = resolveCalcPeriodActiveStorageKey(abonent);
+      if (calcKey) _setRawScoped(calcKey, JSON.stringify({ from: "", to: "" }));
+      if (calcActiveKey) _setRawScoped(calcActiveKey, "0");
       _setRawScoped("report_period_" + id, JSON.stringify({ from: "", to: "" }));
     });
 

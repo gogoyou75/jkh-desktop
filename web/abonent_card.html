@@ -1750,8 +1750,6 @@ function migrateLocalKeys(oldId, newId) {
     const pairs = [
         ["note_", "note_"],
         ["moratorium_", "moratorium_"],
-        ["calc_period_", "calc_period_"],
-        ["calc_period_active_", "calc_period_active_"],
         ["exclude_periods_", "exclude_periods_"]
     ];
 
@@ -1763,6 +1761,26 @@ function migrateLocalKeys(oldId, newId) {
             storeSet(newKey, val);
         }
         if (val !== null) storeRemove(oldKey);
+    });
+
+    const db = getDb() || {};
+    const abonent = db[String(newId)] || db[String(oldId)] || null;
+    const uid = String(abonent?.uid || '').trim();
+    if (!uid) return;
+
+    [
+        { legacyPrefix: "calc_period_", canonicalKey: "calc_period_" + uid },
+        { legacyPrefix: "calc_period_active_", canonicalKey: "calc_period_active_" + uid }
+    ].forEach((item) => {
+        [String(oldId), String(newId)].forEach((id) => {
+            if (!id || id === uid) return;
+            const legacyKey = item.legacyPrefix + id;
+            const val = storeGet(legacyKey);
+            if (val !== null && storeGet(item.canonicalKey) === null) {
+                storeSet(item.canonicalKey, val);
+            }
+            if (val !== null) storeRemove(legacyKey);
+        });
     });
 }
 
@@ -2044,17 +2062,32 @@ function saveNotes() {
     alert("Примечание сохранено");
 }
 
-function calcPeriodKey(id){ return "calc_period_" + id; }
-function calcPeriodActiveKey(id){ return "calc_period_active_" + id; }
+function getCalcPeriodStorageMeta(){
+    const requestedId = getAbonentIdFromURL();
+    const db = getDb() || {};
+    const abonent = db[requestedId] || null;
+    const resolvedUid = String(abonent?.uid || '').trim();
+    const storageKey = (window.getCalcPeriodStorageKey && abonent) ? String(window.getCalcPeriodStorageKey(abonent) || '') : '';
+    const activeStorageKey = (window.getCalcPeriodActiveStorageKey && abonent) ? String(window.getCalcPeriodActiveStorageKey(abonent) || '') : '';
+    return {
+        requestedId: String(requestedId || ''),
+        resolvedUid: resolvedUid,
+        storageKey: storageKey,
+        activeStorageKey: activeStorageKey
+    };
+}
+
+function calcPeriodKey(){ return getCalcPeriodStorageMeta().storageKey; }
+function calcPeriodActiveKey(){ return getCalcPeriodStorageMeta().activeStorageKey; }
 
 function loadCalcPeriodUI(){
-    const id = getAbonentTechnicalIdFromURL();
+    const meta = getCalcPeriodStorageMeta();
     const fromEl = document.getElementById("calcFrom");
     const toEl   = document.getElementById("calcTo");
     if (!fromEl || !toEl) return;
 
     try {
-        const raw = storeGet(calcPeriodKey(id));
+        const raw = meta.storageKey ? storeGet(meta.storageKey) : null;
         if (raw) {
             const obj = JSON.parse(raw);
             fromEl.value = obj.from || "";
@@ -2067,17 +2100,50 @@ function loadCalcPeriodUI(){
         fromEl.value = "";
         toEl.value   = "";
     }
+
+    try {
+        console.log("[calc-period][load]", {
+            requestedId: meta.requestedId,
+            resolvedUid: meta.resolvedUid,
+            storageKey: meta.storageKey,
+            from: fromEl.value || "",
+            to: toEl.value || ""
+        });
+    } catch (e) {}
 }
 
 // intentionally local-only: период расчёта это UI-параметр и не отправляется на сервер
 function saveCalcPeriod(from, to){
-    const id = getAbonentTechnicalIdFromURL();
-    storeSet(calcPeriodKey(id), JSON.stringify({from: from || "", to: to || ""}));
+    const meta = getCalcPeriodStorageMeta();
+    if (!meta.storageKey || !meta.resolvedUid) {
+        try {
+            console.warn("[calc-period][save]", {
+                requestedId: meta.requestedId,
+                resolvedUid: meta.resolvedUid,
+                storageKey: meta.storageKey,
+                from: from || "",
+                to: to || "",
+                reason: "UID_REQUIRED"
+            });
+        } catch (e) {}
+        return;
+    }
+    storeSet(meta.storageKey, JSON.stringify({from: from || "", to: to || ""}));
+    try {
+        console.log("[calc-period][save]", {
+            requestedId: meta.requestedId,
+            resolvedUid: meta.resolvedUid,
+            storageKey: meta.storageKey,
+            from: from || "",
+            to: to || ""
+        });
+    } catch (e) {}
 }
 
 function setCalcPeriodActive(active){
-    const id = getAbonentTechnicalIdFromURL();
-    storeSet(calcPeriodActiveKey(id), active ? "1" : "0");
+    const meta = getCalcPeriodStorageMeta();
+    if (!meta.activeStorageKey || !meta.resolvedUid) return;
+    storeSet(meta.activeStorageKey, active ? "1" : "0");
 }
 
 function isValidPeriod(from, to){

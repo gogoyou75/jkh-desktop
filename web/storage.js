@@ -685,8 +685,11 @@
       out.push("payments_" + id);
       out.push("exclude_periods_" + id);
       out.push("note_" + id);
-      out.push("calc_period_" + id);
-      out.push("calc_period_active_" + id);
+      var uid = String(abonents[id] && abonents[id].uid || "").trim();
+      if (uid) {
+        out.push("calc_period_" + uid);
+        out.push("calc_period_active_" + uid);
+      }
       out.push("report_period_" + id);
       out.push("payments_ui_collapsed_" + id);
       out.push("jkh_transfer_to_v1:" + id);
