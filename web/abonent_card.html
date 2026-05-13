@@ -2126,7 +2126,7 @@ function saveCalcPeriod(from, to){
                 reason: "UID_REQUIRED"
             });
         } catch (e) {}
-        return;
+        return false;
     }
     storeSet(meta.storageKey, JSON.stringify({from: from || "", to: to || ""}));
     try {
@@ -2138,12 +2138,78 @@ function saveCalcPeriod(from, to){
             to: to || ""
         });
     } catch (e) {}
+    return true;
 }
 
 function setCalcPeriodActive(active){
     const meta = getCalcPeriodStorageMeta();
-    if (!meta.activeStorageKey || !meta.resolvedUid) return;
+    if (!meta.activeStorageKey || !meta.resolvedUid) return false;
+
+    if (active) {
+        let periodRaw = null;
+        let savedPeriod = null;
+        try {
+            periodRaw = (window.JKHStore && typeof JKHStore.getRaw === "function") ? JKHStore.getRaw(meta.storageKey) : null;
+            savedPeriod = periodRaw ? JSON.parse(periodRaw) : null;
+        } catch (e) {
+            savedPeriod = null;
+        }
+
+        if (!savedPeriod || !isValidPeriod(savedPeriod.from || "", savedPeriod.to || "")) {
+            storeSet(meta.activeStorageKey, "0");
+            try {
+                console.warn("[calc-period][active-blocked]", {
+                    periodKey: meta.storageKey,
+                    activeKey: meta.activeStorageKey,
+                    periodRaw: periodRaw,
+                    reason: "PERIOD_REQUIRED"
+                });
+            } catch (e) {}
+            return false;
+        }
+    }
+
     storeSet(meta.activeStorageKey, active ? "1" : "0");
+    return true;
+}
+
+function confirmCalcPeriodSaved(){
+    const periodKey = calcPeriodKey();
+    const activeKey = calcPeriodActiveKey();
+    let periodRaw = null;
+    let activeRaw = null;
+
+    try {
+        if (window.JKHStore && typeof JKHStore.getRaw === "function") {
+            periodRaw = periodKey ? JKHStore.getRaw(periodKey) : null;
+            activeRaw = activeKey ? JKHStore.getRaw(activeKey) : null;
+        }
+    } catch (e) {
+        periodRaw = null;
+        activeRaw = null;
+    }
+
+    try {
+        console.log("[calc-period][save-confirm]", {
+            periodKey: periodKey,
+            activeKey: activeKey,
+            periodRaw: periodRaw,
+            activeRaw: activeRaw
+        });
+    } catch (e) {}
+
+    if (!periodRaw) {
+        if (activeKey) storeSet(activeKey, "0");
+        alert("Период расчёта не сохранён в canonical UID key. Справка не будет открыта.");
+        return false;
+    }
+
+    if (activeRaw !== "1") {
+        alert("Флаг активного периода расчёта не сохранён. Справка не будет открыта.");
+        return false;
+    }
+
+    return true;
 }
 
 function isValidPeriod(from, to){
@@ -2177,8 +2243,16 @@ function bindCalcButtons(){
             return;
         }
 
-        saveCalcPeriod(from, to);
-        setCalcPeriodActive(true);
+        if (!saveCalcPeriod(from, to)) {
+            alert("Период расчёта не сохранён: не найден canonical UID key.");
+            return;
+        }
+        if (!setCalcPeriodActive(true)) {
+            confirmCalcPeriodSaved();
+            alert("Период расчёта не активирован: сначала укажите и сохраните даты начала и окончания.");
+            return;
+        }
+        if (!confirmCalcPeriodSaved()) return;
 
         __safeLoadPaymentTableOnce();
     });
