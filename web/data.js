@@ -867,6 +867,102 @@
     }
   }
 
+  function generateUniqueAbonentUid(db) {
+    var abonents = db && db.abonents && typeof db.abonents === "object" ? db.abonents : {};
+    var used = {};
+    Object.keys(abonents).forEach(function (id) {
+      var uid = String(abonents[id] && abonents[id].uid || "").trim();
+      if (uid) used[uid] = true;
+    });
+
+    for (var i = 0; i < 50; i++) {
+      var candidate = (typeof window.generateUid === "function")
+        ? String(window.generateUid()).trim()
+        : ("uid_" + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2, 8));
+      if (candidate && !used[candidate]) return candidate;
+    }
+
+    return "uid_" + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2, 12);
+  }
+
+  function ensureAbonentUidOnRecord(db, abonentId, abonent, options) {
+    var opts = options || {};
+    var id = String(abonentId || "").trim();
+    var a = abonent || null;
+    var currentUid = String(a && a.uid || "").trim();
+
+    try {
+      console.log("[abonent][uid-check]", {
+        abonentId: id,
+        uid: currentUid,
+        source: String(opts.source || "data")
+      });
+    } catch (e) {}
+
+    if (!a) return { ok: false, uid: "", changed: false, reason: "ABONENT_NOT_FOUND" };
+    if (currentUid) return { ok: true, uid: currentUid, changed: false };
+
+    var uid = generateUniqueAbonentUid(db);
+    a.uid = uid;
+    try {
+      console.log("[abonent][uid-generated]", {
+        abonentId: id,
+        uid: uid,
+        source: String(opts.source || "data")
+      });
+    } catch (e2) {}
+    return { ok: true, uid: uid, changed: true };
+  }
+
+  async function ensureAbonentUid(abonentOrId, options) {
+    var opts = options || {};
+    var db = window.AbonentsDB || null;
+    if (!db) return { ok: false, uid: "", changed: false, reason: "DB_NOT_READY" };
+    if (!db.abonents || typeof db.abonents !== "object") db.abonents = {};
+
+    var found = _findAbonentByIdOrUid(abonentOrId);
+    var id = String(found && found.id || (abonentOrId && typeof abonentOrId === "object" ? abonentOrId.id : abonentOrId) || "").trim();
+    var abonent = (found && found.abonent && db.abonents[id] === found.abonent) ? found.abonent : (id ? db.abonents[id] : null);
+
+    if (!abonent && abonentOrId && typeof abonentOrId === "object") {
+      var objUid = String(abonentOrId.uid || "").trim();
+      if (objUid) {
+        var byUid = Object.keys(db.abonents).find(function (key) { return String(db.abonents[key] && db.abonents[key].uid || "").trim() === objUid; });
+        if (byUid) { id = byUid; abonent = db.abonents[byUid]; }
+      }
+    }
+
+    var result = ensureAbonentUidOnRecord(db, id, abonent, { source: opts.source || "ensureAbonentUid" });
+    if (!result.ok) return result;
+
+    var saved = false;
+    try {
+      normalizeDb(db);
+      saved = saveToStorage(db) === true;
+      if (saved) {
+        _resetPaymentKeyResolveCache("ensure-abonent-uid");
+        try { console.log("[abonent][uid-persist-ok]", { abonentId: id, uid: result.uid, storage: "local" }); } catch (eOk) {}
+      } else {
+        try { console.error("[abonent][uid-persist-failed]", { abonentId: id, uid: result.uid, reason: "LOCAL_SAVE_FAILED" }); } catch (eFail) {}
+        return { ok: false, uid: result.uid, changed: true, reason: "LOCAL_SAVE_FAILED" };
+      }
+    } catch (e3) {
+      try { console.error("[abonent][uid-persist-failed]", { abonentId: id, uid: result.uid, reason: String(e3 && e3.message || e3) }); } catch (eFail2) {}
+      return { ok: false, uid: result.uid, changed: true, reason: "LOCAL_SAVE_EXCEPTION" };
+    }
+
+    try {
+      if (window.Data && typeof window.Data.flushDbToServer === "function") {
+        await window.Data.flushDbToServer();
+        try { console.log("[abonent][uid-persist-ok]", { abonentId: id, uid: result.uid, storage: "server" }); } catch (eSrvOk) {}
+      }
+    } catch (e4) {
+      try { console.warn("[abonent][uid-persist-failed]", { abonentId: id, uid: result.uid, storage: "server", reason: String(e4 && e4.message || e4) }); } catch (eSrvFail) {}
+    }
+
+    return result;
+  }
+
 
   function isForbiddenDefaultDateString(v) {
     var s = String(v || "").trim();
@@ -898,12 +994,7 @@
       const a = db.abonents[abonentId];
       if (!a) return;
 
-      if (!String(a.uid || '').trim()) {
-        a.uid = (typeof window.generateUid === 'function')
-          ? String(window.generateUid())
-          : ('uid_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8));
-        console.log('[data][uid] migrated legacy abonent', { abonentId: String(abonentId), uid: String(a.uid) });
-      }
+      ensureAbonentUidOnRecord(db, abonentId, a, { source: "normalizeDb" });
 
       const regnum = String(a.regnum || a.premiseRegnum || "").trim();
       if (!regnum) return;
@@ -999,6 +1090,7 @@
     writeCanonicalExcludePeriods: writeCanonicalExcludePeriods,
     repairEmptyExcludePeriodsKeys: repairEmptyExcludePeriodsKeys,
     migrateLegacyCalcPeriodKeysForDb: migrateLegacyCalcPeriodKeysForDb,
+    ensureAbonentUid: ensureAbonentUid,
     resolveCalcPeriodStorageKey: resolveCalcPeriodStorageKey,
     resolveCalcPeriodActiveStorageKey: resolveCalcPeriodActiveStorageKey,
     resolvePaymentLedgerKey: resolvePaymentLedgerKey,
@@ -1158,12 +1250,7 @@
       var existedBefore = !!window.AbonentsDB.abonents[id];
       if (!existedBefore) removeLegacyExcludeFields(input);
 
-      if (!String(input.uid || '').trim()) {
-        input.uid = (typeof window.generateUid === 'function')
-          ? String(window.generateUid())
-          : ('uid_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8));
-        console.log('[data][uid] generated for abonent', { abonentId: id, uid: String(input.uid) });
-      }
+      ensureAbonentUidOnRecord(window.AbonentsDB, id, input, { source: "upsertAbonent" });
 
       var regnum = normalizeRegnumValue(input.premiseRegnum || input.regnum);
       if (regnum) {

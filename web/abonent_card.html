@@ -2122,6 +2122,7 @@ function saveCalcPeriod(from, to){
     const toInputValue = toEl ? toEl.value : "";
     const payloadFrom = String(fromInputValue || from || "").trim();
     const payloadTo = String(toInputValue || to || "").trim();
+    const payload = { from: payloadFrom, to: payloadTo };
 
     try {
         console.log("[calc-period][save-inputs]", {
@@ -2131,10 +2132,7 @@ function saveCalcPeriod(from, to){
     } catch (e) {}
 
     try {
-        console.log("[calc-period][save-payload]", {
-            from: payloadFrom,
-            to: payloadTo
-        });
+        console.log("[calc-period][save-payload]", payload);
     } catch (e) {}
 
     if (!payloadFrom || !payloadTo) {
@@ -2156,13 +2154,14 @@ function saveCalcPeriod(from, to){
         return false;
     }
 
-    if (!meta.storageKey || !meta.resolvedUid) {
+    if (!meta.storageKey || !meta.activeStorageKey || !meta.resolvedUid) {
         saveCalcPeriod.lastError = "UID_REQUIRED";
         try {
             console.warn("[calc-period][save]", {
                 requestedId: meta.requestedId,
                 resolvedUid: meta.resolvedUid,
                 storageKey: meta.storageKey,
+                activeStorageKey: meta.activeStorageKey,
                 from: payloadFrom,
                 to: payloadTo,
                 reason: "UID_REQUIRED"
@@ -2170,12 +2169,15 @@ function saveCalcPeriod(from, to){
         } catch (e) {}
         return false;
     }
-    storeSet(meta.storageKey, JSON.stringify({from: payloadFrom, to: payloadTo}));
+
+    storeSet(meta.storageKey, JSON.stringify(payload));
+    storeSet(meta.activeStorageKey, "1");
     try {
         console.log("[calc-period][save]", {
             requestedId: meta.requestedId,
             resolvedUid: meta.resolvedUid,
-            storageKey: meta.storageKey,
+            periodKey: meta.storageKey,
+            activeKey: meta.activeStorageKey,
             from: payloadFrom,
             to: payloadTo
         });
@@ -2220,15 +2222,16 @@ function confirmCalcPeriodSaved(){
     const activeKey = calcPeriodActiveKey();
     let periodRaw = null;
     let activeRaw = null;
+    let parsedPeriod = null;
 
     try {
         if (window.JKHStore && typeof JKHStore.getRaw === "function") {
             periodRaw = periodKey ? JKHStore.getRaw(periodKey) : null;
             activeRaw = activeKey ? JKHStore.getRaw(activeKey) : null;
         }
+        parsedPeriod = periodRaw ? JSON.parse(periodRaw) : null;
     } catch (e) {
-        periodRaw = null;
-        activeRaw = null;
+        parsedPeriod = null;
     }
 
     try {
@@ -2236,11 +2239,12 @@ function confirmCalcPeriodSaved(){
             periodKey: periodKey,
             activeKey: activeKey,
             periodRaw: periodRaw,
-            activeRaw: activeRaw
+            activeRaw: activeRaw,
+            parsedPeriod: parsedPeriod
         });
     } catch (e) {}
 
-    if (!periodRaw) {
+    if (!periodRaw || !parsedPeriod || !parsedPeriod.from || !parsedPeriod.to) {
         if (activeKey) storeSet(activeKey, "0");
         alert("Период расчёта не сохранён в canonical UID key. Справка не будет открыта.");
         return false;
@@ -2271,8 +2275,9 @@ function bindCalcButtons(){
     const toEl   = document.getElementById("calcTo");
     if (!runBtn || !repBtn || !resetBtn || !fromEl || !toEl) return;
 
-    runBtn.addEventListener("click", () => {
+    runBtn.addEventListener("click", async () => {
         if (!canWriteOrExplainLocal()) return;
+        const currentAbonentId = getAbonentIdFromURL();
         const from = fromEl.value;
         const to   = toEl.value;
 
@@ -2285,15 +2290,27 @@ function bindCalcButtons(){
             return;
         }
 
+        if (!window.Data || typeof Data.ensureAbonentUid !== "function") {
+            alert("Период расчёта не сохранён: сервис UID недоступен.");
+            return;
+        }
+
+        let uidResult = null;
+        try {
+            uidResult = await Data.ensureAbonentUid(currentAbonentId, { source: "abonent_card.calc" });
+        } catch (e) {
+            uidResult = { ok: false, reason: String(e && e.message || e) };
+        }
+
+        if (!uidResult || uidResult.ok !== true || !uidResult.uid) {
+            alert("Период расчёта не сохранён: UID абонента не сохранён.");
+            return;
+        }
+
         if (!saveCalcPeriod(from, to)) {
             if (saveCalcPeriod.lastError !== "PERIOD_REQUIRED") {
                 alert("Период расчёта не сохранён: не найден canonical UID key.");
             }
-            return;
-        }
-        if (!setCalcPeriodActive(true)) {
-            confirmCalcPeriodSaved();
-            alert("Период расчёта не активирован: сначала укажите и сохраните даты начала и окончания.");
             return;
         }
         if (!confirmCalcPeriodSaved()) return;
