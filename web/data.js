@@ -911,7 +911,7 @@
       var ledgerKey = "payments_" + uid;
       var raw = _getProjectRaw(ledgerKey);
       var rows = raw === null || raw === undefined || raw === "" ? [] : _parseLedgerRows(raw, ledgerKey);
-      var period = _readActiveCalcPeriod(abonent) || _defaultCalcPeriodForAbonent(abonentId, abonent);
+      var period = _readActiveCalcPeriod(abonentId) || _defaultCalcPeriodForAbonent(abonentId, abonent);
       var periodMode = _calcPeriodMode(period);
       var periodFrom = String((period.active ? period.from : (opts.periodFrom || period.from)) || "").trim();
       var periodTo = String((period.active ? period.to : (opts.periodTo || period.to)) || "").trim();
@@ -973,10 +973,10 @@
       };
 
       _calcLog("[calc-period-boundary][summary-period]", { abonentId: abonentId, uid: uid, periodFrom: summary.periodFrom, periodTo: summary.periodTo, periodMode: summary.periodMode, rowsTotal: summary.rowsTotal, rowsInPeriod: summary.rowsInPeriod });
-      var summaryOk = writeCalcSummary(abonent, summary);
+      var summaryOk = writeCalcSummary(abonentId, summary);
       if (summaryOk === false) throw new Error("SUMMARY_WRITE_FAILED");
-      _calcLog("[calc-summary][recalc] summary-written", { abonentId: abonentId, uid: uid, key: resolveCalcSummaryKey(abonent), checkpointKey: resolveCalcCheckpointKey(abonent) });
-      _calcLog("[calc-summary][recalc] dirty-cleared", { abonentId: abonentId, uid: uid, key: resolveCalcDirtyKey(abonent) });
+      _calcLog("[calc-summary][recalc] summary-written", { abonentId: abonentId, uid: uid, key: resolveCalcSummaryKey(abonentId), checkpointKey: resolveCalcCheckpointKey(abonent) });
+      _calcLog("[calc-summary][recalc] dirty-cleared", { abonentId: abonentId, uid: uid, key: resolveCalcDirtyKey(abonentId) });
 
       return { ok: true, uid: uid, abonentId: abonentId, periodFrom: periodFrom, periodTo: periodTo, summary: summary, reason: "OK" };
     } catch (e) {
@@ -985,6 +985,205 @@
       return { ok: false, uid: uid, abonentId: abonentId, periodFrom: "", periodTo: "", summary: null, reason: reason };
     }
   }
+
+
+
+  function _hasCalcAccrualRows(rows) {
+    return (Array.isArray(rows) ? rows : []).some(function (row) {
+      var accrued = Number(String(row && row.accrued || "0").replace(/\s+/g, "").replace(",", "."));
+      return Number.isFinite(accrued) && Math.abs(accrued) > 0.0000001;
+    });
+  }
+
+  function _roundCalcMoney(value) {
+    var n = Number(value);
+    return Number.isFinite(n) ? Math.round(n * 100) / 100 : 0;
+  }
+
+  function _endOfCalcMonthDate(year, month) {
+    var y = Number(year) || 0;
+    var m = Number(month) || 0;
+    if (!y || m < 1 || m > 12) return null;
+    return new Date(y, m, 0, 12, 0, 0, 0);
+  }
+
+  function _asOfDateForCalcRow(row) {
+    var paid = Number(String(row && row.paid || "0").replace(/\s+/g, "").replace(",", ".")) || 0;
+    if (paid > 0.0000001) {
+      var paidDate = _parseCalcDateISO(row && row.paid_date);
+      if (paidDate) return paidDate;
+    }
+    return _endOfCalcMonthDate(row && row.year, row && row.month) || new Date();
+  }
+
+  function _rowInCalcPeriod(row, periodFrom, periodTo) {
+    return _filterCalcRowsByPeriod([row], periodFrom, periodTo).length > 0;
+  }
+
+  function _calcRowsWithEngine(rows, periodFrom, periodTo, periodActive, abonentId) {
+    if (!window.JKHCalcEngine || typeof window.JKHCalcEngine.calcTotalsAsOfAdjusted !== "function") throw new Error("CALC_ENGINE_NOT_AVAILABLE");
+    var allRows = _cloneLedgerRows(rows);
+    var baseRows = periodActive ? _filterCalcRowsByPeriod(allRows, periodFrom, periodTo) : allRows;
+    var sorted = allRows.slice().sort(function (a, b) {
+      var ad = _asOfDateForCalcRow(a).getTime();
+      var bd = _asOfDateForCalcRow(b).getTime();
+      if (ad !== bd) return ad - bd;
+      return (Number(a && a.id) || 0) - (Number(b && b.id) || 0);
+    });
+
+    sorted.forEach(function (row) {
+      if (!_rowInCalcPeriod(row, periodFrom, periodTo)) return;
+      var asOf = _asOfDateForCalcRow(row);
+      var totals = window.JKHCalcEngine.calcTotalsAsOfAdjusted(baseRows, asOf, { abonentId: abonentId, applyAdvanceOffset: true, allowNegativePrincipal: true });
+      if (!totals || !Number.isFinite(Number(totals.principal)) || !Number.isFinite(Number(totals.penaltyDebt)) || !Number.isFinite(Number(totals.total))) {
+        throw new Error("CALC_TOTALS_INVALID");
+      }
+      row.pay_main = _roundCalcMoney(totals.principal);
+      row.pay_penalty = _roundCalcMoney(totals.penaltyDebt);
+      row.total = _roundCalcMoney(totals.total);
+      row.total_debt = _roundCalcMoney(totals.total);
+    });
+
+    return allRows;
+  }
+
+  function _isServerFirstDataReadyForRecalc() {
+    try {
+      if (!_remoteEnabled()) return true;
+      var st = window.JKH_UI_STATE && window.JKH_UI_STATE.data;
+      var status = String(st && st.status || "");
+      if (status !== "ready" && status !== "empty") return false;
+      if (st && Object.prototype.hasOwnProperty.call(st, "source") && String(st.source || "") !== "server") return false;
+      return true;
+    } catch (e) {
+      return !_remoteEnabled();
+    }
+  }
+
+  async function _waitForServerFirstDataReadyForRecalc() {
+    if (_isServerFirstDataReadyForRecalc()) return true;
+    if (_remoteEnabled() && window.JKHDataLoader && typeof window.JKHDataLoader.loadFromServer === "function") {
+      try { await window.JKHDataLoader.loadFromServer({ reason: "abonent_card_recalc", force: false }); } catch (e) { }
+      if (_isServerFirstDataReadyForRecalc()) return true;
+    }
+
+    if (!_remoteEnabled()) return true;
+    var started = Date.now();
+    while (Date.now() - started < 8000) {
+      await new Promise(function (resolve) { setTimeout(resolve, 100); });
+      if (_isServerFirstDataReadyForRecalc()) return true;
+    }
+    throw new Error("SERVER_DATA_NOT_READY");
+  }
+
+  async function recalculateAbonentCard(abonentOrId, options) {
+    var opts = options || {};
+    var startedAt = new Date().toISOString();
+    var found0 = _findAbonentByIdOrUid(abonentOrId);
+    var abonentId0 = String(found0 && found0.id || (typeof abonentOrId === "object" ? abonentOrId && abonentOrId.id : abonentOrId) || "").trim();
+    _calcLog("[abonent-card-recalc][start]", { abonentId: abonentId0, source: String(opts.source || ""), startedAt: startedAt });
+
+    try {
+      await _waitForServerFirstDataReadyForRecalc();
+      if (!Data.ensureWriteOrExplain()) return { ok: false, rowsCount: 0, summary: null, reason: "WRITE_BLOCKED" };
+
+      var found = _findAbonentByIdOrUid(abonentOrId);
+      var abonentId = String(found && found.id || (typeof abonentOrId === "object" ? abonentOrId && abonentOrId.id : abonentOrId) || "").trim();
+      var abonent = found && found.abonent ? found.abonent : null;
+      var uid = String(abonent && abonent.uid || "").trim();
+      if (!abonent || !abonentId || !uid) throw new Error("ABONENT_UID_REQUIRED");
+
+      var ledgerKey = resolvePaymentLedgerKey(abonentId);
+      _calcLog("[abonent-card-recalc][ledger-key]", { abonentId: abonentId, uid: uid, ledgerKey: ledgerKey });
+      if (!ledgerKey) throw new Error("LEDGER_KEY_REQUIRED");
+
+      var raw = _getProjectRaw(ledgerKey);
+      var ledgerMissing = raw === null || raw === undefined || raw === "";
+      var rows = ledgerMissing ? [] : _parseLedgerRows(raw, ledgerKey);
+      var period = _readActiveCalcPeriod(abonentId) || _defaultCalcPeriodForAbonent(abonentId, abonent);
+      var periodMode = _calcPeriodMode(period);
+      var periodFrom = String(period && period.from || "").trim();
+      var periodTo = String(period && period.to || "").trim();
+      if (!_parseCalcDateISO(periodFrom) || !_parseCalcDateISO(periodTo)) throw new Error("CALC_PERIOD_INVALID");
+      var rowsForAccrualCheck = _filterCalcRowsByPeriod(rows, periodFrom, periodTo);
+      var hasAccrualInScope = _hasCalcAccrualRows(rowsForAccrualCheck);
+      _calcLog("[abonent-card-recalc][rows-before]", { abonentId: abonentId, uid: uid, ledgerKey: ledgerKey, rowsCount: rows.length, ledgerMissing: ledgerMissing, hasAccrual: _hasCalcAccrualRows(rows), hasAccrualInScope: hasAccrualInScope, periodFrom: periodFrom, periodTo: periodTo, periodMode: periodMode });
+
+      var autoaccrualResult = { ok: true, changed: false, reason: "SKIPPED" };
+      if (ledgerMissing || !hasAccrualInScope) {
+        if (!(window.JKHAutoAccrual && typeof window.JKHAutoAccrual.recalcForAbonent === "function")) throw new Error("AUTOACCRUAL_NOT_AVAILABLE");
+        autoaccrualResult = window.JKHAutoAccrual.recalcForAbonent(abonentId);
+        if (autoaccrualResult && autoaccrualResult.ok === false) throw new Error(autoaccrualResult.reason || "AUTOACCRUAL_FAILED");
+      }
+      _calcLog("[abonent-card-recalc][autoaccrual]", { abonentId: abonentId, uid: uid, result: autoaccrualResult });
+
+      raw = _getProjectRaw(ledgerKey);
+      rows = raw === null || raw === undefined || raw === "" ? [] : _parseLedgerRows(raw, ledgerKey);
+
+      var recalculatedRows = _calcRowsWithEngine(rows, periodFrom, periodTo, !!period.active, abonentId);
+      _calcLog("[abonent-card-recalc][rows-after]", { abonentId: abonentId, uid: uid, ledgerKey: ledgerKey, rowsCount: recalculatedRows.length, periodFrom: periodFrom, periodTo: periodTo, periodMode: periodMode });
+
+      var ledgerOk = writePaymentLedger(abonentId, recalculatedRows, { eventType: "ABONENT_CARD_RECALC_LEDGER_WRITE", dirtyReason: "abonent_card_recalc", event: { source: String(opts.source || "abonent_card") } });
+      if (ledgerOk === false) throw new Error("LEDGER_WRITE_FAILED");
+
+      var summaryRows = _filterCalcRowsByPeriod(recalculatedRows, periodFrom, periodTo);
+      var asOf = _parseCalcDateISO(periodTo);
+      var totals = window.JKHCalcEngine.calcTotalsAsOfAdjusted(summaryRows, asOf, { abonentId: abonentId, applyAdvanceOffset: true, allowNegativePrincipal: true });
+      if (!totals || !Number.isFinite(Number(totals.principal)) || !Number.isFinite(Number(totals.penaltyDebt)) || !Number.isFinite(Number(totals.total))) throw new Error("CALC_TOTALS_INVALID");
+
+      var accruedTotal = _roundCalcMoney(_sumCalcRows(summaryRows, "accrued"));
+      var paidTotal = _roundCalcMoney(_sumCalcRows(summaryRows, "paid"));
+      var summary = {
+        uid: uid,
+        abonentId: abonentId,
+        calculatedAt: new Date().toISOString(),
+        periodFrom: periodFrom,
+        periodTo: periodTo,
+        periodMode: periodMode,
+        from: periodFrom,
+        to: periodTo,
+        selectedPeriod: !!period.active,
+        ledgerKey: ledgerKey,
+        rowsTotal: recalculatedRows.length,
+        rowsInPeriod: summaryRows.length,
+        accrued: accruedTotal,
+        accruedTotal: accruedTotal,
+        nachisleno: accruedTotal,
+        paid: paidTotal,
+        paidTotal: paidTotal,
+        oplacheno: paidTotal,
+        principal: _roundCalcMoney(totals.principal),
+        mainDebt: _roundCalcMoney(totals.principal),
+        main_debt: _roundCalcMoney(totals.principal),
+        penalty: _roundCalcMoney(totals.penaltyDebt),
+        penaltyDebt: _roundCalcMoney(totals.penaltyDebt),
+        penalty_debt: _roundCalcMoney(totals.penaltyDebt),
+        totalDebt: _roundCalcMoney(totals.total),
+        total_debt: _roundCalcMoney(totals.total),
+        total: _roundCalcMoney(totals.total),
+        startDate: periodFrom,
+        endDate: periodTo,
+        totals: totals
+      };
+
+      var summaryOk = writeCalcSummary(abonentId, summary);
+      if (summaryOk === false) throw new Error("SUMMARY_WRITE_FAILED");
+      _calcLog("[abonent-card-recalc][summary-write]", { abonentId: abonentId, uid: uid, key: resolveCalcSummaryKey(abonentId), rowsInPeriod: summary.rowsInPeriod, total: summary.total });
+      _calcLog("[abonent-card-recalc][dirty-clear]", { abonentId: abonentId, uid: uid, key: resolveCalcDirtyKey(abonentId) });
+
+      var readBackSummary = readCalcSummary(abonentId);
+      var readBackLedger = readPaymentLedger(abonentId);
+      if (!readBackSummary || readBackSummary.status !== "fresh") throw new Error(readBackSummary && readBackSummary.reason ? readBackSummary.reason : "SUMMARY_READBACK_NOT_FRESH");
+      _calcLog("[abonent-card-recalc][done]", { abonentId: abonentId, uid: uid, rowsCount: readBackLedger.length, summaryStatus: readBackSummary.status });
+
+      return { ok: true, rowsCount: readBackLedger.length, summary: readBackSummary.summary };
+    } catch (e) {
+      var reason = e && e.message ? e.message : String(e);
+      _calcWarn("[abonent-card-recalc][failed]", { abonentId: abonentId0, reason: reason });
+      return { ok: false, rowsCount: 0, summary: null, reason: reason };
+    }
+  }
+
 
   function resolvePaymentLedgerKey(abonentOrId, options) {
     var opts = options || {};
@@ -1629,6 +1828,7 @@
     readCalcSummary: readCalcSummary,
     writeCalcSummary: writeCalcSummary,
     recalculateCalcSummary: recalculateCalcSummary,
+    recalculateAbonentCard: recalculateAbonentCard,
     resolvePaymentLedgerKey: resolvePaymentLedgerKey,
     readPaymentLedger: readPaymentLedger,
     writePaymentLedger: writePaymentLedger,
@@ -2663,6 +2863,7 @@ window.markCalcDirty = markCalcDirty;
 window.readCalcSummary = readCalcSummary;
 window.writeCalcSummary = writeCalcSummary;
 window.recalculateCalcSummary = recalculateCalcSummary;
+window.recalculateAbonentCard = recalculateAbonentCard;
 window.Data = Data;
 
 function __markAllCalcDirty(reason) {

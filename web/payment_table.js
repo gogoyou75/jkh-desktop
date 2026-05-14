@@ -1743,9 +1743,9 @@ async function recalculateCurrentCalcSummaryFromTable(button){
   if (!id) return;
   const oldText = btn ? btn.textContent : "";
   try {
-    if (!window.Data || typeof window.Data.recalculateCalcSummary !== "function") throw new Error("Data.recalculateCalcSummary not available");
+    if (!window.Data || typeof window.Data.recalculateAbonentCard !== "function") throw new Error("Data.recalculateAbonentCard not available");
     if (btn) { btn.disabled = true; btn.textContent = "Пересчёт…"; }
-    const res = window.Data.recalculateCalcSummary(id, { source: "payment_table" });
+    const res = await window.Data.recalculateAbonentCard(id, { source: "payment_table" });
     if (!res || res.ok !== true) throw new Error(res && res.reason ? res.reason : "CALC_RECALC_FAILED");
     clearPaymentLedgerReadCache('calc-summary-recalc');
     const state = readCurrentCalcSummaryState();
