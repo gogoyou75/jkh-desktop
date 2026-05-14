@@ -1746,6 +1746,13 @@ async function recalculateCurrentCalcSummaryFromTable(button){
     if (!window.Data || typeof window.Data.recalculateAbonentCard !== "function") throw new Error("Data.recalculateAbonentCard not available");
     if (btn) { btn.disabled = true; btn.textContent = "Пересчёт…"; }
     const res = await window.Data.recalculateAbonentCard(id, { source: "payment_table" });
+    if (res && res.reason === "period_accruals_missing") {
+      alert("Нет начислений за выбранный период. Сначала подготовьте начисления.");
+      clearPaymentLedgerReadCache('period-accrual-readiness-missing');
+      renderCalcSummaryStatus(readCurrentCalcSummaryState());
+      if (btn) { btn.disabled = false; btn.textContent = oldText || "Пересчитать"; }
+      return;
+    }
     if (!res || res.ok !== true) throw new Error(res && res.reason ? res.reason : "CALC_RECALC_FAILED");
     clearPaymentLedgerReadCache('calc-summary-recalc');
     const state = readCurrentCalcSummaryState();

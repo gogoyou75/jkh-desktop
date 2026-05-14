@@ -869,6 +869,11 @@ async function recalculateAbonentCalcSummaryFromCard(){
         if (!window.Data || typeof window.Data.recalculateAbonentCard !== "function") throw new Error("Data.recalculateAbonentCard not available");
         if (box) box.innerHTML = 'Пересчёт начислений и итогов…';
         const res = await window.Data.recalculateAbonentCard(id, { source: "abonent_card" });
+        if (res && res.reason === "period_accruals_missing") {
+            alert("Нет начислений за выбранный период. Сначала подготовьте начисления.");
+            renderAbonentCalcSummaryStatus();
+            return;
+        }
         if (!res || res.ok !== true) throw new Error(res && res.reason ? res.reason : "CALC_RECALC_FAILED");
         renderAbonentCalcSummaryStatus();
         try { if (typeof window.__loadPaymentTable === "function") window.__loadPaymentTable("calc-summary-recalc"); } catch(e) {}

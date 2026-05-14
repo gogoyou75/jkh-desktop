@@ -930,6 +930,13 @@ async function recalculateIndexRowCalcSummary(abonentId, button){
         if (!window.Data || typeof window.Data.recalculateCalcSummary !== "function") throw new Error("Data.recalculateCalcSummary not available");
         if (btn) { btn.disabled = true; btn.textContent = "Пересчёт…"; }
         const res = window.Data.recalculateCalcSummary(id, { source: "index_row" });
+        if (res && res.reason === "period_accruals_missing") {
+            alert("Нет начислений за выбранный период. Сначала подготовьте начисления.");
+            rebuildIndexRows();
+            render();
+            if (btn) { btn.disabled = false; btn.textContent = oldText || "Пересчитать"; }
+            return;
+        }
         if (!res || res.ok !== true) throw new Error(res && res.reason ? res.reason : "CALC_RECALC_FAILED");
         try {
             if (window.Data && typeof Data.flushDbToServer === "function") await Data.flushDbToServer();
