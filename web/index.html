@@ -942,7 +942,7 @@ async function prepareIndexRowPeriodAccruals(abonentId, button){
         clearIndexLedgerReadCache();
         rebuildIndexRows();
         render();
-        alert("Начисления за выбранный период подготовлены. Нажмите «Пересчитать».");
+        alert("Начисления подготовлены. Нажмите Пересчитать.");
     } catch (e) {
         const msg = e && e.message ? e.message : String(e);
         try { console.warn("[period-accrual-prepare] failed", e); } catch (_) {}

@@ -1647,15 +1647,21 @@ function calcSummaryRecalcReason(state){
   return state && state.reason ? String(state.reason) : "SUMMARY_NOT_FRESH";
 }
 
+let __paymentPeriodAccrualsMissing = false;
+let __paymentPeriodAccrualsPrepared = false;
+
 function readCurrentCalcSummaryState(){
   const id = getAbonentId();
   const state = (window.Data && typeof window.Data.readCalcSummary === "function") ? window.Data.readCalcSummary(id) : null;
+  const reason = __paymentPeriodAccrualsMissing ? "period_accruals_missing" : calcSummaryRecalcReason(state);
   return {
     status: state && state.status ? state.status : "missing",
     summary: state && state.status === "fresh" ? state.summary : null,
     checkpoint: state ? state.checkpoint : null,
-    reason: calcSummaryRecalcReason(state),
-    ready: !!(state && state.status === "fresh" && state.summary)
+    reason: reason,
+    ready: !!(state && state.status === "fresh" && state.summary && !__paymentPeriodAccrualsPrepared),
+    accrualsMissing: __paymentPeriodAccrualsMissing,
+    accrualsPrepared: __paymentPeriodAccrualsPrepared
   };
 }
 
@@ -1702,9 +1708,16 @@ function renderCalcSummaryStatus(state){
       box.style.borderColor = "#e0a800";
       box.style.background = "#fff8e1";
       box.style.color = "#5f4300";
-      const reason = state && state.reason ? ' (' + escapeHtml(String(state.reason)) + ')' : '';
-      box.innerHTML = '<span>Требуется пересчёт' + reason + '</span> <button type="button" id="calcSummaryRecalcBtn" style="margin-left:10px;font-weight:700;">Пересчитать</button>';
+      if (state && state.accrualsPrepared) {
+        box.innerHTML = '<span>Начисления подготовлены. Нажмите Пересчитать.</span> <button type="button" id="calcSummaryRecalcBtn" style="margin-left:10px;font-weight:700;">Пересчитать</button>';
+      } else {
+        const reason = state && state.reason ? ' (' + escapeHtml(String(state.reason)) + ')' : '';
+        const prepareBtn = state && state.accrualsMissing ? ' <button type="button" id="calcSummaryPrepareAccrualsBtn" style="margin-left:10px;font-weight:700;">Подготовить начисления</button>' : '';
+        box.innerHTML = '<span>Требуется пересчёт' + reason + '</span>' + prepareBtn + ' <button type="button" id="calcSummaryRecalcBtn" style="margin-left:10px;font-weight:700;">Пересчитать</button>';
+      }
     }
+    const prepareBtn = document.getElementById("calcSummaryPrepareAccrualsBtn");
+    if (prepareBtn) prepareBtn.onclick = function(){ prepareCurrentPeriodAccrualsFromTable(prepareBtn); };
     const btn = document.getElementById("calcSummaryRecalcBtn");
     if (btn) btn.onclick = function(){ recalculateCurrentCalcSummaryFromTable(btn); };
   } catch (e) {
@@ -1735,6 +1748,35 @@ function applySummaryToCardTotals(state){
   }
 }
 
+async function prepareCurrentPeriodAccrualsFromTable(button){
+  const btn = button || document.getElementById("calcSummaryPrepareAccrualsBtn");
+  const id = getAbonentId();
+  if (!id) return;
+  const oldText = btn ? btn.textContent : "";
+  try {
+    if (!window.Data || typeof window.Data.preparePeriodAccruals !== "function") throw new Error("Data.preparePeriodAccruals not available");
+    if (btn) { btn.disabled = true; btn.textContent = "Подготовка…"; }
+    const res = window.Data.preparePeriodAccruals(id, { source: "payment_table" });
+    if (!res || res.ok !== true) throw new Error(res && res.reason ? res.reason : "PERIOD_ACCRUAL_PREPARE_FAILED");
+    __paymentPeriodAccrualsMissing = false;
+    __paymentPeriodAccrualsPrepared = true;
+    clearPaymentLedgerReadCache('period-accrual-prepare');
+    renderCalcSummaryStatus(readCurrentCalcSummaryState());
+    applySummaryToCardTotals({ ready: false });
+    try { if (typeof window.renderAbonentCalcSummaryStatus === "function") window.renderAbonentCalcSummaryStatus(); } catch (_) {}
+    try {
+      if (window.Data && typeof Data.flushDbToServer === "function") await Data.flushDbToServer();
+    } catch (flushErr) {
+      try { console.warn("[period-accrual-prepare] server-flush-failed", flushErr); } catch (_) {}
+    }
+  } catch (e) {
+    const msg = e && e.message ? e.message : String(e);
+    try { console.warn("[period-accrual-prepare] failed", e); } catch (_) {}
+    alert("Ошибка подготовки начислений: " + msg);
+    if (btn) { btn.disabled = false; btn.textContent = oldText || "Подготовить начисления"; }
+  }
+}
+
 
 
 async function recalculateCurrentCalcSummaryFromTable(button){
@@ -1745,8 +1787,10 @@ async function recalculateCurrentCalcSummaryFromTable(button){
   try {
     if (!window.Data || typeof window.Data.recalculateAbonentCard !== "function") throw new Error("Data.recalculateAbonentCard not available");
     if (btn) { btn.disabled = true; btn.textContent = "Пересчёт…"; }
+    __paymentPeriodAccrualsPrepared = false;
     const res = await window.Data.recalculateAbonentCard(id, { source: "payment_table" });
     if (res && res.reason === "period_accruals_missing") {
+      __paymentPeriodAccrualsMissing = true;
       alert("Нет начислений за выбранный период. Сначала подготовьте начисления.");
       clearPaymentLedgerReadCache('period-accrual-readiness-missing');
       renderCalcSummaryStatus(readCurrentCalcSummaryState());
@@ -1754,6 +1798,8 @@ async function recalculateCurrentCalcSummaryFromTable(button){
       return;
     }
     if (!res || res.ok !== true) throw new Error(res && res.reason ? res.reason : "CALC_RECALC_FAILED");
+    __paymentPeriodAccrualsMissing = false;
+    __paymentPeriodAccrualsPrepared = false;
     clearPaymentLedgerReadCache('calc-summary-recalc');
     const state = readCurrentCalcSummaryState();
     renderCalcSummaryStatus(state);

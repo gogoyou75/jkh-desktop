@@ -825,6 +825,9 @@ function abonentCalcSummaryRecalcReason(state){
     return state && state.reason ? String(state.reason) : "";
 }
 
+let __abonentPeriodAccrualsMissingFor = "";
+let __abonentPeriodAccrualsPreparedFor = "";
+
 function abonentCalcSummaryPeriodLabel(summary){
     if (!summary) return "";
     const from = String(summary.periodFrom || summary.from || "").trim();
@@ -841,13 +844,18 @@ function renderAbonentCalcSummaryStatus(){
     const id = getAbonentIdFromURL();
     const summaryState = (window.Data && typeof window.Data.readCalcSummary === "function") ? window.Data.readCalcSummary(id) : null;
     const summary = (summaryState && summaryState.status === "fresh") ? summaryState.summary : null;
-    if (!summary) {
+    if (!summary || __abonentPeriodAccrualsPreparedFor === String(id || "")) {
         box.style.borderColor = "#e0a800";
         box.style.background = "#fff8e1";
         box.style.color = "#5f4300";
-        const rawReason = abonentCalcSummaryRecalcReason(summaryState);
+        if (__abonentPeriodAccrualsPreparedFor === String(id || "")) {
+            box.innerHTML = 'Начисления подготовлены. Нажмите Пересчитать. <button class="btn" type="button" onclick="recalculateAbonentCalcSummaryFromCard()" style="margin-left:10px;">Пересчитать</button>';
+            return;
+        }
+        const rawReason = (__abonentPeriodAccrualsMissingFor === String(id || "")) ? "period_accruals_missing" : abonentCalcSummaryRecalcReason(summaryState);
         const reason = rawReason ? ' (' + rawReason.replace(/[<>&"]/g, function(ch){ return { '<':'&lt;', '>':'&gt;', '&':'&amp;', '"':'&quot;' }[ch]; }) + ')' : '';
-        box.innerHTML = 'Требуется пересчёт' + reason + ' <button class="btn" type="button" onclick="recalculateAbonentCalcSummaryFromCard()" style="margin-left:10px;">Пересчитать</button>';
+        const prepareButton = (__abonentPeriodAccrualsMissingFor === String(id || "")) ? ' <button class="btn" type="button" onclick="prepareAbonentPeriodAccrualsFromCard()" style="margin-left:10px;">Подготовить начисления</button>' : '';
+        box.innerHTML = 'Требуется пересчёт' + reason + prepareButton + ' <button class="btn" type="button" onclick="recalculateAbonentCalcSummaryFromCard()" style="margin-left:10px;">Пересчитать</button>';
         return;
     }
     const total = calcSummaryCardNumber(summary, ["totalDebt", "total_debt", "total", "debtTotal"]);
@@ -862,19 +870,49 @@ function renderAbonentCalcSummaryStatus(){
 }
 window.renderAbonentCalcSummaryStatus = renderAbonentCalcSummaryStatus;
 
+async function prepareAbonentPeriodAccrualsFromCard(){
+    const box = document.getElementById("abonentCalcSummaryStatus");
+    const id = getAbonentIdFromURL();
+    try {
+        if (!window.Data || typeof window.Data.preparePeriodAccruals !== "function") throw new Error("Data.preparePeriodAccruals not available");
+        if (box) box.innerHTML = 'Подготовка начислений…';
+        const res = window.Data.preparePeriodAccruals(id, { source: "abonent_card" });
+        if (!res || res.ok !== true) throw new Error(res && res.reason ? res.reason : "PERIOD_ACCRUAL_PREPARE_FAILED");
+        __abonentPeriodAccrualsMissingFor = "";
+        __abonentPeriodAccrualsPreparedFor = String(id || "");
+        renderAbonentCalcSummaryStatus();
+        try { if (typeof window.__loadPaymentTable === "function") window.__loadPaymentTable("period-accrual-prepare"); } catch(e) {}
+        try {
+            if (window.Data && typeof Data.flushDbToServer === "function") await Data.flushDbToServer();
+        } catch (flushErr) {
+            try { console.warn("[period-accrual-prepare] server-flush-failed", flushErr); } catch (_) {}
+        }
+    } catch (e) {
+        const msg = e && e.message ? e.message : String(e);
+        try { console.warn("[period-accrual-prepare] failed", e); } catch (_) {}
+        alert("Ошибка подготовки начислений: " + msg);
+        renderAbonentCalcSummaryStatus();
+    }
+}
+window.prepareAbonentPeriodAccrualsFromCard = prepareAbonentPeriodAccrualsFromCard;
+
 async function recalculateAbonentCalcSummaryFromCard(){
     const box = document.getElementById("abonentCalcSummaryStatus");
     const id = getAbonentIdFromURL();
     try {
         if (!window.Data || typeof window.Data.recalculateAbonentCard !== "function") throw new Error("Data.recalculateAbonentCard not available");
         if (box) box.innerHTML = 'Пересчёт начислений и итогов…';
+        __abonentPeriodAccrualsPreparedFor = "";
         const res = await window.Data.recalculateAbonentCard(id, { source: "abonent_card" });
         if (res && res.reason === "period_accruals_missing") {
+            __abonentPeriodAccrualsMissingFor = String(id || "");
             alert("Нет начислений за выбранный период. Сначала подготовьте начисления.");
             renderAbonentCalcSummaryStatus();
             return;
         }
         if (!res || res.ok !== true) throw new Error(res && res.reason ? res.reason : "CALC_RECALC_FAILED");
+        __abonentPeriodAccrualsMissingFor = "";
+        __abonentPeriodAccrualsPreparedFor = "";
         renderAbonentCalcSummaryStatus();
         try { if (typeof window.__loadPaymentTable === "function") window.__loadPaymentTable("calc-summary-recalc"); } catch(e) {}
         try {
