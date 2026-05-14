@@ -33,6 +33,73 @@ Doc: docs/LOGIC_SPEC_v1.5.3.md
     <style>
         .uid-click{ cursor:pointer; text-decoration: underline; }
 
+        .calc-summary-debug {
+            margin: 10px 0 14px 0;
+            padding: 10px;
+            border: 1px solid #999;
+            border-radius: 8px;
+            background: #f7f7f7;
+            color: #222;
+            font-size: 12px;
+        }
+        .calc-summary-debug summary {
+            cursor: pointer;
+            font-weight: 700;
+        }
+        .calc-summary-debug-grid {
+            display: grid;
+            grid-template-columns: 180px 1fr;
+            gap: 6px 10px;
+            margin-top: 10px;
+        }
+        .calc-summary-debug-label {
+            color: #555;
+        }
+        .calc-summary-debug-badge {
+            display: inline-block;
+            padding: 2px 7px;
+            border-radius: 12px;
+            border: 1px solid #777;
+            background: #fff;
+            font-weight: 700;
+        }
+        .calc-summary-debug-badge.fresh {
+            border-color: #2e7d32;
+            background: #e8f5e9;
+            color: #1b5e20;
+        }
+        .calc-summary-debug-badge.dirty {
+            border-color: #e0a800;
+            background: #fff8e1;
+            color: #5f4300;
+        }
+        .calc-summary-debug-badge.mismatch {
+            border-color: #b00020;
+            background: #fff0f0;
+            color: #8a0018;
+        }
+        .calc-summary-debug-flags {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+        }
+        .calc-summary-debug-flag {
+            display: inline-block;
+            padding: 2px 6px;
+            border: 1px solid #aaa;
+            border-radius: 10px;
+            background: #fff;
+        }
+        .calc-summary-debug-flag.on {
+            border-color: #b00020;
+            background: #ffecec;
+            color: #8a0018;
+            font-weight: 700;
+        }
+        .calc-summary-debug-actions {
+            margin-top: 10px;
+        }
+
         .edit-link {
             font-size: 13px;
             margin-left: 14px;
@@ -471,6 +538,15 @@ Doc: docs/LOGIC_SPEC_v1.5.3.md
     Требуется пересчёт <button class="btn" type="button" onclick="recalculateAbonentCalcSummaryFromCard()" style="margin-left:10px;">Пересчитать</button>
 </div>
 
+
+<details id="calcSummaryDebugPanel" class="calc-summary-debug" ontoggle="onCalcSummaryDebugToggle()">
+    <summary>Диагностика calc_summary</summary>
+    <div id="calcSummaryDebugBody">Нет данных диагностики.</div>
+    <div class="calc-summary-debug-actions">
+        <button class="btn" type="button" onclick="copyCalcSummaryDebugInfo()">Скопировать debug info</button>
+    </div>
+</details>
+
 <h3>Оплата абонента</h3>
 
 <div class="note" style="margin:6px 0 10px 0; font-size:12px; opacity:0.85;">Подсказка: начисление месяца показывается первой строкой; оплаты — ниже. Если включаете «за период», изменения сохраняются автоматически.</div>
@@ -871,6 +947,92 @@ function renderAbonentCalcSummaryStatus(){
 }
 window.renderAbonentCalcSummaryStatus = renderAbonentCalcSummaryStatus;
 
+
+let __calcSummaryDebugLastInfo = null;
+
+function escapeCalcSummaryDebugText(value){
+    return String(value === null || value === undefined ? "" : value).replace(/[<>&"]/g, function(ch){ return { '<':'&lt;', '>':'&gt;', '&':'&amp;', '"':'&quot;' }[ch]; });
+}
+
+function calcSummaryDebugUiStatus(info){
+    const status = String(info && info.summaryStatus || "missing");
+    if (status === "fresh" && !(info && info.calcDirty)) return { text: "fresh", cls: "fresh" };
+    if (status === "dirty" || (info && info.calcDirty)) return { text: "dirty", cls: "dirty" };
+    return { text: "mismatch", cls: "mismatch" };
+}
+
+function calcSummaryDebugFlagHtml(name, flags){
+    const on = !!(flags && flags[name]);
+    return '<span class="calc-summary-debug-flag' + (on ? ' on' : '') + '">' + escapeCalcSummaryDebugText(name) + ': ' + (on ? 'mismatch' : 'ok') + '</span>';
+}
+
+function renderCalcSummaryDebugPanel(){
+    const body = document.getElementById("calcSummaryDebugBody");
+    if (!body) return;
+    const id = getAbonentIdFromURL();
+    let info = null;
+    try {
+        if (window.Data && typeof window.Data.getCalcSummaryDebugInfo === "function") {
+            info = window.Data.getCalcSummaryDebugInfo(id);
+        }
+    } catch (e) {
+        info = { uid: "", summaryStatus: "debug_error", summaryReason: String(e && e.message || e), calcDirty: false, summaryExists: false, checkpointExists: false, periodFrom: "", periodTo: "", periodMode: "", calcEngineVersion: "", canonVersion: "", summaryFormatVersion: "", generatedAt: "", fingerprints: {}, mismatchFlags: {} };
+    }
+    __calcSummaryDebugLastInfo = info;
+    if (!info) {
+        body.textContent = "Data.getCalcSummaryDebugInfo недоступен.";
+        return;
+    }
+    const ui = calcSummaryDebugUiStatus(info);
+    const flags = info.mismatchFlags || {};
+    const flagNames = ["ledger", "tariffs", "refinancing", "excludes", "moratorium", "responsibility", "engineVersion", "summaryVersion", "period"];
+    body.innerHTML = ''
+        + '<div class="calc-summary-debug-grid">'
+        + '<div class="calc-summary-debug-label">Состояние</div><div><span class="calc-summary-debug-badge ' + ui.cls + '">' + ui.text + '</span> <span>(' + escapeCalcSummaryDebugText(info.summaryStatus) + ')</span></div>'
+        + '<div class="calc-summary-debug-label">Reason</div><div>' + escapeCalcSummaryDebugText(info.summaryReason || '—') + '</div>'
+        + '<div class="calc-summary-debug-label">UID</div><div>' + escapeCalcSummaryDebugText(info.uid || '—') + '</div>'
+        + '<div class="calc-summary-debug-label">Exists</div><div>summary: ' + (info.summaryExists ? 'yes' : 'no') + ', checkpoint: ' + (info.checkpointExists ? 'yes' : 'no') + ', dirty: ' + (info.calcDirty ? 'yes' : 'no') + '</div>'
+        + '<div class="calc-summary-debug-label">Период</div><div>' + escapeCalcSummaryDebugText((info.periodFrom || '—') + ' — ' + (info.periodTo || '—') + ' (' + (info.periodMode || '—') + ')') + '</div>'
+        + '<div class="calc-summary-debug-label">Версии</div><div>engine: ' + escapeCalcSummaryDebugText(info.calcEngineVersion || '—') + '; canon: ' + escapeCalcSummaryDebugText(info.canonVersion || '—') + '; summary: ' + escapeCalcSummaryDebugText(info.summaryFormatVersion || '—') + '</div>'
+        + '<div class="calc-summary-debug-label">Generated at</div><div>' + escapeCalcSummaryDebugText(info.generatedAt || '—') + '</div>'
+        + '<div class="calc-summary-debug-label">Mismatch indicators</div><div class="calc-summary-debug-flags">' + flagNames.map(function(name){ return calcSummaryDebugFlagHtml(name, flags); }).join('') + '</div>'
+        + '</div>';
+}
+window.renderCalcSummaryDebugPanel = renderCalcSummaryDebugPanel;
+
+function onCalcSummaryDebugToggle(){
+    const panel = document.getElementById("calcSummaryDebugPanel");
+    if (panel && panel.open) {
+        try { console.log("[calc-summary-debug][open]", { abonentId: getAbonentIdFromURL() }); } catch(e) {}
+        renderCalcSummaryDebugPanel();
+    }
+}
+window.onCalcSummaryDebugToggle = onCalcSummaryDebugToggle;
+
+async function copyCalcSummaryDebugInfo(){
+    if (!__calcSummaryDebugLastInfo) renderCalcSummaryDebugPanel();
+    const text = JSON.stringify(__calcSummaryDebugLastInfo || {}, null, 2);
+    try {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            await navigator.clipboard.writeText(text);
+        } else {
+            const ta = document.createElement("textarea");
+            ta.value = text;
+            ta.style.position = "fixed";
+            ta.style.left = "-1000px";
+            document.body.appendChild(ta);
+            ta.focus();
+            ta.select();
+            document.execCommand("copy");
+            document.body.removeChild(ta);
+        }
+        alert("Debug info скопирован в JSON-формате.");
+    } catch (e) {
+        alert("Не удалось скопировать debug info: " + String(e && e.message || e));
+    }
+}
+window.copyCalcSummaryDebugInfo = copyCalcSummaryDebugInfo;
+
 async function prepareAbonentPeriodAccrualsFromCard(){
     const box = document.getElementById("abonentCalcSummaryStatus");
     const id = getAbonentIdFromURL();
@@ -1069,6 +1231,7 @@ function fillAbonentCard() {
     try { renderResponsibilityHistory(regnum || a.regnum || ''); } catch(e) {}
     try { renderTransferInfo(id, regnum || a.regnum || ''); } catch(e) {}
     try { renderAbonentCalcSummaryStatus(); } catch(e) {}
+    try { renderCalcSummaryDebugPanel(); } catch(e) {}
 }
 function renderMergeList(){
   const db = Data.getDb();

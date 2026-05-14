@@ -750,6 +750,91 @@
     return _calcSummaryState("fresh", abonentOrId, summaryRead.value, checkpointRead.value, "OK");
   }
 
+
+  function _calcDebugFingerprintPair(currentCheckpoint, storedCheckpoint, fieldName, storedPropName) {
+    var currentFp = currentCheckpoint && currentCheckpoint.fingerprints ? currentCheckpoint.fingerprints[fieldName] : null;
+    var storedFp = storedCheckpoint && storedCheckpoint.fingerprints ? storedCheckpoint.fingerprints[fieldName] : null;
+    if (!storedFp && storedCheckpoint && storedPropName) storedFp = storedCheckpoint[storedPropName] || null;
+    return { current: currentFp || null, checkpoint: storedFp || null };
+  }
+
+  function _calcDebugFingerprintMismatch(currentCheckpoint, storedCheckpoint, fieldName, storedPropName) {
+    var pair = _calcDebugFingerprintPair(currentCheckpoint, storedCheckpoint, fieldName, storedPropName);
+    if (!pair.current && !pair.checkpoint) return false;
+    return _stableCalcStringify(pair.current) !== _stableCalcStringify(pair.checkpoint);
+  }
+
+  function getCalcSummaryDebugInfo(abonentOrId) {
+    var summaryKey = resolveCalcSummaryKey(abonentOrId);
+    var checkpointKey = resolveCalcCheckpointKey(abonentOrId);
+    var uid = _resolveAbonentUid(abonentOrId);
+    var found = _findAbonentByIdOrUid(abonentOrId);
+    var abonentId = String(found && found.id || (typeof abonentOrId === "object" ? abonentOrId && abonentOrId.id : abonentOrId) || "").trim();
+    var summaryRead = summaryKey ? _readCalcSummaryJson(summaryKey, "[calc-summary-debug][invalid-summary]") : { status: "missing", value: null, raw: null };
+    var checkpointRead = checkpointKey ? _readCalcSummaryJson(checkpointKey, "[calc-summary-debug][invalid-checkpoint]") : { status: "missing", value: null, raw: null };
+    var summaryExists = !!(summaryRead.raw !== null && summaryRead.raw !== undefined && summaryRead.raw !== "");
+    var checkpointExists = !!(checkpointRead.raw !== null && checkpointRead.raw !== undefined && checkpointRead.raw !== "");
+    var summaryState = readCalcSummary(abonentOrId);
+    var summary = summaryRead.value && typeof summaryRead.value === "object" ? summaryRead.value : (summaryState && summaryState.summary ? summaryState.summary : null);
+    var checkpoint = checkpointRead.value && typeof checkpointRead.value === "object" ? checkpointRead.value : (summaryState && summaryState.checkpoint ? summaryState.checkpoint : null);
+    var currentCheckpoint = null;
+    try {
+      if (summary && uid && abonentId) currentCheckpoint = _buildCalcCheckpoint(abonentOrId, summary);
+    } catch (e) {
+      currentCheckpoint = null;
+    }
+
+    var calcDirty = isCalcDirty(abonentOrId);
+    var periodFrom = String(summary && (summary.periodFrom || summary.from) || checkpoint && checkpoint.periodFrom || currentCheckpoint && currentCheckpoint.periodFrom || "");
+    var periodTo = String(summary && (summary.periodTo || summary.to) || checkpoint && checkpoint.periodTo || currentCheckpoint && currentCheckpoint.periodTo || "");
+    var periodMode = String(summary && summary.periodMode || checkpoint && checkpoint.periodMode || currentCheckpoint && currentCheckpoint.periodMode || "");
+    var storedEngineVersion = String(checkpoint && checkpoint.calcEngineVersion || "");
+    var storedCanonVersion = String(checkpoint && checkpoint.canonVersion || "");
+    var storedSummaryVersion = String(checkpoint && checkpoint.summaryFormatVersion || "");
+
+    var flags = {
+      ledger: _calcDebugFingerprintMismatch(currentCheckpoint, checkpoint, "ledger", "ledgerFingerprint"),
+      tariffs: _calcDebugFingerprintMismatch(currentCheckpoint, checkpoint, "tariffs", "tariffsFingerprint"),
+      refinancing: _calcDebugFingerprintMismatch(currentCheckpoint, checkpoint, "refinancing", "refinancingFingerprint"),
+      excludes: _calcDebugFingerprintMismatch(currentCheckpoint, checkpoint, "excludes", "excludesFingerprint"),
+      moratorium: _calcDebugFingerprintMismatch(currentCheckpoint, checkpoint, "moratorium", "moratoriumFingerprint"),
+      responsibility: _calcDebugFingerprintMismatch(currentCheckpoint, checkpoint, "responsibility", "responsibilityFingerprint"),
+      engineVersion: !!(checkpoint && (storedEngineVersion !== CALC_SUMMARY_ENGINE_VERSION || storedCanonVersion !== CALC_SUMMARY_CANON_VERSION)),
+      summaryVersion: !!(checkpoint && storedSummaryVersion !== CALC_SUMMARY_FORMAT_VERSION),
+      period: !!(checkpoint && currentCheckpoint && (String(currentCheckpoint.periodFrom || "") !== String(checkpoint.periodFrom || "") || String(currentCheckpoint.periodTo || "") !== String(checkpoint.periodTo || "") || String(currentCheckpoint.periodMode || "") !== String(checkpoint.periodMode || "") || _calcDebugFingerprintMismatch(currentCheckpoint, checkpoint, "calcPeriod", "calcPeriodFingerprint")))
+    };
+
+    return {
+      uid: uid,
+      summaryStatus: summaryState && summaryState.status ? summaryState.status : (summaryExists ? "invalid_json" : "missing"),
+      summaryReason: summaryState && summaryState.reason ? summaryState.reason : (summaryExists ? "SUMMARY_UNREADABLE" : "SUMMARY_MISSING"),
+      calcDirty: calcDirty,
+      summaryExists: summaryExists,
+      checkpointExists: checkpointExists,
+
+      periodFrom: periodFrom,
+      periodTo: periodTo,
+      periodMode: periodMode,
+
+      calcEngineVersion: storedEngineVersion || CALC_SUMMARY_ENGINE_VERSION,
+      canonVersion: storedCanonVersion || CALC_SUMMARY_CANON_VERSION,
+      summaryFormatVersion: storedSummaryVersion || CALC_SUMMARY_FORMAT_VERSION,
+
+      generatedAt: String(checkpoint && checkpoint.generatedAt || summary && (summary.generatedAt || summary.calculatedAt || summary.updatedAt) || ""),
+
+      fingerprints: {
+        ledger: _calcDebugFingerprintPair(currentCheckpoint, checkpoint, "ledger", "ledgerFingerprint"),
+        tariffs: _calcDebugFingerprintPair(currentCheckpoint, checkpoint, "tariffs", "tariffsFingerprint"),
+        refinancing: _calcDebugFingerprintPair(currentCheckpoint, checkpoint, "refinancing", "refinancingFingerprint"),
+        excludes: _calcDebugFingerprintPair(currentCheckpoint, checkpoint, "excludes", "excludesFingerprint"),
+        moratorium: _calcDebugFingerprintPair(currentCheckpoint, checkpoint, "moratorium", "moratoriumFingerprint"),
+        responsibility: _calcDebugFingerprintPair(currentCheckpoint, checkpoint, "responsibility", "responsibilityFingerprint")
+      },
+
+      mismatchFlags: flags
+    };
+  }
+
   function writeCalcSummary(abonentOrId, summary) {
     if (!Data.ensureWriteOrExplain()) return false;
     var summaryKey = resolveCalcSummaryKey(abonentOrId);
@@ -1994,6 +2079,7 @@
     markCalcDirty: markCalcDirty,
     isCalcDirty: isCalcDirty,
     readCalcSummary: readCalcSummary,
+    getCalcSummaryDebugInfo: getCalcSummaryDebugInfo,
     writeCalcSummary: writeCalcSummary,
     recalculateCalcSummary: recalculateCalcSummary,
     preparePeriodAccruals: preparePeriodAccruals,
@@ -3031,6 +3117,7 @@ window.resolveCalcCheckpointKey = resolveCalcCheckpointKey;
 window.resolveCalcDirtyKey = resolveCalcDirtyKey;
 window.markCalcDirty = markCalcDirty;
 window.readCalcSummary = readCalcSummary;
+window.getCalcSummaryDebugInfo = getCalcSummaryDebugInfo;
 window.writeCalcSummary = writeCalcSummary;
 window.recalculateCalcSummary = recalculateCalcSummary;
 window.prepareAndRecalculateCalcSummary = prepareAndRecalculateCalcSummary;
