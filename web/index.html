@@ -583,139 +583,37 @@ function filterLedgerRowsByResponsibility(abonentId, arr){
 //    - если totalDebt > 0 -> сегодня
 //    - если totalDebt == 0 -> max(paid_date)
 function calcTotalsFromPayments(id, abonentObj){
-    const arr = getPaymentsForAbonent(id);
-    if (!arr.length) return null;
+    const summary = (window.Data && typeof window.Data.readCalcSummary === "function") ? window.Data.readCalcSummary(id) : null;
+    const dirty = (window.Data && typeof window.Data.isCalcDirty === "function") ? window.Data.isCalcDirty(id) : true;
 
-    const viewRows = filterLedgerRowsByResponsibility(id, arr);
-    const responsibilityRange = getResponsibilityRangeForIndex(id);
-    const asOf = parseDateAnyToDate(responsibilityRange?.to) || new Date();
-
-    let sumAcc = 0;
-    let sumPaid = 0;
-
-    for (const r of viewRows){
-        sumAcc += toNum(r.accrued);
-        sumPaid += toNum(r.paid);
+    if (!summary || dirty) {
+        return {
+            status: "Требуется пересчёт",
+            totalDebt: "Требуется пересчёт",
+            penalty: "",
+            nachisleno: "",
+            oplacheno: "",
+            startDate: "",
+            endDate: ""
+        };
     }
 
-    // ✅ Итоговые "Всего задолженность" и "ПЕНЯ за период" должны совпадать с логикой карточки.
-    // Важно: в LS строки payments_<id> могут НЕ содержать актуальные total_debt/pay_penalty,
-    // потому что карточка пересчитывает это "на лету".
-    // Поэтому:
-    //   1) если доступен calc_engine (JKHCalcEngine) — считаем итог прямо сейчас (это самый надёжный вариант)
-    //   2) иначе — fallback к данным из последней строки последнего месяца.
-
-    let totalDebt = 0;
-    let penalty = 0;
-
-    // (1) основной путь — через calc_engine
-    try {
-        if (window.JKHCalcEngine) {
-            // ✅ ЕДИНЫЙ ДВИЖОК: для сводной главной используем тот же метод,
-            // что и карточка/справка: calcTotalsAsOfAdjusted() на дату окончания расчёта.
-            //
-            // ВАЖНО:
-            // - calcTotalsAsOfCore() отдаёт "начисленную пеню" (penaltyAccruedTotal) — это ДРУГОЕ.
-            // - нам нужна "пеня к взысканию / задолженность по пени" (penaltyDebt),
-            //   которая согласована с карточкой и справкой.
-            if (typeof window.JKHCalcEngine.calcTotalsAsOfAdjusted === 'function') {
-                const adj = window.JKHCalcEngine.calcTotalsAsOfAdjusted(
-                    viewRows,
-                    asOf,
-                    { abonentId: id, applyAdvanceOffset: true, allowNegativePrincipal: true }
-                );
-
-                const principal = Number(adj?.principal) || 0;       // может быть отрицательный (аванс)
-                const penDebt   = Number(adj?.penaltyDebt) || 0;
-                const total     = Number(adj?.total) || (principal + penDebt);
-
-                totalDebt = total;
-                // CRITICAL: пеня берётся напрямую из calc_engine (penaltyDebt).
-                // Запрещено обнулять её в index.html — это нарушает единый расчёт.
-                penalty = penDebt;
-
-                CRITICAL_ASSERT(Number.isFinite(totalDebt), "Index: totalDebt is not finite", { id, totalDebt, adj });
-                CRITICAL_ASSERT(Number.isFinite(penalty),   "Index: penalty is not finite",   { id, penalty, adj });
-            } else {
-                throw new Error('JKHCalcEngine.calcTotalsAsOfAdjusted is missing');
-            }
-        } else {
-            throw new Error('no JKHCalcEngine');
+    function pick(names){
+        for (const name of names){
+            const v = summary ? summary[name] : undefined;
+            if (v !== undefined && v !== null && v !== "") return v;
         }
-    } catch (e) {
-        // (2) fallback — последняя строка последнего месяца (как раньше)
-        let endRow = null;
-        let bestKey = -Infinity;
-        let bestIsAccr = false;
-        let bestId = -Infinity;
-
-        for (const r of viewRows){
-            const y = Number(r.year) || 0;
-            const m = Number(r.month) || 0;
-            const key = (y * 12) + m;
-            const isAccr = Math.abs(toNum(r.accrued)) > 0.0000001;
-
-            const rid = Number(r.id) || 0;
-
-            const better =
-                (key > bestKey) ||
-                (key === bestKey && isAccr && !bestIsAccr) ||
-                (key === bestKey && isAccr === bestIsAccr && rid >= bestId);
-
-            if (better){
-                bestKey = key;
-                bestIsAccr = isAccr;
-                bestId = rid;
-                endRow = r;
-            }
-        }
-
-        totalDebt = endRow ? toNum(endRow.total_debt) : 0;
-        penalty   = endRow ? toNum(endRow.pay_penalty) : 0;
-
+        return "";
     }
-
-    // ✅ страховка: если total_debt в строках не заполнен (0), всё равно можем показать аванс/долг по суммам
-    // principalNet = начислено - оплачено (может быть < 0)
-    const principalNet = sumAcc - sumPaid;
-    if (Math.abs(totalDebt) <= 0.0000001 && Math.abs(principalNet) > 0.0000001) {
-        totalDebt = principalNet + penalty;
-    }
-
-
-    // ✅ дата начала расчёта = dateFrom текущего периода ответственности.
-    let startDate = "";
-    const respFromD = parseDateAnyToDate(responsibilityRange?.from);
-    if (respFromD) startDate = formatDMY(respFromD);
-
-    // запасной вариант, если периода ответственности нет: берём первый месяц из отфильтрованных данных
-    if (!startDate){
-        let minKey = Infinity;
-        let minY = 0, minM = 0;
-        for (const r of viewRows){
-            const y = Number(r.year) || 0;
-            const m = Number(r.month) || 0;
-            const key = (y * 12) + m;
-            if (key && key < minKey){
-                minKey = key;
-                minY = y; minM = m;
-            }
-        }
-        if (minKey !== Infinity && minY && minM){
-            startDate = formatDMY(new Date(minY, minM-1, 1));
-        }
-    }
-
-    // ✅ дата окончания расчёта = dateTo периода ответственности, либо текущая дата для открытого периода
-    const endDate = formatDMY(asOf);
 
     return {
-        nachisleno: Math.abs(sumAcc)  > 0.0000001 ? sumAcc.toFixed(2)  : "",
-        oplacheno:  Math.abs(sumPaid) > 0.0000001 ? sumPaid.toFixed(2) : "",
-        totalDebt:  Math.abs(totalDebt) > 0.0000001 ? totalDebt.toFixed(2) : "",
-        penalty:    Math.abs(penalty)   > 0.0000001 ? penalty.toFixed(2)   : "",
-        startDate:  startDate,
-        endDate:    endDate
+        nachisleno: pick(["nachisleno", "accrued", "accruedTotal", "sumAccrued"]),
+        oplacheno:  pick(["oplacheno", "paid", "paidTotal", "sumPaid"]),
+        totalDebt:  pick(["totalDebt", "total_debt", "total", "debtTotal"]),
+        penalty:    pick(["penalty", "pay_penalty", "penaltyDebt", "penalty_debt"]),
+        startDate:  pick(["startDate", "start_date", "from"]),
+        endDate:    pick(["endDate", "end_date", "to"]),
+        status: ""
     };
 }
 
@@ -780,7 +678,7 @@ function rebuildIndexRows(){
         const hasClosedLink = ownLinks.some(l => !!String(l?.dateTo || '').trim());
         const hasNoActiveButClosed = !activeLink && hasClosedLink;
         const isMerged = String(premise?.status || '').trim() === 'merged';
-        const rowStatusMark = isMerged ? 'объединена' : (hasNoActiveButClosed ? 'расчёт остановлен' : '');
+        const rowStatusMark = totals?.status || (isMerged ? 'объединена' : (hasNoActiveButClosed ? 'расчёт остановлен' : ''));
         allRows.push({
             id,
             fam,
@@ -801,16 +699,9 @@ function rebuildIndexRows(){
 
 function hasUsablePaymentLedger(abonentId){
     try {
-        const arr = (window.Data && typeof window.Data.readPaymentLedger === "function")
-            ? window.Data.readPaymentLedger(abonentId)
-            : (function(){
-                const key = ((typeof window.getPaymentsKeyForAbonent === "function") ? window.getPaymentsKeyForAbonent(abonentId) : "");
-                return key ? getPaymentRowsByStorageKeyCached(key) : [];
-            })();
-        if (!Array.isArray(arr)) return false;
-        for (const row of arr){
-            if (toNum(row && row.accrued) > 0 || toNum(row && row.paid) > 0) return true;
-        }
+        const summary = (window.Data && typeof window.Data.readCalcSummary === "function") ? window.Data.readCalcSummary(abonentId) : null;
+        const dirty = (window.Data && typeof window.Data.isCalcDirty === "function") ? window.Data.isCalcDirty(abonentId) : true;
+        return !!summary && !dirty;
     } catch (e) {}
     return false;
 }
@@ -938,7 +829,7 @@ function showIndexAccrualsReadonlyStatus(){
             if (anchor && anchor.parentNode) anchor.parentNode.insertBefore(box, anchor.nextSibling);
             else document.body.appendChild(box);
         }
-        box.textContent = 'Начисления подготовлены не для всех абонентов. Выполните пересчёт начислений вручную.';
+        box.textContent = 'Для части абонентов отсутствует актуальный calc_summary или выставлен dirty-флаг. Выполните пересчёт вручную.';
     } catch(e) {
         console.warn('[index][readonly-status] failed', e);
     }

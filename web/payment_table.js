@@ -1642,6 +1642,74 @@ function calcRowBase(r) {
   r.__base_total_debt = 0;
 }
 
+function readCurrentCalcSummaryState(){
+  const id = getAbonentId();
+  const summary = (window.Data && typeof window.Data.readCalcSummary === "function") ? window.Data.readCalcSummary(id) : null;
+  const dirty = (window.Data && typeof window.Data.isCalcDirty === "function") ? window.Data.isCalcDirty(id) : true;
+  return { summary: summary, dirty: dirty, ready: !!summary && !dirty };
+}
+
+function summaryNumber(summary, names){
+  if (!summary || !Array.isArray(names)) return 0;
+  for (let i = 0; i < names.length; i++) {
+    const v = summary[names[i]];
+    if (v !== undefined && v !== null && v !== "") return toNum(v);
+  }
+  return 0;
+}
+
+function renderCalcSummaryStatus(state){
+  try {
+    const tbody = qs("#paymentTableBody");
+    if (!tbody || !tbody.parentNode) return;
+    let box = document.getElementById("calcSummaryStatus");
+    if (!box) {
+      box = document.createElement("div");
+      box.id = "calcSummaryStatus";
+      box.style.cssText = "margin:10px 0;padding:10px;border-radius:8px;border:1px solid #e0a800;background:#fff8e1;color:#5f4300;font-weight:600;";
+      tbody.parentNode.insertBefore(box, tbody.parentNode.firstChild);
+    }
+    if (state && state.ready) {
+      const total = summaryNumber(state.summary, ["totalDebt", "total_debt", "total", "debtTotal"]);
+      const penalty = summaryNumber(state.summary, ["penalty", "pay_penalty", "penaltyDebt", "penalty_debt"]);
+      box.style.borderColor = "#b8d7b8";
+      box.style.background = "#f2fff2";
+      box.style.color = "#245b24";
+      box.textContent = "Итоги расчёта загружены из calc_summary: всего " + fmtMoney(total) + ", пеня " + fmtMoney(penalty) + ".";
+    } else {
+      box.style.borderColor = "#e0a800";
+      box.style.background = "#fff8e1";
+      box.style.color = "#5f4300";
+      box.textContent = "Требуется пересчёт";
+    }
+  } catch (e) {
+    try { console.warn("[calc-summary][status-render-failed]", e); } catch (_) {}
+  }
+}
+
+function applySummaryToCardTotals(state){
+  try {
+    const totalEl = document.getElementById('abonent_total_debt') || document.getElementById('total_debt') || document.querySelector('[data-field="total_debt"]') || document.querySelector('[data-total="debt"]');
+    const debtEl = document.getElementById('abonent_total_main_debt') || document.getElementById('total_main_debt') || document.querySelector('[data-field="total_main_debt"]');
+    const penEl = document.getElementById('abonent_total_penalty_debt') || document.getElementById('total_penalty_debt') || document.querySelector('[data-field="total_penalty_debt"]');
+    if (state && state.ready) {
+      const debt = summaryNumber(state.summary, ["principal", "pay_main", "mainDebt", "main_debt", "debt"]);
+      const penalty = summaryNumber(state.summary, ["penalty", "pay_penalty", "penaltyDebt", "penalty_debt"]);
+      const totalRaw = summaryNumber(state.summary, ["totalDebt", "total_debt", "total", "debtTotal"]);
+      const total = Math.abs(totalRaw) > 0.0000001 ? totalRaw : (debt + penalty);
+      if (totalEl) totalEl.textContent = r2(total).toFixed(2);
+      if (debtEl) debtEl.textContent = r2(debt).toFixed(2);
+      if (penEl) penEl.textContent = r2(penalty).toFixed(2);
+    } else {
+      if (totalEl) totalEl.textContent = "Требуется пересчёт";
+      if (debtEl) debtEl.textContent = "—";
+      if (penEl) penEl.textContent = "—";
+    }
+  } catch (e) {
+    try { console.warn("[calc-summary][card-total-failed]", e); } catch (_) {}
+  }
+}
+
 // Нарастающий итог: теперь это "состояние долга и пени на дату строки"
 
 // --- AS-OF дата для строки (важно для корректной помесячной истории пени)
@@ -2037,19 +2105,9 @@ function applyRunningTotals(viewRows) {
     });
 
     const view = applyResponsibilityRangeToView(applyCalcFilter(arr)).slice();
-    try {
-      applyRunningTotals(view);
-    } catch (e) {
-      if (isRatesFatalError(e)) {
-        renderRatesFatal(tbody);
-        return;
-      }
-      if (isExcludesFatalError(e)) {
-        renderExcludesFatal(tbody);
-        return;
-      }
-      throw e;
-    }
+    const summaryState = readCurrentCalcSummaryState();
+    renderCalcSummaryStatus(summaryState);
+    applySummaryToCardTotals(summaryState);
 
     // сопоставление id -> rowObj
     const byId = new Map(view.map(r => [String(r.id), r]));
@@ -2129,19 +2187,9 @@ function applyRunningTotals(viewRows) {
     });
 
     const view = applyResponsibilityRangeToView(applyCalcFilter(arr)).slice();
-    try {
-      applyRunningTotals(view);
-    } catch (e) {
-      if (isRatesFatalError(e)) {
-        renderRatesFatal(tbody);
-        return;
-      }
-      if (isExcludesFatalError(e)) {
-        renderExcludesFatal(tbody);
-        return;
-      }
-      throw e;
-    }
+    const summaryState = readCurrentCalcSummaryState();
+    renderCalcSummaryStatus(summaryState);
+    applySummaryToCardTotals(summaryState);
 
     // сортировка отображения — год/месяц (новые сверху),
     // внутри месяца: сначала строка начисления, ниже — оплаты (Excel и ручные)
@@ -2533,16 +2581,15 @@ tbody.innerHTML = "";
   // =============================================================
   function JKH_RecalcAbonentTotalDebtCard() {
     try {
-      const rows = getPayments() || [];
-      let sumDebt = 0;
-      let sumPenalty = 0;
-
-      for (const r of rows) {
-        sumDebt += toNum(r?.pay_main ?? 0);
-        sumPenalty += toNum(r?.pay_penalty ?? 0);
+      const summaryState = readCurrentCalcSummaryState();
+      if (!summaryState.ready) {
+        applySummaryToCardTotals(summaryState);
+        return;
       }
-
-      const total = r2(sumDebt + sumPenalty);
+      const sumDebt = summaryNumber(summaryState.summary, ["principal", "pay_main", "mainDebt", "main_debt", "debt"]);
+      const sumPenalty = summaryNumber(summaryState.summary, ["penalty", "pay_penalty", "penaltyDebt", "penalty_debt"]);
+      const totalRaw = summaryNumber(summaryState.summary, ["totalDebt", "total_debt", "total", "debtTotal"]);
+      const total = r2(Math.abs(totalRaw) > 0.0000001 ? totalRaw : (sumDebt + sumPenalty));
 
       // Куда выводить итог (поддержка разных разметок карточки):
       const totalEl =

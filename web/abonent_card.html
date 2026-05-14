@@ -1206,7 +1206,7 @@ async function __initAbonentCardSafe(){
     try { fillAbonentCard(); } catch(e) { try { console.error('[abonent_card] fill failed', e); } catch(_){} }
 
     setTimeout(() => {
-        __runAutoAccrualRepairOnce();
+        // Карточка открывается в read-only режиме: полный autoaccrual/recalc не запускается автоматически.
         __safeLoadPaymentTableOnce('DOMContentLoaded');
     }, 0);
 }
@@ -1688,6 +1688,11 @@ async function applyChangeResponsible(mode) {
         transferMode: String(mode || 'WITH_DEBT')
     });
 
+    if (transferred === true && window.Data && typeof window.Data.markCalcDirty === "function") {
+        window.Data.markCalcDirty(currentActiveId, "responsibility_period_changed");
+        window.Data.markCalcDirty(String(newId), "responsibility_period_changed");
+    }
+
     if (transferred !== true) {
         alert('Передача ответственности не выполнена. Проверьте дату, выбранного абонента и расчёт frozen debt.');
         return;
@@ -1971,6 +1976,10 @@ async function saveAbonentEdit() {
     if (window.Data && typeof window.Data.upsertAbonent === 'function') {
         window.Data.upsertAbonent(updated);
     }
+    if (window.Data && typeof window.Data.markCalcDirty === "function") {
+        window.Data.markCalcDirty(String(newId), "abonent_or_responsibility_period_changed");
+        if (isIdChanged) window.Data.markCalcDirty(String(oldId), "abonent_or_responsibility_period_changed");
+    }
 
     if (isIdChanged) {
         if (window.Data && typeof window.Data.getLinksForAbonent === 'function') {
@@ -2039,6 +2048,7 @@ function bindMoratoriumUI(){
             return;
         }
         storeSet(moratoriumKey(id), el.checked ? "1" : "0");
+        if (window.Data && typeof window.Data.markCalcDirty === "function") window.Data.markCalcDirty(getAbonentIdFromURL(), "moratorium_changed");
         __safeLoadPaymentTableOnce();
     });
 }
@@ -2189,6 +2199,7 @@ function saveCalcPeriod(from, to){
 
     storeSet(meta.storageKey, JSON.stringify(payload), meta.ownerId);
     storeSet(meta.activeStorageKey, "1", meta.ownerId);
+    if (window.Data && typeof window.Data.markCalcDirty === "function") window.Data.markCalcDirty(meta.requestedId, "calc_period_changed");
     try {
         console.log("[calc-period][save]", {
             requestedId: meta.requestedId,
@@ -2233,6 +2244,7 @@ function setCalcPeriodActive(active){
     }
 
     storeSet(meta.activeStorageKey, active ? "1" : "0", meta.ownerId);
+    if (window.Data && typeof window.Data.markCalcDirty === "function") window.Data.markCalcDirty(meta.requestedId, "calc_period_changed");
     return true;
 }
 
@@ -2345,6 +2357,7 @@ function bindCalcButtons(){
         setCalcPeriodActive(false);
         const periodKey = calcPeriodKey();
         if (periodKey) storeRemove(periodKey, getCalcPeriodOwnerId());
+        if (window.Data && typeof window.Data.markCalcDirty === "function") window.Data.markCalcDirty(getAbonentIdFromURL(), "calc_period_changed");
         fromEl.value = "";
         toEl.value = "";
         __safeLoadPaymentTableOnce();

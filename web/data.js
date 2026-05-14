@@ -470,6 +470,73 @@
     return resolveCalcPeriodStorageKey(abonentOrId, { suffix: "_active" });
   }
 
+  function _resolveAbonentUid(abonentOrId) {
+    var found = _findAbonentByIdOrUid(abonentOrId);
+    var abonent = found && found.abonent ? found.abonent : null;
+    return String(abonent && abonent.uid || "").trim();
+  }
+
+  function resolveCalcSummaryKey(abonentOrId) {
+    var uid = _resolveAbonentUid(abonentOrId);
+    return uid ? ("calc_summary_" + uid) : "";
+  }
+
+  function resolveCalcCheckpointKey(abonentOrId) {
+    var uid = _resolveAbonentUid(abonentOrId);
+    return uid ? ("calc_checkpoint_" + uid) : "";
+  }
+
+  function resolveCalcDirtyKey(abonentOrId) {
+    var uid = _resolveAbonentUid(abonentOrId);
+    return uid ? ("calc_dirty_" + uid) : "";
+  }
+
+  function isCalcDirty(abonentOrId) {
+    var key = resolveCalcDirtyKey(abonentOrId);
+    if (!key) return true;
+    var raw = _getProjectRaw(key);
+    if (raw === "1" || raw === "true" || raw === true) return true;
+    if (raw === "0" || raw === "false" || raw === false || raw === null || raw === undefined || raw === "") return false;
+    try {
+      var parsed = JSON.parse(String(raw));
+      return !!(parsed && parsed.dirty);
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function markCalcDirty(abonentOrId, reason) {
+    var key = resolveCalcDirtyKey(abonentOrId);
+    if (!key) return false;
+    var payload = JSON.stringify({ dirty: true, reason: String(reason || ""), updatedAt: new Date().toISOString() });
+    return _setProjectRaw(key, payload);
+  }
+
+  function readCalcSummary(abonentOrId) {
+    var key = resolveCalcSummaryKey(abonentOrId);
+    if (!key) return null;
+    var raw = _getProjectRaw(key);
+    if (raw === null || raw === undefined || raw === "") return null;
+    try {
+      var parsed = JSON.parse(String(raw));
+      return parsed && typeof parsed === "object" ? parsed : null;
+    } catch (e) {
+      console.warn("[calc-summary][read-failed]", { key: key, error: e && e.message ? e.message : String(e) });
+      return null;
+    }
+  }
+
+  function writeCalcSummary(abonentOrId, summary) {
+    if (!Data.ensureWriteOrExplain()) return false;
+    var summaryKey = resolveCalcSummaryKey(abonentOrId);
+    var dirtyKey = resolveCalcDirtyKey(abonentOrId);
+    if (!summaryKey || !dirtyKey) return false;
+    var payload = Object.assign({}, (summary && typeof summary === "object") ? summary : {}, { updatedAt: new Date().toISOString() });
+    var ok = _setProjectRaw(summaryKey, JSON.stringify(payload));
+    if (ok !== false) _setProjectRaw(dirtyKey, "0");
+    return ok;
+  }
+
   function resolvePaymentLedgerKey(abonentOrId, options) {
     var opts = options || {};
     var found = _findAbonentByIdOrUid(abonentOrId);
@@ -490,12 +557,7 @@
       if (raw !== null && raw !== undefined) return _cloneLedgerRows(_parseLedgerRows(raw, canonicalKey));
     }
 
-    // Legacy read-only fallback: payments_<LS> may still exist for old localStorage data.
-    var legacyKey = id ? ("payments_" + id) : "";
-    if (legacyKey && legacyKey !== canonicalKey) {
-      var legacyRaw = _getProjectRaw(legacyKey);
-      if (legacyRaw !== null && legacyRaw !== undefined) return _cloneLedgerRows(_parseLedgerRows(legacyRaw, legacyKey));
-    }
+    // calc_summary architecture: ordinary reads do not fall back to legacy payments_<LS>.
     return [];
   }
 
@@ -532,6 +594,7 @@
     }
     var payload = JSON.stringify(Array.isArray(rows) ? rows : []);
     var ok = _setProjectRaw(key, payload);
+    if (ok !== false) markCalcDirty(abonentOrId, opts.dirtyReason || "payments_changed");
     if (ok !== false && opts.event !== false) {
       recordFinancialEvent(Object.assign({
         type: opts.eventType || "LEDGER_WRITE",
@@ -1094,6 +1157,13 @@
     ensureAbonentUid: ensureAbonentUid,
     resolveCalcPeriodStorageKey: resolveCalcPeriodStorageKey,
     resolveCalcPeriodActiveStorageKey: resolveCalcPeriodActiveStorageKey,
+    resolveCalcSummaryKey: resolveCalcSummaryKey,
+    resolveCalcCheckpointKey: resolveCalcCheckpointKey,
+    resolveCalcDirtyKey: resolveCalcDirtyKey,
+    markCalcDirty: markCalcDirty,
+    isCalcDirty: isCalcDirty,
+    readCalcSummary: readCalcSummary,
+    writeCalcSummary: writeCalcSummary,
     resolvePaymentLedgerKey: resolvePaymentLedgerKey,
     readPaymentLedger: readPaymentLedger,
     writePaymentLedger: writePaymentLedger,
@@ -2118,7 +2188,62 @@
 
 window.getCalcPeriodStorageKey = resolveCalcPeriodStorageKey;
 window.getCalcPeriodActiveStorageKey = resolveCalcPeriodActiveStorageKey;
+window.resolveCalcSummaryKey = resolveCalcSummaryKey;
+window.resolveCalcCheckpointKey = resolveCalcCheckpointKey;
+window.resolveCalcDirtyKey = resolveCalcDirtyKey;
+window.markCalcDirty = markCalcDirty;
+window.readCalcSummary = readCalcSummary;
+window.writeCalcSummary = writeCalcSummary;
 window.Data = Data;
+
+function __markAllCalcDirty(reason) {
+  try {
+    var db = window.AbonentsDB || {};
+    var abonents = db && db.abonents && typeof db.abonents === "object" ? db.abonents : {};
+    Object.keys(abonents).forEach(function (id) { markCalcDirty(id, reason); });
+  } catch (e) { }
+}
+
+function __markCalcDirtyForStorageMutation(key) {
+  var k = String(key || "");
+  if (!k || k.indexOf("calc_dirty_") === 0 || k.indexOf("calc_summary_") === 0 || k.indexOf("calc_checkpoint_") === 0) return;
+  if (k.indexOf("tariff") >= 0 || k.indexOf("refinancing_rates_") === 0) {
+    __markAllCalcDirty(k.indexOf("refinancing_rates_") === 0 ? "refinancing_rates_changed" : "tariffs_changed");
+    return;
+  }
+  if (k.indexOf("exclude_periods_") === 0) {
+    markCalcDirty(k.slice("exclude_periods_".length), "exclude_periods_changed");
+    return;
+  }
+  if (k.indexOf("moratorium_") === 0) {
+    markCalcDirty(k.slice("moratorium_".length), "moratorium_changed");
+  }
+}
+
+(function __installCalcDirtyStorageHooks(){
+  try {
+    if (!window.JKHStore || window.JKHStore.__calcDirtyHooksInstalled) return;
+    var originalSetRaw = window.JKHStore.setRaw;
+    var originalRemoveRaw = window.JKHStore.removeRaw;
+    if (typeof originalSetRaw === "function") {
+      window.JKHStore.setRaw = function(key, value, ownerId){
+        var res = originalSetRaw.apply(this, arguments);
+        if (res !== false) __markCalcDirtyForStorageMutation(key);
+        return res;
+      };
+    }
+    if (typeof originalRemoveRaw === "function") {
+      window.JKHStore.removeRaw = function(key, ownerId){
+        var res = originalRemoveRaw.apply(this, arguments);
+        if (res !== false) __markCalcDirtyForStorageMutation(key);
+        return res;
+      };
+    }
+    window.JKHStore.__calcDirtyHooksInstalled = true;
+  } catch (e) {
+    try { console.warn("[calc-dirty][storage-hooks-failed]", e); } catch (_) {}
+  }
+})();
 window.JKHBoot?.markReady?.('data');
 
   // Read-only init: empty storage is not materialized until an explicit user save.
