@@ -583,10 +583,10 @@ function filterLedgerRowsByResponsibility(abonentId, arr){
 //    - если totalDebt > 0 -> сегодня
 //    - если totalDebt == 0 -> max(paid_date)
 function calcTotalsFromPayments(id, abonentObj){
-    const summary = (window.Data && typeof window.Data.readCalcSummary === "function") ? window.Data.readCalcSummary(id) : null;
-    const dirty = (window.Data && typeof window.Data.isCalcDirty === "function") ? window.Data.isCalcDirty(id) : true;
+    const summaryState = (window.Data && typeof window.Data.readCalcSummary === "function") ? window.Data.readCalcSummary(id) : null;
+    const summary = (summaryState && summaryState.status === "fresh") ? summaryState.summary : null;
 
-    if (!summary || dirty) {
+    if (!summary) {
         return {
             status: "Требуется пересчёт",
             totalDebt: "Требуется пересчёт",
@@ -700,9 +700,8 @@ function rebuildIndexRows(){
 
 function hasUsablePaymentLedger(abonentId){
     try {
-        const summary = (window.Data && typeof window.Data.readCalcSummary === "function") ? window.Data.readCalcSummary(abonentId) : null;
-        const dirty = (window.Data && typeof window.Data.isCalcDirty === "function") ? window.Data.isCalcDirty(abonentId) : true;
-        return !!summary && !dirty;
+        const state = (window.Data && typeof window.Data.readCalcSummary === "function") ? window.Data.readCalcSummary(abonentId) : null;
+        return !!(state && state.status === "fresh" && state.summary);
     } catch (e) {}
     return false;
 }

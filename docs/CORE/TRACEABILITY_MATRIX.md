@@ -305,3 +305,15 @@
 | Rollback protection | LOGIC_SPEC → Canonical Financial Modes | web/data.js / transfer rollback snapshots | ✅ OK | Transfer snapshots raw keys и DB |
 | Merge premises responsibility boundary | LOGIC_SPEC → Canonical Financial Modes | web/data.js / Data.mergePremises TODO/CRITICAL | 🟡 PARTIAL | Merge работает, boundary отмечен к унификации |
 | Split premises future mode | LOGIC_SPEC → Canonical Financial Modes | web/data.js / Data.financialModes.SPLIT_PREMISES | ⚪ IDEA | Только enum/документационный режим, бизнес-логики split нет |
+
+---
+
+## 🧩 Блок: Calc summary integrity
+
+| Правило | Где в ТЗ | Где в коде | Статус | Комментарий |
+| --- | --- | --- | --- | --- |
+| `calc_summary_<uid>` является cache-derived entity, не source of truth | Задание 3 → Документация | `web/data.js`, `web/payment_table.js`, `web/index.html`, `web/abonent_card.html` | ✅ OK | Summary используется UI только при `status === "fresh"`. |
+| Checkpoint содержит identity, период и fingerprints источников истины | Задание 3 → п.1 | `web/data.js` | ✅ OK | Lightweight deterministic fingerprints без crypto layer. |
+| `readCalcSummary` возвращает structured state | Задание 3 → п.3 | `web/data.js` | ✅ OK | Статусы: `fresh`, `missing`, `dirty`, `checkpoint_mismatch`, `invalid_json`, `invalid_structure`. |
+| Dirty/mismatch/invalid блокируют старые totals | Задание 3 → п.4–5, п.7 | `web/payment_table.js`, `web/index.html`, `web/abonent_card.html` | ✅ OK | UI показывает «Требуется пересчёт» и не делает silent fallback. |
+| Изменения ledger/tariffs/rates/excludes/moratorium/responsibility/calc period инвалидируют актуальность summary | Задание 3 → п.6 | `web/data.js` | ✅ OK | Dirty ставится через storage hooks и сохранение responsibility snapshot. |

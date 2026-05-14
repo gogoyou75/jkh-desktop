@@ -1487,3 +1487,24 @@ Fatal-правила:
 - `jkh_freeze_to_v1:*` и `jkh_transfer_to_v1:*` записываются только service layer в рамках transfer transaction.
 - Financial event log обязателен для ledger/transfer write-path и хранит минимум: `type`, `mode`, `sourceAbonentId`, `targetAbonentId`, `premiseId/regnum`, `date`, `ownerId`, `createdAt`, `debtAmount`, `balanceAmount` при наличии.
 - Merge/split должны быть приведены к тому же responsibility transaction boundary; `SPLIT_PREMISES` пока является документированным будущим режимом без бизнес-логики split.
+
+---
+
+## 12. Calc summary integrity (cache-derived entity)
+
+`calc_summary_<uid>` является cache-derived entity, а не источником истины. Источниками истины для расчёта остаются:
+- `payments_<uid>`;
+- тарифы owner (`tariffs_<owner>` / `tariffs_v1`);
+- ставки рефинансирования;
+- исключённые периоды `exclude_periods_<abonentId>`;
+- мораторий;
+- responsibility data (`premises` / `links` / запись абонента);
+- выбранный расчётный период `calc_period_<uid>` / `calc_period_active_<uid>`.
+
+UI имеет право использовать `calc_summary_<uid>` только если `Data.readCalcSummary(...)` вернул `status: "fresh"`.
+Любой другой статус (`missing`, `dirty`, `checkpoint_mismatch`, `invalid_json`, `invalid_structure`) обязан блокировать показ старых totals как актуальных и показывать пользователю «Требуется пересчёт».
+
+`calc_checkpoint_<uid>` хранится вместе с summary и фиксирует `uid`, `abonentId`, `generatedAt`, период расчёта, ключ/значение расчётного периода и lightweight fingerprints для ledger, тарифов, ставок, исключений, моратория и responsibility data.
+Checkpoint проверяется при каждом чтении summary. Несовпадение fingerprint не исправляется автоматически, не очищается молча и не запускает автоматический пересчёт.
+
+Повреждённые summary/checkpoint не превращаются в нулевые totals и не заменяются пустыми объектами. Допустимы только логирование, статус `invalid_json`/`invalid_structure` и явное предложение выполнить пересчёт.

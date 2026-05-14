@@ -509,33 +509,237 @@
     var key = resolveCalcDirtyKey(abonentOrId);
     if (!key) return false;
     var payload = JSON.stringify({ dirty: true, reason: String(reason || ""), updatedAt: new Date().toISOString() });
-    return _setProjectRaw(key, payload);
+    var ok = _setProjectRaw(key, payload);
+    if (ok !== false) _calcLog("[calc-summary][dirty]", { uid: _resolveAbonentUid(abonentOrId), key: key, reason: String(reason || "") });
+    return ok;
+  }
+
+  function _calcSummaryState(status, abonentOrId, summary, checkpoint, reason) {
+    return {
+      status: status,
+      summary: summary || null,
+      checkpoint: checkpoint || null,
+      uid: _resolveAbonentUid(abonentOrId),
+      reason: String(reason || status || "")
+    };
+  }
+
+  function _stableCalcStringify(value) {
+    if (value === null || value === undefined) return String(value);
+    if (typeof value !== "object") return JSON.stringify(value);
+    if (Array.isArray(value)) return "[" + value.map(function (item) { return _stableCalcStringify(item); }).join(",") + "]";
+    var keys = Object.keys(value).sort();
+    return "{" + keys.map(function (key) { return JSON.stringify(key) + ":" + _stableCalcStringify(value[key]); }).join(",") + "}";
+  }
+
+  function _calcFingerprintFromRaw(key) {
+    var raw = _getProjectRaw(key);
+    if (raw === null || raw === undefined) raw = "";
+    return { key: key, hash: _simpleCalcHash(String(raw)), length: String(raw).length };
+  }
+
+  function _calcFingerprintObject(name, value) {
+    var raw = _stableCalcStringify(value === undefined ? null : value);
+    return { key: name, hash: _simpleCalcHash(raw), length: raw.length };
+  }
+
+  function _readCalcSummaryJson(key, tag) {
+    var raw = _getProjectRaw(key);
+    if (raw === null || raw === undefined || raw === "") return { status: "missing", value: null, raw: raw };
+    try {
+      return { status: "ok", value: JSON.parse(String(raw)), raw: String(raw) };
+    } catch (e) {
+      _calcWarn(tag || "[calc-summary][invalid-summary]", { key: key, reason: "JSON_PARSE_FAILED", error: e && e.message ? e.message : String(e) });
+      return { status: "invalid_json", value: null, raw: String(raw), reason: "JSON_PARSE_FAILED" };
+    }
+  }
+
+  function _effectiveCalcPeriodForCheckpoint(abonentOrId, summary) {
+    var activeKey = resolveCalcPeriodActiveStorageKey(abonentOrId);
+    var periodKey = resolveCalcPeriodStorageKey(abonentOrId);
+    var activeRaw = activeKey ? _getProjectRaw(activeKey) : null;
+    var periodRaw = periodKey ? _getProjectRaw(periodKey) : null;
+    var active = _readActiveCalcPeriod(abonentOrId);
+    var fallback = null;
+    if (!active) {
+      var found = _findAbonentByIdOrUid(abonentOrId);
+      fallback = _defaultCalcPeriodForAbonent(found && found.id, found && found.abonent);
+    }
+    var effective = active || fallback || { from: "", to: "", active: false, source: "unknown" };
+    return {
+      key: periodKey,
+      activeKey: activeKey,
+      value: { activeRaw: activeRaw === null || activeRaw === undefined ? "" : String(activeRaw), periodRaw: periodRaw === null || periodRaw === undefined ? "" : String(periodRaw), from: String(effective.from || ""), to: String(effective.to || ""), active: !!effective.active, source: String(effective.source || "") },
+      effectiveFrom: String(effective.from || ""),
+      effectiveTo: String(effective.to || ""),
+      summaryFrom: String(summary && (summary.periodFrom || summary.from) || ""),
+      summaryTo: String(summary && (summary.periodTo || summary.to) || "")
+    };
+  }
+
+  function _responsibilitySnapshotForCheckpoint(abonentId, uid) {
+    var db = window.AbonentsDB || {};
+    var abonents = db && db.abonents && typeof db.abonents === "object" ? db.abonents : {};
+    var links = Array.isArray(db && db.links) ? db.links : [];
+    var premises = db && db.premises && typeof db.premises === "object" ? db.premises : {};
+    var relevantLinks = links.filter(function (l) { return String(l && l.abonentId || "") === String(abonentId || ""); });
+    var regnums = {};
+    relevantLinks.forEach(function (l) { var r = String(l && l.regnum || "").trim(); if (r) regnums[r] = true; });
+    var relevantPremises = {};
+    Object.keys(regnums).sort().forEach(function (r) { relevantPremises[r] = premises[r] || null; });
+    return { abonent: abonents[String(abonentId || "")] || null, uid: uid || "", links: relevantLinks, premises: relevantPremises };
+  }
+
+  function _buildCalcCheckpoint(abonentOrId, summary) {
+    var found = _findAbonentByIdOrUid(abonentOrId);
+    var abonentId = String(found && found.id || (typeof abonentOrId === "object" ? abonentOrId && abonentOrId.id : abonentOrId) || summary && summary.abonentId || "").trim();
+    var abonent = found && found.abonent ? found.abonent : null;
+    var uid = String(abonent && abonent.uid || summary && summary.uid || "").trim();
+    if (!uid || !abonentId) return null;
+    var owner = _ownerId();
+    var calcPeriod = _effectiveCalcPeriodForCheckpoint(abonent || abonentId, summary);
+    var ledgerKey = "payments_" + uid;
+    var fingerprints = {
+      ledger: _calcFingerprintFromRaw(ledgerKey),
+      tariffs: _calcFingerprintObject("tariffs", { owner: owner, tariffsOwner: _getRawScoped("tariffs_" + owner, owner), tariffsV1: _getProjectRaw("tariffs_v1") }),
+      refinancing: _calcFingerprintObject("refinancing", { refinancingV1: _getProjectRaw("refinancing_v1"), normal: _getProjectRaw("refinancing_rates_normal_v1"), moratorium: _getProjectRaw("refinancing_rates_moratorium_v1") }),
+      excludes: _calcFingerprintFromRaw(excludePeriodsStorageKey(abonentId)),
+      moratorium: _calcFingerprintFromRaw("moratorium_" + uid),
+      responsibility: _calcFingerprintObject("responsibility", _responsibilitySnapshotForCheckpoint(abonentId, uid)),
+      calcPeriod: _calcFingerprintObject("calc_period", calcPeriod.value)
+    };
+    return {
+      uid: uid,
+      abonentId: abonentId,
+      generatedAt: new Date().toISOString(),
+      periodFrom: String(summary && (summary.periodFrom || summary.from) || calcPeriod.effectiveFrom || ""),
+      periodTo: String(summary && (summary.periodTo || summary.to) || calcPeriod.effectiveTo || ""),
+      calcPeriodKey: calcPeriod.key,
+      calcPeriodValue: calcPeriod.value,
+      ledgerKey: ledgerKey,
+      ledgerFingerprint: fingerprints.ledger,
+      tariffsFingerprint: fingerprints.tariffs,
+      refinancingFingerprint: fingerprints.refinancing,
+      excludesFingerprint: fingerprints.excludes,
+      moratoriumFingerprint: fingerprints.moratorium,
+      responsibilityFingerprint: fingerprints.responsibility,
+      calcPeriodFingerprint: fingerprints.calcPeriod,
+      summaryFingerprint: _calcFingerprintObject("summary", summary || null),
+      fingerprints: fingerprints
+    };
+  }
+
+  function _validateCalcSummaryStructure(summary, uid, abonentId) {
+    if (!summary || typeof summary !== "object" || Array.isArray(summary)) return "SUMMARY_NOT_OBJECT";
+    if (String(summary.uid || "").trim() !== uid) return "SUMMARY_UID_MISMATCH";
+    if (String(summary.abonentId || "").trim() !== abonentId) return "SUMMARY_ABONENT_MISMATCH";
+    if (!_parseCalcDateISO(summary.periodFrom || summary.from) || !_parseCalcDateISO(summary.periodTo || summary.to)) return "SUMMARY_PERIOD_INVALID";
+    var total = summary.totalDebt !== undefined ? summary.totalDebt : (summary.total !== undefined ? summary.total : summary.total_debt);
+    if (!Number.isFinite(Number(total))) return "SUMMARY_TOTAL_INVALID";
+    return "";
+  }
+
+  function _validateCalcCheckpointStructure(checkpoint, uid, abonentId) {
+    if (!checkpoint || typeof checkpoint !== "object" || Array.isArray(checkpoint)) return "CHECKPOINT_NOT_OBJECT";
+    if (String(checkpoint.uid || "").trim() !== uid) return "CHECKPOINT_UID_MISMATCH";
+    if (String(checkpoint.abonentId || "").trim() !== abonentId) return "CHECKPOINT_ABONENT_MISMATCH";
+    if (!_parseCalcDateISO(checkpoint.periodFrom) || !_parseCalcDateISO(checkpoint.periodTo)) return "CHECKPOINT_PERIOD_INVALID";
+    if (!checkpoint.generatedAt || !checkpoint.fingerprints || typeof checkpoint.fingerprints !== "object") return "CHECKPOINT_FINGERPRINTS_MISSING";
+    if (!checkpoint.ledgerFingerprint || !checkpoint.tariffsFingerprint || !checkpoint.refinancingFingerprint || !checkpoint.excludesFingerprint || !checkpoint.moratoriumFingerprint || !checkpoint.responsibilityFingerprint || !checkpoint.calcPeriodFingerprint) return "CHECKPOINT_REQUIRED_FINGERPRINT_MISSING";
+    return "";
+  }
+
+  function _calcCheckpointMismatchReason(current, stored) {
+    var fields = ["ledger", "tariffs", "refinancing", "excludes", "moratorium", "responsibility", "calcPeriod"];
+    for (var i = 0; i < fields.length; i++) {
+      var name = fields[i];
+      var a = current && current.fingerprints && current.fingerprints[name];
+      var b = stored && stored.fingerprints && stored.fingerprints[name];
+      if (_stableCalcStringify(a) !== _stableCalcStringify(b)) return String(name).toUpperCase() + "_FINGERPRINT_MISMATCH";
+    }
+    if (_stableCalcStringify(current && current.summaryFingerprint) !== _stableCalcStringify(stored && stored.summaryFingerprint)) return "SUMMARY_FINGERPRINT_MISMATCH";
+    if (String(current.periodFrom || "") !== String(stored.periodFrom || "") || String(current.periodTo || "") !== String(stored.periodTo || "")) return "PERIOD_MISMATCH";
+    return "";
   }
 
   function readCalcSummary(abonentOrId) {
-    var key = resolveCalcSummaryKey(abonentOrId);
-    if (!key) return null;
-    var raw = _getProjectRaw(key);
-    if (raw === null || raw === undefined || raw === "") return null;
-    try {
-      var parsed = JSON.parse(String(raw));
-      return parsed && typeof parsed === "object" ? parsed : null;
-    } catch (e) {
-      console.warn("[calc-summary][read-failed]", { key: key, error: e && e.message ? e.message : String(e) });
-      return null;
+    var summaryKey = resolveCalcSummaryKey(abonentOrId);
+    var checkpointKey = resolveCalcCheckpointKey(abonentOrId);
+    var uid = _resolveAbonentUid(abonentOrId);
+    var found = _findAbonentByIdOrUid(abonentOrId);
+    var abonentId = String(found && found.id || (typeof abonentOrId === "object" ? abonentOrId && abonentOrId.id : abonentOrId) || "").trim();
+    _calcLog("[calc-summary][integrity-check]", { uid: uid, abonentId: abonentId, summaryKey: summaryKey, checkpointKey: checkpointKey });
+    if (!summaryKey || !checkpointKey || !uid || !abonentId) return _calcSummaryState("missing", abonentOrId, null, null, "UID_REQUIRED");
+
+    var summaryRead = _readCalcSummaryJson(summaryKey, "[calc-summary][invalid-summary]");
+    if (summaryRead.status === "missing") return _calcSummaryState("missing", abonentOrId, null, null, "SUMMARY_MISSING");
+    if (summaryRead.status === "invalid_json") return _calcSummaryState("invalid_json", abonentOrId, null, null, "SUMMARY_JSON_INVALID");
+
+    var checkpointRead = _readCalcSummaryJson(checkpointKey, "[calc-summary][invalid-checkpoint]");
+    if (checkpointRead.status === "missing") {
+      _calcWarn("[calc-summary][invalid-checkpoint]", { uid: uid, abonentId: abonentId, key: checkpointKey, reason: "CHECKPOINT_MISSING" });
+      return _calcSummaryState("invalid_structure", abonentOrId, summaryRead.value, null, "CHECKPOINT_MISSING");
     }
+    if (checkpointRead.status === "invalid_json") return _calcSummaryState("invalid_json", abonentOrId, summaryRead.value, null, "CHECKPOINT_JSON_INVALID");
+
+    var summaryReason = _validateCalcSummaryStructure(summaryRead.value, uid, abonentId);
+    if (summaryReason) {
+      _calcWarn("[calc-summary][invalid-summary]", { uid: uid, abonentId: abonentId, key: summaryKey, reason: summaryReason });
+      return _calcSummaryState("invalid_structure", abonentOrId, summaryRead.value, checkpointRead.value, summaryReason);
+    }
+    var checkpointReason = _validateCalcCheckpointStructure(checkpointRead.value, uid, abonentId);
+    if (checkpointReason) {
+      _calcWarn("[calc-summary][invalid-checkpoint]", { uid: uid, abonentId: abonentId, key: checkpointKey, reason: checkpointReason });
+      return _calcSummaryState("invalid_structure", abonentOrId, summaryRead.value, checkpointRead.value, checkpointReason);
+    }
+
+    if (isCalcDirty(abonentOrId)) {
+      _calcLog("[calc-summary][dirty]", { uid: uid, abonentId: abonentId, reason: "DIRTY_FLAG" });
+      return _calcSummaryState("dirty", abonentOrId, summaryRead.value, checkpointRead.value, "DIRTY_FLAG");
+    }
+
+    var currentCheckpoint = _buildCalcCheckpoint(abonentOrId, summaryRead.value);
+    var mismatchReason = _calcCheckpointMismatchReason(currentCheckpoint, checkpointRead.value);
+    if (mismatchReason) {
+      _calcWarn("[calc-summary][checkpoint-mismatch]", { uid: uid, abonentId: abonentId, reason: mismatchReason });
+      return _calcSummaryState("checkpoint_mismatch", abonentOrId, summaryRead.value, checkpointRead.value, mismatchReason);
+    }
+
+    _calcLog("[calc-summary][fresh]", { uid: uid, abonentId: abonentId });
+    return _calcSummaryState("fresh", abonentOrId, summaryRead.value, checkpointRead.value, "OK");
   }
 
   function writeCalcSummary(abonentOrId, summary) {
     if (!Data.ensureWriteOrExplain()) return false;
     var summaryKey = resolveCalcSummaryKey(abonentOrId);
+    var checkpointKey = resolveCalcCheckpointKey(abonentOrId);
     var dirtyKey = resolveCalcDirtyKey(abonentOrId);
-    if (!summaryKey || !dirtyKey) return false;
-    var payload = Object.assign({}, (summary && typeof summary === "object") ? summary : {}, { updatedAt: new Date().toISOString() });
-    var ok = _setProjectRaw(summaryKey, JSON.stringify(payload));
-    if (ok !== false) _setProjectRaw(dirtyKey, "0");
-    return ok;
+    var found = _findAbonentByIdOrUid(abonentOrId);
+    var abonentId = String(found && found.id || (typeof abonentOrId === "object" ? abonentOrId && abonentOrId.id : abonentOrId) || summary && summary.abonentId || "").trim();
+    var uid = _resolveAbonentUid(abonentOrId) || String(summary && summary.uid || "").trim();
+    if (!summaryKey || !checkpointKey || !dirtyKey || !uid || !abonentId) return false;
+    var payload = Object.assign({}, (summary && typeof summary === "object" && !Array.isArray(summary)) ? summary : {}, { uid: uid, abonentId: abonentId, updatedAt: new Date().toISOString() });
+    var summaryReason = _validateCalcSummaryStructure(payload, uid, abonentId);
+    if (summaryReason) {
+      _calcWarn("[calc-summary][invalid-summary]", { uid: uid, abonentId: abonentId, key: summaryKey, reason: summaryReason });
+      return false;
+    }
+    var checkpoint = _buildCalcCheckpoint(abonentOrId, payload);
+    var checkpointReason = _validateCalcCheckpointStructure(checkpoint, uid, abonentId);
+    if (checkpointReason) {
+      _calcWarn("[calc-summary][invalid-checkpoint]", { uid: uid, abonentId: abonentId, key: checkpointKey, reason: checkpointReason });
+      return false;
+    }
+    _calcLog("[calc-summary][write]", { uid: uid, abonentId: abonentId, summaryKey: summaryKey, checkpointKey: checkpointKey });
+    _calcLog("[calc-summary][checkpoint]", { uid: uid, abonentId: abonentId, checkpoint: checkpoint });
+    var checkpointOk = _setProjectRaw(checkpointKey, JSON.stringify(checkpoint));
+    if (checkpointOk === false) return false;
+    var summaryOk = _setProjectRaw(summaryKey, JSON.stringify(payload));
+    if (summaryOk === false) return false;
+    _setProjectRaw(dirtyKey, "0");
+    return summaryOk;
   }
+
 
 
 
@@ -725,25 +929,8 @@
 
       var summaryOk = writeCalcSummary(abonent, summary);
       if (summaryOk === false) throw new Error("SUMMARY_WRITE_FAILED");
-      _calcLog("[calc-summary][recalc] summary-written", { abonentId: abonentId, uid: uid, key: resolveCalcSummaryKey(abonent) });
-
-      var checkpointKey = resolveCalcCheckpointKey(abonent);
-      var checkpoint = {
-        uid: uid,
-        abonentId: abonentId,
-        timestamp: new Date().toISOString(),
-        startedAt: startedAt,
-        periodFrom: periodFrom,
-        periodTo: periodTo,
-        ledgerKey: ledgerKey,
-        ledgerHash: _simpleCalcHash(raw || "[]"),
-        rowsTotal: rows.length,
-        rowsInPeriod: periodRows.length
-      };
-      if (checkpointKey) _setProjectRaw(checkpointKey, JSON.stringify(checkpoint));
-      var dirtyKey = resolveCalcDirtyKey(abonent);
-      if (dirtyKey) _setProjectRaw(dirtyKey, "0");
-      _calcLog("[calc-summary][recalc] dirty-cleared", { abonentId: abonentId, uid: uid, key: dirtyKey });
+      _calcLog("[calc-summary][recalc] summary-written", { abonentId: abonentId, uid: uid, key: resolveCalcSummaryKey(abonent), checkpointKey: resolveCalcCheckpointKey(abonent) });
+      _calcLog("[calc-summary][recalc] dirty-cleared", { abonentId: abonentId, uid: uid, key: resolveCalcDirtyKey(abonent) });
 
       return { ok: true, uid: uid, abonentId: abonentId, periodFrom: periodFrom, periodTo: periodTo, summary: summary, reason: "OK" };
     } catch (e) {
@@ -1136,11 +1323,23 @@
     return migrated;
   }
 
+  function _responsibilityDbFingerprint(db) {
+    var src = db || {};
+    return _simpleCalcHash(_stableCalcStringify({ premises: src.premises || {}, links: Array.isArray(src.links) ? src.links : [] }));
+  }
+
   function saveToStorage(db) {
     if (!_canWriteStorage()) return false;
     migrateLegacyCalcPeriodKeysForDb(db);
     try {
+      var beforeRaw = _getRawScoped(KEY_DB);
+      var beforeHash = "";
+      if (beforeRaw) {
+        try { beforeHash = _responsibilityDbFingerprint(JSON.parse(String(beforeRaw))); } catch (e0) { beforeHash = "invalid"; }
+      }
+      var afterHash = _responsibilityDbFingerprint(db);
       _setRawScoped(KEY_DB, JSON.stringify(db));
+      if (beforeHash && beforeHash !== afterHash) __markAllCalcDirty("responsibility_changed");
       return true;
     } catch (e) {
       return false;
@@ -2425,8 +2624,20 @@ function __markAllCalcDirty(reason) {
 function __markCalcDirtyForStorageMutation(key) {
   var k = String(key || "");
   if (!k || k.indexOf("calc_dirty_") === 0 || k.indexOf("calc_summary_") === 0 || k.indexOf("calc_checkpoint_") === 0) return;
-  if (k.indexOf("tariff") >= 0 || k.indexOf("refinancing_rates_") === 0) {
-    __markAllCalcDirty(k.indexOf("refinancing_rates_") === 0 ? "refinancing_rates_changed" : "tariffs_changed");
+  if (k.indexOf("tariff") >= 0 || k.indexOf("refinancing_rates_") === 0 || k === "refinancing_v1") {
+    __markAllCalcDirty(k.indexOf("refinancing") === 0 ? "refinancing_rates_changed" : "tariffs_changed");
+    return;
+  }
+  if (k.indexOf("payments_") === 0) {
+    markCalcDirty(k.slice("payments_".length), "payments_changed");
+    return;
+  }
+  if (k.indexOf("calc_period_active_") === 0) {
+    markCalcDirty(k.slice("calc_period_active_".length), "calc_period_changed");
+    return;
+  }
+  if (k.indexOf("calc_period_") === 0) {
+    markCalcDirty(k.slice("calc_period_".length), "calc_period_changed");
     return;
   }
   if (k.indexOf("exclude_periods_") === 0) {

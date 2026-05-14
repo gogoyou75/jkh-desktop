@@ -824,13 +824,14 @@ function renderAbonentCalcSummaryStatus(){
     const box = document.getElementById("abonentCalcSummaryStatus");
     if (!box) return;
     const id = getAbonentIdFromURL();
-    const summary = (window.Data && typeof window.Data.readCalcSummary === "function") ? window.Data.readCalcSummary(id) : null;
-    const dirty = (window.Data && typeof window.Data.isCalcDirty === "function") ? window.Data.isCalcDirty(id) : true;
-    if (!summary || dirty) {
+    const summaryState = (window.Data && typeof window.Data.readCalcSummary === "function") ? window.Data.readCalcSummary(id) : null;
+    const summary = (summaryState && summaryState.status === "fresh") ? summaryState.summary : null;
+    if (!summary) {
         box.style.borderColor = "#e0a800";
         box.style.background = "#fff8e1";
         box.style.color = "#5f4300";
-        box.innerHTML = 'Требуется пересчёт <button class="btn" type="button" onclick="recalculateAbonentCalcSummaryFromCard()" style="margin-left:10px;">Пересчитать</button>';
+        const reason = summaryState && summaryState.reason ? ' (' + String(summaryState.reason).replace(/[<>&"]/g, function(ch){ return { '<':'&lt;', '>':'&gt;', '&':'&amp;', '"':'&quot;' }[ch]; }) + ')' : '';
+        box.innerHTML = 'Требуется пересчёт' + reason + ' <button class="btn" type="button" onclick="recalculateAbonentCalcSummaryFromCard()" style="margin-left:10px;">Пересчитать</button>';
         return;
     }
     const total = calcSummaryCardNumber(summary, ["totalDebt", "total_debt", "total", "debtTotal"]);

@@ -1644,9 +1644,14 @@ function calcRowBase(r) {
 
 function readCurrentCalcSummaryState(){
   const id = getAbonentId();
-  const summary = (window.Data && typeof window.Data.readCalcSummary === "function") ? window.Data.readCalcSummary(id) : null;
-  const dirty = (window.Data && typeof window.Data.isCalcDirty === "function") ? window.Data.isCalcDirty(id) : true;
-  return { summary: summary, dirty: dirty, ready: !!summary && !dirty };
+  const state = (window.Data && typeof window.Data.readCalcSummary === "function") ? window.Data.readCalcSummary(id) : null;
+  return {
+    status: state && state.status ? state.status : "missing",
+    summary: state && state.status === "fresh" ? state.summary : null,
+    checkpoint: state ? state.checkpoint : null,
+    reason: state && state.reason ? state.reason : "SUMMARY_NOT_FRESH",
+    ready: !!(state && state.status === "fresh" && state.summary)
+  };
 }
 
 function summaryNumber(summary, names){
@@ -1681,7 +1686,8 @@ function renderCalcSummaryStatus(state){
       box.style.borderColor = "#e0a800";
       box.style.background = "#fff8e1";
       box.style.color = "#5f4300";
-      box.innerHTML = '<span>Требуется пересчёт</span> <button type="button" id="calcSummaryRecalcBtn" style="margin-left:10px;font-weight:700;">Пересчитать</button>';
+      const reason = state && state.reason ? ' (' + escapeHtml(String(state.reason)) + ')' : '';
+      box.innerHTML = '<span>Требуется пересчёт' + reason + '</span> <button type="button" id="calcSummaryRecalcBtn" style="margin-left:10px;font-weight:700;">Пересчитать</button>';
     }
     const btn = document.getElementById("calcSummaryRecalcBtn");
     if (btn) btn.onclick = function(){ recalculateCurrentCalcSummaryFromTable(btn); };

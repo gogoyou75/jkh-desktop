@@ -1,5 +1,13 @@
 # CHANGELOG
 
+## 2026-05-14 — Calc summary integrity
+
+- Усилен lifecycle `calc_summary_<uid>`: summary теперь считается cache-derived entity и используется только при `integrity=fresh`.
+- `Data.readCalcSummary(...)` возвращает structured state со статусами `fresh`, `missing`, `dirty`, `checkpoint_mismatch`, `invalid_json`, `invalid_structure`.
+- `Data.writeCalcSummary(...)` записывает summary вместе с `calc_checkpoint_<uid>` и валидирует структуру summary/checkpoint перед сохранением.
+- Checkpoint фиксирует период расчёта и lightweight fingerprints для ledger, тарифов, ставок рефинансирования, исключений, моратория, responsibility data и calc period.
+- UI (`payment_table`, карточка абонента, индекс) больше не показывает старые totals при dirty/mismatch/invalid состояниях и выводит «Требуется пересчёт».
+
 ## 2026-05-12 — Import XLS: единый сборщик новых платежей
 
 - import_xls: добавлен единый сборщик платежей `collectImportPaymentsToApply(...)`.
