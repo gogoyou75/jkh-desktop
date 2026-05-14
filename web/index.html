@@ -582,14 +582,21 @@ function filterLedgerRowsByResponsibility(abonentId, arr){
 // - endDate (умно):
 //    - если totalDebt > 0 -> сегодня
 //    - если totalDebt == 0 -> max(paid_date)
+function calcSummaryRecalcReason(state){
+    if (state && (state.status === "engine_version_mismatch" || state.status === "summary_version_mismatch")) return "Изменена версия расчёта";
+    return state && state.reason ? String(state.reason) : "";
+}
+
 function calcTotalsFromPayments(id, abonentObj){
     const summaryState = (window.Data && typeof window.Data.readCalcSummary === "function") ? window.Data.readCalcSummary(id) : null;
     const summary = (summaryState && summaryState.status === "fresh") ? summaryState.summary : null;
 
     if (!summary) {
+        const reason = calcSummaryRecalcReason(summaryState);
         return {
             status: "Требуется пересчёт",
-            totalDebt: "Требуется пересчёт",
+            recalcReason: reason,
+            totalDebt: reason ? "Требуется пересчёт (" + reason + ")" : "Требуется пересчёт",
             penalty: "",
             nachisleno: "",
             oplacheno: "",
@@ -678,7 +685,7 @@ function rebuildIndexRows(){
         const hasClosedLink = ownLinks.some(l => !!String(l?.dateTo || '').trim());
         const hasNoActiveButClosed = !activeLink && hasClosedLink;
         const isMerged = String(premise?.status || '').trim() === 'merged';
-        const rowStatusMark = totals?.status || (isMerged ? 'объединена' : (hasNoActiveButClosed ? 'расчёт остановлен' : ''));
+        const rowStatusMark = totals?.status ? (totals.recalcReason ? totals.status + ' (' + totals.recalcReason + ')' : totals.status) : (isMerged ? 'объединена' : (hasNoActiveButClosed ? 'расчёт остановлен' : ''));
         allRows.push({
             id,
             fam,

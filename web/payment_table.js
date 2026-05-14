@@ -1642,6 +1642,11 @@ function calcRowBase(r) {
   r.__base_total_debt = 0;
 }
 
+function calcSummaryRecalcReason(state){
+  if (state && (state.status === "engine_version_mismatch" || state.status === "summary_version_mismatch")) return "Изменена версия расчёта";
+  return state && state.reason ? String(state.reason) : "SUMMARY_NOT_FRESH";
+}
+
 function readCurrentCalcSummaryState(){
   const id = getAbonentId();
   const state = (window.Data && typeof window.Data.readCalcSummary === "function") ? window.Data.readCalcSummary(id) : null;
@@ -1649,7 +1654,7 @@ function readCurrentCalcSummaryState(){
     status: state && state.status ? state.status : "missing",
     summary: state && state.status === "fresh" ? state.summary : null,
     checkpoint: state ? state.checkpoint : null,
-    reason: state && state.reason ? state.reason : "SUMMARY_NOT_FRESH",
+    reason: calcSummaryRecalcReason(state),
     ready: !!(state && state.status === "fresh" && state.summary)
   };
 }

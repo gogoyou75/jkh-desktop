@@ -1499,12 +1499,14 @@ Fatal-правила:
 - исключённые периоды `exclude_periods_<abonentId>`;
 - мораторий;
 - responsibility data (`premises` / `links` / запись абонента);
-- выбранный расчётный период `calc_period_<uid>` / `calc_period_active_<uid>`.
+- выбранный расчётный период `calc_period_<uid>` / `calc_period_active_<uid>`;
+- статические версии финансовой логики: `CALC_SUMMARY_ENGINE_VERSION` / `CALC_SUMMARY_CANON_VERSION`;
+- версия формата summary: `CALC_SUMMARY_FORMAT_VERSION`.
 
 UI имеет право использовать `calc_summary_<uid>` только если `Data.readCalcSummary(...)` вернул `status: "fresh"`.
-Любой другой статус (`missing`, `dirty`, `checkpoint_mismatch`, `invalid_json`, `invalid_structure`) обязан блокировать показ старых totals как актуальных и показывать пользователю «Требуется пересчёт».
+Любой другой статус (`missing`, `dirty`, `checkpoint_mismatch`, `engine_version_mismatch`, `summary_version_mismatch`, `invalid_json`, `invalid_structure`) обязан блокировать показ старых totals как актуальных и показывать пользователю «Требуется пересчёт». Для version mismatch UI показывает reason «Изменена версия расчёта».
 
-`calc_checkpoint_<uid>` хранится вместе с summary и фиксирует `uid`, `abonentId`, `generatedAt`, период расчёта, ключ/значение расчётного периода и lightweight fingerprints для ledger, тарифов, ставок, исключений, моратория и responsibility data.
-Checkpoint проверяется при каждом чтении summary. Несовпадение fingerprint не исправляется автоматически, не очищается молча и не запускает автоматический пересчёт.
+`calc_checkpoint_<uid>` хранится вместе с summary и фиксирует `uid`, `abonentId`, `generatedAt`, `calcEngineVersion`, `summaryFormatVersion`, `canonVersion`, период расчёта, ключ/значение расчётного периода и lightweight fingerprints для ledger, тарифов, ставок, исключений, моратория и responsibility data.
+Checkpoint проверяется при каждом чтении summary. Несовпадение fingerprint или версии не исправляется автоматически, не очищается молча, не считается совместимым автоматически и не запускает автоматический пересчёт. Версии являются отдельными ручными константами и не вычисляются через hash файлов.
 
 Повреждённые summary/checkpoint не превращаются в нулевые totals и не заменяются пустыми объектами. Допустимы только логирование, статус `invalid_json`/`invalid_structure` и явное предложение выполнить пересчёт.

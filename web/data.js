@@ -8,6 +8,11 @@
   // CONFIG
   // ============================================================
   const KEY_DB = "abonents_db_v1";
+  const CALC_SUMMARY_ENGINE_VERSION = "calc-engine-v1.9.4";
+  const CALC_SUMMARY_CANON_VERSION = "financial-canon-v1.9.4";
+  const CALC_SUMMARY_FORMAT_VERSION = "calc-summary-format-v1";
+  window.JKH_CALC_CANON_VERSION = CALC_SUMMARY_CANON_VERSION;
+
 
   // ============================================================
   // ✅ JKH_REMOTE_DATA_SYNC v1 (2026-02-10)
@@ -612,6 +617,9 @@
       uid: uid,
       abonentId: abonentId,
       generatedAt: new Date().toISOString(),
+      calcEngineVersion: CALC_SUMMARY_ENGINE_VERSION,
+      summaryFormatVersion: CALC_SUMMARY_FORMAT_VERSION,
+      canonVersion: CALC_SUMMARY_CANON_VERSION,
       periodFrom: String(summary && (summary.periodFrom || summary.from) || calcPeriod.effectiveFrom || ""),
       periodTo: String(summary && (summary.periodTo || summary.to) || calcPeriod.effectiveTo || ""),
       calcPeriodKey: calcPeriod.key,
@@ -645,8 +653,16 @@
     if (String(checkpoint.abonentId || "").trim() !== abonentId) return "CHECKPOINT_ABONENT_MISMATCH";
     if (!_parseCalcDateISO(checkpoint.periodFrom) || !_parseCalcDateISO(checkpoint.periodTo)) return "CHECKPOINT_PERIOD_INVALID";
     if (!checkpoint.generatedAt || !checkpoint.fingerprints || typeof checkpoint.fingerprints !== "object") return "CHECKPOINT_FINGERPRINTS_MISSING";
+    if (!checkpoint.calcEngineVersion || !checkpoint.summaryFormatVersion || !checkpoint.canonVersion) return "CHECKPOINT_VERSION_MISSING";
     if (!checkpoint.ledgerFingerprint || !checkpoint.tariffsFingerprint || !checkpoint.refinancingFingerprint || !checkpoint.excludesFingerprint || !checkpoint.moratoriumFingerprint || !checkpoint.responsibilityFingerprint || !checkpoint.calcPeriodFingerprint) return "CHECKPOINT_REQUIRED_FINGERPRINT_MISSING";
     return "";
+  }
+
+  function _calcCheckpointVersionMismatch(stored) {
+    if (String(stored && stored.calcEngineVersion || "") !== CALC_SUMMARY_ENGINE_VERSION) return { status: "engine_version_mismatch", reason: "Изменена версия расчёта" };
+    if (String(stored && stored.canonVersion || "") !== CALC_SUMMARY_CANON_VERSION) return { status: "engine_version_mismatch", reason: "Изменена версия расчёта" };
+    if (String(stored && stored.summaryFormatVersion || "") !== CALC_SUMMARY_FORMAT_VERSION) return { status: "summary_version_mismatch", reason: "Изменена версия расчёта" };
+    return null;
   }
 
   function _calcCheckpointMismatchReason(current, stored) {
@@ -681,6 +697,12 @@
       return _calcSummaryState("invalid_structure", abonentOrId, summaryRead.value, null, "CHECKPOINT_MISSING");
     }
     if (checkpointRead.status === "invalid_json") return _calcSummaryState("invalid_json", abonentOrId, summaryRead.value, null, "CHECKPOINT_JSON_INVALID");
+
+    var versionMismatch = _calcCheckpointVersionMismatch(checkpointRead.value);
+    if (versionMismatch) {
+      _calcWarn("[calc-summary][version-mismatch]", { uid: uid, abonentId: abonentId, key: checkpointKey, status: versionMismatch.status, reason: versionMismatch.reason });
+      return _calcSummaryState(versionMismatch.status, abonentOrId, summaryRead.value, checkpointRead.value, versionMismatch.reason);
+    }
 
     var summaryReason = _validateCalcSummaryStructure(summaryRead.value, uid, abonentId);
     if (summaryReason) {
@@ -1564,6 +1586,9 @@
 
   var Data = {
     __canon_v16: true,
+    CALC_SUMMARY_ENGINE_VERSION: CALC_SUMMARY_ENGINE_VERSION,
+    CALC_SUMMARY_CANON_VERSION: CALC_SUMMARY_CANON_VERSION,
+    CALC_SUMMARY_FORMAT_VERSION: CALC_SUMMARY_FORMAT_VERSION,
     normalizeExcludePeriodsList: normalizeExcludePeriodsList,
     readCanonicalExcludePeriods: readCanonicalExcludePeriods,
     writeCanonicalExcludePeriods: writeCanonicalExcludePeriods,
@@ -2604,6 +2629,9 @@
 
 window.getCalcPeriodStorageKey = resolveCalcPeriodStorageKey;
 window.getCalcPeriodActiveStorageKey = resolveCalcPeriodActiveStorageKey;
+window.CALC_SUMMARY_ENGINE_VERSION = CALC_SUMMARY_ENGINE_VERSION;
+window.CALC_SUMMARY_CANON_VERSION = CALC_SUMMARY_CANON_VERSION;
+window.CALC_SUMMARY_FORMAT_VERSION = CALC_SUMMARY_FORMAT_VERSION;
 window.resolveCalcSummaryKey = resolveCalcSummaryKey;
 window.resolveCalcCheckpointKey = resolveCalcCheckpointKey;
 window.resolveCalcDirtyKey = resolveCalcDirtyKey;

@@ -1,5 +1,12 @@
 # CHANGELOG
 
+## 2026-05-14 — Calc engine versioning
+
+- `calc_checkpoint_<uid>` теперь хранит `calcEngineVersion`, `canonVersion` и `summaryFormatVersion`.
+- `Data.readCalcSummary(...)` инвалидирует старые summary со статусами `engine_version_mismatch` / `summary_version_mismatch`, если checkpoint создан другой версией расчётной логики или формата summary.
+- UI (`payment_table`, карточка абонента, индекс) не использует totals при version mismatch и показывает «Требуется пересчёт (Изменена версия расчёта)».
+- Зафиксировано правило: `calc_summary_<uid>` зависит от данных, версии финансовой логики и версии формата summary; silent upgrade/patch запрещён.
+
 ## 2026-05-14 — Calc summary integrity
 
 - Усилен lifecycle `calc_summary_<uid>`: summary теперь считается cache-derived entity и используется только при `integrity=fresh`.
