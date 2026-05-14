@@ -1,0 +1,5 @@
+{
+  "scripts": {
+    "test:calc-summary:acceptance": "node --test tests/calc_summary_acceptance.test.js"
+  }
+}
