@@ -855,7 +855,8 @@ function renderAbonentCalcSummaryStatus(){
         const rawReason = (__abonentPeriodAccrualsMissingFor === String(id || "")) ? "period_accruals_missing" : abonentCalcSummaryRecalcReason(summaryState);
         const reason = rawReason ? ' (' + rawReason.replace(/[<>&"]/g, function(ch){ return { '<':'&lt;', '>':'&gt;', '&':'&amp;', '"':'&quot;' }[ch]; }) + ')' : '';
         const prepareButton = (__abonentPeriodAccrualsMissingFor === String(id || "")) ? ' <button class="btn" type="button" onclick="prepareAbonentPeriodAccrualsFromCard()" style="margin-left:10px;">Подготовить начисления</button>' : '';
-        box.innerHTML = 'Требуется пересчёт' + reason + prepareButton + ' <button class="btn" type="button" onclick="recalculateAbonentCalcSummaryFromCard()" style="margin-left:10px;">Пересчитать</button>';
+        const prepareAndRecalcButton = (__abonentPeriodAccrualsMissingFor === String(id || "")) ? ' <button class="btn" type="button" onclick="prepareAndRecalculateAbonentCalcSummaryFromCard()" style="margin-left:10px;">Подготовить и пересчитать</button>' : '';
+        box.innerHTML = 'Требуется пересчёт' + reason + prepareButton + prepareAndRecalcButton + ' <button class="btn" type="button" onclick="recalculateAbonentCalcSummaryFromCard()" style="margin-left:10px;">Пересчитать</button>';
         return;
     }
     const total = calcSummaryCardNumber(summary, ["totalDebt", "total_debt", "total", "debtTotal"]);
@@ -895,6 +896,34 @@ async function prepareAbonentPeriodAccrualsFromCard(){
     }
 }
 window.prepareAbonentPeriodAccrualsFromCard = prepareAbonentPeriodAccrualsFromCard;
+
+async function prepareAndRecalculateAbonentCalcSummaryFromCard(){
+    const box = document.getElementById("abonentCalcSummaryStatus");
+    const id = getAbonentIdFromURL();
+    try {
+        if (!window.Data || typeof window.Data.prepareAndRecalculateCalcSummary !== "function") throw new Error("Data.prepareAndRecalculateCalcSummary not available");
+        if (box) box.innerHTML = 'Подготовка начислений и пересчёт итогов…';
+        __abonentPeriodAccrualsPreparedFor = "";
+        const res = window.Data.prepareAndRecalculateCalcSummary(id, { source: "abonent_card" });
+        if (!res || res.ok !== true) throw new Error(res && res.reason ? res.reason : "PREPARE_AND_RECALC_FAILED");
+        __abonentPeriodAccrualsMissingFor = "";
+        __abonentPeriodAccrualsPreparedFor = "";
+        renderAbonentCalcSummaryStatus();
+        try { if (typeof window.__loadPaymentTable === "function") window.__loadPaymentTable("prepare-and-recalc"); } catch(e) {}
+        try {
+            if (window.Data && typeof Data.flushDbToServer === "function") await Data.flushDbToServer();
+        } catch (flushErr) {
+            try { console.warn("[prepare-and-recalc] server-flush-failed", flushErr); } catch (_) {}
+        }
+    } catch (e) {
+        const msg = e && e.message ? e.message : String(e);
+        try { console.warn("[prepare-and-recalc] failed", e); } catch (_) {}
+        alert("Ошибка подготовки и пересчёта: " + msg);
+        renderAbonentCalcSummaryStatus();
+    }
+}
+window.prepareAndRecalculateAbonentCalcSummaryFromCard = prepareAndRecalculateAbonentCalcSummaryFromCard;
+
 
 async function recalculateAbonentCalcSummaryFromCard(){
     const box = document.getElementById("abonentCalcSummaryStatus");

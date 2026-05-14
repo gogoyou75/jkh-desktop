@@ -1713,11 +1713,14 @@ function renderCalcSummaryStatus(state){
       } else {
         const reason = state && state.reason ? ' (' + escapeHtml(String(state.reason)) + ')' : '';
         const prepareBtn = state && state.accrualsMissing ? ' <button type="button" id="calcSummaryPrepareAccrualsBtn" style="margin-left:10px;font-weight:700;">Подготовить начисления</button>' : '';
-        box.innerHTML = '<span>Требуется пересчёт' + reason + '</span>' + prepareBtn + ' <button type="button" id="calcSummaryRecalcBtn" style="margin-left:10px;font-weight:700;">Пересчитать</button>';
+        const prepareAndRecalcBtn = state && state.accrualsMissing ? ' <button type="button" id="calcSummaryPrepareAndRecalcBtn" style="margin-left:10px;font-weight:700;">Подготовить и пересчитать</button>' : '';
+        box.innerHTML = '<span>Требуется пересчёт' + reason + '</span>' + prepareBtn + prepareAndRecalcBtn + ' <button type="button" id="calcSummaryRecalcBtn" style="margin-left:10px;font-weight:700;">Пересчитать</button>';
       }
     }
     const prepareBtn = document.getElementById("calcSummaryPrepareAccrualsBtn");
     if (prepareBtn) prepareBtn.onclick = function(){ prepareCurrentPeriodAccrualsFromTable(prepareBtn); };
+    const prepareAndRecalcBtn = document.getElementById("calcSummaryPrepareAndRecalcBtn");
+    if (prepareAndRecalcBtn) prepareAndRecalcBtn.onclick = function(){ prepareAndRecalculateCurrentCalcSummaryFromTable(prepareAndRecalcBtn); };
     const btn = document.getElementById("calcSummaryRecalcBtn");
     if (btn) btn.onclick = function(){ recalculateCurrentCalcSummaryFromTable(btn); };
   } catch (e) {
@@ -1774,6 +1777,41 @@ async function prepareCurrentPeriodAccrualsFromTable(button){
     try { console.warn("[period-accrual-prepare] failed", e); } catch (_) {}
     alert("Ошибка подготовки начислений: " + msg);
     if (btn) { btn.disabled = false; btn.textContent = oldText || "Подготовить начисления"; }
+  }
+}
+
+
+
+async function prepareAndRecalculateCurrentCalcSummaryFromTable(button){
+  const btn = button || document.getElementById("calcSummaryPrepareAndRecalcBtn");
+  const id = getAbonentId();
+  if (!id) return;
+  const oldText = btn ? btn.textContent : "";
+  try {
+    if (!window.Data || typeof window.Data.prepareAndRecalculateCalcSummary !== "function") throw new Error("Data.prepareAndRecalculateCalcSummary not available");
+    if (btn) { btn.disabled = true; btn.textContent = "Подготовка и пересчёт…"; }
+    __paymentPeriodAccrualsPrepared = false;
+    const res = window.Data.prepareAndRecalculateCalcSummary(id, { source: "payment_table" });
+    if (!res || res.ok !== true) throw new Error(res && res.reason ? res.reason : "PREPARE_AND_RECALC_FAILED");
+    __paymentPeriodAccrualsMissing = false;
+    __paymentPeriodAccrualsPrepared = false;
+    clearPaymentLedgerReadCache('prepare-and-recalc');
+    const state = readCurrentCalcSummaryState();
+    renderCalcSummaryStatus(state);
+    applySummaryToCardTotals(state);
+    try { if (typeof window.renderAbonentCalcSummaryStatus === "function") window.renderAbonentCalcSummaryStatus(); } catch (_) {}
+    try {
+      if (window.Data && typeof Data.flushDbToServer === "function") await Data.flushDbToServer();
+    } catch (flushErr) {
+      try { console.warn("[prepare-and-recalc] server-flush-failed", flushErr); } catch (_) {}
+    }
+  } catch (e) {
+    const msg = e && e.message ? e.message : String(e);
+    try { console.warn("[prepare-and-recalc] failed", e); } catch (_) {}
+    alert("Ошибка подготовки и пересчёта: " + msg);
+    clearPaymentLedgerReadCache('prepare-and-recalc-failed');
+    renderCalcSummaryStatus(readCurrentCalcSummaryState());
+    if (btn) { btn.disabled = false; btn.textContent = oldText || "Подготовить и пересчитать"; }
   }
 }
 

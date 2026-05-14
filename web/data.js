@@ -1112,6 +1112,53 @@
 
 
 
+  function prepareAndRecalculateCalcSummary(abonentOrId, options) {
+    var opts = options || {};
+    var found = _findAbonentByIdOrUid(abonentOrId);
+    var abonentId = String(found && found.id || (typeof abonentOrId === "object" ? abonentOrId && abonentOrId.id : abonentOrId) || "").trim();
+    var abonent = found && found.abonent ? found.abonent : null;
+    var uid = String(abonent && abonent.uid || "").trim();
+    var startedAt = new Date().toISOString();
+    _calcLog("[prepare-and-recalc][start]", { abonentId: abonentId, uid: uid, source: String(opts.source || ""), startedAt: startedAt });
+
+    var prepared = null;
+    var summary = null;
+    try {
+      if (!Data.ensureWriteOrExplain()) {
+        _calcWarn("[prepare-and-recalc][failed]", { abonentId: abonentId, uid: uid, reason: "WRITE_BLOCKED" });
+        return { ok: false, uid: uid, abonentId: abonentId, periodFrom: "", periodTo: "", prepared: null, recalculated: null, summary: null, reason: "WRITE_BLOCKED" };
+      }
+      if (!abonent || !abonentId || !uid) throw new Error("ABONENT_UID_REQUIRED");
+
+      var period = _readActiveCalcPeriod(abonentId);
+      if (!period || !period.active) throw new Error("ACTIVE_CALC_PERIOD_REQUIRED");
+
+      prepared = preparePeriodAccruals(abonentId, Object.assign({}, opts, { source: String(opts.source || "prepare_and_recalc") }));
+      _calcLog("[prepare-and-recalc][prepared]", { abonentId: abonentId, uid: uid, result: prepared });
+      if (!prepared || prepared.ok !== true) {
+        var prepareReason = prepared && prepared.reason ? prepared.reason : "PERIOD_ACCRUAL_PREPARE_FAILED";
+        _calcWarn("[prepare-and-recalc][failed]", { abonentId: abonentId, uid: uid, reason: prepareReason, step: "prepare" });
+        return { ok: false, uid: uid, abonentId: abonentId, periodFrom: period.from, periodTo: period.to, prepared: prepared, recalculated: null, summary: null, reason: prepareReason };
+      }
+
+      summary = recalculateCalcSummary(abonentId, Object.assign({}, opts, { source: String(opts.source || "prepare_and_recalc") }));
+      _calcLog("[prepare-and-recalc][summary]", { abonentId: abonentId, uid: uid, result: summary });
+      if (!summary || summary.ok !== true) {
+        var summaryReason = summary && summary.reason ? summary.reason : "CALC_RECALC_FAILED";
+        _calcWarn("[prepare-and-recalc][failed]", { abonentId: abonentId, uid: uid, reason: summaryReason, step: "summary" });
+        return { ok: false, uid: uid, abonentId: abonentId, periodFrom: prepared.periodFrom || period.from, periodTo: prepared.periodTo || period.to, prepared: prepared, recalculated: summary || null, summary: summary || null, reason: summaryReason };
+      }
+
+      return { ok: true, uid: uid, abonentId: abonentId, periodFrom: summary.periodFrom || prepared.periodFrom || period.from, periodTo: summary.periodTo || prepared.periodTo || period.to, prepared: prepared, recalculated: summary, summary: summary, reason: "OK" };
+    } catch (e) {
+      var reason = e && e.message ? e.message : String(e);
+      _calcWarn("[prepare-and-recalc][failed]", { abonentId: abonentId, uid: uid, reason: reason });
+      return { ok: false, uid: uid, abonentId: abonentId, periodFrom: "", periodTo: "", prepared: prepared, recalculated: summary, summary: summary, reason: reason };
+    }
+  }
+
+
+
   function _hasCalcAccrualRows(rows) {
     return (Array.isArray(rows) ? rows : []).some(function (row) {
       var accrued = Number(String(row && row.accrued || "0").replace(/\s+/g, "").replace(",", "."));
@@ -1950,6 +1997,7 @@
     writeCalcSummary: writeCalcSummary,
     recalculateCalcSummary: recalculateCalcSummary,
     preparePeriodAccruals: preparePeriodAccruals,
+    prepareAndRecalculateCalcSummary: prepareAndRecalculateCalcSummary,
     recalculateAbonentCard: recalculateAbonentCard,
     resolvePaymentLedgerKey: resolvePaymentLedgerKey,
     readPaymentLedger: readPaymentLedger,
@@ -2985,6 +3033,7 @@ window.markCalcDirty = markCalcDirty;
 window.readCalcSummary = readCalcSummary;
 window.writeCalcSummary = writeCalcSummary;
 window.recalculateCalcSummary = recalculateCalcSummary;
+window.prepareAndRecalculateCalcSummary = prepareAndRecalculateCalcSummary;
 window.recalculateAbonentCard = recalculateAbonentCard;
 window.Data = Data;
 
