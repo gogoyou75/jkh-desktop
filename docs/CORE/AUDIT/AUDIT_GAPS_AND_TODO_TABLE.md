@@ -1,6 +1,7 @@
 # AUDIT_GAPS_AND_TODO_TABLE — что было пропущено / что надо сделать
 
 Дата: **2026-05-04**  
+Обновлено: **2026-05-14** — Calc Summary pipeline закрыт как DONE.  
 Источник: аудит `TRACEABILITY_MATRIX.md`, `LOGIC_SPEC.md`, ключевых frontend-файлов.
 
 ---
@@ -79,6 +80,7 @@
 | 56 | Fake dates | `2000-01-01` нельзя использовать как fallback для финансовых/судебных дат | DONE | P0 | Отсутствие даты начала расчёта/ответственности завершает операцию `START_DATE_MISSING` / `RESPONSIBILITY_DATE_MISSING` | LOGIC_SPEC / TRACEABILITY / CHANGELOG; commit 13176e3 Remove default 2000 date fallback |
 | 57 | Import period | Импорт платежей не должен использовать текущий год как fallback периода | DONE | P0 | `payment_period` обязателен в формате `YYYY-MM`; строка без явного периода не применяется | LOGIC_SPEC / TRACEABILITY / CHANGELOG; commit a2ce9a0 Require explicit payment import period |
 | 58 | Responsibility transfer / Debt transfer | Передача ответственности должна идти через единый `Data.transferResponsibility(...)`; `WITH_DEBT` не должен превращать ошибку frozen debt calculation в нулевой долг | DONE | P0 | Финансовый канон зафиксирован: active link требует transfer-flow, периоды закрываются/открываются по `transferDate`, `WITH_DEBT` требует successful frozen debt calculation, `WITHOUT_DEBT` оставляет долг старому UID | LOGIC_SPEC / TRACEABILITY / CHANGELOG; commit 2a42b5d Enforce canonical responsibility transfer flow |
+| 59 | Calc Summary pipeline | Канон Calc Summary должен быть завершён и синхронизирован с кодом: summary только derived cache, source of truth — ledger/tariffs/rates/excludes/moratorium/responsibility/calc period, fresh-only read, explicit recalc, strict calc period boundary, missing accruals block fresh summary | DONE | P0 | Pipeline закрыт: stale/dirty/mismatch/invalid/missing → «Требуется пересчёт»; prepare accruals не создаёт summary; prepare-and-recalc — явная команда; acceptance test `npm run test:calc-summary:acceptance` | LOGIC_SPEC / TRACEABILITY / CHANGELOG; chain 1994f4d → b092e78 |
 ---
 
 ## Ближайший порядок работ

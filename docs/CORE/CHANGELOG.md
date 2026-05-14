@@ -1,5 +1,17 @@
 # CHANGELOG
 
+## 2026-05-14 — Calc Summary Docs Freeze
+
+- Зафиксирован завершённый канон Calc Summary: `calc_summary_<uid>` является derived cache, а не source of truth.
+- Source of truth для расчёта: `payments_<uid>`, tariffs, refinancing, excludes, moratorium, responsibility и выбранный calc period.
+- Summary разрешено использовать только при fresh state; stale/dirty/mismatch/invalid/missing состояния показывают «Требуется пересчёт» и не подставляют старые totals.
+- Пересчёт summary разрешён только по явному действию пользователя; read-only открытие страниц, dirty detection и prepare accruals не запускают пересчёт автоматически.
+- Выбранный `calc_period_<uid>` / `calc_period_active_<uid>` строго ограничивает summary; изменение периода делает ранее записанный summary not-fresh.
+- Missing accruals внутри выбранного периода блокируют fresh summary. `prepare accruals` только подготавливает ledger-начисления и не создаёт `calc_summary_<uid>`.
+- `prepare-and-recalc` закреплён как явная пользовательская команда, которая после подготовки начислений запускает пересчёт и только при успешном расчёте может записать fresh summary.
+- Acceptance test канона: `npm run test:calc-summary:acceptance`.
+- Цепочка коммитов Calc Summary freeze: `1994f4d` → `b092e78`.
+
 ## 2026-05-14 — Calc engine versioning
 
 - `calc_checkpoint_<uid>` теперь хранит `calcEngineVersion`, `canonVersion` и `summaryFormatVersion`.

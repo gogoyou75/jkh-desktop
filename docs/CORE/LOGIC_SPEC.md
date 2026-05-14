@@ -1492,7 +1492,7 @@ Fatal-правила:
 
 ## 12. Calc summary integrity (cache-derived entity)
 
-`calc_summary_<uid>` является cache-derived entity, а не источником истины. Источниками истины для расчёта остаются:
+`calc_summary_<uid>` является derived cache, а не source of truth и не самостоятельным финансовым регистром. Источниками истины для расчёта остаются только:
 - `payments_<uid>`;
 - тарифы owner (`tariffs_<owner>` / `tariffs_v1`);
 - ставки рефинансирования;
@@ -1509,4 +1509,14 @@ UI имеет право использовать `calc_summary_<uid>` толь�
 `calc_checkpoint_<uid>` хранится вместе с summary и фиксирует `uid`, `abonentId`, `generatedAt`, `calcEngineVersion`, `summaryFormatVersion`, `canonVersion`, период расчёта, ключ/значение расчётного периода и lightweight fingerprints для ledger, тарифов, ставок, исключений, моратория и responsibility data.
 Checkpoint проверяется при каждом чтении summary. Несовпадение fingerprint или версии не исправляется автоматически, не очищается молча, не считается совместимым автоматически и не запускает автоматический пересчёт. Версии являются отдельными ручными константами и не вычисляются через hash файлов.
 
+Выбранный calc period является строгой границей summary: fresh summary может описывать только период, сохранённый в `calc_period_<uid>` / `calc_period_active_<uid>` на момент пересчёта. Изменение периода переводит ранее записанный summary в not-fresh состояние (`dirty` / mismatch) и требует явного пересчёта.
+
+Отсутствующие начисления внутри выбранного периода блокируют fresh summary. В этом состоянии UI должен показывать «Требуется пересчёт» и предлагать подготовить начисления, но не должен подменять отсутствующие строки нулевым итогом и не должен считать старый summary актуальным.
+
+Подготовка начислений (`prepare accruals` / «Подготовить начисления») не создаёт `calc_summary_<uid>` и не является пересчётом summary. Команда `prepare-and-recalc` / «Подготовить и пересчитать» является явным пользовательским действием: сначала подготавливает начисления, затем запускает пересчёт и только после успешного расчёта может записать fresh summary.
+
+Автоматический пересчёт summary запрещён. Пересчёт `calc_summary_<uid>` допускается только по явному действию пользователя: «Пересчитать» или «Подготовить и пересчитать». Read-only открытие страниц, prepare accruals, storage read, dirty/mismatch/invalid detection и version mismatch не запускают пересчёт автоматически.
+
 Повреждённые summary/checkpoint не превращаются в нулевые totals и не заменяются пустыми объектами. Допустимы только логирование, статус `invalid_json`/`invalid_structure` и явное предложение выполнить пересчёт.
+
+Acceptance-контракт Calc Summary фиксируется командой `npm run test:calc-summary:acceptance`. Этот тест проверяет, что открытие страниц не запускает пересчёт, missing summary отображается как «Требуется пересчёт», missing accruals блокируют fresh summary, `prepare-and-recalc` создаёт fresh summary, изменение calc period делает summary not-fresh, изменение платежей ставит dirty, debug panel показывает reason, а выбранный период ограничивает строки summary.
