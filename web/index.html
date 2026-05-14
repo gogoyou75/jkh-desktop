@@ -313,6 +313,7 @@ let sortField = null;
 let sortAsc = true;
 const filters = {};
 const __indexLedgerReadCache = new Map();
+const __indexPeriodAccrualsMissing = new Set();
 let __indexLedgerReadCacheOwner = "";
 
 function __indexOwnerId(){
@@ -712,7 +713,8 @@ function rebuildIndexRows(){
             note: getAbonentNote(id, a),
             flatReg: regnum,
             rowStatusMark,
-            needsRecalc: !!(totals && totals.status === "Требуется пересчёт")
+            needsRecalc: !!(totals && totals.status === "Требуется пересчёт"),
+            accrualsMissing: __indexPeriodAccrualsMissing.has(String(id))
         });
     }
 }
@@ -921,6 +923,34 @@ function initSorting() {
 ============================================================ */
 
 
+async function prepareIndexRowPeriodAccruals(abonentId, button){
+    const id = String(abonentId || "").trim();
+    const btn = button || null;
+    const oldText = btn ? btn.textContent : "";
+    if (!id) return;
+    try {
+        if (!window.Data || typeof window.Data.preparePeriodAccruals !== "function") throw new Error("Data.preparePeriodAccruals not available");
+        if (btn) { btn.disabled = true; btn.textContent = "Подготовка…"; }
+        const res = window.Data.preparePeriodAccruals(id, { source: "index_row" });
+        if (!res || res.ok !== true) throw new Error(res && res.reason ? res.reason : "PERIOD_ACCRUAL_PREPARE_FAILED");
+        __indexPeriodAccrualsMissing.delete(id);
+        try {
+            if (window.Data && typeof Data.flushDbToServer === "function") await Data.flushDbToServer();
+        } catch (flushErr) {
+            try { console.warn("[period-accrual-prepare] server-flush-failed", flushErr); } catch (_) {}
+        }
+        clearIndexLedgerReadCache();
+        rebuildIndexRows();
+        render();
+        alert("Начисления за выбранный период подготовлены. Нажмите «Пересчитать».");
+    } catch (e) {
+        const msg = e && e.message ? e.message : String(e);
+        try { console.warn("[period-accrual-prepare] failed", e); } catch (_) {}
+        alert("Ошибка подготовки начислений: " + msg);
+        if (btn) { btn.disabled = false; btn.textContent = oldText || "Подготовить начисления"; }
+    }
+}
+
 async function recalculateIndexRowCalcSummary(abonentId, button){
     const id = String(abonentId || "").trim();
     const btn = button || null;
@@ -931,6 +961,7 @@ async function recalculateIndexRowCalcSummary(abonentId, button){
         if (btn) { btn.disabled = true; btn.textContent = "Пересчёт…"; }
         const res = window.Data.recalculateCalcSummary(id, { source: "index_row" });
         if (res && res.reason === "period_accruals_missing") {
+            __indexPeriodAccrualsMissing.add(id);
             alert("Нет начислений за выбранный период. Сначала подготовьте начисления.");
             rebuildIndexRows();
             render();
@@ -938,6 +969,7 @@ async function recalculateIndexRowCalcSummary(abonentId, button){
             return;
         }
         if (!res || res.ok !== true) throw new Error(res && res.reason ? res.reason : "CALC_RECALC_FAILED");
+        __indexPeriodAccrualsMissing.delete(id);
         try {
             if (window.Data && typeof Data.flushDbToServer === "function") await Data.flushDbToServer();
         } catch (flushErr) {
@@ -1022,7 +1054,7 @@ function render() {
             <td>${r.startDate}</td>
             <td>${r.endDate}</td>
             <td><textarea class="note-inline note-abonent" data-id="${r.id}" placeholder="">${escapeHtml(String(r.note||""))}</textarea></td>
-            <td>${r.flatReg}${r.rowStatusMark ? (' <span class="row-status-badge">' + r.rowStatusMark + '</span>') : ''}${r.needsRecalc ? (' <button type="button" class="row-recalc-btn" data-id="' + escapeHtml(r.id) + '" style="margin-left:8px;">Пересчитать</button>') : ''}</td>
+            <td>${r.flatReg}${r.rowStatusMark ? (' <span class="row-status-badge">' + r.rowStatusMark + '</span>') : ''}${r.accrualsMissing ? (' <button type="button" class="row-prepare-accruals-btn" data-id="' + escapeHtml(r.id) + '" style="margin-left:8px;">Подготовить начисления</button>') : ''}${r.needsRecalc ? (' <button type="button" class="row-recalc-btn" data-id="' + escapeHtml(r.id) + '" style="margin-left:8px;">Пересчитать</button>') : ''}</td>
         `;
         tbody.appendChild(tr);
     });
@@ -1032,6 +1064,11 @@ function render() {
         // если клик по textarea/инпуту — НЕ переходим в карточку
         const tag = (e.target && e.target.tagName) ? e.target.tagName.toLowerCase() : "";
         if (tag === "button") {
+            const prepareBtn = e.target.closest(".row-prepare-accruals-btn");
+            if (prepareBtn) {
+                prepareIndexRowPeriodAccruals(prepareBtn.getAttribute("data-id"), prepareBtn);
+                return;
+            }
             const btn = e.target.closest(".row-recalc-btn");
             if (btn) recalculateIndexRowCalcSummary(btn.getAttribute("data-id"), btn);
             return;

@@ -1057,6 +1057,59 @@
     }
   }
 
+  function preparePeriodAccruals(abonentOrId, options) {
+    var opts = options || {};
+    var found = _findAbonentByIdOrUid(abonentOrId);
+    var abonentId = String(found && found.id || (typeof abonentOrId === "object" ? abonentOrId && abonentOrId.id : abonentOrId) || "").trim();
+    var abonent = found && found.abonent ? found.abonent : null;
+    var uid = String(abonent && abonent.uid || "").trim();
+    _calcLog("[period-accrual-prepare][start]", { abonentId: abonentId, uid: uid, source: String(opts.source || "") });
+
+    try {
+      if (!Data.ensureWriteOrExplain()) return { ok: false, uid: uid, abonentId: abonentId, periodFrom: "", periodTo: "", reason: "WRITE_BLOCKED" };
+      if (!abonent || !abonentId || !uid) throw new Error("ABONENT_UID_REQUIRED");
+
+      var ledgerKey = "payments_" + uid;
+      var resolvedLedgerKey = resolvePaymentLedgerKey(abonentId);
+      if (resolvedLedgerKey !== ledgerKey) throw new Error("UID_LEDGER_REQUIRED");
+
+      var raw = _getProjectRaw(ledgerKey);
+      var rowsBefore = raw === null || raw === undefined || raw === "" ? [] : _parseLedgerRows(raw, ledgerKey);
+      var period = _readActiveCalcPeriod(abonentId);
+      if (!period || !period.active) throw new Error("ACTIVE_CALC_PERIOD_REQUIRED");
+
+      var periodFrom = String(period.from || "").trim();
+      var periodTo = String(period.to || "").trim();
+      if (!_parseCalcDateISO(periodFrom) || !_parseCalcDateISO(periodTo)) throw new Error("CALC_PERIOD_INVALID");
+      _calcLog("[period-accrual-prepare][period]", { abonentId: abonentId, uid: uid, ledgerKey: ledgerKey, periodFrom: periodFrom, periodTo: periodTo, months: _calcPeriodMonths(periodFrom, periodTo) });
+
+      if (!window.JKHAutoAccrual || typeof window.JKHAutoAccrual.recalcForAbonent !== "function") throw new Error("AUTOACCRUAL_NOT_AVAILABLE");
+      var result = window.JKHAutoAccrual.recalcForAbonent(abonentId, {
+        explicit: true,
+        periodFrom: periodFrom,
+        periodTo: periodTo,
+        keepExistingOutside: true,
+        source: "period_accrual_prepare"
+      });
+      if (result && result.ok === false) throw new Error(result.reason || "AUTOACCRUAL_FAILED");
+
+      var afterRaw = _getProjectRaw(ledgerKey);
+      var rowsAfter = afterRaw === null || afterRaw === undefined || afterRaw === "" ? [] : _parseLedgerRows(afterRaw, ledgerKey);
+      var periodRows = _filterCalcRowsByPeriod(rowsAfter, periodFrom, periodTo);
+      _calcLog("[period-accrual-prepare][written]", { abonentId: abonentId, uid: uid, ledgerKey: ledgerKey, changed: !!(result && result.changed), rowsBefore: rowsBefore.length, rowsAfter: rowsAfter.length, rowsInPeriod: periodRows.length, result: result || null });
+
+      var dirtyOk = markCalcDirty(abonentId, "period_accrual_prepare");
+      _calcLog("[period-accrual-prepare][dirty]", { abonentId: abonentId, uid: uid, key: resolveCalcDirtyKey(abonentId), ok: dirtyOk !== false });
+
+      return { ok: true, uid: uid, abonentId: abonentId, ledgerKey: ledgerKey, periodFrom: periodFrom, periodTo: periodTo, rowsBefore: rowsBefore.length, rowsAfter: rowsAfter.length, rowsInPeriod: periodRows.length, changed: !!(result && result.changed), reason: "OK" };
+    } catch (e) {
+      var reason = e && e.message ? e.message : String(e);
+      _calcWarn("[period-accrual-prepare][failed]", { abonentId: abonentId, uid: uid, reason: reason });
+      return { ok: false, uid: uid, abonentId: abonentId, periodFrom: "", periodTo: "", reason: reason };
+    }
+  }
+
+
 
 
   function _hasCalcAccrualRows(rows) {
@@ -1896,6 +1949,7 @@
     readCalcSummary: readCalcSummary,
     writeCalcSummary: writeCalcSummary,
     recalculateCalcSummary: recalculateCalcSummary,
+    preparePeriodAccruals: preparePeriodAccruals,
     recalculateAbonentCard: recalculateAbonentCard,
     resolvePaymentLedgerKey: resolvePaymentLedgerKey,
     readPaymentLedger: readPaymentLedger,

@@ -578,8 +578,11 @@
     return arr.length ? Math.max(...arr.map(x => Number(x.id) || 0)) + 1 : 1;
   }
 
-  function ensureAutoAccrualsForAbonent(ls, arr){
-    const range = getActiveRangeISOForAbonent(ls);
+  function ensureAutoAccrualsForAbonent(ls, arr, opts){
+    const options = opts && typeof opts === 'object' ? opts : {};
+    const scopedRange = options.range && typeof options.range === 'object' ? options.range : null;
+    const keepExistingOutside = options.keepExistingOutside === true;
+    const range = scopedRange || getActiveRangeISOForAbonent(ls);
     if (range && range.__fatal) return { changed:false, reason:range.code, code:range.code, message:range.message, fatal:true, details:range.details };
     if (!range) return { changed:false, reason:'NO_RANGE' };
 
@@ -600,11 +603,13 @@
       const key = rowToYM(r);
       if (!key) continue;
       if (!allowedYm.has(key)){
-        if (toNum(r.accrued) !== 0){
-          r.accrued = 0;
-          changed = true;
+        if (!keepExistingOutside){
+          if (toNum(r.accrued) !== 0){
+            r.accrued = 0;
+            changed = true;
+          }
+          zeroedMonthsSet.add(key);
         }
-        zeroedMonthsSet.add(key);
       }
     }
 
@@ -687,7 +692,8 @@
       to: range.to || '',
       allowedMonths: allowedMonths,
       zeroedMonths: Array.from(zeroedMonthsSet).sort(),
-      recalculatedMonths: Array.from(recalculatedMonthsSet).sort()
+      recalculatedMonths: Array.from(recalculatedMonthsSet).sort(),
+      scoped: !!scopedRange
     };
     try { console.log('[autoaccrual][responsibility-range]', diagnostics); } catch(e) {}
 
@@ -715,7 +721,14 @@
       throw e;
     }
     const beforeRows = dryRun ? JSON.parse(JSON.stringify(arr || [])) : null;
-    const res = ensureAutoAccrualsForAbonent(id, arr);
+    let scopedRange = null;
+    const optFrom = parseAnyToISO(options.periodFrom || options.from || '');
+    const optTo = parseAnyToISO(options.periodTo || options.to || '');
+    if (optFrom && optTo) scopedRange = { from: optFrom, to: optTo };
+    const res = ensureAutoAccrualsForAbonent(id, arr, {
+      range: scopedRange,
+      keepExistingOutside: options.keepExistingOutside === true || !!scopedRange
+    });
     const rows = arr;
 
     if (dryRun){
