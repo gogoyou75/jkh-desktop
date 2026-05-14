@@ -467,6 +467,10 @@ Doc: docs/LOGIC_SPEC_v1.5.3.md
     </div>
 </div>
 
+<div id="abonentCalcSummaryStatus" style="margin:10px 0;padding:10px;border:1px solid #e0a800;border-radius:8px;background:#fff8e1;color:#5f4300;font-weight:600;">
+    Требуется пересчёт <button class="btn" type="button" onclick="recalculateAbonentCalcSummaryFromCard()" style="margin-left:10px;">Пересчитать</button>
+</div>
+
 <h3>Оплата абонента</h3>
 
 <div class="note" style="margin:6px 0 10px 0; font-size:12px; opacity:0.85;">Подсказка: начисление месяца показывается первой строкой; оплаты — ниже. Если включаете «за период», изменения сохраняются автоматически.</div>
@@ -802,6 +806,70 @@ async function copyUidFromCard(){
     document.body.removeChild(ta);
 }
 
+
+
+function calcSummaryCardNumber(summary, names){
+    if (!summary || !Array.isArray(names)) return 0;
+    for (let i = 0; i < names.length; i++) {
+        const v = summary[names[i]];
+        if (v !== undefined && v !== null && v !== "") {
+            const n = Number(String(v).replace(/\s+/g, "").replace(",", "."));
+            return Number.isFinite(n) ? n : 0;
+        }
+    }
+    return 0;
+}
+
+function renderAbonentCalcSummaryStatus(){
+    const box = document.getElementById("abonentCalcSummaryStatus");
+    if (!box) return;
+    const id = getAbonentIdFromURL();
+    const summary = (window.Data && typeof window.Data.readCalcSummary === "function") ? window.Data.readCalcSummary(id) : null;
+    const dirty = (window.Data && typeof window.Data.isCalcDirty === "function") ? window.Data.isCalcDirty(id) : true;
+    if (!summary || dirty) {
+        box.style.borderColor = "#e0a800";
+        box.style.background = "#fff8e1";
+        box.style.color = "#5f4300";
+        box.innerHTML = 'Требуется пересчёт <button class="btn" type="button" onclick="recalculateAbonentCalcSummaryFromCard()" style="margin-left:10px;">Пересчитать</button>';
+        return;
+    }
+    const total = calcSummaryCardNumber(summary, ["totalDebt", "total_debt", "total", "debtTotal"]);
+    const penalty = calcSummaryCardNumber(summary, ["penalty", "pay_penalty", "penaltyDebt", "penalty_debt"]);
+    const from = String(summary.periodFrom || summary.from || "");
+    const to = String(summary.periodTo || summary.to || "");
+    box.style.borderColor = "#b8d7b8";
+    box.style.background = "#f2fff2";
+    box.style.color = "#245b24";
+    box.innerHTML = 'Актуальные итоги: всего ' + total.toFixed(2) + ', пеня ' + penalty.toFixed(2)
+        + (from || to ? ' <span style="font-weight:400;">(' + from + ' — ' + to + ')</span>' : '')
+        + ' <button class="btn" type="button" onclick="recalculateAbonentCalcSummaryFromCard()" style="margin-left:10px;">Пересчитать</button>';
+}
+window.renderAbonentCalcSummaryStatus = renderAbonentCalcSummaryStatus;
+
+async function recalculateAbonentCalcSummaryFromCard(){
+    const box = document.getElementById("abonentCalcSummaryStatus");
+    const id = getAbonentIdFromURL();
+    try {
+        if (!window.Data || typeof window.Data.recalculateCalcSummary !== "function") throw new Error("Data.recalculateCalcSummary not available");
+        if (box) box.innerHTML = 'Пересчёт начислений и итогов…';
+        const res = window.Data.recalculateCalcSummary(id, { source: "abonent_card" });
+        if (!res || res.ok !== true) throw new Error(res && res.reason ? res.reason : "CALC_RECALC_FAILED");
+        renderAbonentCalcSummaryStatus();
+        try { if (typeof window.__loadPaymentTable === "function") window.__loadPaymentTable("calc-summary-recalc"); } catch(e) {}
+        try {
+            if (window.Data && typeof Data.flushDbToServer === "function") await Data.flushDbToServer();
+        } catch (flushErr) {
+            try { console.warn("[calc-summary][recalc] server-flush-failed", flushErr); } catch (_) {}
+        }
+    } catch (e) {
+        const msg = e && e.message ? e.message : String(e);
+        try { console.warn("[calc-summary][recalc] failed", e); } catch (_) {}
+        alert("Ошибка пересчёта: " + msg);
+        renderAbonentCalcSummaryStatus();
+    }
+}
+window.recalculateAbonentCalcSummaryFromCard = recalculateAbonentCalcSummaryFromCard;
+
 /* ✅ FIX: fillAbonentCard() — убраны лишние скобки, логика выполняется корректно */
 function fillAbonentCard() {
     const { id, a } = getCurrentAbonent();
@@ -912,6 +980,7 @@ function fillAbonentCard() {
     // ✅ показываем историю ответственности по квартире
     try { renderResponsibilityHistory(regnum || a.regnum || ''); } catch(e) {}
     try { renderTransferInfo(id, regnum || a.regnum || ''); } catch(e) {}
+    try { renderAbonentCalcSummaryStatus(); } catch(e) {}
 }
 function renderMergeList(){
   const db = Data.getDb();
@@ -1120,42 +1189,6 @@ function __safeLoadPaymentTableOnce(reason){
     }, 0);
 }
 
-function __runAutoAccrualRepairOnce(){
-    try {
-        if (!__abonentCardServerRepairDone) {
-            try { console.warn('[abonent_card] skip autoaccrual before server repair'); } catch(e){}
-            return;
-        }
-
-        const id = getAbonentIdFromURL();
-        if (!id) return;
-
-        const db = getDb();
-        if (!db || !db[String(id)]) {
-            try { console.warn('[abonent_card] skip autoaccrual: abonent not ready', id); } catch(e){}
-            return;
-        }
-
-        const gk = 'jkh_autoaccrual_repair_once_v2_partial_month:' + String(id);
-        if (sessionStorage.getItem(gk) === '1') return;
-        sessionStorage.setItem(gk, '1');
-
-        if (!window.JKHAutoAccrual || typeof window.JKHAutoAccrual.recalcForAbonent !== 'function') return;
-
-        setTimeout(() => {
-            try {
-                const res = window.JKHAutoAccrual.recalcForAbonent(id);
-                if (res && res.ok && res.changed) {
-                    __safeLoadPaymentTableOnce('autoaccrual_changed');
-                }
-            } catch(e) {
-                try { console.warn('[autoaccrual] repairOnce error', e); } catch(_){}
-            }
-        }, 0);
-    } catch(e) {
-        try { console.warn('[autoaccrual] repairOnce outer error', e); } catch(_){}
-    }
-}
 
 async function __uploadRepairedExcludePeriodsToServer(){
     if (window.Data && typeof Data.flushDbToServer === "function") {
@@ -2391,6 +2424,7 @@ function bindCalcButtons(){
 document.addEventListener("DOMContentLoaded", () => {
     loadCalcPeriodUI();
     bindCalcButtons();
+    try { renderAbonentCalcSummaryStatus(); } catch(e) {}
     document.getElementById("clearBrokenExcludesBtn")?.addEventListener("click", __clearBrokenExcludesAndReload);
 });
 

@@ -1675,13 +1675,16 @@ function renderCalcSummaryStatus(state){
       box.style.borderColor = "#b8d7b8";
       box.style.background = "#f2fff2";
       box.style.color = "#245b24";
-      box.textContent = "Итоги расчёта загружены из calc_summary: всего " + fmtMoney(total) + ", пеня " + fmtMoney(penalty) + ".";
+      box.innerHTML = '<span>Итоги расчёта загружены из calc_summary: всего ' + escapeHtml(fmtMoney(total)) + ', пеня ' + escapeHtml(fmtMoney(penalty)) + '.</span> '
+        + '<button type="button" id="calcSummaryRecalcBtn" style="margin-left:10px;">Пересчитать</button>';
     } else {
       box.style.borderColor = "#e0a800";
       box.style.background = "#fff8e1";
       box.style.color = "#5f4300";
-      box.textContent = "Требуется пересчёт";
+      box.innerHTML = '<span>Требуется пересчёт</span> <button type="button" id="calcSummaryRecalcBtn" style="margin-left:10px;font-weight:700;">Пересчитать</button>';
     }
+    const btn = document.getElementById("calcSummaryRecalcBtn");
+    if (btn) btn.onclick = function(){ recalculateCurrentCalcSummaryFromTable(btn); };
   } catch (e) {
     try { console.warn("[calc-summary][status-render-failed]", e); } catch (_) {}
   }
@@ -1707,6 +1710,36 @@ function applySummaryToCardTotals(state){
     }
   } catch (e) {
     try { console.warn("[calc-summary][card-total-failed]", e); } catch (_) {}
+  }
+}
+
+
+
+async function recalculateCurrentCalcSummaryFromTable(button){
+  const btn = button || document.getElementById("calcSummaryRecalcBtn");
+  const id = getAbonentId();
+  if (!id) return;
+  const oldText = btn ? btn.textContent : "";
+  try {
+    if (!window.Data || typeof window.Data.recalculateCalcSummary !== "function") throw new Error("Data.recalculateCalcSummary not available");
+    if (btn) { btn.disabled = true; btn.textContent = "Пересчёт…"; }
+    const res = window.Data.recalculateCalcSummary(id, { source: "payment_table" });
+    if (!res || res.ok !== true) throw new Error(res && res.reason ? res.reason : "CALC_RECALC_FAILED");
+    clearPaymentLedgerReadCache('calc-summary-recalc');
+    const state = readCurrentCalcSummaryState();
+    renderCalcSummaryStatus(state);
+    applySummaryToCardTotals(state);
+    try { if (typeof window.renderAbonentCalcSummaryStatus === "function") window.renderAbonentCalcSummaryStatus(); } catch (_) {}
+    try {
+      if (window.Data && typeof Data.flushDbToServer === "function") await Data.flushDbToServer();
+    } catch (flushErr) {
+      try { console.warn("[calc-summary][recalc] server-flush-failed", flushErr); } catch (_) {}
+    }
+  } catch (e) {
+    const msg = e && e.message ? e.message : String(e);
+    try { console.warn("[calc-summary][recalc] failed", e); } catch (_) {}
+    alert("Ошибка пересчёта: " + msg);
+    if (btn) { btn.disabled = false; btn.textContent = oldText || "Пересчитать"; }
   }
 }
 
@@ -2636,6 +2669,7 @@ tbody.innerHTML = "";
 
 
   window.__loadPaymentTable = requestLoadPaymentTable;
+  window.recalculateCurrentCalcSummaryFromTable = recalculateCurrentCalcSummaryFromTable;
 
   window.addPaymentRow = async function addPaymentRow() {
     const arr = getPayments();

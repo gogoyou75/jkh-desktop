@@ -692,7 +692,8 @@ function rebuildIndexRows(){
             endDate:    (totals?.endDate   ?? ""),
             note: getAbonentNote(id, a),
             flatReg: regnum,
-            rowStatusMark
+            rowStatusMark,
+            needsRecalc: !!(totals && totals.status === "Требуется пересчёт")
         });
     }
 }
@@ -900,6 +901,33 @@ function initSorting() {
 /* ============================================================
      ОСНОВНОЙ РЕНДЕР (фильтры + сортировка + пагинация)
 ============================================================ */
+
+
+async function recalculateIndexRowCalcSummary(abonentId, button){
+    const id = String(abonentId || "").trim();
+    const btn = button || null;
+    const oldText = btn ? btn.textContent : "";
+    if (!id) return;
+    try {
+        if (!window.Data || typeof window.Data.recalculateCalcSummary !== "function") throw new Error("Data.recalculateCalcSummary not available");
+        if (btn) { btn.disabled = true; btn.textContent = "Пересчёт…"; }
+        const res = window.Data.recalculateCalcSummary(id, { source: "index_row" });
+        if (!res || res.ok !== true) throw new Error(res && res.reason ? res.reason : "CALC_RECALC_FAILED");
+        try {
+            if (window.Data && typeof Data.flushDbToServer === "function") await Data.flushDbToServer();
+        } catch (flushErr) {
+            try { console.warn("[calc-summary][recalc] server-flush-failed", flushErr); } catch (_) {}
+        }
+        rebuildIndexRows();
+        render();
+    } catch (e) {
+        const msg = e && e.message ? e.message : String(e);
+        try { console.warn("[calc-summary][recalc] failed", e); } catch (_) {}
+        alert("Ошибка пересчёта: " + msg);
+        if (btn) { btn.disabled = false; btn.textContent = oldText || "Пересчитать"; }
+    }
+}
+
 function render() {
     /* --- фильтрация --- */
     filteredRows = allRows.filter(r => {
@@ -969,7 +997,7 @@ function render() {
             <td>${r.startDate}</td>
             <td>${r.endDate}</td>
             <td><textarea class="note-inline note-abonent" data-id="${r.id}" placeholder="">${escapeHtml(String(r.note||""))}</textarea></td>
-            <td>${r.flatReg}${r.rowStatusMark ? (' <span class="row-status-badge">' + r.rowStatusMark + '</span>') : ''}</td>
+            <td>${r.flatReg}${r.rowStatusMark ? (' <span class="row-status-badge">' + r.rowStatusMark + '</span>') : ''}${r.needsRecalc ? (' <button type="button" class="row-recalc-btn" data-id="' + escapeHtml(r.id) + '" style="margin-left:8px;">Пересчитать</button>') : ''}</td>
         `;
         tbody.appendChild(tr);
     });
@@ -978,7 +1006,12 @@ function render() {
     tbody.onclick = (e) => {
         // если клик по textarea/инпуту — НЕ переходим в карточку
         const tag = (e.target && e.target.tagName) ? e.target.tagName.toLowerCase() : "";
-        if (tag === "textarea" || tag === "input" || tag === "select" || tag === "button") return;
+        if (tag === "button") {
+            const btn = e.target.closest(".row-recalc-btn");
+            if (btn) recalculateIndexRowCalcSummary(btn.getAttribute("data-id"), btn);
+            return;
+        }
+        if (tag === "textarea" || tag === "input" || tag === "select") return;
 
         const tr = e.target.closest("tr");
         if (tr) {
