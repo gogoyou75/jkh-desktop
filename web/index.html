@@ -587,6 +587,15 @@ function calcSummaryRecalcReason(state){
     return state && state.reason ? String(state.reason) : "";
 }
 
+function calcSummaryPeriodModeText(mode){
+    mode = String(mode || "").trim();
+    if (mode === "selected_calc_period") return "выбранный период";
+    if (mode === "full_active_responsibility") return "полная активная ответственность";
+    if (mode === "current_default") return "текущий период по умолчанию";
+    if (mode === "explicit_options") return "явно заданный период";
+    return mode;
+}
+
 function calcTotalsFromPayments(id, abonentObj){
     const summaryState = (window.Data && typeof window.Data.readCalcSummary === "function") ? window.Data.readCalcSummary(id) : null;
     const summary = (summaryState && summaryState.status === "fresh") ? summaryState.summary : null;
@@ -618,8 +627,9 @@ function calcTotalsFromPayments(id, abonentObj){
         oplacheno:  pick(["oplacheno", "paid", "paidTotal", "sumPaid"]),
         totalDebt:  pick(["totalDebt", "total_debt", "total", "debtTotal"]),
         penalty:    pick(["penalty", "pay_penalty", "penaltyDebt", "penalty_debt"]),
-        startDate:  pick(["startDate", "start_date", "from"]),
-        endDate:    pick(["endDate", "end_date", "to"]),
+        startDate:  pick(["periodFrom", "startDate", "start_date", "from"]),
+        endDate:    pick(["periodTo", "endDate", "end_date", "to"]),
+        periodMode: pick(["periodMode"]),
         status: ""
     };
 }
@@ -685,7 +695,9 @@ function rebuildIndexRows(){
         const hasClosedLink = ownLinks.some(l => !!String(l?.dateTo || '').trim());
         const hasNoActiveButClosed = !activeLink && hasClosedLink;
         const isMerged = String(premise?.status || '').trim() === 'merged';
-        const rowStatusMark = totals?.status ? (totals.recalcReason ? totals.status + ' (' + totals.recalcReason + ')' : totals.status) : (isMerged ? 'объединена' : (hasNoActiveButClosed ? 'расчёт остановлен' : ''));
+        const periodModeText = totals?.periodMode ? calcSummaryPeriodModeText(totals.periodMode) : "";
+        const periodMark = (!totals?.status && (totals?.startDate || totals?.endDate || periodModeText)) ? ('итоги: ' + (totals?.startDate || '—') + ' — ' + (totals?.endDate || '—') + (periodModeText ? ' (' + periodModeText + ')' : '')) : '';
+        const rowStatusMark = totals?.status ? (totals.recalcReason ? totals.status + ' (' + totals.recalcReason + ')' : totals.status) : (periodMark || (isMerged ? 'объединена' : (hasNoActiveButClosed ? 'расчёт остановлен' : '')));
         allRows.push({
             id,
             fam,

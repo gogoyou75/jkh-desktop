@@ -825,6 +825,16 @@ function abonentCalcSummaryRecalcReason(state){
     return state && state.reason ? String(state.reason) : "";
 }
 
+function abonentCalcSummaryPeriodLabel(summary){
+    if (!summary) return "";
+    const from = String(summary.periodFrom || summary.from || "").trim();
+    const to = String(summary.periodTo || summary.to || "").trim();
+    const mode = String(summary.periodMode || "").trim();
+    const modeText = mode === "selected_calc_period" ? "выбранный период" : (mode === "full_active_responsibility" ? "полная активная ответственность" : (mode === "current_default" ? "текущий период по умолчанию" : (mode === "explicit_options" ? "явно заданный период" : mode)));
+    if (!from && !to && !modeText) return "";
+    return "Период итогов: " + (from || "—") + " — " + (to || "—") + (modeText ? " (" + modeText + ")" : "");
+}
+
 function renderAbonentCalcSummaryStatus(){
     const box = document.getElementById("abonentCalcSummaryStatus");
     if (!box) return;
@@ -842,13 +852,12 @@ function renderAbonentCalcSummaryStatus(){
     }
     const total = calcSummaryCardNumber(summary, ["totalDebt", "total_debt", "total", "debtTotal"]);
     const penalty = calcSummaryCardNumber(summary, ["penalty", "pay_penalty", "penaltyDebt", "penalty_debt"]);
-    const from = String(summary.periodFrom || summary.from || "");
-    const to = String(summary.periodTo || summary.to || "");
+    const periodLabel = abonentCalcSummaryPeriodLabel(summary);
     box.style.borderColor = "#b8d7b8";
     box.style.background = "#f2fff2";
     box.style.color = "#245b24";
     box.innerHTML = 'Актуальные итоги: всего ' + total.toFixed(2) + ', пеня ' + penalty.toFixed(2)
-        + (from || to ? ' <span style="font-weight:400;">(' + from + ' — ' + to + ')</span>' : '')
+        + (periodLabel ? ' <span style="font-weight:400;">(' + periodLabel.replace(/[<>&"]/g, function(ch){ return { '<':'&lt;', '>':'&gt;', '&':'&amp;', '"':'&quot;' }[ch]; }) + ')</span>' : '')
         + ' <button class="btn" type="button" onclick="recalculateAbonentCalcSummaryFromCard()" style="margin-left:10px;">Пересчитать</button>';
 }
 window.renderAbonentCalcSummaryStatus = renderAbonentCalcSummaryStatus;

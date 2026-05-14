@@ -1668,6 +1668,16 @@ function summaryNumber(summary, names){
   return 0;
 }
 
+function calcSummaryPeriodLabel(summary){
+  if (!summary) return "";
+  const from = String(summary.periodFrom || summary.from || "").trim();
+  const to = String(summary.periodTo || summary.to || "").trim();
+  const mode = String(summary.periodMode || "").trim();
+  const modeText = mode === "selected_calc_period" ? "выбранный период" : (mode === "full_active_responsibility" ? "полная активная ответственность" : (mode === "current_default" ? "текущий период по умолчанию" : (mode === "explicit_options" ? "явно заданный период" : mode)));
+  if (!from && !to && !modeText) return "";
+  return "Период итогов: " + (from || "—") + " — " + (to || "—") + (modeText ? " (" + modeText + ")" : "");
+}
+
 function renderCalcSummaryStatus(state){
   try {
     const tbody = qs("#paymentTableBody");
@@ -1685,7 +1695,8 @@ function renderCalcSummaryStatus(state){
       box.style.borderColor = "#b8d7b8";
       box.style.background = "#f2fff2";
       box.style.color = "#245b24";
-      box.innerHTML = '<span>Итоги расчёта загружены из calc_summary: всего ' + escapeHtml(fmtMoney(total)) + ', пеня ' + escapeHtml(fmtMoney(penalty)) + '.</span> '
+      const periodLabel = calcSummaryPeriodLabel(state.summary);
+      box.innerHTML = '<span>Итоги расчёта загружены из calc_summary: всего ' + escapeHtml(fmtMoney(total)) + ', пеня ' + escapeHtml(fmtMoney(penalty)) + '. ' + escapeHtml(periodLabel) + '</span> '
         + '<button type="button" id="calcSummaryRecalcBtn" style="margin-left:10px;">Пересчитать</button>';
     } else {
       box.style.borderColor = "#e0a800";
@@ -2620,8 +2631,7 @@ tbody.innerHTML = "";
   // =============================================================
   // 🧮 ИТОГ КАРТОЧКИ АБОНЕНТА — ВСЕГО ЗАДОЛЖЕННОСТЬ
   // CRITICAL (ПАПАЖКХ):
-  // Всего задолженность = Σ(Долг) + Σ(Пени) по всем строкам,
-  // не зависит от выбранного периода.
+  // Всего задолженность берётся из calc_summary и строго ограничена periodFrom/periodTo.
   // =============================================================
   function JKH_RecalcAbonentTotalDebtCard() {
     try {

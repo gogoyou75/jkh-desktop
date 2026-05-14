@@ -10,7 +10,7 @@
   const KEY_DB = "abonents_db_v1";
   const CALC_SUMMARY_ENGINE_VERSION = "calc-engine-v1.9.4";
   const CALC_SUMMARY_CANON_VERSION = "financial-canon-v1.9.4";
-  const CALC_SUMMARY_FORMAT_VERSION = "calc-summary-format-v1";
+  const CALC_SUMMARY_FORMAT_VERSION = "calc-summary-format-v2-period-boundary";
   window.JKH_CALC_CANON_VERSION = CALC_SUMMARY_CANON_VERSION;
 
 
@@ -515,7 +515,11 @@
     if (!key) return false;
     var payload = JSON.stringify({ dirty: true, reason: String(reason || ""), updatedAt: new Date().toISOString() });
     var ok = _setProjectRaw(key, payload);
-    if (ok !== false) _calcLog("[calc-summary][dirty]", { uid: _resolveAbonentUid(abonentOrId), key: key, reason: String(reason || "") });
+    if (ok !== false) {
+      var uid = _resolveAbonentUid(abonentOrId);
+      _calcLog("[calc-summary][dirty]", { uid: uid, key: key, reason: String(reason || "") });
+      if (String(reason || "") === "calc_period_changed") _calcWarn("[calc-period-boundary][mismatch]", { uid: uid, key: key, reason: "calc_period_changed" });
+    }
     return ok;
   }
 
@@ -559,6 +563,12 @@
     }
   }
 
+  function _calcPeriodMode(period) {
+    if (period && period.active) return "selected_calc_period";
+    if (period && String(period.source || "") === "responsibility") return "full_active_responsibility";
+    return "current_default";
+  }
+
   function _effectiveCalcPeriodForCheckpoint(abonentOrId, summary) {
     var activeKey = resolveCalcPeriodActiveStorageKey(abonentOrId);
     var periodKey = resolveCalcPeriodStorageKey(abonentOrId);
@@ -571,14 +581,17 @@
       fallback = _defaultCalcPeriodForAbonent(found && found.id, found && found.abonent);
     }
     var effective = active || fallback || { from: "", to: "", active: false, source: "unknown" };
+    var mode = _calcPeriodMode(effective);
     return {
       key: periodKey,
       activeKey: activeKey,
-      value: { activeRaw: activeRaw === null || activeRaw === undefined ? "" : String(activeRaw), periodRaw: periodRaw === null || periodRaw === undefined ? "" : String(periodRaw), from: String(effective.from || ""), to: String(effective.to || ""), active: !!effective.active, source: String(effective.source || "") },
+      value: { activeRaw: activeRaw === null || activeRaw === undefined ? "" : String(activeRaw), periodRaw: periodRaw === null || periodRaw === undefined ? "" : String(periodRaw), from: String(effective.from || ""), to: String(effective.to || ""), active: !!effective.active, source: String(effective.source || ""), periodMode: mode },
       effectiveFrom: String(effective.from || ""),
       effectiveTo: String(effective.to || ""),
+      periodMode: mode,
       summaryFrom: String(summary && (summary.periodFrom || summary.from) || ""),
-      summaryTo: String(summary && (summary.periodTo || summary.to) || "")
+      summaryTo: String(summary && (summary.periodTo || summary.to) || ""),
+      summaryMode: String(summary && summary.periodMode || "")
     };
   }
 
@@ -622,6 +635,7 @@
       canonVersion: CALC_SUMMARY_CANON_VERSION,
       periodFrom: String(summary && (summary.periodFrom || summary.from) || calcPeriod.effectiveFrom || ""),
       periodTo: String(summary && (summary.periodTo || summary.to) || calcPeriod.effectiveTo || ""),
+      periodMode: String(summary && summary.periodMode || calcPeriod.periodMode || ""),
       calcPeriodKey: calcPeriod.key,
       calcPeriodValue: calcPeriod.value,
       ledgerKey: ledgerKey,
@@ -642,6 +656,7 @@
     if (String(summary.uid || "").trim() !== uid) return "SUMMARY_UID_MISMATCH";
     if (String(summary.abonentId || "").trim() !== abonentId) return "SUMMARY_ABONENT_MISMATCH";
     if (!_parseCalcDateISO(summary.periodFrom || summary.from) || !_parseCalcDateISO(summary.periodTo || summary.to)) return "SUMMARY_PERIOD_INVALID";
+    if (!["selected_calc_period", "full_active_responsibility", "current_default", "explicit_options"].includes(String(summary.periodMode || ""))) return "SUMMARY_PERIOD_MODE_INVALID";
     var total = summary.totalDebt !== undefined ? summary.totalDebt : (summary.total !== undefined ? summary.total : summary.total_debt);
     if (!Number.isFinite(Number(total))) return "SUMMARY_TOTAL_INVALID";
     return "";
@@ -652,6 +667,7 @@
     if (String(checkpoint.uid || "").trim() !== uid) return "CHECKPOINT_UID_MISMATCH";
     if (String(checkpoint.abonentId || "").trim() !== abonentId) return "CHECKPOINT_ABONENT_MISMATCH";
     if (!_parseCalcDateISO(checkpoint.periodFrom) || !_parseCalcDateISO(checkpoint.periodTo)) return "CHECKPOINT_PERIOD_INVALID";
+    if (!["selected_calc_period", "full_active_responsibility", "current_default", "explicit_options"].includes(String(checkpoint.periodMode || ""))) return "CHECKPOINT_PERIOD_MODE_INVALID";
     if (!checkpoint.generatedAt || !checkpoint.fingerprints || typeof checkpoint.fingerprints !== "object") return "CHECKPOINT_FINGERPRINTS_MISSING";
     if (!checkpoint.calcEngineVersion || !checkpoint.summaryFormatVersion || !checkpoint.canonVersion) return "CHECKPOINT_VERSION_MISSING";
     if (!checkpoint.ledgerFingerprint || !checkpoint.tariffsFingerprint || !checkpoint.refinancingFingerprint || !checkpoint.excludesFingerprint || !checkpoint.moratoriumFingerprint || !checkpoint.responsibilityFingerprint || !checkpoint.calcPeriodFingerprint) return "CHECKPOINT_REQUIRED_FINGERPRINT_MISSING";
@@ -674,7 +690,7 @@
       if (_stableCalcStringify(a) !== _stableCalcStringify(b)) return String(name).toUpperCase() + "_FINGERPRINT_MISMATCH";
     }
     if (_stableCalcStringify(current && current.summaryFingerprint) !== _stableCalcStringify(stored && stored.summaryFingerprint)) return "SUMMARY_FINGERPRINT_MISMATCH";
-    if (String(current.periodFrom || "") !== String(stored.periodFrom || "") || String(current.periodTo || "") !== String(stored.periodTo || "")) return "PERIOD_MISMATCH";
+    if (String(current.periodFrom || "") !== String(stored.periodFrom || "") || String(current.periodTo || "") !== String(stored.periodTo || "") || String(current.periodMode || "") !== String(stored.periodMode || "")) return "PERIOD_MISMATCH";
     return "";
   }
 
@@ -724,6 +740,9 @@
     var mismatchReason = _calcCheckpointMismatchReason(currentCheckpoint, checkpointRead.value);
     if (mismatchReason) {
       _calcWarn("[calc-summary][checkpoint-mismatch]", { uid: uid, abonentId: abonentId, reason: mismatchReason });
+      if (mismatchReason === "CALCPERIOD_FINGERPRINT_MISMATCH" || mismatchReason === "PERIOD_MISMATCH") {
+        _calcWarn("[calc-period-boundary][mismatch]", { uid: uid, abonentId: abonentId, reason: mismatchReason, currentPeriodFrom: currentCheckpoint && currentCheckpoint.periodFrom, currentPeriodTo: currentCheckpoint && currentCheckpoint.periodTo, currentPeriodMode: currentCheckpoint && currentCheckpoint.periodMode, storedPeriodFrom: checkpointRead.value && checkpointRead.value.periodFrom, storedPeriodTo: checkpointRead.value && checkpointRead.value.periodTo, storedPeriodMode: checkpointRead.value && checkpointRead.value.periodMode });
+      }
       return _calcSummaryState("checkpoint_mismatch", abonentOrId, summaryRead.value, checkpointRead.value, mismatchReason);
     }
 
@@ -893,10 +912,13 @@
       var raw = _getProjectRaw(ledgerKey);
       var rows = raw === null || raw === undefined || raw === "" ? [] : _parseLedgerRows(raw, ledgerKey);
       var period = _readActiveCalcPeriod(abonent) || _defaultCalcPeriodForAbonent(abonentId, abonent);
-      var periodFrom = String((opts.periodFrom || period.from) || "").trim();
-      var periodTo = String((opts.periodTo || period.to) || "").trim();
+      var periodMode = _calcPeriodMode(period);
+      var periodFrom = String((period.active ? period.from : (opts.periodFrom || period.from)) || "").trim();
+      var periodTo = String((period.active ? period.to : (opts.periodTo || period.to)) || "").trim();
+      if (!period.active && (opts.periodFrom || opts.periodTo)) periodMode = "explicit_options";
       if (!_parseCalcDateISO(periodFrom) || !_parseCalcDateISO(periodTo)) throw new Error("CALC_PERIOD_INVALID");
-      _calcLog("[calc-summary][recalc] period", { abonentId: abonentId, uid: uid, periodFrom: periodFrom, periodTo: periodTo, selected: !!period.active });
+      _calcLog("[calc-summary][recalc] period", { abonentId: abonentId, uid: uid, periodFrom: periodFrom, periodTo: periodTo, periodMode: periodMode, selected: !!period.active });
+      _calcLog("[calc-period-boundary][resolve]", { abonentId: abonentId, uid: uid, periodFrom: periodFrom, periodTo: periodTo, periodMode: periodMode, selected: !!period.active, source: String(period.source || "") });
 
       var autoaccrualResult = { ok: true, changed: false, reason: "SKIPPED" };
       if (!period.active && window.JKHAutoAccrual && typeof window.JKHAutoAccrual.recalcForAbonent === "function") {
@@ -923,6 +945,7 @@
         calculatedAt: new Date().toISOString(),
         periodFrom: periodFrom,
         periodTo: periodTo,
+        periodMode: periodMode,
         from: periodFrom,
         to: periodTo,
         selectedPeriod: !!period.active,
@@ -949,6 +972,7 @@
         totals: totals
       };
 
+      _calcLog("[calc-period-boundary][summary-period]", { abonentId: abonentId, uid: uid, periodFrom: summary.periodFrom, periodTo: summary.periodTo, periodMode: summary.periodMode, rowsTotal: summary.rowsTotal, rowsInPeriod: summary.rowsInPeriod });
       var summaryOk = writeCalcSummary(abonent, summary);
       if (summaryOk === false) throw new Error("SUMMARY_WRITE_FAILED");
       _calcLog("[calc-summary][recalc] summary-written", { abonentId: abonentId, uid: uid, key: resolveCalcSummaryKey(abonent), checkpointKey: resolveCalcCheckpointKey(abonent) });
