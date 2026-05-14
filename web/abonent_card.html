@@ -2373,8 +2373,8 @@ function getCalcPeriodStorageMeta(){
     const db = getDb() || {};
     const abonent = db[requestedId] || null;
     const resolvedUid = String(abonent?.uid || '').trim();
-    const storageKey = (window.getCalcPeriodStorageKey && abonent) ? String(window.getCalcPeriodStorageKey(abonent) || '') : '';
-    const activeStorageKey = (window.getCalcPeriodActiveStorageKey && abonent) ? String(window.getCalcPeriodActiveStorageKey(abonent) || '') : '';
+    const storageKey = (window.Data && typeof Data.resolveCalcPeriodStorageKey === "function" && abonent) ? String(Data.resolveCalcPeriodStorageKey(abonent) || '') : ((window.getCalcPeriodStorageKey && abonent) ? String(window.getCalcPeriodStorageKey(abonent) || '') : '');
+    const activeStorageKey = (window.Data && typeof Data.resolveCalcPeriodActiveStorageKey === "function" && abonent) ? String(Data.resolveCalcPeriodActiveStorageKey(abonent) || '') : ((window.getCalcPeriodActiveStorageKey && abonent) ? String(window.getCalcPeriodActiveStorageKey(abonent) || '') : '');
     const ownerId = getCalcPeriodOwnerId();
     return {
         requestedId: String(requestedId || ''),
@@ -2633,7 +2633,35 @@ function bindCalcButtons(){
         }
         if (!confirmCalcPeriodSaved()) return;
 
-        __safeLoadPaymentTableOnce();
+        try {
+            const box = document.getElementById("abonentCalcSummaryStatus");
+            if (box) box.innerHTML = 'Пересчёт начислений и итогов…';
+            __abonentPeriodAccrualsPreparedFor = "";
+            if (!window.Data || typeof Data.recalculateAbonentCard !== "function") throw new Error("Data.recalculateAbonentCard not available");
+            const res = await Data.recalculateAbonentCard(currentAbonentId, { source: "abonent_card_calc_button" });
+            if (res && res.reason === "period_accruals_missing") {
+                __abonentPeriodAccrualsMissingFor = String(currentAbonentId || "");
+                alert("Нет начислений за выбранный период. Сначала подготовьте начисления.");
+                renderAbonentCalcSummaryStatus();
+                try { if (typeof window.__loadPaymentTable === "function") window.__loadPaymentTable("calc-period-missing-accruals"); } catch(e) {}
+                return;
+            }
+            if (!res || res.ok !== true) throw new Error(res && res.reason ? res.reason : "CALC_RECALC_FAILED");
+            __abonentPeriodAccrualsMissingFor = "";
+            __abonentPeriodAccrualsPreparedFor = "";
+            renderAbonentCalcSummaryStatus();
+            try { if (typeof window.__loadPaymentTable === "function") window.__loadPaymentTable("abonent-card-calc-button"); } catch(e) {}
+            try {
+                if (window.Data && typeof Data.flushDbToServer === "function") await Data.flushDbToServer();
+            } catch (flushErr) {
+                try { console.warn("[abonent-card-calc-button] server-flush-failed", flushErr); } catch (_) {}
+            }
+        } catch (e) {
+            const msg = e && e.message ? e.message : String(e);
+            try { console.warn("[abonent-card-calc-button] failed", e); } catch (_) {}
+            alert("Ошибка пересчёта: " + msg);
+            renderAbonentCalcSummaryStatus();
+        }
     });
 
     resetBtn.addEventListener("click", () => {
@@ -2650,6 +2678,23 @@ function bindCalcButtons(){
     repBtn.addEventListener("click", () => {
         const id = getAbonentIdFromURL();
         const meta = getCalcPeriodStorageMeta();
+        const from = String(fromEl.value || "").trim();
+        const to = String(toEl.value || "").trim();
+        if (!isValidPeriod(from, to)) {
+            if (!from || !to) {
+                alert("Укажите дату начала и дату окончания периода расчёта.");
+            } else {
+                alert("Такой период невозможен: дата начала не может быть позже даты окончания.");
+            }
+            return;
+        }
+        if (!saveCalcPeriod(from, to)) {
+            if (saveCalcPeriod.lastError !== "PERIOD_REQUIRED") {
+                alert("Период расчёта не сохранён: не найден canonical UID key.");
+            }
+            return;
+        }
+        if (!confirmCalcPeriodSaved()) return;
         // ✅ FIX: forward active db key (if present) to reports page
         // to keep correct data when multiple bases exist in localStorage.
         let dbKey = "";
@@ -2668,7 +2713,10 @@ function bindCalcButtons(){
                 activeKey: meta.activeStorageKey
             });
         } catch (e) {}
-        location.href = "reports.html?abonent=" + encodeURIComponent(id) + (dbKey ? ("&db=" + encodeURIComponent(dbKey)) : (meta.ownerId ? ("&owner=" + encodeURIComponent(meta.ownerId)) : ""));
+        location.href = "spravka_sud.html?abonent=" + encodeURIComponent(id)
+            + "&from=" + encodeURIComponent(from)
+            + "&to=" + encodeURIComponent(to)
+            + (dbKey ? ("&db=" + encodeURIComponent(dbKey)) : (meta.ownerId ? ("&owner=" + encodeURIComponent(meta.ownerId)) : ""));
     });
 }
 

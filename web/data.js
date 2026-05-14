@@ -1361,6 +1361,7 @@
       var periodFrom = String(period && period.from || "").trim();
       var periodTo = String(period && period.to || "").trim();
       if (!_parseCalcDateISO(periodFrom) || !_parseCalcDateISO(periodTo)) throw new Error("CALC_PERIOD_INVALID");
+      _calcLog("[calc-period-boundary][resolve]", { abonentId: abonentId, uid: uid, periodFrom: periodFrom, periodTo: periodTo, periodMode: periodMode, selected: !!period.active, source: String(period.source || "") });
       var rowsForAccrualCheck = _filterCalcRowsByPeriod(rows, periodFrom, periodTo);
       var hasAccrualInScope = _hasCalcAccrualRows(rowsForAccrualCheck);
       _calcLog("[abonent-card-recalc][rows-before]", { abonentId: abonentId, uid: uid, ledgerKey: ledgerKey, rowsCount: rows.length, ledgerMissing: ledgerMissing, hasAccrual: _hasCalcAccrualRows(rows), hasAccrualInScope: hasAccrualInScope, periodFrom: periodFrom, periodTo: periodTo, periodMode: periodMode });
@@ -1419,6 +1420,7 @@
         totals: totals
       };
 
+      _calcLog("[calc-period-boundary][summary-period]", { abonentId: abonentId, uid: uid, periodFrom: summary.periodFrom, periodTo: summary.periodTo, periodMode: summary.periodMode, rowsTotal: summary.rowsTotal, rowsInPeriod: summary.rowsInPeriod });
       var summaryOk = writeCalcSummary(abonentId, summary);
       if (summaryOk === false) throw new Error("SUMMARY_WRITE_FAILED");
       _calcLog("[abonent-card-recalc][summary-write]", { abonentId: abonentId, uid: uid, key: resolveCalcSummaryKey(abonentId), rowsInPeriod: summary.rowsInPeriod, total: summary.total });

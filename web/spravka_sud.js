@@ -103,6 +103,57 @@
     return d.getDate() + " " + months[d.getMonth()] + " " + d.getFullYear() + " года";
   }
 
+
+  function parseIsoDateStrict(value){
+    const m = String(value || "").trim().match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (!m) return null;
+    const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]), 12, 0, 0, 0);
+    if (d.getFullYear() !== Number(m[1]) || d.getMonth() !== Number(m[2]) - 1 || d.getDate() !== Number(m[3])) return null;
+    return d;
+  }
+
+  function loadUrlPeriod(){
+    const p = getUrlParams();
+    const from = String(p.get("from") || "").trim();
+    const to = String(p.get("to") || "").trim();
+    if (!from && !to) return null;
+    if (!parseIsoDateStrict(from) || !parseIsoDateStrict(to)) return null;
+    return { from: from, to: to };
+  }
+
+  function rowYmKey(row){
+    const y = parseInt(row && row.year, 10);
+    const m = parseInt(row && row.month, 10);
+    if (Number.isFinite(y) && Number.isFinite(m) && y > 0 && m >= 1 && m <= 12) return (y * 12) + m;
+    return null;
+  }
+
+  function filterRowsBySelectedPeriod(rows, period){
+    const fromD = parseIsoDateStrict(period && period.from);
+    const toD = parseIsoDateStrict(period && period.to);
+    if (!fromD || !toD) return Array.isArray(rows) ? rows.slice() : [];
+    const fromKey = (fromD.getFullYear() * 12) + (fromD.getMonth() + 1);
+    const toKey = (toD.getFullYear() * 12) + (toD.getMonth() + 1);
+    return (Array.isArray(rows) ? rows : []).filter(function (r) {
+      const k = rowYmKey(r);
+      if (k === null || k < fromKey || k > toKey) return false;
+      const paid = Number(String(r && r.paid || "0").replace(/\s+/g, "").replace(",", ".")) || 0;
+      const paidD = parseIsoDateStrict(r && r.paid_date);
+      if (paid > 0.0000001 && paidD) {
+        if (paidD.getTime() < fromD.getTime()) return false;
+        if (paidD.getTime() > toD.getTime()) return false;
+      }
+      return true;
+    });
+  }
+
+  function hasAccrualRows(rows){
+    return (Array.isArray(rows) ? rows : []).some(function(row){
+      const accrued = Number(String(row && row.accrued || "0").replace(/\s+/g, "").replace(",", "."));
+      return Number.isFinite(accrued) && accrued > 0.0000001;
+    });
+  }
+
   function loadSelectedPeriod(ctx, abonent){
     function parsePeriod(raw){
       try {
@@ -145,6 +196,17 @@
         readOwner: readOwner,
         key: storageKey,
         activeKey: activeStorageKey
+      });
+      return null;
+    }
+
+    if (activeRaw !== "1") {
+      console.warn("[spravka][calc-period-read][inactive-canonical-period]", {
+        abonentId: requestedId,
+        readOwner: readOwner,
+        key: storageKey,
+        activeKey: activeStorageKey,
+        activeRaw: activeRaw
       });
       return null;
     }
@@ -576,17 +638,12 @@
         return;
       }
 
-      let period = loadSelectedPeriod(ctx, abonent);
-      let periodSource = period ? "stored canonical calc period" : "missing canonical calc period";
+      const urlPeriod = loadUrlPeriod();
+      let period = urlPeriod || loadSelectedPeriod(ctx, abonent);
+      let periodSource = urlPeriod ? "url selected calc period" : (period ? "stored canonical calc period" : "missing canonical calc period");
       if (!period) {
         showFatal("Период расчёта не найден в canonical UID key. Откройте карточку/расчёт и сохраните период расчёта.");
         return;
-      }
-
-      const pFrom = eng.parseDateAnyToDate(period.from);
-      if (pFrom && eng.startOfDay(pFrom) < abonentStart) {
-        period.from = eng.toISODateString(abonentStart);
-        periodSource += " + clampedToAbonentStart";
       }
 
       const periodFromD = eng.parseDateAnyToDate(period.from);
@@ -604,7 +661,7 @@
       setText("period_to", fmtDateRuAny(period.to));
 
       const toD = periodToD;
-      const asOfFinal = eng.endOfMonth(toD);
+      const asOfFinal = eng.startOfDay(toD);
 
       setText("stateDate", fmtDateRuAny(asOfFinal));
       setText("docDate", fmtDateRuAny(new Date()));
@@ -621,26 +678,6 @@
           if ((Number(row.accrued) || 0) > 0 || (Number(row.paid) || 0) > 0) return true;
         }
         return false;
-      }
-
-      if (window.JKHAutoAccrual && typeof window.JKHAutoAccrual.recalcForAbonent === "function") {
-        let recalcResult = null;
-        try {
-          recalcResult = window.JKHAutoAccrual.recalcForAbonent(ctx.abonentId);
-        } catch (e) {
-          if (isLedgerJsonInvalidError(e)) {
-            showFatal(LEDGER_FATAL_MESSAGE, { abonentId: ctx.abonentId, error: e });
-            return;
-          }
-          throw e;
-        }
-        if (isLedgerJsonInvalidResult(recalcResult)) {
-          showFatal((recalcResult && recalcResult.message) || LEDGER_FATAL_MESSAGE, { abonentId: ctx.abonentId, result: recalcResult });
-          return;
-        }
-        if (recalcResult && recalcResult.ok && recalcResult.changed && window.Data && typeof window.Data.flushDbToServer === "function") {
-          await window.Data.flushDbToServer();
-        }
       }
 
       let allRowsRaw;
@@ -674,19 +711,14 @@
         });
       }
 
-      const fromD = eng.parseDateAnyToDate(period.from);
-      const toD2 = eng.parseDateAnyToDate(period.to);
-      let baseRows = allRows;
-      if (fromD && toD2){
-        const fromKey = (fromD.getFullYear() * 12) + (fromD.getMonth() + 1);
-        const toKey = (toD2.getFullYear() * 12) + (toD2.getMonth() + 1);
-        baseRows = allRows.filter(function (r) {
-          const y = parseInt(r && r.year, 10);
-          const m = parseInt(r && r.month, 10);
-          if (!(Number.isFinite(y) && Number.isFinite(m) && y > 0 && m >= 1 && m <= 12)) return false;
-          const k = (y * 12) + m;
-          return k >= fromKey && k <= toKey;
+      const baseRows = filterRowsBySelectedPeriod(allRows, period);
+      if (!hasAccrualRows(baseRows)) {
+        showFatal("Нет начислений за выбранный период. Сначала подготовьте начисления.", {
+          abonentId: ctx.abonentId,
+          period: period,
+          rowsInPeriod: baseRows.length
         });
+        return;
       }
 
       let viewRows;
