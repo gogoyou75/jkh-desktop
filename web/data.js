@@ -525,6 +525,33 @@
     return ok;
   }
 
+  function clearCalcDirtyReason(abonentOrId, reason) {
+    var key = resolveCalcDirtyKey(abonentOrId);
+    if (!key) return false;
+    var raw = _getProjectRaw(key);
+    var targetReason = String(reason || "");
+    var currentReason = "";
+    var dirty = false;
+    if (raw === "1" || raw === "true" || raw === true) {
+      dirty = true;
+    } else if (raw === "0" || raw === "false" || raw === false || raw === null || raw === undefined || raw === "") {
+      dirty = false;
+    } else {
+      try {
+        var parsed = JSON.parse(String(raw));
+        dirty = !!(parsed && parsed.dirty);
+        currentReason = String(parsed && parsed.reason || "");
+      } catch (e) {
+        dirty = false;
+      }
+    }
+    if (!dirty) return true;
+    if (targetReason && currentReason && currentReason !== targetReason) return true;
+    var ok = _setProjectRaw(key, "0");
+    if (ok !== false) _calcLog("[calc-summary][dirty-clear-reason]", { uid: _resolveAbonentUid(abonentOrId), key: key, reason: targetReason || currentReason });
+    return ok;
+  }
+
   function _calcSummaryState(status, abonentOrId, summary, checkpoint, reason) {
     return {
       status: status,
@@ -1318,6 +1345,32 @@
     return allRows;
   }
 
+  function _calcRowsForSelectedPeriodFastPath(rows, periodRows, periodFrom, periodTo, abonentId) {
+    var started = Date.now();
+    var allRows = _cloneLedgerRows(rows);
+    var selectedRows = _cloneLedgerRows(periodRows);
+    var periodItems = [];
+    for (var i = 0; i < allRows.length; i++) {
+      if (_rowInCalcPeriod(allRows[i], periodFrom, periodTo)) periodItems.push({ index: i });
+    }
+
+    var recalculatedPeriodRows = _calcRowsWithEngine(selectedRows, periodFrom, periodTo, true, abonentId);
+    for (var j = 0; j < periodItems.length; j++) {
+      allRows[periodItems[j].index] = recalculatedPeriodRows[j];
+    }
+
+    _calcLog("[abonent-card-recalc][period-fast-path]", {
+      periodFrom: periodFrom,
+      periodTo: periodTo,
+      rowsTotal: allRows.length,
+      rowsInPeriod: selectedRows.length,
+      skippedRows: Math.max(0, allRows.length - selectedRows.length),
+      durationMs: Date.now() - started
+    });
+
+    return { rows: allRows, periodRows: recalculatedPeriodRows };
+  }
+
   function _isServerFirstDataReadyForRecalc() {
     try {
       if (!_remoteEnabled()) return true;
@@ -1389,13 +1442,22 @@
         if (!readiness.ok) return { ok: false, uid: uid, abonentId: abonentId, periodFrom: periodFrom, periodTo: periodTo, summary: null, reason: readiness.reason, missingMonths: readiness.missingMonths };
       }
 
-      var recalculatedRows = _calcRowsWithEngine(rows, periodFrom, periodTo, !!period.active, abonentId);
+      var recalculatedRows = null;
+      var summaryRows = null;
+      if (period.active) {
+        var periodRows = _filterCalcRowsByPeriod(rows, periodFrom, periodTo);
+        var fastPath = _calcRowsForSelectedPeriodFastPath(rows, periodRows, periodFrom, periodTo, abonentId);
+        recalculatedRows = fastPath.rows;
+        summaryRows = fastPath.periodRows;
+      } else {
+        recalculatedRows = _calcRowsWithEngine(rows, periodFrom, periodTo, false, abonentId);
+        summaryRows = _filterCalcRowsByPeriod(recalculatedRows, periodFrom, periodTo);
+      }
       _calcLog("[abonent-card-recalc][rows-after]", { abonentId: abonentId, uid: uid, ledgerKey: ledgerKey, rowsCount: recalculatedRows.length, periodFrom: periodFrom, periodTo: periodTo, periodMode: periodMode });
 
       var ledgerOk = writePaymentLedger(abonentId, recalculatedRows, { eventType: "ABONENT_CARD_RECALC_LEDGER_WRITE", dirtyReason: "abonent_card_recalc", event: { source: String(opts.source || "abonent_card") } });
       if (ledgerOk === false) throw new Error("LEDGER_WRITE_FAILED");
 
-      var summaryRows = _filterCalcRowsByPeriod(recalculatedRows, periodFrom, periodTo);
       var asOf = _parseCalcDateISO(periodTo);
       var totals = window.JKHCalcEngine.calcTotalsAsOfAdjusted(summaryRows, asOf, { abonentId: abonentId, applyAdvanceOffset: true, allowNegativePrincipal: true });
       if (!totals || !Number.isFinite(Number(totals.principal)) || !Number.isFinite(Number(totals.penaltyDebt)) || !Number.isFinite(Number(totals.total))) throw new Error("CALC_TOTALS_INVALID");
@@ -2095,6 +2157,7 @@
     resolveCalcCheckpointKey: resolveCalcCheckpointKey,
     resolveCalcDirtyKey: resolveCalcDirtyKey,
     markCalcDirty: markCalcDirty,
+    clearCalcDirtyReason: clearCalcDirtyReason,
     isCalcDirty: isCalcDirty,
     readCalcSummary: readCalcSummary,
     getCalcSummaryDebugInfo: getCalcSummaryDebugInfo,
@@ -3134,6 +3197,7 @@ window.resolveCalcSummaryKey = resolveCalcSummaryKey;
 window.resolveCalcCheckpointKey = resolveCalcCheckpointKey;
 window.resolveCalcDirtyKey = resolveCalcDirtyKey;
 window.markCalcDirty = markCalcDirty;
+window.clearCalcDirtyReason = clearCalcDirtyReason;
 window.readCalcSummary = readCalcSummary;
 window.getCalcSummaryDebugInfo = getCalcSummaryDebugInfo;
 window.writeCalcSummary = writeCalcSummary;
