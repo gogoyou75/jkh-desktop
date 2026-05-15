@@ -405,6 +405,15 @@ function loadAutoPeriod(abonent) {
     const toEl = document.getElementById("repTo");
     if (!fromEl || !toEl) return;
 
+    const params = getReportsUrlParams();
+    const urlFrom = String(params.get("from") || "").trim();
+    const urlTo = String(params.get("to") || "").trim();
+    if (isValidPeriod(urlFrom, urlTo)) {
+        fromEl.value = urlFrom;
+        toEl.value = urlTo;
+        return;
+    }
+
     const meta = getCanonicalPeriodMeta(id, abonent);
     try {
         const raw = meta.periodKey ? storeGetCanonical(meta.periodKey, meta.ownerId) : null;

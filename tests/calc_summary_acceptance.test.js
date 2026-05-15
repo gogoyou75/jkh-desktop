@@ -322,7 +322,7 @@ test('8. Three-month period does not calculate the full history', async () => {
   assert.equal(state.summary.accrued, 600);
 });
 
-test('9. Empty report period opens spravka for full responsibility period', () => {
+test('9. Empty report period opens reports for full responsibility period', () => {
   const env = loadCardApp({ seed: { activePeriod: false } });
   const db = baseDb();
   db.links[0].dateTo = '2025-05-31';
@@ -341,7 +341,7 @@ test('9. Empty report period opens spravka for full responsibility period', () =
 
   assert.equal(env.document.getElementById('calcFrom').value, '2025-01-01');
   assert.equal(env.document.getElementById('calcTo').value, '2025-05-31');
-  assert.match(String(env.context.location.href), /spravka_sud\.html\?abonent=9001/);
+  assert.match(String(env.context.location.href), /reports\.html\?abonent=9001/);
   assert.match(String(env.context.location.href), /from=2025-01-01/);
   assert.match(String(env.context.location.href), /to=2025-05-31/);
   assert.equal(env.localStorage.getItem(scoped(`calc_period_active_${UID}`)), null);

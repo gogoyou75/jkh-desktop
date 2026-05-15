@@ -517,8 +517,10 @@
     var ok = _setProjectRaw(key, payload);
     if (ok !== false) {
       var uid = _resolveAbonentUid(abonentOrId);
+      var suppressCalcPeriodMismatch = false;
+      try { suppressCalcPeriodMismatch = !!window.__JKH_SUPPRESS_CALC_PERIOD_BOUNDARY_MISMATCH; } catch (e) { suppressCalcPeriodMismatch = false; }
       _calcLog("[calc-summary][dirty]", { uid: uid, key: key, reason: String(reason || "") });
-      if (String(reason || "") === "calc_period_changed") _calcWarn("[calc-period-boundary][mismatch]", { uid: uid, key: key, reason: "calc_period_changed" });
+      if (String(reason || "") === "calc_period_changed" && !suppressCalcPeriodMismatch) _calcWarn("[calc-period-boundary][mismatch]", { uid: uid, key: key, reason: "calc_period_changed" });
     }
     return ok;
   }
