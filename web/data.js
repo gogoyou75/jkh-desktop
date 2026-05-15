@@ -919,7 +919,7 @@
     var toYm = String(toD.getFullYear()).padStart(4, "0") + "-" + String(toD.getMonth() + 1).padStart(2, "0");
     return _cloneLedgerRows(rows).filter(function (row) {
       var ym = _rowCalcYm(row);
-      if (ym && (ym < fromYm || ym > toYm)) return false;
+      if (!ym || ym < fromYm || ym > toYm) return false;
       var paid = Number(String(row && row.paid || "0").replace(/\s+/g, "").replace(",", ".")) || 0;
       var paidD = _parseCalcDateISO(row && row.paid_date);
       if (paid > 0.0000001 && paidD) {
@@ -964,6 +964,19 @@
     var fallbackFrom = String(abonent && (abonent.dateFrom || abonent.date_from || abonent.calcFrom || abonent.startDate) || "").trim();
     if (!_parseCalcDateISO(fallbackFrom)) fallbackFrom = _toCalcDateISO(new Date());
     return { from: fallbackFrom, to: _toCalcDateISO(new Date()), active: false, source: "safe-current" };
+  }
+
+  function resolveDefaultCalcPeriodForAbonent(abonentOrId) {
+    var found = _findAbonentByIdOrUid(abonentOrId);
+    var abonentId = String(found && found.id || (typeof abonentOrId === "object" ? abonentOrId && abonentOrId.id : abonentOrId) || "").trim();
+    var abonent = found && found.abonent ? found.abonent : (typeof abonentOrId === "object" ? abonentOrId : null);
+    var period = _defaultCalcPeriodForAbonent(abonentId, abonent);
+    return {
+      from: String(period && period.from || "").trim(),
+      to: String(period && period.to || "").trim(),
+      active: false,
+      source: String(period && period.source || "")
+    };
   }
 
   function _simpleCalcHash(raw) {
@@ -2075,6 +2088,7 @@
     ensureAbonentUid: ensureAbonentUid,
     resolveCalcPeriodStorageKey: resolveCalcPeriodStorageKey,
     resolveCalcPeriodActiveStorageKey: resolveCalcPeriodActiveStorageKey,
+    resolveDefaultCalcPeriodForAbonent: resolveDefaultCalcPeriodForAbonent,
     resolveCalcSummaryKey: resolveCalcSummaryKey,
     resolveCalcCheckpointKey: resolveCalcCheckpointKey,
     resolveCalcDirtyKey: resolveCalcDirtyKey,

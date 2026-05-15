@@ -2585,6 +2585,16 @@ function isValidPeriod(from, to){
     } catch (e) { return false; }
 }
 
+function resolveDefaultReportCalcPeriod(abonentId){
+    if (window.Data && typeof Data.resolveDefaultCalcPeriodForAbonent === "function") {
+        const period = Data.resolveDefaultCalcPeriodForAbonent(abonentId);
+        const from = String(period && period.from || "").trim();
+        const to = String(period && period.to || "").trim();
+        if (isValidPeriod(from, to)) return { from: from, to: to, source: String(period && period.source || "") };
+    }
+    return null;
+}
+
 function bindCalcButtons(){
     const runBtn = document.getElementById("calcRunBtn");
     const repBtn = document.getElementById("calcReportsBtn");
@@ -2678,23 +2688,46 @@ function bindCalcButtons(){
     repBtn.addEventListener("click", () => {
         const id = getAbonentIdFromURL();
         const meta = getCalcPeriodStorageMeta();
-        const from = String(fromEl.value || "").trim();
-        const to = String(toEl.value || "").trim();
-        if (!isValidPeriod(from, to)) {
-            if (!from || !to) {
-                alert("Укажите дату начала и дату окончания периода расчёта.");
-            } else {
-                alert("Такой период невозможен: дата начала не может быть позже даты окончания.");
+        const inputFrom = String(fromEl.value || "").trim();
+        const inputTo = String(toEl.value || "").trim();
+        let from = inputFrom;
+        let to = inputTo;
+
+        if (!inputFrom && !inputTo) {
+            const defaultPeriod = resolveDefaultReportCalcPeriod(id);
+            if (!defaultPeriod) {
+                alert("Не удалось определить полный период ответственности абонента.");
+                return;
             }
-            return;
-        }
-        if (!saveCalcPeriod(from, to)) {
-            if (saveCalcPeriod.lastError !== "PERIOD_REQUIRED") {
-                alert("Период расчёта не сохранён: не найден canonical UID key.");
+            from = defaultPeriod.from;
+            to = defaultPeriod.to;
+            fromEl.value = from;
+            toEl.value = to;
+            try {
+                console.log("[calc-period][reports-default-period]", {
+                    abonentId: String(id || ""),
+                    from: from,
+                    to: to,
+                    source: defaultPeriod.source
+                });
+            } catch (e) {}
+        } else {
+            if (!isValidPeriod(from, to)) {
+                if (!from || !to) {
+                    alert("Укажите дату начала и дату окончания периода расчёта.");
+                } else {
+                    alert("Такой период невозможен: дата начала не может быть позже даты окончания.");
+                }
+                return;
             }
-            return;
+            if (!saveCalcPeriod(from, to)) {
+                if (saveCalcPeriod.lastError !== "PERIOD_REQUIRED") {
+                    alert("Период расчёта не сохранён: не найден canonical UID key.");
+                }
+                return;
+            }
+            if (!confirmCalcPeriodSaved()) return;
         }
-        if (!confirmCalcPeriodSaved()) return;
         // ✅ FIX: forward active db key (if present) to reports page
         // to keep correct data when multiple bases exist in localStorage.
         let dbKey = "";

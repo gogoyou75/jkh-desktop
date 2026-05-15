@@ -321,3 +321,54 @@ test('8. Three-month period does not calculate the full history', async () => {
   assert.ok(state.summary.rowsTotal >= 4, 'fixture contains rows outside the selected period');
   assert.equal(state.summary.accrued, 600);
 });
+
+test('9. Empty report period opens spravka for full responsibility period', () => {
+  const env = loadCardApp({ seed: { activePeriod: false } });
+  const db = baseDb();
+  db.links[0].dateTo = '2025-05-31';
+  db.abonents[ABONENT_ID].calcEndDate = '';
+  db.abonents[ABONENT_ID].dateTo = '2025-05-31';
+  env.localStorage.setItem(scoped('abonents_db_v1'), JSON.stringify(db));
+  env.localStorage.removeItem(scoped(`calc_period_${UID}`));
+  env.localStorage.removeItem(scoped(`calc_period_active_${UID}`));
+  env.context.AbonentsDB = db;
+  env.context.location = { search: `?abonent=${ABONENT_ID}`, href: `file://${path.join(WEB, 'abonent_card.html')}?abonent=${ABONENT_ID}` };
+  env.document.getElementById('calcFrom').value = '';
+  env.document.getElementById('calcTo').value = '';
+  env.context.bindCalcButtons();
+
+  env.document.getElementById('calcReportsBtn').click();
+
+  assert.equal(env.document.getElementById('calcFrom').value, '2025-01-01');
+  assert.equal(env.document.getElementById('calcTo').value, '2025-05-31');
+  assert.match(String(env.context.location.href), /spravka_sud\.html\?abonent=9001/);
+  assert.match(String(env.context.location.href), /from=2025-01-01/);
+  assert.match(String(env.context.location.href), /to=2025-05-31/);
+  assert.equal(env.localStorage.getItem(scoped(`calc_period_active_${UID}`)), null);
+});
+
+test('10. Selected March-May period excludes older debt from summary totals', async () => {
+  const env = loadCardApp({ seed: {
+    periodFrom: '2025-03-01',
+    periodTo: '2025-05-31',
+    activePeriod: true,
+    ledgerRows: [
+      { id: 1, year: '2025', month: '02', accrued: 10000, paid: 0, paid_date: '', source: 'Acceptance', payment_period: '' },
+      { id: 2, year: '2025', month: '03', accrued: 100, paid: 0, paid_date: '', source: 'Acceptance', payment_period: '' },
+      { id: 3, year: '2025', month: '04', accrued: 100, paid: 0, paid_date: '', source: 'Acceptance', payment_period: '' },
+      { id: 4, year: '2025', month: '05', accrued: 100, paid: 0, paid_date: '', source: 'Acceptance', payment_period: '' }
+    ]
+  } });
+
+  const res = await env.context.Data.recalculateAbonentCard(ABONENT_ID, { source: 'acceptance_selected_period' });
+  assert.equal(res.ok, true);
+  const state = env.context.Data.readCalcSummary(ABONENT_ID);
+  assert.equal(state.status, 'fresh');
+  assert.equal(state.summary.periodMode, 'selected_calc_period');
+  assert.equal(state.summary.periodFrom, '2025-03-01');
+  assert.equal(state.summary.periodTo, '2025-05-31');
+  assert.equal(state.summary.rowsInPeriod, 3);
+  assert.equal(state.summary.accrued, 300);
+  assert.equal(state.summary.principal, 300);
+  assert.equal(state.summary.total < 10000, true);
+});
