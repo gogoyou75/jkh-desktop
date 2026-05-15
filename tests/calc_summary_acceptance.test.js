@@ -322,7 +322,77 @@ test('8. Three-month period does not calculate the full history', async () => {
   assert.equal(state.summary.accrued, 600);
 });
 
-test('9. Empty report period opens reports for full responsibility period', () => {
+
+test('9. History 200 months recalculates only selected 3 months plus one checkpoint', async () => {
+  const rows = [];
+  let y = 2025;
+  let m = 1;
+  for (let i = 0; i < 200; i += 1) {
+    const row = {
+      id: i + 1,
+      year: String(y),
+      month: String(m).padStart(2, '0'),
+      accrued: 100,
+      paid: 0,
+      paid_date: '',
+      source: 'Acceptance',
+      payment_period: ''
+    };
+    if (i === 196) {
+      row.pay_main = 19700;
+      row.pay_penalty = 0;
+      row.total = 19700;
+      row.total_debt = 19700;
+    }
+    rows.push(row);
+    m += 1;
+    if (m > 12) {
+      m = 1;
+      y += 1;
+    }
+  }
+
+  const env = loadCardApp({ seed: {
+    periodFrom: '2041-06-01',
+    periodTo: '2041-08-31',
+    activePeriod: true,
+    ledgerRows: rows
+  } });
+
+  const db = JSON.parse(env.localStorage.getItem(scoped('abonents_db_v1')));
+  db.links[0].dateTo = '2041-08-31';
+  db.abonents[ABONENT_ID].calcEndDate = '2041-08-31';
+  db.abonents[ABONENT_ID].dateTo = '2041-08-31';
+  env.localStorage.setItem(scoped('abonents_db_v1'), JSON.stringify(db));
+  env.context.AbonentsDB = db;
+
+  const originalCalc = env.context.JKHCalcEngine.calcTotalsAsOfAdjusted;
+  let calcCalls = 0;
+  env.context.JKHCalcEngine.calcTotalsAsOfAdjusted = function () {
+    calcCalls += 1;
+    return originalCalc.apply(this, arguments);
+  };
+
+  const res = await env.context.Data.recalculateAbonentCard(ABONENT_ID, { source: 'acceptance_200_month_checkpoint' });
+  assert.equal(res.ok, true);
+  assert.equal(calcCalls, 4);
+
+  const savedRows = ledgerRows(env.localStorage);
+  assert.equal(savedRows.length, 200);
+  assert.equal(savedRows[0].pay_main, undefined);
+  assert.equal(savedRows[196].pay_main, 19700);
+  assert.equal(savedRows[197].pay_main, 19800);
+  assert.equal(savedRows[198].pay_main, 19900);
+  assert.equal(savedRows[199].pay_main, 20000);
+
+  const fastLog = env.logs.find((entry) => entry.some((item) => typeof item === 'string' && item.includes('[abonent-card-recalc][period-fast-path]')));
+  const fastPayload = fastLog && fastLog.find((item) => item && typeof item === 'object' && !Array.isArray(item));
+  assert.equal(fastPayload.rowsTotal, 200);
+  assert.equal(fastPayload.rowsInPeriod, 3);
+  assert.equal(fastPayload.skippedRows, 197);
+});
+
+test('10. Empty report period opens reports for full responsibility period', () => {
   const env = loadCardApp({ seed: { activePeriod: false } });
   const db = baseDb();
   db.links[0].dateTo = '2025-05-31';
@@ -347,13 +417,13 @@ test('9. Empty report period opens reports for full responsibility period', () =
   assert.equal(env.localStorage.getItem(scoped(`calc_period_active_${UID}`)), null);
 });
 
-test('10. Selected March-May period excludes older debt from summary totals', async () => {
+test('11. Selected March-May period uses previous calculated row as checkpoint', async () => {
   const env = loadCardApp({ seed: {
     periodFrom: '2025-03-01',
     periodTo: '2025-05-31',
     activePeriod: true,
     ledgerRows: [
-      { id: 1, year: '2025', month: '02', accrued: 10000, paid: 0, paid_date: '', source: 'Acceptance', payment_period: '' },
+      { id: 1, year: '2025', month: '02', accrued: 10000, paid: 0, paid_date: '', source: 'Acceptance', payment_period: '', pay_main: 10000, pay_penalty: 0, total: 10000, total_debt: 10000 },
       { id: 2, year: '2025', month: '03', accrued: 100, paid: 0, paid_date: '', source: 'Acceptance', payment_period: '' },
       { id: 3, year: '2025', month: '04', accrued: 100, paid: 0, paid_date: '', source: 'Acceptance', payment_period: '' },
       { id: 4, year: '2025', month: '05', accrued: 100, paid: 0, paid_date: '', source: 'Acceptance', payment_period: '' }
@@ -369,6 +439,8 @@ test('10. Selected March-May period excludes older debt from summary totals', as
   assert.equal(state.summary.periodTo, '2025-05-31');
   assert.equal(state.summary.rowsInPeriod, 3);
   assert.equal(state.summary.accrued, 300);
-  assert.equal(state.summary.principal, 300);
-  assert.equal(state.summary.total < 10000, true);
+  assert.equal(state.summary.principal, 10300);
+  assert.equal(state.summary.total, 10300.66);
+  assert.equal(env.logs.filter((entry) => entry.some((item) => typeof item === 'string' && item.includes('[abonent-card-recalc][checkpoint]'))).length, 1);
+  assert.equal(env.logs.filter((entry) => entry.some((item) => typeof item === 'string' && item.includes('[abonent-card-recalc][period-fast-path]'))).length, 1);
 });

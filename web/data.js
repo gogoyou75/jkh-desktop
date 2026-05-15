@@ -1131,11 +1131,29 @@
         var readiness = _checkPeriodAccrualReadiness(periodRows, periodFrom, periodTo, { abonentId: abonentId, uid: uid, ledgerKey: ledgerKey, periodMode: periodMode });
         if (!readiness.ok) return { ok: false, uid: uid, abonentId: abonentId, periodFrom: periodFrom, periodTo: periodTo, summary: null, reason: readiness.reason, missingMonths: readiness.missingMonths };
       }
+      var openingState = null;
+      if (period.active) {
+        openingState = _findCalcOpeningCheckpoint(rows, periodFrom);
+        if (!openingState || openingState.found !== true) {
+          _calcWarn("[abonent-card-recalc][checkpoint-missing]", { periodFrom: periodFrom, periodTo: periodTo, rowsTotal: rows.length, previousRows: openingState && openingState.previousRows || 0, reason: "CALC_CHECKPOINT_REQUIRED" });
+          throw new Error("CALC_CHECKPOINT_REQUIRED");
+        }
+        _calcLog("[abonent-card-recalc][checkpoint]", {
+          periodFrom: periodFrom,
+          periodTo: periodTo,
+          checkpointMonth: openingState.checkpointMonth,
+          openingPrincipal: openingState.openingPrincipal,
+          openingPenalty: openingState.openingPenalty,
+          openingTotal: openingState.openingTotal
+        });
+      }
+
       var asOf = _parseCalcDateISO(periodTo);
       var totals = window.JKHCalcEngine.calcTotalsAsOfAdjusted(periodRows, asOf, { abonentId: abonentId, applyAdvanceOffset: true, allowNegativePrincipal: true });
       if (!totals || !Number.isFinite(Number(totals.principal)) || !Number.isFinite(Number(totals.penaltyDebt)) || !Number.isFinite(Number(totals.total))) {
         throw new Error("CALC_TOTALS_INVALID");
       }
+      if (period.active) totals = _mergeCalcOpeningTotals(totals, openingState);
 
       var summary = {
         uid: uid,
@@ -1318,10 +1336,102 @@
     return _filterCalcRowsByPeriod([row], periodFrom, periodTo).length > 0;
   }
 
-  function _calcRowsWithEngine(rows, periodFrom, periodTo, periodActive, abonentId) {
+  function _calcFiniteMoney(value) {
+    var n = Number(String(value === null || value === undefined ? "" : value).replace(/\s+/g, "").replace(",", "."));
+    return Number.isFinite(n) ? n : null;
+  }
+
+  function _calcRowCheckpointTotal(row) {
+    var totalDebt = _calcFiniteMoney(row && row.total_debt);
+    if (totalDebt !== null) return totalDebt;
+    var total = _calcFiniteMoney(row && row.total);
+    return total !== null ? total : null;
+  }
+
+  function _calcRowHasCheckpoint(row) {
+    return _calcFiniteMoney(row && row.pay_main) !== null &&
+      _calcFiniteMoney(row && row.pay_penalty) !== null &&
+      _calcRowCheckpointTotal(row) !== null;
+  }
+
+  function _zeroCalcOpeningState(periodFrom) {
+    return {
+      found: true,
+      checkpointMonth: "",
+      openingPrincipal: 0,
+      openingPenalty: 0,
+      openingTotal: 0,
+      previousRows: 0,
+      checkpointRow: null,
+      periodFrom: String(periodFrom || "")
+    };
+  }
+
+  function _findCalcOpeningCheckpoint(rows, periodFrom) {
+    var fromD = _parseCalcDateISO(periodFrom);
+    if (!fromD) return null;
+    var list = Array.isArray(rows) ? rows : [];
+    var best = null;
+    var previousRows = 0;
+    for (var i = 0; i < list.length; i++) {
+      var row = list[i];
+      var asOf = _asOfDateForCalcRow(row);
+      if (!asOf || asOf.getTime() >= fromD.getTime()) continue;
+      previousRows += 1;
+      if (!_calcRowHasCheckpoint(row)) continue;
+      if (!best || asOf.getTime() > best.asOf.getTime() || (asOf.getTime() === best.asOf.getTime() && (Number(row && row.id) || 0) > (Number(best.row && best.row.id) || 0))) {
+        best = { row: row, asOf: asOf };
+      }
+    }
+
+    if (!best) {
+      if (previousRows <= 0) return _zeroCalcOpeningState(periodFrom);
+      return { found: false, previousRows: previousRows, periodFrom: String(periodFrom || "") };
+    }
+
+    var openingPrincipal = _roundCalcMoney(_calcFiniteMoney(best.row && best.row.pay_main));
+    var openingPenalty = _roundCalcMoney(_calcFiniteMoney(best.row && best.row.pay_penalty));
+    var openingTotalRaw = _calcRowCheckpointTotal(best.row);
+    var openingTotal = _roundCalcMoney(openingTotalRaw !== null ? openingTotalRaw : (openingPrincipal + openingPenalty));
+    return {
+      found: true,
+      checkpointMonth: _rowCalcYm(best.row),
+      openingPrincipal: openingPrincipal,
+      openingPenalty: openingPenalty,
+      openingTotal: openingTotal,
+      previousRows: previousRows,
+      checkpointRow: best.row,
+      periodFrom: String(periodFrom || "")
+    };
+  }
+
+  function _mergeCalcOpeningTotals(totals, openingState) {
+    var opening = openingState && openingState.found ? openingState : _zeroCalcOpeningState("");
+    var principal = _roundCalcMoney((opening.openingPrincipal || 0) + _calcMoneyNumber(totals && totals.principal));
+    var penaltyDebt = _roundCalcMoney((opening.openingPenalty || 0) + _calcMoneyNumber(totals && totals.penaltyDebt));
+    if (principal < 0) {
+      var extra = _roundCalcMoney(-principal);
+      var usedOnPenalty = _roundCalcMoney(Math.min(extra, penaltyDebt));
+      penaltyDebt = _roundCalcMoney(Math.max(penaltyDebt - usedOnPenalty, 0));
+      extra = _roundCalcMoney(extra - usedOnPenalty);
+      principal = _roundCalcMoney(-extra);
+    }
+    var merged = Object.assign({}, totals || {});
+    merged.principal = principal;
+    merged.penaltyDebt = penaltyDebt;
+    merged.total = _roundCalcMoney(principal + penaltyDebt);
+    merged.openingPrincipal = _roundCalcMoney(opening.openingPrincipal || 0);
+    merged.openingPenalty = _roundCalcMoney(opening.openingPenalty || 0);
+    merged.openingTotal = _roundCalcMoney(opening.openingTotal || 0);
+    merged.checkpointMonth = String(opening.checkpointMonth || "");
+    return merged;
+  }
+
+  function _calcRowsWithEngine(rows, periodFrom, periodTo, periodActive, abonentId, openingState) {
     if (!window.JKHCalcEngine || typeof window.JKHCalcEngine.calcTotalsAsOfAdjusted !== "function") throw new Error("CALC_ENGINE_NOT_AVAILABLE");
     var allRows = _cloneLedgerRows(rows);
     var baseRows = periodActive ? _filterCalcRowsByPeriod(allRows, periodFrom, periodTo) : allRows;
+    var opening = openingState && openingState.found ? openingState : _zeroCalcOpeningState(periodFrom);
     var sorted = allRows.slice().sort(function (a, b) {
       var ad = _asOfDateForCalcRow(a).getTime();
       var bd = _asOfDateForCalcRow(b).getTime();
@@ -1336,6 +1446,7 @@
       if (!totals || !Number.isFinite(Number(totals.principal)) || !Number.isFinite(Number(totals.penaltyDebt)) || !Number.isFinite(Number(totals.total))) {
         throw new Error("CALC_TOTALS_INVALID");
       }
+      totals = periodActive ? _mergeCalcOpeningTotals(totals, opening) : totals;
       row.pay_main = _roundCalcMoney(totals.principal);
       row.pay_penalty = _roundCalcMoney(totals.penaltyDebt);
       row.total = _roundCalcMoney(totals.total);
@@ -1349,26 +1460,44 @@
     var started = Date.now();
     var allRows = _cloneLedgerRows(rows);
     var selectedRows = _cloneLedgerRows(periodRows);
+    var opening = _findCalcOpeningCheckpoint(allRows, periodFrom);
+    if (!opening || opening.found !== true) {
+      _calcWarn("[abonent-card-recalc][checkpoint-missing]", {
+        periodFrom: periodFrom,
+        periodTo: periodTo,
+        rowsTotal: allRows.length,
+        previousRows: opening && opening.previousRows || 0,
+        reason: "CALC_CHECKPOINT_REQUIRED"
+      });
+      throw new Error("CALC_CHECKPOINT_REQUIRED");
+    }
+    _calcLog("[abonent-card-recalc][checkpoint]", {
+      periodFrom: periodFrom,
+      periodTo: periodTo,
+      checkpointMonth: opening.checkpointMonth,
+      openingPrincipal: opening.openingPrincipal,
+      openingPenalty: opening.openingPenalty,
+      openingTotal: opening.openingTotal
+    });
+
     var periodItems = [];
     for (var i = 0; i < allRows.length; i++) {
       if (_rowInCalcPeriod(allRows[i], periodFrom, periodTo)) periodItems.push({ index: i });
     }
 
-    var recalculatedPeriodRows = _calcRowsWithEngine(selectedRows, periodFrom, periodTo, true, abonentId);
+    var recalculatedPeriodRows = _calcRowsWithEngine(selectedRows, periodFrom, periodTo, true, abonentId, opening);
     for (var j = 0; j < periodItems.length; j++) {
       allRows[periodItems[j].index] = recalculatedPeriodRows[j];
     }
 
     _calcLog("[abonent-card-recalc][period-fast-path]", {
-      periodFrom: periodFrom,
-      periodTo: periodTo,
       rowsTotal: allRows.length,
       rowsInPeriod: selectedRows.length,
       skippedRows: Math.max(0, allRows.length - selectedRows.length),
       durationMs: Date.now() - started
     });
 
-    return { rows: allRows, periodRows: recalculatedPeriodRows };
+    return { rows: allRows, periodRows: recalculatedPeriodRows, openingState: opening };
   }
 
   function _isServerFirstDataReadyForRecalc() {
@@ -1444,11 +1573,13 @@
 
       var recalculatedRows = null;
       var summaryRows = null;
+      var openingState = null;
       if (period.active) {
         var periodRows = _filterCalcRowsByPeriod(rows, periodFrom, periodTo);
         var fastPath = _calcRowsForSelectedPeriodFastPath(rows, periodRows, periodFrom, periodTo, abonentId);
         recalculatedRows = fastPath.rows;
         summaryRows = fastPath.periodRows;
+        openingState = fastPath.openingState || null;
       } else {
         recalculatedRows = _calcRowsWithEngine(rows, periodFrom, periodTo, false, abonentId);
         summaryRows = _filterCalcRowsByPeriod(recalculatedRows, periodFrom, periodTo);
@@ -1461,6 +1592,7 @@
       var asOf = _parseCalcDateISO(periodTo);
       var totals = window.JKHCalcEngine.calcTotalsAsOfAdjusted(summaryRows, asOf, { abonentId: abonentId, applyAdvanceOffset: true, allowNegativePrincipal: true });
       if (!totals || !Number.isFinite(Number(totals.principal)) || !Number.isFinite(Number(totals.penaltyDebt)) || !Number.isFinite(Number(totals.total))) throw new Error("CALC_TOTALS_INVALID");
+      if (period.active) totals = _mergeCalcOpeningTotals(totals, openingState);
 
       var accruedTotal = _roundCalcMoney(_sumCalcRows(summaryRows, "accrued"));
       var paidTotal = _roundCalcMoney(_sumCalcRows(summaryRows, "paid"));
