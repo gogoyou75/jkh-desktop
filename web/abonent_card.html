@@ -2689,6 +2689,15 @@ function bindCalcButtons(){
         if (!canWriteOrExplainLocal()) return;
         const currentAbonentId = getAbonentIdFromURL();
         const meta = getCalcPeriodStorageMeta();
+        const inputFrom = String(fromEl.value || "").trim();
+        const inputTo = String(toEl.value || "").trim();
+        let activeRawBefore = "";
+        try { activeRawBefore = meta.activeStorageKey ? String(storeGet(meta.activeStorageKey, meta.ownerId) || "") : ""; } catch (e) { activeRawBefore = ""; }
+        if (!inputFrom && !inputTo && activeRawBefore !== "1") {
+            loadCalcPeriodUI();
+            renderAbonentCalcSummaryStatus();
+            return;
+        }
         const oldText = resetBtn.textContent;
         let dirtyKey = "";
         let dirtyRawBefore = null;

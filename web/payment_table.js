@@ -1146,45 +1146,9 @@ if (parts.length) {
     return storeGetRaw(calcPeriodActiveKey()) === "1";
   }
 
-  // ✅ ФИЛЬТР: показываем оплаты, у которых "Дата оплаты" попадает в выбранный период
+  // Selected calc period is summary-only; the payment ledger table stays in its ordinary view.
   function applyCalcFilter(arr) {
-    if (!isCalcPeriodActive()) return arr;
-
-    const p = getCalcPeriod();
-    if (!p) return arr;
-
-    const fromD = parseDateAnyToDate(p.from);
-    const toD   = parseDateAnyToDate(p.to);
-    if (!fromD || !toD) return arr;
-
-    // ✅ фильтр по РАСЧЁТНОМУ ПЕРИОДУ (год/месяц строки), а не по paid_date
-    // Включительно по месяцам.
-    const fromKey = (fromD.getFullYear() * 12) + (fromD.getMonth() + 1);
-    const toKey   = (toD.getFullYear()   * 12) + (toD.getMonth() + 1);
-
-    const lastId = getLastAddedPaymentId();
-
-    return arr.filter(r => {
-      // всегда показываем последнюю добавленную строку (чтобы пользователь её увидел)
-      if (lastId && String(r.id) === String(lastId)) return true;
-
-      let y = parseInt(r?.year, 10);
-      let m = parseInt(r?.month, 10);
-
-      // fallback: если year/month не заполнены — попробуем из paid_date
-      if (!(Number.isFinite(y) && Number.isFinite(m) && y > 0 && m >= 1 && m <= 12)) {
-        const d = parseDateAnyToDate(r?.paid_date);
-        if (d) {
-          y = d.getFullYear();
-          m = d.getMonth() + 1;
-        }
-      }
-
-      if (!(Number.isFinite(y) && Number.isFinite(m) && y > 0 && m >= 1 && m <= 12)) return false;
-
-      const key = (y * 12) + m;
-      return key >= fromKey && key <= toKey;
-    });
+    return arr;
   }
 
   function responsibilityAllowedYmSet(){
@@ -1886,33 +1850,7 @@ function asOfForRow(r) {
 
 function applyRunningTotals(viewRows) {
   const allRows = Array.isArray(viewRows) ? viewRows : getPayments();
-
-// ✅ Если активен расчёт "взыскиваемой суммы за период",
-  // то считаем долги/остатки ТОЛЬКО внутри выбранного периода,
-  // и стартуем с нуля на начале периода (т.е. игнорируем долг до периода).
-  let baseRows = allRows;
-  if (isCalcPeriodActive()) {
-    const p = getCalcPeriod();
-    const fromD = p ? parseDateAnyToDate(p.from) : null;
-    const toD   = p ? parseDateAnyToDate(p.to)   : null;
-
-    if (fromD && toD) {
-      const fromKey = (fromD.getFullYear() * 12) + (fromD.getMonth() + 1);
-      const toKey   = (toD.getFullYear()   * 12) + (toD.getMonth() + 1);
-
-      baseRows = allRows.filter(r => {
-        let y = parseInt(r?.year, 10);
-        let m = parseInt(r?.month, 10);
-        if (!(Number.isFinite(y) && Number.isFinite(m) && y > 0 && m >= 1 && m <= 12)) {
-          const d = parseDateAnyToDate(r?.paid_date);
-          if (d) { y = d.getFullYear(); m = d.getMonth() + 1; }
-        }
-        if (!(Number.isFinite(y) && Number.isFinite(m) && y > 0 && m >= 1 && m <= 12)) return false;
-        const key = (y * 12) + m;
-        return key >= fromKey && key <= toKey;
-      });
-    }
-  }
+  const baseRows = allRows;
 
   const sortedAsc = viewRows.slice().sort((a, b) => {
     const at = paidDateMsAscKey(a);

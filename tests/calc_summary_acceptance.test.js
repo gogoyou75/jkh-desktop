@@ -381,9 +381,10 @@ test('9. History 200 months recalculates only selected 3 months plus one checkpo
   assert.equal(savedRows.length, 200);
   assert.equal(savedRows[0].pay_main, undefined);
   assert.equal(savedRows[196].pay_main, 19700);
-  assert.equal(savedRows[197].pay_main, 19800);
-  assert.equal(savedRows[198].pay_main, 19900);
-  assert.equal(savedRows[199].pay_main, 20000);
+  assert.equal(savedRows[197].pay_main, undefined);
+  assert.equal(savedRows[198].pay_main, undefined);
+  assert.equal(savedRows[199].pay_main, undefined);
+  assert.equal(env.localStorage.getItem(scoped('jkh_financial_events_v1')), null);
 
   const fastLog = env.logs.find((entry) => entry.some((item) => typeof item === 'string' && item.includes('[abonent-card-recalc][period-fast-path]')));
   const fastPayload = fastLog && fastLog.find((item) => item && typeof item === 'object' && !Array.isArray(item));
@@ -441,6 +442,53 @@ test('11. Selected March-May period uses previous calculated row as checkpoint',
   assert.equal(state.summary.accrued, 300);
   assert.equal(state.summary.principal, 10300);
   assert.equal(state.summary.total, 10300.66);
+  const savedRows = ledgerRows(env.localStorage);
+  assert.equal(savedRows[1].pay_main, undefined);
+  assert.equal(savedRows[2].pay_main, undefined);
+  assert.equal(savedRows[3].pay_main, undefined);
+  assert.equal(env.localStorage.getItem(scoped('jkh_financial_events_v1')), null);
   assert.equal(env.logs.filter((entry) => entry.some((item) => typeof item === 'string' && item.includes('[abonent-card-recalc][checkpoint]'))).length, 1);
   assert.equal(env.logs.filter((entry) => entry.some((item) => typeof item === 'string' && item.includes('[abonent-card-recalc][period-fast-path]'))).length, 1);
+  assert.equal(env.logs.filter((entry) => entry.some((item) => typeof item === 'string' && item.includes('[abonent-card-recalc][ledger-write-skip]'))).length, 1);
+});
+
+test('12. Reset with empty fields and no active period is a no-op', async () => {
+  const env = loadCardApp({ seed: { activePeriod: false } });
+  env.localStorage.removeItem(scoped(`calc_period_${UID}`));
+  env.localStorage.removeItem(scoped(`calc_period_active_${UID}`));
+  env.document.getElementById('calcFrom').value = '';
+  env.document.getElementById('calcTo').value = '';
+  env.context.bindCalcButtons();
+
+  env.document.getElementById('calcResetBtn').click();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.equal(recalcStartLogCount(env.logs), 0);
+  assert.equal(env.localStorage.getItem(scoped(`calc_period_${UID}`)), null);
+  assert.equal(env.localStorage.getItem(scoped(`calc_period_active_${UID}`)), null);
+  assert.equal(env.localStorage.getItem(scoped('jkh_financial_events_v1')), null);
+});
+
+test('13. Reset removes active selected period without ledger write', async () => {
+  const env = loadCardApp({ seed: {
+    periodFrom: '2025-03-01',
+    periodTo: '2025-05-31',
+    activePeriod: true,
+    ledgerRows: [
+      { id: 1, year: '2025', month: '02', accrued: 10000, paid: 0, paid_date: '', source: 'Acceptance', payment_period: '', pay_main: 10000, pay_penalty: 0, total: 10000, total_debt: 10000 },
+      { id: 2, year: '2025', month: '03', accrued: 100, paid: 0, paid_date: '', source: 'Acceptance', payment_period: '' }
+    ]
+  } });
+  const beforeLedger = env.localStorage.getItem(scoped(`payments_${UID}`));
+  env.context.loadCalcPeriodUI();
+  env.context.bindCalcButtons();
+
+  env.document.getElementById('calcResetBtn').click();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.equal(recalcStartLogCount(env.logs), 0);
+  assert.equal(env.localStorage.getItem(scoped(`calc_period_${UID}`)), null);
+  assert.equal(env.localStorage.getItem(scoped(`calc_period_active_${UID}`)), null);
+  assert.equal(env.localStorage.getItem(scoped(`payments_${UID}`)), beforeLedger);
+  assert.equal(env.localStorage.getItem(scoped('jkh_financial_events_v1')), null);
 });

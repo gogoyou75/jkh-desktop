@@ -1577,17 +1577,21 @@
       if (period.active) {
         var periodRows = _filterCalcRowsByPeriod(rows, periodFrom, periodTo);
         var fastPath = _calcRowsForSelectedPeriodFastPath(rows, periodRows, periodFrom, periodTo, abonentId);
-        recalculatedRows = fastPath.rows;
+        recalculatedRows = rows;
         summaryRows = fastPath.periodRows;
         openingState = fastPath.openingState || null;
       } else {
         recalculatedRows = _calcRowsWithEngine(rows, periodFrom, periodTo, false, abonentId);
         summaryRows = _filterCalcRowsByPeriod(recalculatedRows, periodFrom, periodTo);
       }
-      _calcLog("[abonent-card-recalc][rows-after]", { abonentId: abonentId, uid: uid, ledgerKey: ledgerKey, rowsCount: recalculatedRows.length, periodFrom: periodFrom, periodTo: periodTo, periodMode: periodMode });
+      _calcLog("[abonent-card-recalc][rows-after]", { abonentId: abonentId, uid: uid, ledgerKey: ledgerKey, rowsCount: recalculatedRows.length, periodFrom: periodFrom, periodTo: periodTo, periodMode: periodMode, ledgerWriteSkipped: !!period.active });
 
-      var ledgerOk = writePaymentLedger(abonentId, recalculatedRows, { eventType: "ABONENT_CARD_RECALC_LEDGER_WRITE", dirtyReason: "abonent_card_recalc", event: { source: String(opts.source || "abonent_card") } });
-      if (ledgerOk === false) throw new Error("LEDGER_WRITE_FAILED");
+      if (period.active) {
+        _calcLog("[abonent-card-recalc][ledger-write-skip]", { abonentId: abonentId, uid: uid, ledgerKey: ledgerKey, reason: "selected_calc_period_summary_only" });
+      } else {
+        var ledgerOk = writePaymentLedger(abonentId, recalculatedRows, { eventType: "ABONENT_CARD_RECALC_LEDGER_WRITE", dirtyReason: "abonent_card_recalc", event: { source: String(opts.source || "abonent_card") } });
+        if (ledgerOk === false) throw new Error("LEDGER_WRITE_FAILED");
+      }
 
       var asOf = _parseCalcDateISO(periodTo);
       var totals = window.JKHCalcEngine.calcTotalsAsOfAdjusted(summaryRows, asOf, { abonentId: abonentId, applyAdvanceOffset: true, allowNegativePrincipal: true });
