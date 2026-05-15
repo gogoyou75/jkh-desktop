@@ -381,15 +381,19 @@ test('9. History 200 months recalculates only selected 3 months plus one checkpo
   assert.equal(savedRows.length, 200);
   assert.equal(savedRows[0].pay_main, undefined);
   assert.equal(savedRows[196].pay_main, 19700);
-  assert.equal(savedRows[197].pay_main, 19800);
-  assert.equal(savedRows[198].pay_main, 19900);
-  assert.equal(savedRows[199].pay_main, 20000);
+  assert.equal(savedRows[197].pay_main, 100);
+  assert.equal(savedRows[198].pay_main, 200);
+  assert.equal(savedRows[199].pay_main, 300);
 
   const fastLog = env.logs.find((entry) => entry.some((item) => typeof item === 'string' && item.includes('[abonent-card-recalc][period-fast-path]')));
   const fastPayload = fastLog && fastLog.find((item) => item && typeof item === 'object' && !Array.isArray(item));
   assert.equal(fastPayload.rowsTotal, 200);
   assert.equal(fastPayload.rowsInPeriod, 3);
   assert.equal(fastPayload.skippedRows, 197);
+  const periodOnlyLog = env.logs.find((entry) => entry.some((item) => typeof item === 'string' && item.includes('[abonent-card-recalc][period-only-summary]')));
+  const periodOnlyPayload = periodOnlyLog && periodOnlyLog.find((item) => item && typeof item === 'object' && !Array.isArray(item));
+  assert.equal(periodOnlyPayload.rowsInPeriod, 3);
+  assert.equal(periodOnlyPayload.skippedRows, 197);
 });
 
 test('10. Empty report period opens reports for full responsibility period', () => {
@@ -439,8 +443,66 @@ test('11. Selected March-May period uses previous calculated row as checkpoint',
   assert.equal(state.summary.periodTo, '2025-05-31');
   assert.equal(state.summary.rowsInPeriod, 3);
   assert.equal(state.summary.accrued, 300);
-  assert.equal(state.summary.principal, 10300);
-  assert.equal(state.summary.total, 10300.66);
+  assert.equal(state.summary.principal, 300);
+  assert.equal(state.summary.total, 300.66);
   assert.equal(env.logs.filter((entry) => entry.some((item) => typeof item === 'string' && item.includes('[abonent-card-recalc][checkpoint]'))).length, 1);
   assert.equal(env.logs.filter((entry) => entry.some((item) => typeof item === 'string' && item.includes('[abonent-card-recalc][period-fast-path]'))).length, 1);
+});
+
+test('12. Empty reset without active selected period is no-op', async () => {
+  const env = loadCardApp({ seed: { activePeriod: false } });
+  env.localStorage.removeItem(scoped(`calc_period_${UID}`));
+  env.localStorage.removeItem(scoped(`calc_period_active_${UID}`));
+  env.context.__loadPaymentTable = () => { throw new Error('LOAD_PAYMENT_TABLE_MUST_NOT_RUN'); };
+  let flushCalls = 0;
+  env.context.Data.flushDbToServer = async () => { flushCalls += 1; };
+  env.document.getElementById('calcFrom').value = '';
+  env.document.getElementById('calcTo').value = '';
+  env.context.bindCalcButtons();
+
+  const beforeRecalcLogs = recalcStartLogCount(env.logs);
+  const resetBtn = env.document.getElementById('calcResetBtn');
+  await resetBtn.eventListeners.click[0].call(resetBtn, { type: 'click', target: resetBtn, preventDefault(){} });
+
+  assert.equal(recalcStartLogCount(env.logs), beforeRecalcLogs);
+  assert.equal(flushCalls, 0);
+  assert.equal(env.localStorage.getItem(scoped(`calc_period_${UID}`)), null);
+  assert.equal(env.localStorage.getItem(scoped(`calc_period_active_${UID}`)), null);
+  assert.ok(env.logs.some((entry) => entry.some((item) => typeof item === 'string' && item.includes('[abonent-card-reset][noop]'))));
+});
+
+test('13. Reset active selected period restores only selected window', async () => {
+  const env = loadCardApp({ seed: {
+    periodFrom: '2025-03-01',
+    periodTo: '2025-05-31',
+    activePeriod: true,
+    ledgerRows: [
+      { id: 1, year: '2025', month: '02', accrued: 10000, paid: 0, paid_date: '', source: 'Acceptance', payment_period: '', pay_main: 10000, pay_penalty: 0, total: 10000, total_debt: 10000 },
+      { id: 2, year: '2025', month: '03', accrued: 100, paid: 0, paid_date: '', source: 'Acceptance', payment_period: '', pay_main: 99901 },
+      { id: 3, year: '2025', month: '04', accrued: 100, paid: 0, paid_date: '', source: 'Acceptance', payment_period: '', pay_main: 99902 },
+      { id: 4, year: '2025', month: '05', accrued: 100, paid: 0, paid_date: '', source: 'Acceptance', payment_period: '', pay_main: 99903 },
+      { id: 5, year: '2025', month: '06', accrued: 100, paid: 0, paid_date: '', source: 'Acceptance', payment_period: '', pay_main: 77777 }
+    ]
+  } });
+  env.context.__loadPaymentTable = () => { throw new Error('LOAD_PAYMENT_TABLE_MUST_NOT_RUN'); };
+  env.document.getElementById('calcFrom').value = '2025-03-01';
+  env.document.getElementById('calcTo').value = '2025-05-31';
+  env.context.bindCalcButtons();
+
+  const resetBtn = env.document.getElementById('calcResetBtn');
+  await resetBtn.eventListeners.click[0].call(resetBtn, { type: 'click', target: resetBtn, preventDefault(){} });
+
+  const savedRows = ledgerRows(env.localStorage);
+  assert.equal(savedRows[0].pay_main, 10000);
+  assert.equal(savedRows[1].pay_main, 100);
+  assert.equal(savedRows[2].pay_main, 200);
+  assert.equal(savedRows[3].pay_main, 300);
+  assert.equal(savedRows[4].pay_main, 77777);
+  assert.equal(env.localStorage.getItem(scoped(`calc_period_${UID}`)), null);
+  assert.equal(env.localStorage.getItem(scoped(`calc_period_active_${UID}`)), null);
+  assert.ok(env.logs.some((entry) => entry.some((item) => typeof item === 'string' && item.includes('[abonent-card-reset][restore-window]'))));
+  const fastLog = env.logs.find((entry) => entry.some((item) => typeof item === 'string' && item.includes('[abonent-card-recalc][period-fast-path]')));
+  const fastPayload = fastLog && fastLog.find((item) => item && typeof item === 'object' && !Array.isArray(item));
+  assert.equal(fastPayload.rowsInPeriod, 3);
+  assert.equal(fastPayload.skippedRows, 2);
 });

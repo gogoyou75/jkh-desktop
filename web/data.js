@@ -1153,7 +1153,20 @@
       if (!totals || !Number.isFinite(Number(totals.principal)) || !Number.isFinite(Number(totals.penaltyDebt)) || !Number.isFinite(Number(totals.total))) {
         throw new Error("CALC_TOTALS_INVALID");
       }
-      if (period.active) totals = _mergeCalcOpeningTotals(totals, openingState);
+      if (period.active) {
+        _calcLog("[abonent-card-recalc][period-only-summary]", {
+          abonentId: abonentId,
+          uid: uid,
+          periodFrom: periodFrom,
+          periodTo: periodTo,
+          rowsTotal: rows.length,
+          rowsInPeriod: periodRows.length,
+          skippedRows: Math.max(0, rows.length - periodRows.length),
+          checkpointMonth: openingState && openingState.checkpointMonth || "",
+          openingTotal: openingState && openingState.openingTotal || 0,
+          summaryTotal: _roundCalcMoney(totals.total)
+        });
+      }
 
       var summary = {
         uid: uid,
@@ -1431,7 +1444,6 @@
     if (!window.JKHCalcEngine || typeof window.JKHCalcEngine.calcTotalsAsOfAdjusted !== "function") throw new Error("CALC_ENGINE_NOT_AVAILABLE");
     var allRows = _cloneLedgerRows(rows);
     var baseRows = periodActive ? _filterCalcRowsByPeriod(allRows, periodFrom, periodTo) : allRows;
-    var opening = openingState && openingState.found ? openingState : _zeroCalcOpeningState(periodFrom);
     var sorted = allRows.slice().sort(function (a, b) {
       var ad = _asOfDateForCalcRow(a).getTime();
       var bd = _asOfDateForCalcRow(b).getTime();
@@ -1446,7 +1458,6 @@
       if (!totals || !Number.isFinite(Number(totals.principal)) || !Number.isFinite(Number(totals.penaltyDebt)) || !Number.isFinite(Number(totals.total))) {
         throw new Error("CALC_TOTALS_INVALID");
       }
-      totals = periodActive ? _mergeCalcOpeningTotals(totals, opening) : totals;
       row.pay_main = _roundCalcMoney(totals.principal);
       row.pay_penalty = _roundCalcMoney(totals.penaltyDebt);
       row.total = _roundCalcMoney(totals.total);
@@ -1592,7 +1603,20 @@
       var asOf = _parseCalcDateISO(periodTo);
       var totals = window.JKHCalcEngine.calcTotalsAsOfAdjusted(summaryRows, asOf, { abonentId: abonentId, applyAdvanceOffset: true, allowNegativePrincipal: true });
       if (!totals || !Number.isFinite(Number(totals.principal)) || !Number.isFinite(Number(totals.penaltyDebt)) || !Number.isFinite(Number(totals.total))) throw new Error("CALC_TOTALS_INVALID");
-      if (period.active) totals = _mergeCalcOpeningTotals(totals, openingState);
+      if (period.active) {
+        _calcLog("[abonent-card-recalc][period-only-summary]", {
+          abonentId: abonentId,
+          uid: uid,
+          periodFrom: periodFrom,
+          periodTo: periodTo,
+          rowsTotal: recalculatedRows.length,
+          rowsInPeriod: summaryRows.length,
+          skippedRows: Math.max(0, recalculatedRows.length - summaryRows.length),
+          checkpointMonth: openingState && openingState.checkpointMonth || "",
+          openingTotal: openingState && openingState.openingTotal || 0,
+          summaryTotal: _roundCalcMoney(totals.total)
+        });
+      }
 
       var accruedTotal = _roundCalcMoney(_sumCalcRows(summaryRows, "accrued"));
       var paidTotal = _roundCalcMoney(_sumCalcRows(summaryRows, "paid"));
