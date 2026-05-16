@@ -1,11 +1,31 @@
-## 2026-05-13 — calc_period UID migration safety
-
-- Added canonical UID validation via `Data.isValidUid(uid)` and blocked canonical calc-period/payment keys for invalid UID placeholders with `[uid][canonical-blocked-invalid]`.
-- Made server dump calc-period migration non-destructive: `UID_ALIAS_NOT_FOUND` now keeps legacy keys and logs `[calc-period][legacy-keep-no-alias]` instead of fatal/drop.
-- Made legacy calc-period cleanup read-back confirmed before deletion, with `[calc-period][canonical-readback-ok]` and `[calc-period][cleanup-skipped-readback-failed]` diagnostics.
-- Added startup invalid UID scan with safe repair only when related storage keys are absent.
-
 # CHANGELOG
+
+## 2026-05-14 — Calc Summary Docs Freeze
+
+- Зафиксирован завершённый канон Calc Summary: `calc_summary_<uid>` является derived cache, а не source of truth.
+- Source of truth для расчёта: `payments_<uid>`, tariffs, refinancing, excludes, moratorium, responsibility и выбранный calc period.
+- Summary разрешено использовать только при fresh state; stale/dirty/mismatch/invalid/missing состояния показывают «Требуется пересчёт» и не подставляют старые totals.
+- Пересчёт summary разрешён только по явному действию пользователя; read-only открытие страниц, dirty detection и prepare accruals не запускают пересчёт автоматически.
+- Выбранный `calc_period_<uid>` / `calc_period_active_<uid>` строго ограничивает summary; изменение периода делает ранее записанный summary not-fresh.
+- Missing accruals внутри выбранного периода блокируют fresh summary. `prepare accruals` только подготавливает ledger-начисления и не создаёт `calc_summary_<uid>`.
+- `prepare-and-recalc` закреплён как явная пользовательская команда, которая после подготовки начислений запускает пересчёт и только при успешном расчёте может записать fresh summary.
+- Acceptance test канона: `npm run test:calc-summary:acceptance`.
+- Цепочка коммитов Calc Summary freeze: `1994f4d` → `b092e78`.
+
+## 2026-05-14 — Calc engine versioning
+
+- `calc_checkpoint_<uid>` теперь хранит `calcEngineVersion`, `canonVersion` и `summaryFormatVersion`.
+- `Data.readCalcSummary(...)` инвалидирует старые summary со статусами `engine_version_mismatch` / `summary_version_mismatch`, если checkpoint создан другой версией расчётной логики или формата summary.
+- UI (`payment_table`, карточка абонента, индекс) не использует totals при version mismatch и показывает «Требуется пересчёт (Изменена версия расчёта)».
+- Зафиксировано правило: `calc_summary_<uid>` зависит от данных, версии финансовой логики и версии формата summary; silent upgrade/patch запрещён.
+
+## 2026-05-14 — Calc summary integrity
+
+- Усилен lifecycle `calc_summary_<uid>`: summary теперь считается cache-derived entity и используется только при `integrity=fresh`.
+- `Data.readCalcSummary(...)` возвращает structured state со статусами `fresh`, `missing`, `dirty`, `checkpoint_mismatch`, `invalid_json`, `invalid_structure`.
+- `Data.writeCalcSummary(...)` записывает summary вместе с `calc_checkpoint_<uid>` и валидирует структуру summary/checkpoint перед сохранением.
+- Checkpoint фиксирует период расчёта и lightweight fingerprints для ledger, тарифов, ставок рефинансирования, исключений, моратория, responsibility data и calc period.
+- UI (`payment_table`, карточка абонента, индекс) больше не показывает старые totals при dirty/mismatch/invalid состояниях и выводит «Требуется пересчёт».
 
 ## 2026-05-12 — Import XLS: единый сборщик новых платежей
 
