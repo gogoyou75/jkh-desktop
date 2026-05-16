@@ -1820,7 +1820,31 @@ Fatal-состояния включают, но не ограничиваютс�
 }
 ```
 
-### 21.7. Future API: dirty/recalc
+### 21.7. Explicit write-path для заполнения `abonent_summary`
+
+Реализованный explicit write-path:
+
+`POST /api/abonent_summary/rebuild`
+
+Назначение: создать или обновить строки `abonent_summary` для абонентов текущего owner. Endpoint является отдельной write-командой и не должен вызываться из read-only `GET /api/abonent_summary`.
+
+Правила endpoint:
+- требует авторизацию;
+- owner определяется только из текущей сессии пользователя; request-параметр `owner` не даёт выбрать чужую базу;
+- список абонентов берётся из owner-scoped `abonents_db_v1` / `abonents_v1`;
+- для каждого абонента с UID создаётся или обновляется строка `abonent_summary`;
+- пока backend-расчёт не реализован, endpoint записывает controlled `missing` status с причиной `SUMMARY_NOT_BUILT`, а не нулевые totals;
+- `summary_json` обязан содержать status/reason, identity абонента и placeholder периода;
+- ответ возвращает counters: `created`, `updated`, `skipped`, `errors`.
+
+Запрещено для этого write-path:
+- читать `payments_<uid>`;
+- запускать autoaccrual;
+- запускать backend-аналог финансового расчёта;
+- менять формулу пени, FIFO, ставки, transfer/merge/split;
+- записывать синтетические `total_debt = 0` / `total_penalty = 0` вместо controlled status.
+
+### 21.8. Future API: dirty/recalc
 
 Будущий API-контракт без реализации:
 
@@ -1845,7 +1869,7 @@ Fatal-состояния включают, но не ограничиваютс�
 - ошибки сохранять в `summary_status = error` и `summary_reason`;
 - результат возвращать по каждому UID.
 
-### 21.8. Read-only правило для `index.html`
+### 21.9. Read-only правило для `index.html`
 
 `index.html` при открытии является read-only страницей.
 
@@ -1858,18 +1882,18 @@ Fatal-состояния включают, но не ограничиваютс�
 - создавать missing ledger;
 - маскировать missing/error summary нулями.
 
-### 21.9. Что не делать в Stage 1 PR
+### 21.10. Что не делать в Stage 1 PR
 
-В этом PR запрещено:
-- менять `backend/app.py`;
-- создавать миграции;
-- создавать таблицу `abonent_summary`;
+Историческое правило Stage 1 было docs-only. Следующий этап разрешает минимальную backend-реализацию только для explicit write-path `POST /api/abonent_summary/rebuild` и соответствующих тестов.
+
+По-прежнему запрещено:
 - менять `index.html`;
 - менять `data.js`;
 - менять `payment_table.js`;
 - менять `calc_engine.js`;
 - менять `autoaccrual_engine.js`;
-- добавлять реальные API;
-- писать тесты реализации.
+- добавлять расчёт в `GET /api/abonent_summary`;
+- добавлять ledger fallback или чтение `payments_<uid>` в summary GET;
+- дублировать финансовые формулы на backend.
 
-Этап 1 — только документационный дизайн-контракт будущего summary-слоя и лёгкой главной страницы.
+Этап заполнения `abonent_summary` добавляет только controlled missing/dirty cache population без финансового расчёта.

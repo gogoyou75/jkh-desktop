@@ -854,6 +854,89 @@ def _find_owner_accounts(owner_id: str, account_uid: str, account_number: str):
     return {"matches": matches, "uid_found": bool(uid_hits)}
 
 
+
+def _summary_identity_value(abonent: dict, keys, fallback: str = ""):
+    if not isinstance(abonent, dict):
+        return fallback
+    for key in keys:
+        value = _norm_text(abonent.get(key))
+        if value:
+            return value
+    return fallback
+
+
+def _owner_abonent_summary_targets(owner_id: str):
+    targets = []
+    seen_uids = set()
+
+    for key in ("abonents_db_v1", "abonents_v1"):
+        row = KVStore.query.filter_by(owner=owner_id, k=key).first()
+        if not row or not row.v:
+            continue
+        try:
+            obj = json.loads(row.v)
+        except Exception:
+            continue
+
+        for ls_key, abonent in _extract_abonents_items(obj):
+            if not isinstance(abonent, dict):
+                continue
+            account_uid = _norm_text(abonent.get("uid"))
+            if not account_uid or account_uid in seen_uids:
+                continue
+            seen_uids.add(account_uid)
+
+            key_account_number = _norm_text(ls_key)
+            account_number = _summary_identity_value(
+                abonent,
+                ("account_number", "accountNumber", "ls", "id"),
+                key_account_number,
+            )
+            abonent_id = _summary_identity_value(
+                abonent,
+                ("abonent_id", "abonentId", "id"),
+                key_account_number or account_number,
+            )
+
+            targets.append({
+                "abonent_id": abonent_id,
+                "account_uid": account_uid,
+                "account_number": account_number,
+                "identity": {
+                    "abonent_id": abonent_id,
+                    "account_uid": account_uid,
+                    "account_number": account_number,
+                    "fio": _summary_identity_value(abonent, ("fio", "fullName", "full_name")),
+                    "address": _summary_identity_value(abonent, ("address", "addr")),
+                },
+            })
+
+        if targets:
+            break
+
+    return targets
+
+
+def _build_missing_abonent_summary(target: dict):
+    identity = target.get("identity") if isinstance(target.get("identity"), dict) else {}
+    return {
+        "status": "missing",
+        "reason": "SUMMARY_NOT_BUILT",
+        "summary_status": "missing",
+        "summary_reason": "SUMMARY_NOT_BUILT",
+        "abonent": {
+            "abonent_id": _norm_text(identity.get("abonent_id") or target.get("abonent_id")),
+            "account_uid": _norm_text(identity.get("account_uid") or target.get("account_uid")),
+            "account_number": _norm_text(identity.get("account_number") or target.get("account_number")),
+            "fio": _norm_text(identity.get("fio")),
+            "address": _norm_text(identity.get("address")),
+        },
+        "period": {
+            "from": None,
+            "to": None,
+        },
+    }
+
 def _row_human_error_payload(r: ImportBatchRow):
     return {
         "excel_row_ref": r.excel_row_ref,
@@ -993,6 +1076,49 @@ def abonent_summary_list():
         items=[_abonent_summary_payload(x) for x in items],
         pagination=_pagination_payload(page, per_page, total),
     )
+
+
+@app.post("/api/abonent_summary/rebuild")
+def abonent_summary_rebuild():
+    user, err = _require_user()
+    if err:
+        return err
+
+    owner = user.id
+    counters = {"created": 0, "updated": 0, "skipped": 0, "errors": 0}
+
+    try:
+        targets = _owner_abonent_summary_targets(owner)
+        for target in targets:
+            account_uid = _norm_text(target.get("account_uid"))
+            if not account_uid:
+                counters["skipped"] += 1
+                continue
+
+            summary_json = json.dumps(_build_missing_abonent_summary(target), ensure_ascii=False, sort_keys=True)
+            row = AbonentSummary.query.filter_by(owner_id=owner, account_uid=account_uid).order_by(AbonentSummary.id.asc()).first()
+            if row:
+                row.abonent_id = _norm_text(target.get("abonent_id"))
+                row.account_number = _norm_text(target.get("account_number"))
+                row.summary_json = summary_json
+                counters["updated"] += 1
+            else:
+                db.session.add(AbonentSummary(
+                    owner_id=owner,
+                    abonent_id=_norm_text(target.get("abonent_id")),
+                    account_uid=account_uid,
+                    account_number=_norm_text(target.get("account_number")),
+                    summary_json=summary_json,
+                ))
+                counters["created"] += 1
+
+        db.session.commit()
+    except SQLAlchemyError as exc:
+        db.session.rollback()
+        app.logger.exception("abonent_summary rebuild failed for owner=%s", owner)
+        return jsonify(ok=False, error="summary_rebuild_failed", counters=counters, details=str(exc)), 500
+
+    return jsonify(ok=True, counters=counters)
 
 
 @app.post("/api/auth/register")

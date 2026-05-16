@@ -1,5 +1,12 @@
 # CHANGELOG
 
+## 2026-05-16 — Explicit abonent_summary rebuild write-path
+
+- Добавлен `POST /api/abonent_summary/rebuild` как отдельная авторизованная write-команда для заполнения `abonent_summary` по абонентам текущего owner из сессии.
+- `GET /api/abonent_summary` сохранён строго read-only: без расчёта, ledger fallback, чтения `payments_<uid>`, autoaccrual и hidden writes.
+- До реализации backend-расчёта rebuild пишет controlled `missing` / `SUMMARY_NOT_BUILT` с identity и period placeholders, не подставляя нулевые totals.
+- Добавлены тесты на read-only GET, запись rebuild, неизменность `web/calc_engine.js`, owner isolation и пустую базу.
+
 ## 2026-05-16 — Passive summary integration for index.html
 
 - Главная страница начала поддерживать read-only summary-layer без recalculation и ledger fallback. Добавлено отображение `summary_status` и passive API loading.
