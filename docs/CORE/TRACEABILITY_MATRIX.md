@@ -323,3 +323,19 @@
 | Изменения ledger/tariffs/rates/excludes/moratorium/responsibility/calc period инвалидируют актуальность summary | Задание 3 → п.6; Задание 12 → п.2, п.4 | `web/data.js` | ✅ OK | Dirty ставится через storage hooks и сохранение responsibility snapshot. |
 | `calc_summary_<uid>` зависит от данных, версии финансовой логики и версии формата summary | Задание 4 → п.1–3, п.5–6; Задание 12 → п.1–4 | `web/data.js`, `docs/CORE/LOGIC_SPEC.md` | ✅ OK | Версии заданы ручными константами; silent upgrade/patch старого checkpoint запрещён. |
 | Acceptance test Calc Summary | Задание 12 → п.10 | `tests/calc_summary_acceptance.test.js`, `package.json` | ✅ OK | Каноническая проверка: `npm run test:calc-summary:acceptance`. |
+
+
+---
+
+## 🧩 Блок: Stable Canon Sync / CalcEngine Freeze Boundary
+
+| Правило | Где в ТЗ | Где в коде/документах | Статус | Комментарий |
+| --- | --- | --- | --- | --- |
+| `calc_engine.js` является единственным юридическим расчётным ядром | LOGIC_SPEC → CalcEngine Freeze Boundary | `web/calc_engine.js`; `docs/CORE/LOGIC_SPEC.md` | ✅ OK | Документально запрещён alternate calc path, second-pass/optimized-pass and perf rewrite без отдельного ТЗ. |
+| UI не считает долг, пеню, FIFO или frozen debt собственной формулой | LOGIC_SPEC → CalcEngine Freeze Boundary; Canonical Financial Modes | `web/payment_table.js`, `web/data.js`, `web/spravka_sud.js` | ✅ OK | UI/service layer должен использовать CalcEngine/service boundary, а не собственный financial engine. |
+| Summary/cache не являются вторым financial engine | LOGIC_SPEC → CalcEngine Freeze Boundary; Calc summary integrity | `web/data.js`, `web/payment_table.js`, `docs/CORE/LOGIC_SPEC.md` | ✅ OK | `calc_summary_<uid>` является derived cache only и используется только при `fresh`. |
+| Dangerous commits `d535dba` и `6780a25` не портируются | LOGIC_SPEC → Architecture Port Audit | `docs/CORE/CHANGELOG.md`, `docs/CORE/CRITICAL_INDEX.md` | ✅ OK | DO NOT PORT: `prepareLedgerState`, precompute/perf CalcEngine pipelines, alternate totals, optimized penalty/FIFO. |
+| Server Summary Layer ограничен foundation/contract | LOGIC_SPEC → Server Summary Layer — foundation only | `docs/CORE/LOGIC_SPEC.md` | 🟡 PARTIAL | Разрешены interface/contract/data boundaries; runtime engine не реализован. |
+| Canonical calc period keys ограничивают summary | LOGIC_SPEC → Calc summary integrity | `web/storage.js`, `web/data.js`, `web/payment_table.js` | ✅ OK | `calc_period_<uid>` / `calc_period_active_<uid>` входят в checkpoint; изменение периода делает summary not-fresh. |
+| Import strict contract and audit remain safe hardening | LOGIC_SPEC → Import contract/audit; CHANGELOG import sections | `web/import_xls.html`, backend import flow, `docs/CORE/CHANGELOG.md` | ✅ OK | Strict template/upload_rows, audit log, rollback and no silent date fallback are safe to keep. |
+| Read-back validation required before legacy cleanup | LOGIC_SPEC → Architecture Port Audit | `web/storage.js`, `web/data.js` | ✅ OK | Legacy cleanup must follow successful canonical read-back, especially UID and calc-period migration. |

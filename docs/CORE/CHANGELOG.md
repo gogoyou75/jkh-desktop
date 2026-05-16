@@ -1,5 +1,13 @@
 # CHANGELOG
 
+## 2026-05-16 — Stable Canon Sync / CalcEngine Freeze Boundary
+
+- Проведён документальный аудит `LOGIC_SPEC.md`, `TRACEABILITY_MATRIX.md`, `CHANGELOG.md`, `CRITICAL_INDEX.md` для переноса safe canon в стабильную базовую ветку.
+- Зафиксирован `CalcEngine Freeze Boundary`: `web/calc_engine.js` остаётся юридическим ядром; performance/precompute/alternate-pass изменения внутри CalcEngine запрещены без отдельного архитектурного ТЗ.
+- Перенесены только SAFE CANON и SAFE HARDENING правила: server-first, UID-only `payments_<uid>`, fatal вместо silent fallback, canonical transfer flow, read-only page rules, calc summary integrity, import strict contract/audit, owner isolation, upload whitelist, canonical `calc_period_<uid>` / `calc_period_active_<uid>`, read-back validation before legacy cleanup.
+- Dangerous commits: `d535dba` и `6780a25` признаны источниками DO NOT PORT для `prepareLedgerState`, single-pass/precompute totals, precomputed penalty/FIFO, optimized FIFO, alternate totals and calc-engine perf pipelines.
+- Server Summary Layer подготовлен только как foundation/contract: summary remains derived cache only, без нового financial engine, без собственной формулы и без изменения FIFO/penalty/legal formulas.
+
 ## 2026-05-14 — Calc Summary Docs Freeze
 
 - Зафиксирован завершённый канон Calc Summary: `calc_summary_<uid>` является derived cache, а не source of truth.

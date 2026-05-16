@@ -1,7 +1,7 @@
 # LOGIC_SPEC.md
 
-Версия: **v1.9.3**<br>
-Дата фиксации: **2026-05-08**<br>
+Версия: **v1.9.4**<br>
+Дата фиксации: **2026-05-16**<br>
 Статус: **АКТУАЛЬНЫЙ КАНОН ДЛЯ ПРАВОК И ЗАДАНИЙ CODEX**
 
 ---
@@ -1520,3 +1520,90 @@ Checkpoint проверяется при каждом чтении summary. Не
 Повреждённые summary/checkpoint не превращаются в нулевые totals и не заменяются пустыми объектами. Допустимы только логирование, статус `invalid_json`/`invalid_structure` и явное предложение выполнить пересчёт.
 
 Acceptance-контракт Calc Summary фиксируется командой `npm run test:calc-summary:acceptance`. Этот тест проверяет, что открытие страниц не запускает пересчёт, missing summary отображается как «Требуется пересчёт», missing accruals блокируют fresh summary, `prepare-and-recalc` создаёт fresh summary, изменение calc period делает summary not-fresh, изменение платежей ставит dirty, debug panel показывает reason, а выбранный период ограничивает строки summary.
+
+
+---
+
+## 17. CalcEngine Freeze Boundary
+
+`web/calc_engine.js` является юридическим расчётным ядром и единственным местом, где допускается финансовая формула расчёта долга, FIFO-разнесения оплат и пени.
+
+Жёсткая граница заморозки:
+- `calc_engine.js` нельзя менять для performance optimization, precompute или alternate-pass без отдельного архитектурного ТЗ;
+- запрещены alternate calc pipeline, second-pass / optimized-pass CalcEngine, single-pass totals precompute, precomputed penalty/FIFO engine, vectorized penalty calculations и optimized FIFO path;
+- запрещено переносить code-paths из dangerous commits `d535dba` и `6780a25`, если они связаны с `prepareLedgerState`, precompute totals, precomputed penalty engine, optimized FIFO, alternate totals или calc-engine perf pipelines;
+- UI не имеет права считать долг, пеню, FIFO-разнесение или frozen debt собственной формулой;
+- summary/cache/read-only entities не являются вторым financial engine;
+- любой summary является только derived cache, построенным из результата канонического CalcEngine и проверенного checkpoint;
+- summary не может содержать собственную финансовую формулу и не может исправлять или дополнять результат CalcEngine;
+- stale/dirty/mismatch/invalid summary не подставляется как актуальный результат и не запускает автоматический пересчёт.
+
+Разрешённая оптимизация системы выполняется вне CalcEngine:
+- server-side prepared data для чтения и навигации;
+- pagination и lazy loading;
+- read-only cache entities;
+- summary layer как derived cache only;
+- явные integrity/status contracts, которые блокируют stale data вместо подмены расчёта.
+
+## 18. Architecture Port Audit — stable baseline
+
+Аудит изменений для стабильной базовой ветки делит найденные изменения на четыре класса.
+
+### SAFE CANON — переносить
+
+- server-first как источник восстановления owner-scoped runtime cache;
+- UID-only ledger: канонический ключ `payments_<uid>`; `payments_<LS>` только read-only legacy fallback внутри service layer;
+- canonical transfer flow через `Data.transferResponsibility(...)`, без самостоятельного расчёта долга в UI;
+- canonical financial modes `WITH_DEBT` и `WITHOUT_DEBT` / `NO_DEBT`;
+- canonical calc period keys `calc_period_<uid>` и `calc_period_active_<uid>` как граница расчёта и summary;
+- calc summary integrity: `calc_summary_<uid>` только derived cache with checkpoint, fresh-only usage and explicit recalc;
+- import strict contract: шаблонный upload_rows, строгие даты, запрет silent fallback и атомарный apply;
+- UID-only import storage: backend/import writes to `payments_<uid>`.
+
+### SAFE HARDENING — переносить
+
+- fatal вместо silent fallback для отсутствующих ставок, повреждённых исключений, повреждённых frozen debt/summary/checkpoint и ошибок `WITH_DEBT` расчёта;
+- read-only page rules: открытие страниц не должно запускать write-side-effect, autoaccrual apply или summary recalculation;
+- owner isolation: owner берётся только из серверной сессии, клиентский owner не является источником истины;
+- upload whitelist: legacy/admin/global keys and foreign-owner keys не отправляются на `/api/store`;
+- import audit log: batch-level и row-level diagnostics, rollback, duplicate/idempotency checks;
+- read-back validation before legacy cleanup для UID/calc-period migrations;
+- logging improvements вне CalcEngine: диагностические логи миграций, импорта, sync/upload и integrity state.
+
+### EXPERIMENTAL — не переносить в stable как runtime path
+
+- Server Summary Layer до отдельного этапа разрешён только как документационный foundation: интерфейс, contract, TODO/CRITICAL comments, data boundaries;
+- server-side prepared data может быть read-only projection только после явного contract и без собственной финансовой формулы;
+- pagination/lazy loading разрешены только как presentation/data delivery layer, не как расчётный слой.
+
+### DANGEROUS / DO NOT PORT
+
+Запрещено переносить в стабильную базовую ветку:
+- `prepareLedgerState`;
+- single-pass totals precompute;
+- precomputed FIFO/penalty path;
+- alternate totals calculation;
+- perf rewrite inside `calc_engine.js`;
+- vectorized penalty calculations;
+- multi-path financial execution;
+- любые code-paths из commits `d535dba` и `6780a25`, связанные с precompute/perf CalcEngine pipelines.
+
+## 19. Server Summary Layer — foundation only
+
+Следующий этап может добавить Server Summary Layer, но только как read-only derived-cache слой поверх результата CalcEngine.
+
+Минимальный contract будущего слоя:
+- input identity: `ownerId`, `abonentUid`, `calc_period_<uid>`, `calc_period_active_<uid>`;
+- source checkpoint: fingerprints/versions ledger, tariffs, rates, excludes, moratorium, responsibility data and CalcEngine/canon/format versions;
+- output: summary totals, period metadata, generatedAt, checkpoint, status;
+- allowed statuses: `fresh`, `missing`, `dirty`, `checkpoint_mismatch`, `engine_version_mismatch`, `summary_version_mismatch`, `invalid_json`, `invalid_structure`;
+- write rule: only explicit successful canonical recalculation may create a fresh summary;
+- read rule: UI may display summary totals only for `fresh`; all other statuses require recalculation notice;
+- invalidation rule: any source/checkpoint/version/calc-period mismatch makes summary not-fresh.
+
+Запрещено для Server Summary Layer:
+- переносить CalcEngine на Python/Pandas или другой engine;
+- менять юридические формулы, FIFO logic или penalty logic;
+- вычислять долг/пеню по собственной формуле;
+- быть alternate totals path или fallback engine;
+- очищать legacy/source data до successful read-back validation of canonical keys.
