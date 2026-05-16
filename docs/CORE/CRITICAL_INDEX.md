@@ -84,3 +84,20 @@ Before any calculation modernization, these prohibitions are mandatory:
 - silent fallback is forbidden for `LEDGER_JSON_INVALID`, `RATES_MISSING`, `RATES_JSON_INVALID`, `MISSING_REQUIRED_RATE`, `EXCLUDES_JSON_INVALID`, `EXCLUDES_INVALID`, `START_DATE_MISSING`, `RESPONSIBILITY_DATE_MISSING`.
 - Next safe stage: summary design with `abonent_summary`, `summary_status` fresh/dirty/missing/error, batch recalculation only by `affected_uids`, and `index.html` reading ready totals instead of recalculating everyone.
 
+
+## 7. Calculation Modernization Stage 1 — summary design contract
+
+Stage 1 is documentation-only. It defines future `abonent_summary`, `summary_status`, `summary_reason`, dirty mechanics, `affected_uids`, and future API boundaries without changing code.
+
+Mandatory boundaries:
+- `abonent_summary` is derived cache only and not a legal calculation engine.
+- `abonent_summary` must store results from the canonical calculation layer and must not change debt, penalty or FIFO formulas.
+- Allowed `summary_status` values are `fresh`, `dirty`, `missing`, `error`.
+- `error` must not become `total_debt = 0`; `missing` must not be shown as zero debt; `dirty` must not be shown as legally fresh.
+- `summary_reason` must preserve the diagnostic reason, including fatal input problems such as `LEDGER_JSON_INVALID`, `RATES_MISSING`, `RATES_JSON_INVALID`, `MISSING_REQUIRED_RATE`, `EXCLUDES_JSON_INVALID`, `EXCLUDES_INVALID`, `START_DATE_MISSING`, `RESPONSIBILITY_DATE_MISSING`, `SUMMARY_NOT_BUILT`, `DATA_DIRTY`.
+- Source changes mark concrete `affected_uids` as dirty instead of recalculating the whole owner database synchronously.
+- Tariff/rate changes may mark all affected owner UID values dirty, but synchronous mass recalculation on `index.html` open remains forbidden.
+- Future `GET /api/abonents?page=1&limit=50&sort=total_debt&order=desc&query=` may return only a page of abonents and their summary totals.
+- Future `POST /api/recalc/mark-dirty` marks `affected_uids` dirty; future `POST /api/recalc/batch` recalculates only requested UID values and records per-UID `summary_status` / `summary_reason`.
+- `index.html` open is read-only: no full `payments_<uid>` scan, no autoaccrual apply, no recalc all, no `payments_<uid>` writes, no flush/upload, no missing ledger creation, no masking missing/error summary with zeroes.
+- Stage 1 must not modify `backend/app.py`, migrations, `index.html`, `data.js`, `payment_table.js`, `calc_engine.js`, `autoaccrual_engine.js`, runtime APIs, or implementation tests.

@@ -1,5 +1,9 @@
 # CHANGELOG
 
+## 2026-05-16 — Stage 1 calculation modernization design contract
+
+- Зафиксирован дизайн-контракт будущего summary-слоя и лёгкой главной страницы. Описаны `abonent_summary`, `summary_status`, dirty-механика, `affected_uids` и будущие API-контракты. Код не менялся.
+
 ## 2026-05-16 — Calculation Modernization Stage 0 Freeze
 
 - Зафиксированы документальные запреты Этапа 0 перед оптимизацией расчётов: `web/calc_engine.js` остаётся юридическим ядром, перенос на Python/Pandas запрещён до summary-слоя, эталонных тестов и сверки 1:1.

@@ -42,3 +42,19 @@
 
 Нарушение любого пункта = критическая ошибка.
 
+
+## 🔴 CALCULATION MODERNIZATION STAGE 1 SUMMARY DESIGN CONTRACT — 2026-05-16
+
+1. Stage 1 is documentation-only: do not change `backend/app.py`, migrations, `index.html`, `data.js`, `payment_table.js`, `calc_engine.js`, `autoaccrual_engine.js`, runtime APIs, or implementation tests.
+2. Future `abonent_summary` is a derived summary layer for the lightweight main page, not a legal calculation engine and not a second financial engine.
+3. `abonent_summary` may store only results produced by the canonical calculation layer; it must not change debt, penalty, FIFO, or legal calculation formulas.
+4. Minimal `abonent_summary` fields: `owner_id`, `abonent_id`, `abonent_uid`, `total_debt`, `total_penalty`, `total_accrued`, `total_paid`, `period_from`, `period_to`, `summary_status`, `summary_reason`, `recalc_fingerprint`, `calc_engine_version`, `canon_version`, `updated_at`.
+5. Allowed `summary_status`: `fresh`, `dirty`, `missing`, `error`.
+6. `error` must not become `total_debt = 0`; `missing` must not be displayed as zero debt; `dirty` must not be displayed as legally fresh.
+7. `summary_reason` stores the status reason, including `OK`, `LEDGER_JSON_INVALID`, `RATES_MISSING`, `RATES_JSON_INVALID`, `MISSING_REQUIRED_RATE`, `EXCLUDES_JSON_INVALID`, `EXCLUDES_INVALID`, `START_DATE_MISSING`, `RESPONSIBILITY_DATE_MISSING`, `SUMMARY_NOT_BUILT`, `DATA_DIRTY`.
+8. Source-data changes mark concrete `affected_uids` as `dirty`; the system must not recalculate the whole owner database synchronously on `index.html` open.
+9. Future `GET /api/abonents?page=1&limit=50&sort=total_debt&order=desc&query=` returns only one page of abonents plus summary totals and status.
+10. Future `POST /api/recalc/mark-dirty` marks `affected_uids` dirty; future `POST /api/recalc/batch` recalculates only listed UID values and records per-UID errors as `summary_status = error` with `summary_reason`.
+11. `index.html` open is read-only: no full `payments_<uid>` scan, no autoaccrual apply, no recalc all, no `payments_<uid>` writes, no flush/upload, no missing ledger creation, no masking missing/error summary with zeroes.
+
+Нарушение любого пункта = критическая ошибка.

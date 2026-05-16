@@ -354,3 +354,20 @@
 | silent fallback запрещён для LEDGER/RATES/EXCLUDES/START_DATE/RESPONSIBILITY ошибок | LOGIC_SPEC 20.8 | calc inputs / readers | ✅ CANON | Ошибки не превращаются в 0, пустой массив или успешный расчёт. |
 | Следующий этап — summary-дизайн: `abonent_summary`, `summary_status`, recalculation по `affected_uids`, `index.html` читает готовые итоги | LOGIC_SPEC 20.9 | future summary layer | ✅ CANON | Summary остаётся derived cache без собственной финансовой формулы. |
 
+
+## 🧩 Блок: Calculation Modernization Stage 1 — Summary Design Contract
+
+| Требование / запрет | Источник | Область | Статус | Комментарий |
+|---|---|---|---|---|
+| Future `abonent_summary` хранит производные итоги абонента для быстрой главной страницы и не является юридическим движком | LOGIC_SPEC 21.1 | future summary layer / docs only | ⚪ IDEA | Этап 1 фиксирует контракт без создания таблицы, миграции или runtime-кода. |
+| `abonent_summary` хранит результат только из канонического расчётного слоя и не имеет собственной формулы долга, пени или FIFO | LOGIC_SPEC 21.1 | future summary layer / CalcEngine boundary | ⚪ IDEA | Запрещён frontend/backend summary как второй financial engine. |
+| `summary_status` допускает только `fresh`, `dirty`, `missing`, `error` | LOGIC_SPEC 21.2 | future summary API / UI | ⚪ IDEA | `error` нельзя превращать в ноль, `missing` нельзя показывать как нулевой долг, `dirty` нельзя показывать как юридически свежий итог. |
+| `summary_reason` хранит диагностическую причину статуса | LOGIC_SPEC 21.3 | future summary API / UI | ⚪ IDEA | Базовые причины включают `OK`, `LEDGER_JSON_INVALID`, `RATES_MISSING`, `MISSING_REQUIRED_RATE`, `SUMMARY_NOT_BUILT`, `DATA_DIRTY`. |
+| Dirty-механика помечает конкретные UID вместо синхронного пересчёта всей базы | LOGIC_SPEC 21.4 | future mark-dirty flow | ⚪ IDEA | Изменения ledger, Excel-платежей, ручных начислений, calc period, excludes, moratorium, transfer/frozen debt, responsibility links и дат расчёта делают affected UID dirty. |
+| `affected_uids` описывает UID, затронутые операцией | LOGIC_SPEC 21.5 | future import/edit/tariff/rate flows | ⚪ IDEA | Excel import, правка платежа, изменение тарифа и изменение ставки должны формировать ограниченный список affected UID. |
+| Future `GET /api/abonents?page=1&limit=50&sort=total_debt&order=desc&query=` возвращает страницу абонентов и summary-итоги | LOGIC_SPEC 21.6 | future API / index page | ⚪ IDEA | API не реализован в Stage 1; контракт нужен для лёгкой главной страницы. |
+| `index.html` запрашивает только одну страницу и показывает `summary_status` рядом с итогами | LOGIC_SPEC 21.6 | future `index.html` | ⚪ IDEA | Главная страница не читает все `payments_<uid>`, не запускает autoaccrual/recalc и не делает flush/upload. |
+| Future `POST /api/recalc/mark-dirty` помечает `affected_uids` как dirty | LOGIC_SPEC 21.7 | future API | ⚪ IDEA | API не реализован в Stage 1. |
+| Future `POST /api/recalc/batch` пересчитывает только указанные UID и возвращает результат по каждому UID | LOGIC_SPEC 21.7 | future API / batch recalc | ⚪ IDEA | Один ошибочный UID не останавливает batch; ошибка сохраняется как `summary_status = error` и `summary_reason`. |
+| `index.html` при открытии является read-only страницей | LOGIC_SPEC 21.8 | future and current page-open boundary | ✅ CANON | Запрещены чтение всех `payments_<uid>`, autoaccrual apply, recalc all, запись ledger, flush/upload, создание missing ledger и маскировка missing/error summary нулями. |
+| Stage 1 PR не меняет код и не добавляет реализацию | LOGIC_SPEC 21.9 | docs only | ✅ CANON | Запрещено менять `backend/app.py`, миграции, `index.html`, `data.js`, `payment_table.js`, `calc_engine.js`, `autoaccrual_engine.js`, реальные API и implementation tests. |

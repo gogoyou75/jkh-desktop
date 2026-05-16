@@ -1596,7 +1596,7 @@ Acceptance-контракт Calc Summary фиксируется командой
 - input identity: `ownerId`, `abonentUid`, `calc_period_<uid>`, `calc_period_active_<uid>`;
 - source checkpoint: fingerprints/versions ledger, tariffs, rates, excludes, moratorium, responsibility data and CalcEngine/canon/format versions;
 - output: summary totals, period metadata, generatedAt, checkpoint, status;
-- allowed statuses: `fresh`, `missing`, `dirty`, `checkpoint_mismatch`, `engine_version_mismatch`, `summary_version_mismatch`, `invalid_json`, `invalid_structure`;
+- allowed statuses for the Stage 1 `abonent_summary` contract: `fresh`, `dirty`, `missing`, `error`; detailed integrity causes must be preserved in `summary_reason` rather than becoming separate legal-success statuses;
 - write rule: only explicit successful canonical recalculation may create a fresh summary;
 - read rule: UI may display summary totals only for `fresh`; all other statuses require recalculation notice;
 - invalidation rule: any source/checkpoint/version/calc-period mismatch makes summary not-fresh.
@@ -1684,3 +1684,192 @@ Fatal-состояния включают, но не ограничиваютс�
 - `index.html` читает готовые итоги, а не пересчитывает всех;
 - summary остаётся derived cache и не получает собственной финансовой формулы.
 
+
+## 21. Calculation Modernization — Stage 1 Summary Design Contract
+
+Этап 1 является только документационным дизайн-контрактом. Код, backend API, миграции, таблицы БД, `index.html`, `data.js`, `payment_table.js`, `calc_engine.js` и `autoaccrual_engine.js` в рамках этого этапа не меняются.
+
+Цель Этапа 1: описать будущую лёгкую главную страницу и summary-слой так, чтобы `index.html` стал списком абонентов, а не расчётчиком. При открытии главная страница не должна читать все `payments_<uid>`, запускать autoaccrual, recalc или flush/upload.
+
+### 21.1. Abonent Summary Layer
+
+Будущая сущность: `abonent_summary`.
+
+Назначение `abonent_summary`: хранить производные итоги по абоненту для быстрого отображения на главной странице.
+
+Жёсткие границы:
+- `abonent_summary` не является юридическим движком;
+- `abonent_summary` не имеет права менять формулу расчёта;
+- `abonent_summary` не имеет собственной формулы долга, пени или FIFO;
+- `abonent_summary` хранит только результат, полученный через канонический расчётный слой;
+- damaged/stale/missing/error summary не может использоваться как юридически актуальный итог.
+
+Минимальные поля будущей сущности:
+- `owner_id`;
+- `abonent_id`;
+- `abonent_uid`;
+- `total_debt`;
+- `total_penalty`;
+- `total_accrued`;
+- `total_paid`;
+- `period_from`;
+- `period_to`;
+- `summary_status`;
+- `summary_reason`;
+- `recalc_fingerprint`;
+- `calc_engine_version`;
+- `canon_version`;
+- `updated_at`.
+
+### 21.2. `summary_status`
+
+Разрешённые статусы `summary_status`:
+- `fresh` — итог актуален и получен через канонический расчётный слой;
+- `dirty` — исходные данные изменились, нужен пересчёт;
+- `missing` — summary ещё не создан;
+- `error` — расчёт невозможен, причина обязана быть сохранена в `summary_reason`.
+
+Запрещено:
+- превращать `error` в `total_debt = 0`;
+- показывать `missing` как нулевой долг;
+- показывать `dirty` как юридически свежий итог;
+- маскировать любой не-`fresh` статус старым или синтетическим total.
+
+### 21.3. `summary_reason`
+
+`summary_reason` хранит причину текущего `summary_status` и должен быть пригоден для диагностики, UI-сообщения и batch-ответа.
+
+Базовые значения `summary_reason`:
+- `OK`;
+- `LEDGER_JSON_INVALID`;
+- `RATES_MISSING`;
+- `RATES_JSON_INVALID`;
+- `MISSING_REQUIRED_RATE`;
+- `EXCLUDES_JSON_INVALID`;
+- `EXCLUDES_INVALID`;
+- `START_DATE_MISSING`;
+- `RESPONSIBILITY_DATE_MISSING`;
+- `SUMMARY_NOT_BUILT`;
+- `DATA_DIRTY`.
+
+### 21.4. Dirty-механика
+
+При изменении исходных данных система не пересчитывает сразу всю базу, а помечает конкретные UID как `dirty`.
+
+`dirty` ставится при изменении:
+- `payments_<uid>`;
+- платежей из Excel;
+- ручных начислений;
+- `calc_period_<uid>`;
+- `exclude_periods_<abonentId>`;
+- `moratorium_<abonentId>`;
+- transfer/frozen debt данных;
+- responsibility links;
+- `calcStartDate` / `calcEndDate`.
+
+Если изменились тарифы или ставки:
+- `dirty` ставится всем `affected_uids` owner;
+- синхронный массовый пересчёт при открытии `index.html` запрещён.
+
+### 21.5. `affected_uids`
+
+`affected_uids` — список UID, которых затронула операция и которые должны быть помечены `dirty` или переданы в batch-пересчёт.
+
+Примеры:
+- Excel import: `affected_uids` = UID абонентов, по которым добавлены новые платежи;
+- изменение платежа в карточке: `affected_uids = [текущий uid]`;
+- изменение тарифа: `affected_uids` = все активные UID owner, на которых влияет тариф;
+- изменение ставки: `affected_uids` = все UID owner, у которых есть расчёт пени в затронутом периоде, либо все UID owner на первом этапе.
+
+### 21.6. Future API: лёгкая главная страница
+
+Будущий API-контракт без реализации:
+
+`GET /api/abonents?page=1&limit=50&sort=total_debt&order=desc&query=`
+
+Назначение: вернуть одну страницу абонентов и их summary-итоги.
+
+`index.html` должен:
+- запрашивать только одну страницу;
+- не читать все `payments_<uid>`;
+- не запускать autoaccrual;
+- не запускать recalc;
+- не делать flush/upload;
+- показывать `summary_status` рядом с итогами.
+
+Концептуальный пример ответа:
+
+```json
+{
+  "page": 1,
+  "limit": 50,
+  "total": 1234,
+  "items": [
+    {
+      "abonent_id": "1001",
+      "uid": "uid_...",
+      "fio": "...",
+      "address": "...",
+      "total_debt": 12345.67,
+      "total_penalty": 100.25,
+      "summary_status": "fresh",
+      "summary_reason": "OK",
+      "updated_at": "..."
+    }
+  ]
+}
+```
+
+### 21.7. Future API: dirty/recalc
+
+Будущий API-контракт без реализации:
+
+`POST /api/recalc/mark-dirty`
+
+Назначение: пометить `affected_uids` как `dirty`.
+
+`POST /api/recalc/batch`
+
+Вход:
+
+```json
+{
+  "uids": ["uid_1", "uid_2"],
+  "reason": "IMPORT_PAYMENTS_APPLIED"
+}
+```
+
+Поведение:
+- пересчитывать только указанные UID;
+- один ошибочный UID не должен останавливать весь batch;
+- ошибки сохранять в `summary_status = error` и `summary_reason`;
+- результат возвращать по каждому UID.
+
+### 21.8. Read-only правило для `index.html`
+
+`index.html` при открытии является read-only страницей.
+
+При открытии `index.html` запрещено:
+- читать все `payments_<uid>`;
+- запускать autoaccrual apply;
+- запускать recalc all;
+- писать `payments_<uid>`;
+- вызывать flush/upload;
+- создавать missing ledger;
+- маскировать missing/error summary нулями.
+
+### 21.9. Что не делать в Stage 1 PR
+
+В этом PR запрещено:
+- менять `backend/app.py`;
+- создавать миграции;
+- создавать таблицу `abonent_summary`;
+- менять `index.html`;
+- менять `data.js`;
+- менять `payment_table.js`;
+- менять `calc_engine.js`;
+- менять `autoaccrual_engine.js`;
+- добавлять реальные API;
+- писать тесты реализации.
+
+Этап 1 — только документационный дизайн-контракт будущего summary-слоя и лёгкой главной страницы.
