@@ -1,5 +1,9 @@
 # CHANGELOG
 
+## 2026-05-16 — Passive summary integration for index.html
+
+- Главная страница начала поддерживать read-only summary-layer без recalculation и ledger fallback. Добавлено отображение `summary_status` и passive API loading.
+
 ## 2026-05-16 — Summary infrastructure contract guards
 
 - Добавлены contract tests и read-only guards для infrastructure-only summary API. Endpoint подтверждён как derived-cache transport layer без recalculation, ledger fallback и hidden writes.

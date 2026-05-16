@@ -64,6 +64,12 @@ Doc: docs/LOGIC_SPEC_v1.5.3.md
         .row-merged td { background-color: #eef6ee !important; color: #6b6b6b; }
         .row-stopped td { background-color: #f3f3f3 !important; color: #6b6b6b; }
         .row-status-badge { font-size: 11px; margin-left: 6px; font-weight: 700; }
+        .summary-status-badge { display:inline-block; padding:2px 6px; border-radius:999px; font-size:11px; font-weight:700; }
+        .summary-status-fresh { background:#e7f6e7; color:#116611; }
+        .summary-status-dirty { background:#fff3cd; color:#7a5300; }
+        .summary-status-missing { background:#f1f1f1; color:#555; }
+        .summary-status-error { background:#fde2e2; color:#9b0015; }
+        .summary-reason { display:block; margin-top:3px; font-size:11px; color:#666; }
 
         /* ===== PAGINATION ===== */
         #paginationInfo {
@@ -276,6 +282,10 @@ Doc: docs/LOGIC_SPEC_v1.5.3.md
                 <span class="label-text">ID квартиры (regnum)</span>
                 <span class="sort-arrow"></span>
             </th>
+            <th data-field="summaryStatus">
+                <span class="label-text">summary_status</span>
+                <span class="sort-arrow"></span>
+            </th>
         </tr>
 
         <!-- === ФИЛЬТРЫ === -->
@@ -292,6 +302,7 @@ Doc: docs/LOGIC_SPEC_v1.5.3.md
             <th><input data-field="endDate"></th>
             <th><input data-field="note"></th>
             <th><input data-field="flatReg"></th>
+            <th><input data-field="summaryStatus"></th>
         </tr>
     </thead>
 
@@ -312,8 +323,24 @@ const pageSize = 20;
 let sortField = null;
 let sortAsc = true;
 const filters = {};
+
+// CRITICAL: Index page is a read-only summary consumer.
+// Do not:
+// - read all payments_<uid>,
+// - trigger recalculation,
+// - auto-build summary,
+// - auto-repair ledger,
+// - fallback to ledger totals,
+// inside passive summary mode.
 const __indexLedgerReadCache = new Map();
 let __indexLedgerReadCacheOwner = "";
+let indexPassiveSummaryMode = false;
+let indexSummaryState = {
+    mode: "legacy",
+    loading: false,
+    error: "",
+    pagination: { page: 1, per_page: pageSize, total: 0, pages: 0, has_next: false, has_prev: false }
+};
 
 function __indexOwnerId(){
     try {
@@ -755,11 +782,139 @@ if (document.readyState === "loading") {
 }
 
 /* ============================================================
-     ЗАГРУЗКА ДАННЫХ ИЗ data.js + (при наличии) из payments_<id>
+     PASSIVE SUMMARY LOADING + LEGACY READONLY VIEW
 ============================================================ */
-let indexAutoAccrualInFlight = false;
-let indexAutoAccrualDoneForOwner = "";
 let indexTableInitDone = false;
+
+function shouldUsePassiveSummaryMode(){
+    try {
+        if (!(window.Data && typeof window.Data.loadAbonentSummaryPage === "function")) return false;
+        if (window.Auth && typeof Auth.isGuest === "function" && Auth.isGuest()) return false;
+        return !!(window.Auth && typeof Auth.getCurrentUser === "function" && Auth.getCurrentUser());
+    } catch(e) {
+        return false;
+    }
+}
+
+function normalizeSummaryStatus(value){
+    const s = String(value || "missing").trim().toLowerCase();
+    return (s === "fresh" || s === "dirty" || s === "missing" || s === "error") ? s : "error";
+}
+
+function summaryNumberToDisplay(value){
+    if (value === null || value === undefined || value === "") return "";
+    const n = toNum(value);
+    return Number.isFinite(n) ? n.toFixed(2) : "";
+}
+
+function pickSummaryValue(summary, keys){
+    for (let i = 0; i < keys.length; i++) {
+        const v = summary ? summary[keys[i]] : undefined;
+        if (v !== null && v !== undefined && v !== "") return v;
+    }
+    return "";
+}
+
+function formatSummaryDate(value){
+    const d = parseDateAnyToDate(value);
+    return d ? formatDMY(d) : String(value || "");
+}
+
+function summaryStatusText(status){
+    if (status === "fresh") return "fresh";
+    if (status === "dirty") return "dirty — требуется пересчёт";
+    if (status === "missing") return "missing — summary отсутствует";
+    if (status === "error") return "error";
+    return status || "missing";
+}
+
+function summaryStatusHtml(row){
+    if (row && row.summaryStatus === "legacy") {
+        return '<span class="summary-status-badge summary-status-missing">legacy</span>';
+    }
+    const status = normalizeSummaryStatus(row && row.summaryStatus);
+    const reason = String((row && row.summaryReason) || "").trim();
+    const reasonHtml = reason ? '<span class="summary-reason">' + escapeHtml(reason) + '</span>' : '';
+    return '<span class="summary-status-badge summary-status-' + status + '">' + escapeHtml(summaryStatusText(status)) + '</span>' + reasonHtml;
+}
+
+function buildIndexRowFromSummaryItem(item){
+    const summary = (item && item.summary && typeof item.summary === "object") ? item.summary : {};
+    const status = normalizeSummaryStatus(summary.summary_status || summary.status);
+    const reason = String(summary.summary_reason || summary.reason || "").trim();
+    const isFresh = status === "fresh";
+    const fioText = String(
+        summary.fio || summary.full_name || summary.abonent_name || summary.name_full || summary.display_name || ""
+    ).trim();
+    const fio = fioText.split(/\s+/);
+    const fam = summary.fam || summary.last_name || fio[0] || "";
+    const name = summary.name || summary.first_name || fio[1] || "";
+    const otch = summary.otch || summary.middle_name || fio.slice(2).join(" ") || "";
+
+    return {
+        id: String(item && (item.abonent_id || item.account_number || item.account_uid || item.id) || ""),
+        fam: String(fam || ""),
+        name: String(name || ""),
+        otch: String(otch || ""),
+        totalDebt: isFresh ? summaryNumberToDisplay(pickSummaryValue(summary, ["total_debt", "totalDebt", "debt_total", "total"])) : "",
+        penalty: isFresh ? summaryNumberToDisplay(pickSummaryValue(summary, ["penalty", "pay_penalty", "penalty_debt", "penaltyDebt"])) : "",
+        nachisleno: isFresh ? summaryNumberToDisplay(pickSummaryValue(summary, ["nachisleno", "accrued", "accrued_total", "accruedTotal"])) : "",
+        oplacheno: isFresh ? summaryNumberToDisplay(pickSummaryValue(summary, ["oplacheno", "paid", "paid_total", "paidTotal"])) : "",
+        startDate: isFresh ? formatSummaryDate(pickSummaryValue(summary, ["start_date", "startDate", "period_start", "date_from"])) : "",
+        endDate: isFresh ? formatSummaryDate(pickSummaryValue(summary, ["end_date", "endDate", "period_end", "date_to", "as_of"])) : "",
+        note: String(summary.note || summary.defaultNote || ""),
+        flatReg: String(summary.flat_reg || summary.regnum || summary.premise_regnum || ""),
+        rowStatusMark: "",
+        summaryStatus: status,
+        summaryReason: reason
+    };
+}
+
+function renderIndexSummaryLoading(){
+    const tbody = document.querySelector("#abonentsTable tbody");
+    if (tbody) tbody.innerHTML = '<tr><td colspan="13">Загрузка summary-layer…</td></tr>';
+    const info = document.getElementById("paginationInfo");
+    const controls = document.getElementById("paginationControls");
+    if (info) info.textContent = "Загрузка summary-layer…";
+    if (controls) controls.innerHTML = "";
+}
+
+function renderIndexSummaryError(message){
+    const safe = escapeHtml(message || "Ошибка загрузки summary-layer");
+    const tbody = document.querySelector("#abonentsTable tbody");
+    if (tbody) tbody.innerHTML = '<tr><td colspan="13">Ошибка summary API: ' + safe + '</td></tr>';
+    const info = document.getElementById("paginationInfo");
+    const controls = document.getElementById("paginationControls");
+    if (info) info.textContent = "Ошибка загрузки summary-layer";
+    if (controls) controls.innerHTML = "";
+}
+
+async function loadPassiveSummaryPage(page){
+    indexPassiveSummaryMode = true;
+    currentPage = Math.max(1, Number(page) || 1);
+    indexSummaryState = Object.assign({}, indexSummaryState, {
+        mode: "summary",
+        loading: true,
+        error: "",
+        pagination: Object.assign({}, indexSummaryState.pagination, { page: currentPage, per_page: pageSize })
+    });
+    renderIndexSummaryLoading();
+
+    try {
+        const payload = await window.Data.loadAbonentSummaryPage({ page: currentPage, per_page: pageSize });
+        allRows = Array.isArray(payload.items) ? payload.items.map(buildIndexRowFromSummaryItem) : [];
+        indexSummaryState.loading = false;
+        indexSummaryState.error = "";
+        indexSummaryState.pagination = Object.assign({ page: currentPage, per_page: pageSize, total: allRows.length, pages: 0, has_next: false, has_prev: false }, payload.pagination || {});
+        currentPage = Number(indexSummaryState.pagination.page) || currentPage;
+        render();
+    } catch(e) {
+        allRows = [];
+        indexSummaryState.loading = false;
+        indexSummaryState.error = String(e && e.message || e || "summary_api_error");
+        renderIndexSummaryError(indexSummaryState.error);
+    }
+}
 
 function rebuildIndexRows(){
     allRows = [];
@@ -794,7 +949,9 @@ function rebuildIndexRows(){
             endDate:    (totals?.endDate   ?? ""),
             note: getAbonentNote(id, a),
             flatReg: regnum,
-            rowStatusMark
+            rowStatusMark,
+            summaryStatus: "legacy",
+            summaryReason: ""
         });
     }
 }
@@ -898,6 +1055,15 @@ async function initIndexPage(){
     var user = (window.Auth && typeof Auth.getCurrentUser === "function") ? Auth.getCurrentUser() : null;
     if (!user || (uiState.auth && uiState.auth.status === "guest")) {
         console.warn("[JKH] guest mode — UI not blocked");
+    } else if (shouldUsePassiveSummaryMode()) {
+        syncLoadingWarning();
+        if (!indexTableInitDone){
+            initFilters();
+            initSorting();
+            indexTableInitDone = true;
+        }
+        await loadPassiveSummaryPage(currentPage);
+        return;
     } else if (uiState.data && uiState.data.status === "error") {
         const table = document.getElementById("abonentsTable");
         if (table) table.style.display = "none";
@@ -910,14 +1076,14 @@ async function initIndexPage(){
         return;
     }
     syncLoadingWarning();
-    var repairState = await repairIndexEmptyExcludeKeysOnce();
-    if (!repairState || !repairState.ready) return;
-    showIndexAccrualsReadonlyStatus();
     if (!indexTableInitDone){
         initFilters();
         initSorting();
         indexTableInitDone = true;
     }
+    var repairState = await repairIndexEmptyExcludeKeysOnce();
+    if (!repairState || !repairState.ready) return;
+    showIndexAccrualsReadonlyStatus();
     await renderIndexRowsReadonly();
 }
 
@@ -959,6 +1125,10 @@ window.addEventListener("JKH_UI_STATE_CHANGED", function(){
     __indexUiRenderScheduled = true;
     setTimeout(async function(){
         __indexUiRenderScheduled = false;
+        if (shouldUsePassiveSummaryMode()) {
+            await loadPassiveSummaryPage(currentPage);
+            return;
+        }
         var repairState = await repairIndexEmptyExcludeKeysOnce();
         if (!repairState || !repairState.ready) return;
         clearIndexLedgerReadCache();
@@ -1039,16 +1209,24 @@ function render() {
     }
 
     /* --- пагинация --- */
-    const total = filteredRows.length;
-    const totalPages = Math.max(1, Math.ceil(total / pageSize));
-    if (currentPage > totalPages) currentPage = totalPages;
+    const summaryMode = indexPassiveSummaryMode && indexSummaryState.mode === "summary";
+    const hasLocalFilters = Object.keys(filters).some(function(k){ return String(filters[k] || "").trim() !== ""; });
+    const total = summaryMode && !hasLocalFilters ? Number(indexSummaryState.pagination.total || filteredRows.length) : filteredRows.length;
+    const totalPages = summaryMode && !hasLocalFilters ? Math.max(1, Number(indexSummaryState.pagination.pages || 1)) : Math.max(1, Math.ceil(total / pageSize));
+    if (!summaryMode && currentPage > totalPages) currentPage = totalPages;
 
-    const startIndex = (currentPage - 1) * pageSize;
-    const pageRows = filteredRows.slice(startIndex, startIndex + pageSize);
+    const startIndex = summaryMode ? 0 : ((currentPage - 1) * pageSize);
+    const pageRows = summaryMode ? filteredRows : filteredRows.slice(startIndex, startIndex + pageSize);
 
     /* --- вывод строк --- */
     const tbody = document.querySelector("#abonentsTable tbody");
     tbody.innerHTML = "";
+
+    if (pageRows.length === 0 && summaryMode) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = '<td colspan="13">Summary-layer пуст: controlled empty state, ledger fallback не выполняется.</td>';
+        tbody.appendChild(tr);
+    }
 
     pageRows.forEach(r => {
         const tr = document.createElement("tr");
@@ -1077,8 +1255,9 @@ function render() {
             <td>${r.oplacheno}</td>
             <td>${r.startDate}</td>
             <td>${r.endDate}</td>
-            <td><textarea class="note-inline note-abonent" data-id="${r.id}" placeholder="">${escapeHtml(String(r.note||""))}</textarea></td>
+            <td><textarea class="note-inline note-abonent" data-id="${r.id}" placeholder="" ${summaryMode ? 'readonly title="Passive summary mode: read-only"' : ''}>${escapeHtml(String(r.note||""))}</textarea></td>
             <td>${r.flatReg}${r.rowStatusMark ? (' <span class="row-status-badge">' + r.rowStatusMark + '</span>') : ''}</td>
+            <td>${summaryStatusHtml(r)}</td>
         `;
         tbody.appendChild(tr);
     });
@@ -1102,6 +1281,7 @@ function render() {
         ta.addEventListener("click", (ev) => ev.stopPropagation());
         ta.addEventListener("keydown", (ev) => ev.stopPropagation());
         ta.addEventListener("blur", () => {
+            if (indexPassiveSummaryMode && indexSummaryState.mode === "summary") return;
             try{
                 if (typeof window.canWriteOrExplain === "function" && !window.canWriteOrExplain()) return;
             }catch(e){}
@@ -1144,7 +1324,7 @@ function render() {
     });
 
     /* --- пагинация --- */
-    renderPagination(total, startIndex + 1, startIndex + pageRows.length);
+    renderPagination(total, pageRows.length ? (summaryMode ? ((currentPage - 1) * pageSize + 1) : startIndex + 1) : 0, pageRows.length ? (summaryMode ? ((currentPage - 1) * pageSize + pageRows.length) : startIndex + pageRows.length) : 0);
 }
 
 /* ============================================================
@@ -1173,7 +1353,8 @@ function renderPagination(total, from, to) {
         if (current) b.classList.add("current-page");
         if (!disabled) b.onclick = () => {
             currentPage = page;
-            render();
+            if (indexPassiveSummaryMode && indexSummaryState.mode === "summary") loadPassiveSummaryPage(page);
+            else render();
         };
         controls.appendChild(b);
     }

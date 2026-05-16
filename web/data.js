@@ -1209,6 +1209,38 @@
   window.canWriteToStorage = _canWriteStorage;
 
   // ============================================================
+  // Passive abonent summary API (read-only derived cache)
+  // ============================================================
+  async function loadAbonentSummaryPage(options) {
+    var opts = options || {};
+    var page = parseInt(opts.page, 10);
+    var perPage = parseInt(opts.per_page, 10);
+    if (!page || page < 1) page = 1;
+    if (!perPage || perPage < 1) perPage = 20;
+
+    var params = new URLSearchParams();
+    params.set("page", String(page));
+    params.set("per_page", String(perPage));
+
+    if (opts.abonent_id) params.set("abonent_id", String(opts.abonent_id));
+    if (opts.account_uid) params.set("account_uid", String(opts.account_uid));
+    if (opts.account_number) params.set("account_number", String(opts.account_number));
+
+    var res = await fetch("/api/abonent_summary?" + params.toString(), {
+      method: "GET",
+      credentials: "include"
+    });
+    var text = await res.text();
+    var data = null;
+    try { data = text ? JSON.parse(text) : null; } catch (e) { data = null; }
+    if (!res.ok || !data || data.ok === false) {
+      throw new Error((data && data.error) || ("HTTP_" + res.status));
+    }
+    return data;
+  }
+
+
+  // ============================================================
   // Service layer API (CANON v1.6)
   // ============================================================
   function normalizeRegnumValue(v) {
@@ -1236,6 +1268,7 @@
     resolveCalcPeriodActiveStorageKey: resolveCalcPeriodActiveStorageKey,
     resolvePaymentLedgerKey: resolvePaymentLedgerKey,
     readPaymentLedger: readPaymentLedger,
+    loadAbonentSummaryPage: loadAbonentSummaryPage,
     writePaymentLedger: writePaymentLedger,
     createEmptyPaymentLedger: createEmptyPaymentLedger,
     normalizeFinancialMode: normalizeFinancialMode,
