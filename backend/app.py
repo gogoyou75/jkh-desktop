@@ -954,6 +954,10 @@ def initdb():
 
 @app.get("/api/abonent_summary")
 def abonent_summary_list():
+    # CRITICAL GUARD: Summary API is read-only derived-cache transport.
+    # Do not add recalculation, ledger rebuild, autoaccrual, fallback totals,
+    # hidden writes, implicit refresh, repair of missing summary rows, or
+    # payments_<uid> reads inside GET /api/abonent_summary.
     user, err = _require_user()
     if err:
         return err

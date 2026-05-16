@@ -1,5 +1,9 @@
 # CHANGELOG
 
+## 2026-05-16 — Summary infrastructure contract guards
+
+- Добавлены contract tests и read-only guards для infrastructure-only summary API. Endpoint подтверждён как derived-cache transport layer без recalculation, ledger fallback и hidden writes.
+
 ## 2026-05-16 — Stage 1 calculation modernization design contract
 
 - Зафиксирован дизайн-контракт будущего summary-слоя и лёгкой главной страницы. Описаны `abonent_summary`, `summary_status`, dirty-механика, `affected_uids` и будущие API-контракты. Код не менялся.
