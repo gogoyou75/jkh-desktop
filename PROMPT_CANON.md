@@ -1,7 +1,7 @@
 
 # PROMPT_CANON — ПАПАЖКХ
 
-Версия: v1.9.0
+Версия: v1.9.1
 
 ## 🔴 CRITICAL UID PAYMENTS RULE — 2026-05-03
 
@@ -27,3 +27,18 @@
 8. История преобразований хранится в `premiseEvents`.
 
 Нарушение любого пункта = критическая ошибка.
+
+## 🔴 CALCULATION MODERNIZATION STAGE 0 FREEZE — 2026-05-16
+
+1. `web/calc_engine.js` является юридическим ядром расчёта. До появления summary-слоя, эталонных тестов и сверки результатов 1:1 перенос расчётов на Python/Pandas запрещён.
+2. Формулу пени менять запрещено: первые 30 дней = 0; 31–90 день = 1/300; 91+ день = 1/130; ежедневная ставка на конкретный день; ограничение ставки 9.5% до 01.01.2027; fatal при отсутствии ставок.
+3. FIFO менять запрещено: старые начисления закрываются раньше новых; платёж без периода не уходит в будущее; переплата/аванс не маскирует ошибки расчёта.
+4. `index.html` при открытии остаётся read-only: не запускает autoaccrual apply, не пишет `payments_<uid>`, не делает flush/upload и не пересчитывает всех абонентов молча.
+5. Frontend summary/cache/table totals являются только производными данными; юридическая логика долга и пени остаётся в каноническом расчётном слое.
+6. SQL payments — отдельный будущий этап; canonical ledger на текущем этапе остаётся `payments_<uid>`.
+7. `/api/store_dump` нельзя удалять или ломать до завершения server-first summary-слоя.
+8. silent fallback запрещён для `LEDGER_JSON_INVALID`, `RATES_MISSING`, `RATES_JSON_INVALID`, `MISSING_REQUIRED_RATE`, `EXCLUDES_JSON_INVALID`, `EXCLUDES_INVALID`, `START_DATE_MISSING`, `RESPONSIBILITY_DATE_MISSING`.
+9. Следующий безопасный этап — summary-слой: `abonent_summary`, `summary_status` fresh/dirty/missing/error, batch recalculation только по `affected_uids`, `index.html` читает готовые итоги.
+
+Нарушение любого пункта = критическая ошибка.
+

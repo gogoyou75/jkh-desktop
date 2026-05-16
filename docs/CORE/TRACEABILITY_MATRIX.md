@@ -339,3 +339,18 @@
 | Canonical calc period keys ограничивают summary | LOGIC_SPEC → Calc summary integrity | `web/storage.js`, `web/data.js`, `web/payment_table.js` | ✅ OK | `calc_period_<uid>` / `calc_period_active_<uid>` входят в checkpoint; изменение периода делает summary not-fresh. |
 | Import strict contract and audit remain safe hardening | LOGIC_SPEC → Import contract/audit; CHANGELOG import sections | `web/import_xls.html`, backend import flow, `docs/CORE/CHANGELOG.md` | ✅ OK | Strict template/upload_rows, audit log, rollback and no silent date fallback are safe to keep. |
 | Read-back validation required before legacy cleanup | LOGIC_SPEC → Architecture Port Audit | `web/storage.js`, `web/data.js` | ✅ OK | Legacy cleanup must follow successful canonical read-back, especially UID and calc-period migration. |
+
+## 🧩 Блок: Calculation Modernization Stage 0 Freeze
+
+| Требование / запрет | Источник | Область | Статус | Комментарий |
+|---|---|---|---|---|
+| `web/calc_engine.js` остаётся юридическим ядром; перенос расчётов на Python/Pandas запрещён до summary-слоя, эталонных тестов и сверки 1:1 | LOGIC_SPEC 20.1 | docs / `web/calc_engine.js` | ✅ CANON | Этап 0 фиксирует запрет переноса, а не меняет код. |
+| Формула пени не меняется: 30 дней = 0, 31–90 = 1/300, 91+ = 1/130, ежедневная ставка, cap 9.5% до 01.01.2027, fatal при отсутствии ставок | LOGIC_SPEC 20.2 | `web/calc_engine.js` | ✅ CANON | Любое изменение требует отдельного этапа и сверки. |
+| FIFO не меняется: старые начисления закрываются первыми, платёж без периода не уходит в будущее, аванс не маскирует ошибки | LOGIC_SPEC 20.3 | `web/calc_engine.js` / ledger | ✅ CANON | Optimized/precomputed FIFO запрещён на текущем этапе. |
+| `index.html` остаётся read-only при открытии: нет autoaccrual apply, записи `payments_<uid>`, flush/upload и массового пересчёта | LOGIC_SPEC 20.4 | `web/index.html` | ✅ CANON | Главная страница должна читать готовые итоги, а не пересчитывать всех молча. |
+| Frontend summary/cache/table totals являются derived data only, не юридическим source of truth | LOGIC_SPEC 20.5 | frontend summary / UI totals | ✅ CANON | Долг и пеня остаются через канонический расчётный слой. |
+| SQL payments — будущий этап; canonical ledger остаётся `payments_<uid>` | LOGIC_SPEC 20.6 | storage / future SQL | ✅ CANON | Миграции БД и смена source of truth запрещены в Этапе 0. |
+| `/api/store_dump` нельзя удалять или ломать до завершения server-first summary-слоя | LOGIC_SPEC 20.7 | backend store dump | ✅ CANON | Старый механизм загрузки данных сохраняется для совместимости. |
+| silent fallback запрещён для LEDGER/RATES/EXCLUDES/START_DATE/RESPONSIBILITY ошибок | LOGIC_SPEC 20.8 | calc inputs / readers | ✅ CANON | Ошибки не превращаются в 0, пустой массив или успешный расчёт. |
+| Следующий этап — summary-дизайн: `abonent_summary`, `summary_status`, recalculation по `affected_uids`, `index.html` читает готовые итоги | LOGIC_SPEC 20.9 | future summary layer | ✅ CANON | Summary остаётся derived cache без собственной финансовой формулы. |
+

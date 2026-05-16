@@ -1,5 +1,12 @@
 # CHANGELOG
 
+## 2026-05-16 — Calculation Modernization Stage 0 Freeze
+
+- Зафиксированы документальные запреты Этапа 0 перед оптимизацией расчётов: `web/calc_engine.js` остаётся юридическим ядром, перенос на Python/Pandas запрещён до summary-слоя, эталонных тестов и сверки 1:1.
+- Запрещены изменения формулы пени, FIFO-разнесения оплат, UID-ledger `payments_<uid>`, read-only поведения `index.html`, `/api/store_dump` и fatal-поведения вместо silent fallback.
+- Клиентские summary/cache/table totals закреплены только как derived data, не юридический source of truth.
+- Следующий безопасный этап определён как проектирование summary-слоя: `abonent_summary`, `summary_status` fresh/dirty/missing/error, batch recalculation только по `affected_uids`, `index.html` читает готовые итоги без массового пересчёта.
+
 ## 2026-05-16 — Stable Canon Sync / CalcEngine Freeze Boundary
 
 - Проведён документальный аудит `LOGIC_SPEC.md`, `TRACEABILITY_MATRIX.md`, `CHANGELOG.md`, `CRITICAL_INDEX.md` для переноса safe canon в стабильную базовую ветку.

@@ -1,6 +1,6 @@
 # 🔒 CRITICAL INDEX — ПАПАЖКХ
 
-Версия: v1.5.4
+Версия: v1.5.5
 Дата фиксации: 2026-05-16
 
 Единый список жёстких канонов и запретов.
@@ -70,3 +70,17 @@ Forbidden now:
 - changes to FIFO logic;
 - changes to penalty logic;
 - alternate totals fallback.
+
+## 6. Calculation Modernization Stage 0 — hard prohibitions
+
+Before any calculation modernization, these prohibitions are mandatory:
+- `web/calc_engine.js` является юридическим ядром расчёта. До появления summary-слоя, эталонных тестов и сверки результатов 1:1 перенос расчётов на Python/Pandas запрещён.
+- Penalty formula must not change: first 30 days = 0, days 31–90 = 1/300, days 91+ = 1/130, daily rate by exact date, 9.5% cap until 01.01.2027, fatal on missing rates.
+- FIFO must not change: oldest accruals are closed first, payment without period must not go to the future, overpayment/advance must not hide calculation errors.
+- `index.html` must remain read-only on open: no autoaccrual apply, no `payments_<uid>` writes, no flush/upload, no silent full-abonent recalculation.
+- Frontend summary/cache/table totals are derived data only and must not be trusted as legal financial data.
+- SQL payments are a separate future stage; canonical ledger remains `payments_<uid>` now.
+- `/api/store_dump` must not be removed or broken before the server-first summary layer is complete.
+- silent fallback is forbidden for `LEDGER_JSON_INVALID`, `RATES_MISSING`, `RATES_JSON_INVALID`, `MISSING_REQUIRED_RATE`, `EXCLUDES_JSON_INVALID`, `EXCLUDES_INVALID`, `START_DATE_MISSING`, `RESPONSIBILITY_DATE_MISSING`.
+- Next safe stage: summary design with `abonent_summary`, `summary_status` fresh/dirty/missing/error, batch recalculation only by `affected_uids`, and `index.html` reading ready totals instead of recalculating everyone.
+
