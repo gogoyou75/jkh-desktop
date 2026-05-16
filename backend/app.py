@@ -194,8 +194,70 @@ class PaymentAuditLog(db.Model):
     created_at = db.Column(db.DateTime, nullable=False, server_default=text("CURRENT_TIMESTAMP"))
 
 
+class AbonentSummary(db.Model):
+    __tablename__ = "abonent_summary"
+
+    id = db.Column(db.BigInteger, primary_key=True, autoincrement=True)
+    owner_id = db.Column(db.String(128), nullable=False, index=True)
+    abonent_id = db.Column(db.String(128), nullable=False, default="", index=True)
+    account_uid = db.Column(db.String(128), nullable=False, default="", index=True)
+    account_number = db.Column(db.String(128), nullable=False, default="", index=True)
+    summary_json = db.Column(db.Text, nullable=False, default="{}")
+    created_at = db.Column(db.DateTime, nullable=False, server_default=text("CURRENT_TIMESTAMP"))
+    updated_at = db.Column(
+        db.DateTime,
+        server_default=text("CURRENT_TIMESTAMP"),
+        onupdate=text("CURRENT_TIMESTAMP"),
+    )
+
+
 def _json_error(error: str, code: int):
     return jsonify(ok=False, error=error), code
+
+
+def _parse_pagination_args(default_per_page: int = 50, max_per_page: int = 200):
+    try:
+        page = int(request.args.get("page", "1"))
+    except (TypeError, ValueError):
+        page = 1
+    try:
+        per_page = int(request.args.get("per_page", str(default_per_page)))
+    except (TypeError, ValueError):
+        per_page = default_per_page
+
+    page = max(1, page)
+    per_page = max(1, min(max_per_page, per_page))
+    return page, per_page
+
+
+def _pagination_payload(page: int, per_page: int, total: int):
+    pages = (total + per_page - 1) // per_page if per_page else 0
+    return {
+        "page": page,
+        "per_page": per_page,
+        "total": total,
+        "pages": pages,
+        "has_next": page < pages,
+        "has_prev": page > 1,
+    }
+
+
+def _abonent_summary_payload(row: AbonentSummary):
+    try:
+        summary = json.loads(row.summary_json or "{}")
+    except (TypeError, ValueError):
+        summary = {}
+
+    return {
+        "id": row.id,
+        "owner_id": row.owner_id,
+        "abonent_id": row.abonent_id or "",
+        "account_uid": row.account_uid or "",
+        "account_number": row.account_number or "",
+        "summary": summary,
+        "created_at": row.created_at.isoformat() + "Z" if row.created_at else None,
+        "updated_at": row.updated_at.isoformat() + "Z" if row.updated_at else None,
+    }
 
 
 def _normalize_email(value: str) -> str:
@@ -888,6 +950,45 @@ def index():
 def initdb():
     db.create_all()
     return jsonify(ok=True, message="users + kv_store ready")
+
+
+@app.get("/api/abonent_summary")
+def abonent_summary_list():
+    user, err = _require_user()
+    if err:
+        return err
+
+    owner = request.args.get("owner") if user.role == "admin" else user.id
+    page, per_page = _parse_pagination_args()
+
+    q = AbonentSummary.query
+    if owner:
+        q = q.filter_by(owner_id=owner)
+
+    abonent_id = str(request.args.get("abonent_id") or "").strip()
+    account_uid = str(request.args.get("account_uid") or "").strip()
+    account_number = str(request.args.get("account_number") or "").strip()
+
+    if abonent_id:
+        q = q.filter_by(abonent_id=abonent_id)
+    if account_uid:
+        q = q.filter_by(account_uid=account_uid)
+    if account_number:
+        q = q.filter_by(account_number=account_number)
+
+    total = q.count()
+    items = (
+        q.order_by(AbonentSummary.updated_at.desc(), AbonentSummary.id.desc())
+        .offset((page - 1) * per_page)
+        .limit(per_page)
+        .all()
+    )
+
+    return jsonify(
+        ok=True,
+        items=[_abonent_summary_payload(x) for x in items],
+        pagination=_pagination_payload(page, per_page, total),
+    )
 
 
 @app.post("/api/auth/register")
