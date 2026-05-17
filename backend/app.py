@@ -44,6 +44,19 @@ IMPORT_BATCH_CRITICAL_COLUMNS = (
     "error_message",
 )
 
+
+ABONENT_SUMMARY_DIRTY_REASONS = {
+    "PAYMENTS_CHANGED",
+    "IMPORT_PAYMENTS_APPLIED",
+    "CALC_PERIOD_CHANGED",
+    "EXCLUDES_CHANGED",
+    "MORATORIUM_CHANGED",
+    "RESPONSIBILITY_CHANGED",
+    "AUTOACCRUAL_CHANGED",
+    "LEDGER_WRITE",
+    "UNKNOWN_CHANGE",
+}
+
 IMPORT_BATCH_AUDIT_FIELDS_MIGRATION_SQL = (
     "ALTER TABLE import_batches "
     "ADD COLUMN rows_skipped INT NOT NULL DEFAULT 0, "
@@ -865,6 +878,81 @@ def _summary_identity_value(abonent: dict, keys, fallback: str = ""):
     return fallback
 
 
+
+
+def _owner_abonents_db_v1_summary_targets(owner_id: str):
+    targets = []
+    seen_uids = set()
+
+    row = KVStore.query.filter_by(owner=owner_id, k="abonents_db_v1").first()
+    if not row or not row.v:
+        return targets
+
+    try:
+        obj = json.loads(row.v)
+    except Exception:
+        return targets
+
+    for ls_key, abonent in _extract_abonents_items(obj):
+        if not isinstance(abonent, dict):
+            continue
+        account_uid = _norm_text(abonent.get("uid"))
+        if not account_uid or account_uid in seen_uids:
+            continue
+        seen_uids.add(account_uid)
+
+        key_account_number = _norm_text(ls_key)
+        account_number = _summary_identity_value(
+            abonent,
+            ("account_number", "accountNumber", "ls", "id"),
+            key_account_number,
+        )
+        abonent_id = _summary_identity_value(
+            abonent,
+            ("abonent_id", "abonentId", "id"),
+            key_account_number or account_number,
+        )
+
+        targets.append({
+            "abonent_id": abonent_id,
+            "account_uid": account_uid,
+            "account_number": account_number,
+            "identity": {
+                "abonent_id": abonent_id,
+                "account_uid": account_uid,
+                "account_number": account_number,
+                "fio": _summary_identity_value(abonent, ("fio", "fullName", "full_name")),
+                "address": _summary_identity_value(abonent, ("address", "addr")),
+            },
+        })
+
+    return targets
+
+
+def _dirty_abonent_summary_payload(existing_summary: dict | None, reason: str):
+    payload = existing_summary.copy() if isinstance(existing_summary, dict) else {}
+    for key in (
+        "totals",
+        "total",
+        "total_debt",
+        "total_penalty",
+        "total_principal",
+        "debt",
+        "penalty",
+        "principal",
+    ):
+        payload.pop(key, None)
+    payload.update({
+        "summary_status": "dirty",
+        "summary_reason": reason,
+        "status": "dirty",
+        "reason": reason,
+        "dirty_at": datetime.utcnow().isoformat() + "Z",
+    })
+    if "period" not in payload or not isinstance(payload.get("period"), dict):
+        payload["period"] = {"from": None, "to": None}
+    return payload
+
 def _owner_abonent_summary_targets(owner_id: str):
     targets = []
     seen_uids = set()
@@ -1075,6 +1163,67 @@ def abonent_summary_list():
         ok=True,
         items=[_abonent_summary_payload(x) for x in items],
         pagination=_pagination_payload(page, per_page, total),
+    )
+
+
+@app.post("/api/abonent_summary/mark_dirty")
+def abonent_summary_mark_dirty():
+    user, err = _require_user()
+    if err:
+        return err
+
+    owner = user.id
+    counters = {"created": 0, "updated": 0, "skipped": 0, "errors": 0}
+    body = request.get_json(silent=True) or {}
+    if not isinstance(body, dict):
+        return jsonify(ok=False, error="summary_invalid", counters=counters), 400
+
+    account_uid = _norm_text(body.get("account_uid"))
+    if not account_uid:
+        return jsonify(ok=False, error="account_uid_required", counters=counters), 400
+
+    reason = _norm_text(body.get("reason")) or "UNKNOWN_CHANGE"
+    if reason not in ABONENT_SUMMARY_DIRTY_REASONS:
+        return jsonify(ok=False, error="invalid_reason", counters=counters), 400
+
+    try:
+        targets = _owner_abonents_db_v1_summary_targets(owner)
+        target = next((t for t in targets if _norm_text(t.get("account_uid")) == account_uid), None)
+        if not target:
+            return jsonify(ok=False, error="uid_not_found"), 404
+
+        row = AbonentSummary.query.filter_by(owner_id=owner, account_uid=account_uid).order_by(AbonentSummary.id.asc()).first()
+        if row:
+            try:
+                existing_summary = json.loads(row.summary_json or "{}")
+            except (TypeError, ValueError):
+                existing_summary = {}
+            row.abonent_id = _norm_text(target.get("abonent_id"))
+            row.account_number = _norm_text(target.get("account_number"))
+            row.summary_json = json.dumps(_dirty_abonent_summary_payload(existing_summary, reason), ensure_ascii=False, sort_keys=True)
+            counters["updated"] += 1
+        else:
+            db.session.add(AbonentSummary(
+                owner_id=owner,
+                abonent_id=_norm_text(target.get("abonent_id")),
+                account_uid=account_uid,
+                account_number=_norm_text(target.get("account_number")),
+                summary_json=json.dumps(_dirty_abonent_summary_payload(None, reason), ensure_ascii=False, sort_keys=True),
+            ))
+            counters["created"] += 1
+
+        db.session.commit()
+    except SQLAlchemyError as exc:
+        db.session.rollback()
+        app.logger.exception("abonent_summary mark_dirty failed for owner=%s", owner)
+        return jsonify(ok=False, error="summary_mark_dirty_failed", counters=counters, details=str(exc)), 500
+
+    return jsonify(
+        ok=True,
+        account_uid=account_uid,
+        status="dirty",
+        reason=reason,
+        counters=counters,
     )
 
 
