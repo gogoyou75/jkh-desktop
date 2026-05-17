@@ -1844,6 +1844,20 @@ Fatal-состояния включают, но не ограничиваютс�
 - менять формулу пени, FIFO, ставки, transfer/merge/split;
 - записывать синтетические `total_debt = 0` / `total_penalty = 0` вместо controlled status.
 
+### 21.7.1. Stage 2 Integration: single UID summary upsert
+
+После успешного канонического UID-пересчёта одного абонента карточка имеет право заполнить `abonent_summary.summary_json` через тот же endpoint `POST /api/abonent_summary/rebuild`, но только в single режимe с body `account_uid` + `summary`.
+
+Правила single режима:
+- `abonent_summary` остаётся derived-cache и не становится новым финансовым движком;
+- расчёт долга, пени, FIFO и итогов выполняет только frontend `calc_engine.js`;
+- backend не читает `payments_<uid>`, не запускает autoaccrual и не считает долг/пеню;
+- owner берётся только из серверной сессии, owner из query/body игнорируется;
+- `account_uid` обязан принадлежать абоненту текущего owner, иначе возвращается `uid_not_found`;
+- при body с одним UID запрещён массовый rebuild;
+- `summary` должен быть объектом и сохраняется в `summary_json` без подстановки синтетических нулей;
+- fatal ошибка расчёта сохраняется как `summary_status = "error"` и диагностический `summary_reason`, но без `totals: 0`.
+
 ### 21.8. Future API: dirty/recalc
 
 Будущий API-контракт без реализации:

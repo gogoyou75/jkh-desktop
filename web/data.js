@@ -1239,6 +1239,48 @@
     return data;
   }
 
+  async function saveAbonentSummaryAfterRecalc(abonentOrId, summary) {
+    try {
+      var found = _findAbonentByIdOrUid(abonentOrId);
+      var abonent = found && found.abonent ? found.abonent : null;
+      var abonentId = String(found && found.id || (abonent && abonent.id) || (typeof abonentOrId === "object" ? abonentOrId && abonentOrId.id : abonentOrId) || "").trim();
+      var uid = String(abonent && abonent.uid || (typeof abonentOrId === "object" ? abonentOrId && abonentOrId.uid : "") || "").trim();
+
+      if (!isValidUid(uid)) {
+        try { console.warn("[summary][save-failed]", { reason: "INVALID_UID", abonentId: abonentId, uid: uid }); } catch (eWarn) {}
+        return { ok: false, skipped: true, reason: "INVALID_UID" };
+      }
+      if (!summary || typeof summary !== "object" || Array.isArray(summary)) {
+        try { console.warn("[summary][save-failed]", { reason: "SUMMARY_INVALID", abonentId: abonentId, uid: uid }); } catch (eSummary) {}
+        return { ok: false, skipped: true, reason: "SUMMARY_INVALID" };
+      }
+
+      var payload = {
+        account_uid: uid,
+        abonent_id: String(abonentId || abonent && abonent.id || ""),
+        account_number: String(abonent && (abonent.account_number || abonent.accountNumber || abonent.ls || abonent.id) || abonentId || ""),
+        summary: summary
+      };
+
+      var res = await fetch("/api/abonent_summary/rebuild", {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      });
+      var text = await res.text();
+      var data = null;
+      try { data = text ? JSON.parse(text) : null; } catch (eParse) { data = null; }
+      if (!res.ok || !data || data.ok === false) {
+        throw new Error((data && data.error) || ("HTTP_" + res.status));
+      }
+      return data;
+    } catch (e) {
+      try { console.warn("[summary][save-failed]", { reason: String(e && e.message || e) }); } catch (eLog) {}
+      return { ok: false, error: String(e && e.message || e) };
+    }
+  }
+
 
   // ============================================================
   // Service layer API (CANON v1.6)
@@ -1269,6 +1311,7 @@
     resolvePaymentLedgerKey: resolvePaymentLedgerKey,
     readPaymentLedger: readPaymentLedger,
     loadAbonentSummaryPage: loadAbonentSummaryPage,
+    saveAbonentSummaryAfterRecalc: saveAbonentSummaryAfterRecalc,
     writePaymentLedger: writePaymentLedger,
     createEmptyPaymentLedger: createEmptyPaymentLedger,
     normalizeFinancialMode: normalizeFinancialMode,

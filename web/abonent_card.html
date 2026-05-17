@@ -2334,6 +2334,71 @@ function isValidPeriod(from, to){
     } catch (e) { return false; }
 }
 
+function __summaryCalcErrorCode(e){
+    if (e && e.code) return String(e.code);
+    const msg = String(e && e.message || e || "CALC_FAILED");
+    if (msg.indexOf("MISSING_REQUIRED_RATE") >= 0) return "MISSING_REQUIRED_RATE";
+    if (msg.indexOf("RATES_JSON_INVALID") >= 0) return "RATES_JSON_INVALID";
+    if (msg.indexOf("EXCLUDES_JSON_INVALID") >= 0) return "EXCLUDES_JSON_INVALID";
+    if (msg.indexOf("EXCLUDES_INVALID") >= 0) return "EXCLUDES_INVALID";
+    if (msg.indexOf("LEDGER_JSON_INVALID") >= 0) return "LEDGER_JSON_INVALID";
+    return msg || "CALC_FAILED";
+}
+
+function __buildAbonentSummaryAfterUidRecalc(abonentId, from, to){
+    if (!window.JKHCalcEngine || typeof window.JKHCalcEngine.loadPaymentsForAbonent !== "function" || typeof window.JKHCalcEngine.calcTotalsAsOfAdjusted !== "function") {
+        throw new Error("CALC_ENGINE_UNAVAILABLE");
+    }
+    const asOf = new Date(to);
+    if (asOf.toString() === "Invalid Date") throw new Error("PERIOD_INVALID");
+    const rows = window.JKHCalcEngine.loadPaymentsForAbonent(String(abonentId));
+    const totals = window.JKHCalcEngine.calcTotalsAsOfAdjusted(rows, asOf, {
+        abonentId: String(abonentId),
+        applyAdvanceOffset: true,
+        allowNegativePrincipal: true
+    });
+    const principal = Number(totals && totals.principal);
+    const penalty = Number(totals && totals.penaltyDebt);
+    const total = Number(totals && totals.total);
+    if (!Number.isFinite(principal) || !Number.isFinite(penalty) || !Number.isFinite(total)) {
+        throw new Error("CALC_TOTALS_INVALID");
+    }
+    return {
+        status: "fresh",
+        reason: "OK",
+        summary_status: "fresh",
+        summary_reason: "OK",
+        period: { from: String(from || ""), to: String(to || "") },
+        totals: {
+            principal: principal,
+            penalty: penalty,
+            total: total
+        },
+        calc_engine_version: "JKHCalcEngine",
+        generated_at: new Date().toISOString()
+    };
+}
+
+async function __saveAbonentSummaryAfterUidRecalc(abonentId, from, to){
+    if (!window.Data || typeof Data.saveAbonentSummaryAfterRecalc !== "function") return;
+    let summary;
+    try {
+        summary = __buildAbonentSummaryAfterUidRecalc(abonentId, from, to);
+    } catch (e) {
+        const reason = __summaryCalcErrorCode(e);
+        summary = {
+            status: "error",
+            reason: reason,
+            summary_status: "error",
+            summary_reason: reason,
+            period: { from: String(from || ""), to: String(to || "") },
+            calc_engine_version: "JKHCalcEngine",
+            generated_at: new Date().toISOString()
+        };
+    }
+    await Data.saveAbonentSummaryAfterRecalc(abonentId, summary);
+}
+
 function bindCalcButtons(){
     const runBtn = document.getElementById("calcRunBtn");
     const repBtn = document.getElementById("calcReportsBtn");
@@ -2382,6 +2447,7 @@ function bindCalcButtons(){
         }
         if (!confirmCalcPeriodSaved()) return;
 
+        await __saveAbonentSummaryAfterUidRecalc(currentAbonentId, from, to);
         __safeLoadPaymentTableOnce();
     });
 

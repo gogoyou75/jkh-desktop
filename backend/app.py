@@ -1086,8 +1086,48 @@ def abonent_summary_rebuild():
 
     owner = user.id
     counters = {"created": 0, "updated": 0, "skipped": 0, "errors": 0}
+    body = request.get_json(silent=True)
 
     try:
+        if body:
+            if not isinstance(body, dict):
+                return jsonify(ok=False, error="summary_invalid", counters=counters), 400
+
+            account_uid = _norm_text(body.get("account_uid"))
+            if not account_uid:
+                return jsonify(ok=False, error="account_uid_required", counters=counters), 400
+
+            summary = body.get("summary")
+            if not isinstance(summary, dict):
+                return jsonify(ok=False, error="summary_invalid", counters=counters), 400
+
+            targets = _owner_abonent_summary_targets(owner)
+            target = next((t for t in targets if _norm_text(t.get("account_uid")) == account_uid), None)
+            if not target:
+                return jsonify(ok=False, error="uid_not_found", counters=counters), 404
+
+            abonent_id = _norm_text(body.get("abonent_id")) or _norm_text(target.get("abonent_id"))
+            account_number = _norm_text(body.get("account_number")) or _norm_text(target.get("account_number"))
+            summary_json = json.dumps(summary, ensure_ascii=False, sort_keys=True)
+            row = AbonentSummary.query.filter_by(owner_id=owner, account_uid=account_uid).order_by(AbonentSummary.id.asc()).first()
+            if row:
+                row.abonent_id = abonent_id
+                row.account_number = account_number
+                row.summary_json = summary_json
+                counters["updated"] += 1
+            else:
+                db.session.add(AbonentSummary(
+                    owner_id=owner,
+                    abonent_id=abonent_id,
+                    account_uid=account_uid,
+                    account_number=account_number,
+                    summary_json=summary_json,
+                ))
+                counters["created"] += 1
+
+            db.session.commit()
+            return jsonify(ok=True, counters=counters)
+
         targets = _owner_abonent_summary_targets(owner)
         for target in targets:
             account_uid = _norm_text(target.get("account_uid"))
