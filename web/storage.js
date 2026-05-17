@@ -121,6 +121,7 @@
   }
 
   function setItem(key, value, ownerId) {
+    if (!_guardCalcPeriodWrite(key, ownerId, "setItem")) return false;
     if (isGuestMode()) throw new Error("GUEST_READONLY");
     if (isAllMode()) throw new Error("ALLMODE_READONLY");
     if (isGlobalProjectKey(key) && !_isAdmin()) throw new Error("GLOBAL_ADMIN_ONLY");
@@ -196,6 +197,115 @@
     exact: SYNC_CANON_EXACT.slice(),
     prefix: SYNC_CANON_PREFIX.slice()
   };
+
+
+
+  function _isValidUid(uid) {
+    var s = String(uid === null || uid === undefined ? "" : uid).trim();
+    if (!s) return false;
+    var low = s.toLowerCase();
+    if (s === "..." || s === "-" || s === "0" || low === "null" || low === "undefined") return false;
+    return /^uid_[a-z0-9][a-z0-9_-]*$/i.test(s);
+  }
+
+  var __invalidUidCanonicalBlockedSeen = {};
+  var __invalidUidCanonicalBlockedSummary = { count: 0, keys: {}, scheduled: false };
+
+  function _flushInvalidUidCanonicalBlockedSummary() {
+    __invalidUidCanonicalBlockedSummary.scheduled = false;
+    if (!__invalidUidCanonicalBlockedSummary.count) return;
+    var keys = Object.keys(__invalidUidCanonicalBlockedSummary.keys);
+    var payload = { count: __invalidUidCanonicalBlockedSummary.count, sampleKeys: keys.slice(0, 10) };
+    __invalidUidCanonicalBlockedSummary.count = 0;
+    __invalidUidCanonicalBlockedSummary.keys = {};
+    try { console.warn("[uid][canonical-blocked-invalid-summary]", payload); } catch (e) {}
+  }
+
+  function _warnInvalidUidCanonicalBlocked(payload) {
+    payload = payload || {};
+    var key = String(payload.key || "");
+    var source = String(payload.source || "");
+    var isCalcPeriod = key.indexOf("calc_period_") === 0 || source.indexOf("calc-period") >= 0 || source === "upload" || source === "server-dump";
+    var sig = [key, String(payload.suffix || ""), String(payload.uid || ""), String(payload.abonentId || ""), source].join("|");
+    if (__invalidUidCanonicalBlockedSeen[sig]) {
+      __invalidUidCanonicalBlockedSummary.count++;
+      if (key) __invalidUidCanonicalBlockedSummary.keys[key] = true;
+      if (!__invalidUidCanonicalBlockedSummary.scheduled) {
+        __invalidUidCanonicalBlockedSummary.scheduled = true;
+        try { setTimeout(_flushInvalidUidCanonicalBlockedSummary, 0); } catch (eTimer) { _flushInvalidUidCanonicalBlockedSummary(); }
+      }
+      return;
+    }
+    __invalidUidCanonicalBlockedSeen[sig] = true;
+    if (isCalcPeriod) {
+      __invalidUidCanonicalBlockedSummary.count++;
+      if (key) __invalidUidCanonicalBlockedSummary.keys[key] = true;
+      if (!__invalidUidCanonicalBlockedSummary.scheduled) {
+        __invalidUidCanonicalBlockedSummary.scheduled = true;
+        try { setTimeout(_flushInvalidUidCanonicalBlockedSummary, 0); } catch (eCalcTimer) { _flushInvalidUidCanonicalBlockedSummary(); }
+      }
+      return;
+    }
+    try { console.warn("[uid][canonical-blocked-invalid]", payload || {}); } catch (e) {}
+  }
+
+  function _calcPeriodKeyInfo(baseKey) {
+    var key = String(baseKey || "");
+    if (key.indexOf("calc_period_active_") === 0) {
+      return { prefix: "calc_period_active_", suffix: String(key.slice("calc_period_active_".length) || "").trim() };
+    }
+    if (key.indexOf("calc_period_") === 0) {
+      return { prefix: "calc_period_", suffix: String(key.slice("calc_period_".length) || "").trim() };
+    }
+    return null;
+  }
+
+  function _calcPeriodUidSet(ownerId) {
+    var out = {};
+    try {
+      var raw = _lsGetDirect(k("abonents_db_v1", ownerId));
+      if (!raw) return out;
+      var db = JSON.parse(raw);
+      var abonents = (db && db.abonents && typeof db.abonents === "object") ? db.abonents : {};
+      var ids = Object.keys(abonents);
+      for (var i = 0; i < ids.length; i++) {
+        var uid = String(abonents[ids[i]] && abonents[ids[i]].uid || "").trim();
+        if (_isValidUid(uid)) out[uid] = true;
+      }
+    } catch (e) {}
+    return out;
+  }
+
+  function _calcPeriodKeyAllowed(baseKey, ownerId) {
+    var info = _calcPeriodKeyInfo(baseKey);
+    if (!info) return true;
+    var suffix = info.suffix;
+    if (!suffix) return false;
+
+    var uidSet = _calcPeriodUidSet(ownerId);
+    var uidKeys = Object.keys(uidSet);
+    if (uidKeys.length > 0) return !!uidSet[suffix];
+
+    if (!_isValidUid(suffix)) {
+      _warnInvalidUidCanonicalBlocked({ key: String(baseKey || ""), suffix: suffix, ownerId: String(ownerId || getActiveOwnerId()), source: "calc-period-write-guard" });
+      return false;
+    }
+
+    return true;
+  }
+
+  function _guardCalcPeriodWrite(baseKey, ownerId, source) {
+    var info = _calcPeriodKeyInfo(baseKey);
+    if (!info) return true;
+    if (_calcPeriodKeyAllowed(baseKey, ownerId)) return true;
+    _warnInvalidUidCanonicalBlocked({
+      key: String(baseKey || ""),
+      suffix: info.suffix,
+      ownerId: String(ownerId || getActiveOwnerId()),
+      source: String(source || "storage")
+    });
+    return false;
+  }
 
   function _isScopedKeyName(x) {
     return String(x || "").indexOf("jkhdb::") === 0;
@@ -367,6 +477,7 @@
   }
 
   function _adminSetItemForOwner(ownerId, baseKey, value) {
+    if (!_guardCalcPeriodWrite(baseKey, ownerId, "admin.setRawForOwner")) return false;
     var u = _getSessionUser();
     if (!u || u.role !== "admin") throw new Error("ADMIN_ONLY");
     var oid = String(ownerId || "");
@@ -449,6 +560,19 @@
       };
 
       Storage.prototype.setItem = function (key, val) {
+        try {
+          var strictBaseKey = String(key || "");
+          var strictOwnerId;
+          if (_isScopedKeyName(strictBaseKey)) {
+            var strictParts = strictBaseKey.split("::");
+            strictOwnerId = strictParts.length >= 3 ? strictParts[1] : undefined;
+            strictBaseKey = strictParts.length >= 3 ? strictParts.slice(2).join("::") : strictBaseKey;
+          } else {
+            var strictPrefix = scopePrefixFor(getActiveOwnerId());
+            if (strictBaseKey.indexOf(strictPrefix) === 0) strictBaseKey = strictBaseKey.slice(strictPrefix.length);
+          }
+          if (_isProjectDataKey(strictBaseKey) && !_guardCalcPeriodWrite(strictBaseKey, strictOwnerId, "Storage.prototype.setItem")) return undefined;
+        } catch (e0) {}
         try {
           var st = (new Error()).stack || "";
           if (!_isAllowedStack(st)) {
@@ -685,8 +809,11 @@
       out.push("payments_" + id);
       out.push("exclude_periods_" + id);
       out.push("note_" + id);
-      out.push("calc_period_" + id);
-      out.push("calc_period_active_" + id);
+      var uid = String(abonents[id] && abonents[id].uid || "").trim();
+      if (_isValidUid(uid)) {
+        out.push("calc_period_" + uid);
+        out.push("calc_period_active_" + uid);
+      }
       out.push("report_period_" + id);
       out.push("payments_ui_collapsed_" + id);
       out.push("jkh_transfer_to_v1:" + id);
@@ -720,6 +847,8 @@
     ];
 
     if (exact.indexOf(key) >= 0) return true;
+
+    if (_calcPeriodKeyInfo(key)) return _guardCalcPeriodWrite(key, ownerId, "upload");
 
     var prefixes = [
       "payments_",
@@ -778,11 +907,19 @@
       filtered.push(key);
     }
 
+    var skippedCalcPeriodUpload = 0;
     filtered = filtered.filter(function (key) {
       if (_isUploadAllowedKey(key, ownerId)) return true;
+      if (_calcPeriodKeyInfo(key)) {
+        skippedCalcPeriodUpload++;
+        return false;
+      }
       console.warn("[JKH sync][skip-upload-not-allowed]", key);
       return false;
     });
+    if (skippedCalcPeriodUpload > 0) {
+      try { console.warn("[JKH sync][skip-upload-not-allowed-summary]", { calcPeriodLegacy: skippedCalcPeriodUpload, ownerId: String(ownerId || "") }); } catch (eSkipSummary) {}
+    }
 
     return filtered;
   }
@@ -809,7 +946,7 @@
       _lsSetDirect(k(kx, "GLOBAL"), v);
       return;
     }
-    window.JKHStore.setRaw(kx, v, ownerId);
+    _lsSetDirect(k(kx, ownerId), v);
   }
 
   function _projectKeysFromDump(dumpObj) {
@@ -852,8 +989,96 @@
     return removed;
   }
 
+
+  function _currentAbonentIdFromLocation() {
+    try {
+      var params = new URLSearchParams(window.location && window.location.search || "");
+      return String(params.get("abonent") || "").trim();
+    } catch (e) {
+      return "";
+    }
+  }
+
+  function _calcPeriodAllowedLegacyAliasesForCurrentAbonent(abonents) {
+    var currentId = _currentAbonentIdFromLocation();
+    var out = { hasScope: false, aliases: {}, uid: "", abonentId: currentId };
+    if (!currentId || !abonents || !abonents[currentId]) return out;
+    var a = abonents[currentId] || {};
+    var uid = String(a.uid || "").trim();
+    out.hasScope = true;
+    out.uid = uid;
+    [currentId, a.id, a.ls, a.account, a.accountNumber, a.personalAccount, a.regnum, a.premiseRegnum, uid].forEach(function (v) {
+      var s = String(v || "").trim();
+      if (s) out.aliases[s] = true;
+    });
+    return out;
+  }
+
+  function _normalizeCalcPeriodKeysInDump(dumpObj, ownerId) {
+    if (!dumpObj || typeof dumpObj !== "object" || Array.isArray(dumpObj)) return dumpObj;
+    var rawDb = Object.prototype.hasOwnProperty.call(dumpObj, KEY_DB) ? dumpObj[KEY_DB] : _readLocalCompat(KEY_DB, ownerId);
+    var db = null;
+    try { db = rawDb ? JSON.parse(String(rawDb)) : null; } catch (e) { db = null; }
+    var abonents = (db && db.abonents && typeof db.abonents === "object") ? db.abonents : {};
+    var aliases = {};
+    var uidSet = {};
+    Object.keys(abonents).forEach(function (id) {
+      var a = abonents[id] || {};
+      var uid = String(a.uid || "").trim();
+      if (!_isValidUid(uid)) {
+        if (uid) _warnInvalidUidCanonicalBlocked({ abonentId: String(id || ""), uid: uid, ownerId: String(ownerId || ""), source: "server-dump" });
+        return;
+      }
+      uidSet[uid] = true;
+      aliases[String(id || "").trim()] = uid;
+      [a.id, a.ls, a.account, a.accountNumber, a.personalAccount, a.regnum, a.premiseRegnum].forEach(function (v) {
+        var s = String(v || "").trim();
+        if (s) aliases[s] = uid;
+      });
+    });
+
+    var scoped = _calcPeriodAllowedLegacyAliasesForCurrentAbonent(abonents);
+    var summary = { migrated: 0, kept: 0, skippedForeign: 0 };
+
+    Object.keys(dumpObj).forEach(function (key) {
+      var info = _calcPeriodKeyInfo(key);
+      if (!info) return;
+      if (uidSet[info.suffix]) return;
+
+      if (scoped.hasScope && !scoped.aliases[info.suffix]) {
+        summary.skippedForeign++;
+        return;
+      }
+
+      if (!_isValidUid(info.suffix) && !aliases[info.suffix]) {
+        summary.kept++;
+        return;
+      }
+
+      var uid = aliases[info.suffix];
+      if (uid && _isValidUid(uid)) {
+        var canonicalKey = info.prefix + uid;
+        if (!Object.prototype.hasOwnProperty.call(dumpObj, canonicalKey)) dumpObj[canonicalKey] = dumpObj[key];
+        var readBackMatches = Object.prototype.hasOwnProperty.call(dumpObj, canonicalKey) && dumpObj[canonicalKey] === dumpObj[key];
+        if (readBackMatches) {
+          delete dumpObj[key];
+          summary.migrated++;
+        } else {
+          summary.kept++;
+        }
+      } else {
+        summary.kept++;
+      }
+    });
+
+    try { console.warn("[calc-period][legacy-summary]", summary); } catch (eSummary) {}
+    return dumpObj;
+  }
+
+
   function _replaceOwnerProjectScopeFromDump(ownerId, dumpObj) {
     if (!window.JKHStore) return { removed: 0, written: 0, invalidAbonentsDb: false };
+    dumpObj = _normalizeCalcPeriodKeysInDump(dumpObj, ownerId);
     var dumpKeys = _projectKeysFromDump(dumpObj);
     var keep = {};
     var i;

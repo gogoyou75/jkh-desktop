@@ -44,8 +44,25 @@
     if (!(window.JKHStore && typeof window.JKHStore.getRaw === "function")) return null;
     try { return JKHStore.getRaw(String(key)); } catch { return null; }
   }
+  const __calcPeriodLogOnce = new Set();
+  function logCalcPeriodOnce(tag, payload){
+    try {
+      const key = String(tag || "") + ":" + String(payload && (payload.key || payload.storageKey || payload.activeKey || payload.reason) || "");
+      if (__calcPeriodLogOnce.has(key)) return;
+      __calcPeriodLogOnce.add(key);
+      console.log(tag, payload || {});
+    } catch(e) {}
+  }
+  function isLegacyCalcPeriodKey(key){
+    const k = String(key || "");
+    return /^calc_period_(active_)?(?!uid_)/.test(k);
+  }
   function storeSetRaw(key, value){
     if (!(window.JKHStore && typeof window.JKHStore.setRaw === "function")) return;
+    if (isLegacyCalcPeriodKey(key)) {
+      logCalcPeriodOnce("[calc-period][legacy-write-prevented]", { key: String(key || ""), source: "payment_table.storeSetRaw" });
+      return;
+    }
     try { JKHStore.setRaw(String(key), value); } catch(e) { console.error(e); throw e; }
   }
   function storeRemoveRaw(key){
@@ -1100,8 +1117,37 @@ if (parts.length) {
 
 
   // ===== ФИЛЬТР ПО ПЕРИОДУ ДЛЯ "РАСЧЁТ ВЗЫСКИВАЕМОЙ СУММЫ" =====
-  function calcPeriodKey() { return "calc_period_" + getAbonentTechnicalId(); }
-  function calcPeriodActiveKey() { return "calc_period_active_" + getAbonentTechnicalId(); }
+  let __calcPeriodMetaCache = null;
+  function calcPeriodStorageMeta(){
+    const id = String(getAbonentId() || "");
+    const owner = currentOwnerIdForPaymentCache();
+    const cacheKey = id + "|" + owner;
+    if (__calcPeriodMetaCache && __calcPeriodMetaCache.cacheKey === cacheKey) return __calcPeriodMetaCache;
+
+    if (!(window.Data && typeof window.Data.resolveCalcPeriodStorageKey === "function" && typeof window.Data.resolveCalcPeriodActiveStorageKey === "function")) {
+      logCalcPeriodOnce("[calc-period][save-skipped-no-canonical-key]", { abonentId: id, reason: "DATA_NOT_READY", source: "payment_table" });
+      return { cacheKey: cacheKey, storageKey: "", activeStorageKey: "", abonentId: id };
+    }
+
+    const abonent = (typeof window.Data.getAbonent === "function") ? window.Data.getAbonent(id) : null;
+    if (!abonent) {
+      logCalcPeriodOnce("[calc-period][save-skipped-no-canonical-key]", { abonentId: id, reason: "ABONENT_NOT_READY", source: "payment_table" });
+      return { cacheKey: cacheKey, storageKey: "", activeStorageKey: "", abonentId: id };
+    }
+
+    const storageKey = String(window.Data.resolveCalcPeriodStorageKey(abonent) || "");
+    const activeStorageKey = String(window.Data.resolveCalcPeriodActiveStorageKey(abonent) || "");
+    if (!storageKey || !activeStorageKey) {
+      logCalcPeriodOnce("[calc-period][save-skipped-no-canonical-key]", { abonentId: id, reason: "CANONICAL_KEY_NOT_READY", source: "payment_table" });
+      return { cacheKey: cacheKey, storageKey: "", activeStorageKey: "", abonentId: id };
+    }
+
+    __calcPeriodMetaCache = { cacheKey: cacheKey, storageKey: storageKey, activeStorageKey: activeStorageKey, abonentId: id };
+    logCalcPeriodOnce("[calc-period][canonical-key-used]", { abonentId: id, storageKey: storageKey, activeKey: activeStorageKey, source: "payment_table" });
+    return __calcPeriodMetaCache;
+  }
+  function calcPeriodKey() { return calcPeriodStorageMeta().storageKey || ""; }
+  function calcPeriodActiveKey() { return calcPeriodStorageMeta().activeStorageKey || ""; }
 
   function lastAddedPaymentKey() { return "last_added_payment_" + getAbonentId(); }
   function setLastAddedPaymentId(id) {
@@ -1116,7 +1162,9 @@ if (parts.length) {
 
   function getCalcPeriod() {
     try {
-      const raw = storeGetRaw(calcPeriodKey());
+      const key = calcPeriodKey();
+      if (!key) return null;
+      const raw = storeGetRaw(key);
       if (!raw) return null;
       const p = JSON.parse(raw);
       const from = String(p?.from || "");
@@ -1129,14 +1177,17 @@ if (parts.length) {
   }
 
   function isCalcPeriodActive() {
-    return storeGetRaw(calcPeriodActiveKey()) === "1";
+    const key = calcPeriodActiveKey();
+    if (!key) return false;
+    return storeGetRaw(key) === "1";
   }
 
   // ✅ ФИЛЬТР: показываем оплаты, у которых "Дата оплаты" попадает в выбранный период
-  function applyCalcFilter(arr) {
-    if (!isCalcPeriodActive()) return arr;
+  function applyCalcFilter(arr, activeOverride, periodOverride) {
+    const active = (typeof activeOverride === "boolean") ? activeOverride : isCalcPeriodActive();
+    if (!active) return arr;
 
-    const p = getCalcPeriod();
+    const p = periodOverride || getCalcPeriod();
     if (!p) return arr;
 
     const fromD = parseDateAnyToDate(p.from);
@@ -1628,6 +1679,105 @@ function calcRowBase(r) {
   r.__base_total_debt = 0;
 }
 
+const __paymentTotalsMemo = new Map();
+let __paymentTableRenderedSignature = "";
+let __paymentTableCalcToken = 0;
+let __paymentTableCalcTimerActive = false;
+
+function perfNow(){
+  try { return (window.performance && typeof window.performance.now === "function") ? window.performance.now() : Date.now(); } catch(e) { return Date.now(); }
+}
+
+function perfLog(stage, startedAt){
+  const ms = Math.round(Math.max(0, perfNow() - startedAt));
+  try { console.log(`[payment-table][perf] ${stage} ms=${ms}`); } catch(e) {}
+  return ms;
+}
+
+function ledgerSignatureForRows(rows){
+  const abonentId = String(getAbonentId() || "");
+  const periodActive = isCalcPeriodActive();
+  const period = periodActive ? getCalcPeriod() : null;
+  const arr = Array.isArray(rows) ? rows : [];
+  let h = 2166136261;
+  function addPart(v){
+    const str = String(v ?? "");
+    for (let i = 0; i < str.length; i++) {
+      h ^= str.charCodeAt(i);
+      h = Math.imul(h, 16777619) >>> 0;
+    }
+    h ^= 124;
+    h = Math.imul(h, 16777619) >>> 0;
+  }
+  addPart(abonentId);
+  addPart(periodActive ? JSON.stringify(period || {}) : "off");
+  addPart(arr.length);
+  for (const r of arr){
+    if (!r || typeof r !== "object") { addPart("null"); continue; }
+    addPart(r.id); addPart(r.year); addPart(r.month); addPart(r.accrued); addPart(r.paid); addPart(r.paid_date); addPart(r.source);
+    addPart(r.use_period ? 1 : 0); addPart(r.period_from_m); addPart(r.period_from_y); addPart(r.period_to_m); addPart(r.period_to_y);
+    addPart(r.note); addPart(r.import_locked || r.locked || r.readonly ? 1 : 0);
+  }
+  return abonentId + "::" + arr.length + "::" + h.toString(16);
+}
+
+function memoKeyForTotals(ledgerSignature, asOfDate){
+  const d = parseDateAnyToDate(asOfDate) || new Date();
+  return String(getAbonentId() || "") + "::" + String(ledgerSignature || "") + "::" + toISODateString(d);
+}
+
+function calcTotalsAsOfMemoized(rows, asOfDate, ledgerSignature){
+  const key = memoKeyForTotals(ledgerSignature, asOfDate);
+  const cached = __paymentTotalsMemo.get(key);
+  if (cached) return cached;
+  const t = calcTotalsAsOf(rows, asOfDate);
+  const out = { principal: t.principal, penalty: t.penalty, total: t.total };
+  __paymentTotalsMemo.set(key, out);
+  if (__paymentTotalsMemo.size > 2000) {
+    try { __paymentTotalsMemo.clear(); } catch(e) {}
+  }
+  return out;
+}
+
+function runningTotalsBaseRows(allRows){
+  let baseRows = Array.isArray(allRows) ? allRows : [];
+  if (isCalcPeriodActive()) {
+    const p = getCalcPeriod();
+    const fromD = p ? parseDateAnyToDate(p.from) : null;
+    const toD   = p ? parseDateAnyToDate(p.to)   : null;
+
+    if (fromD && toD) {
+      const fromKey = (fromD.getFullYear() * 12) + (fromD.getMonth() + 1);
+      const toKey   = (toD.getFullYear()   * 12) + (toD.getMonth() + 1);
+
+      baseRows = baseRows.filter(r => {
+        let y = parseInt(r?.year, 10);
+        let m = parseInt(r?.month, 10);
+        if (!(Number.isFinite(y) && Number.isFinite(m) && y > 0 && m >= 1 && m <= 12)) {
+          const d = parseDateAnyToDate(r?.paid_date);
+          if (d) { y = d.getFullYear(); m = d.getMonth() + 1; }
+        }
+        if (!(Number.isFinite(y) && Number.isFinite(m) && y > 0 && m >= 1 && m <= 12)) return false;
+        const key = (y * 12) + m;
+        return key >= fromKey && key <= toKey;
+      });
+    }
+  }
+  return baseRows;
+}
+
+function nextUiTick(){
+  return new Promise(resolve => {
+    try {
+      if (typeof window.requestAnimationFrame === "function") {
+        window.requestAnimationFrame(() => resolve());
+        return;
+      }
+    } catch(e) {}
+    setTimeout(resolve, 0);
+  });
+}
+
 // Нарастающий итог: теперь это "состояние долга и пени на дату строки"
 
 // --- AS-OF дата для строки (важно для корректной помесячной истории пени)
@@ -1656,35 +1806,9 @@ function asOfForRow(r) {
   return startOfDay(new Date());
 }
 
-function applyRunningTotals(viewRows) {
+function applyRunningTotals(viewRows, ledgerSignature) {
   const allRows = Array.isArray(viewRows) ? viewRows : getPayments();
-
-// ✅ Если активен расчёт "взыскиваемой суммы за период",
-  // то считаем долги/остатки ТОЛЬКО внутри выбранного периода,
-  // и стартуем с нуля на начале периода (т.е. игнорируем долг до периода).
-  let baseRows = allRows;
-  if (isCalcPeriodActive()) {
-    const p = getCalcPeriod();
-    const fromD = p ? parseDateAnyToDate(p.from) : null;
-    const toD   = p ? parseDateAnyToDate(p.to)   : null;
-
-    if (fromD && toD) {
-      const fromKey = (fromD.getFullYear() * 12) + (fromD.getMonth() + 1);
-      const toKey   = (toD.getFullYear()   * 12) + (toD.getMonth() + 1);
-
-      baseRows = allRows.filter(r => {
-        let y = parseInt(r?.year, 10);
-        let m = parseInt(r?.month, 10);
-        if (!(Number.isFinite(y) && Number.isFinite(m) && y > 0 && m >= 1 && m <= 12)) {
-          const d = parseDateAnyToDate(r?.paid_date);
-          if (d) { y = d.getFullYear(); m = d.getMonth() + 1; }
-        }
-        if (!(Number.isFinite(y) && Number.isFinite(m) && y > 0 && m >= 1 && m <= 12)) return false;
-        const key = (y * 12) + m;
-        return key >= fromKey && key <= toKey;
-      });
-    }
-  }
+  const baseRows = runningTotalsBaseRows(allRows);
 
   const sortedAsc = viewRows.slice().sort((a, b) => {
     const at = paidDateMsAscKey(a);
@@ -1693,13 +1817,72 @@ function applyRunningTotals(viewRows) {
     return (Number(a.id) || 0) - (Number(b.id) || 0);
   });
 
+  const sig = ledgerSignature || ledgerSignatureForRows(baseRows);
   for (const r of sortedAsc){
     const asOf = asOfForRow(r);
-    const t = calcTotalsAsOf(baseRows, asOf);
+    const t = calcTotalsAsOfMemoized(baseRows, asOf, sig);
     r.pay_main = t.principal;
     r.pay_penalty = t.penalty;
     r.total = t.total;
   }
+}
+
+function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature){
+  const rows = Array.isArray(viewRows) ? viewRows.slice() : [];
+  const calcRows = Array.isArray(baseRows) ? baseRows : rows;
+  const token = ++__paymentTableCalcToken;
+  const startedAt = perfNow();
+  if (__paymentTableCalcTimerActive) { try { console.timeEnd('[payment-table] calc-totals'); } catch(e) {} }
+  __paymentTableCalcTimerActive = true;
+  try { console.time('[payment-table] calc-totals'); } catch(e) {}
+
+  rows.sort((a, b) => {
+    const at = paidDateMsAscKey(a);
+    const bt = paidDateMsAscKey(b);
+    if (at !== bt) return at - bt;
+    return (Number(a.id) || 0) - (Number(b.id) || 0);
+  });
+
+  let idx = 0;
+
+  function finish(){
+    if (__paymentTableCalcTimerActive) { try { console.timeEnd('[payment-table] calc-totals'); } catch(e) {} }
+    __paymentTableCalcTimerActive = false;
+    perfLog('calc', startedAt);
+  }
+
+  function step(){
+    if (token !== __paymentTableCalcToken) return;
+    const sliceStarted = perfNow();
+    try {
+      while (idx < rows.length && (perfNow() - sliceStarted) < 24) {
+        const r = rows[idx++];
+        const asOf = asOfForRow(r);
+        const t = calcTotalsAsOfMemoized(calcRows, asOf, ledgerSignature);
+        r.pay_main = t.principal;
+        r.pay_penalty = t.penalty;
+        r.total = t.total;
+        if (tbody) {
+          const tr = tbody.querySelector(`tr[data-row-id="${String(r.id)}"]`);
+          if (tr) updateComputedCells(tr, r);
+        }
+      }
+    } catch (e) {
+      if (__paymentTableCalcTimerActive) { try { console.timeEnd('[payment-table] calc-totals'); } catch(_) {} }
+      __paymentTableCalcTimerActive = false;
+      if (isRatesFatalError(e)) { renderRatesFatal(tbody); return; }
+      if (isExcludesFatalError(e)) { renderExcludesFatal(tbody); return; }
+      console.error(e);
+      throw e;
+    }
+    if (idx < rows.length) {
+      setTimeout(step, 0);
+    } else {
+      finish();
+    }
+  }
+
+  setTimeout(step, 0);
 }
 
   // =============================================================
@@ -2010,6 +2193,8 @@ function applyRunningTotals(viewRows) {
       });
     }
 
+    if (!tbody.querySelector("tr[data-row-id]")) return;
+
     let arr = getPayments();
  
     // Read-only render path: autoaccrual is not applied during view rendering.
@@ -2022,163 +2207,186 @@ function applyRunningTotals(viewRows) {
       calcRowBase(r);
     });
 
-    const view = applyResponsibilityRangeToView(applyCalcFilter(arr)).slice();
-    try {
-      applyRunningTotals(view);
-    } catch (e) {
-      if (isRatesFatalError(e)) {
-        renderRatesFatal(tbody);
-        return;
-      }
-      if (isExcludesFatalError(e)) {
-        renderExcludesFatal(tbody);
-        return;
-      }
-      throw e;
-    }
-
-    // сопоставление id -> rowObj
-    const byId = new Map(view.map(r => [String(r.id), r]));
-
-    // обновляем только ro-ячейки у уже нарисованных строк
-    qsa("tr", tbody).forEach(tr => {
-      const id = String(tr.dataset.rowId || "");
-      const row = byId.get(id);
-      if (row) updateComputedCells(tr, row);
-    });
+    const periodActive = isCalcPeriodActive();
+    const selectedPeriod = periodActive ? getCalcPeriod() : null;
+    const view = applyResponsibilityRangeToView(applyCalcFilter(arr, periodActive, selectedPeriod)).slice();
+    const signature = ledgerSignatureForRows(arr);
+    scheduleRunningTotalsUpdate(view, runningTotalsBaseRows(view), tbody, signature);
 
     // на рендере НЕ сохраняем и НЕ flush-им
   }
 
+  async function renderRowsChunked(tbody, view, chunkSize){
+    tbody.innerHTML = "";
+    const size = Math.max(1, Number(chunkSize) || 50);
+    for (let i = 0; i < view.length; i += size) {
+      const frag = document.createDocumentFragment();
+      const end = Math.min(i + size, view.length);
+      for (let j = i; j < end; j++) {
+        frag.appendChild(makeRow(view[j]));
+      }
+      tbody.appendChild(frag);
+      if (end < view.length) await nextUiTick();
+    }
+  }
+
   async function loadPaymentTableImpl() {
-    if (!isDataReady()) {
-      try { console.warn('[payment-table] load skipped: DATA_NOT_READY'); } catch(e) {}
-      return;
-    }
-    const keyForReadiness = paymentsKey();
-    if (!keyForReadiness) {
-      try { console.warn('[payment-table] load skipped: PAYMENT_KEY_NOT_READY'); } catch(e) {}
-      return;
-    }
-
-    const tbody = qs("#paymentTableBody");
-
-    // UI: группировка ledger внутри месяца (начисление сверху, оплаты ниже)
-    // и скрытие "по пени" на строках оплат делаем визуально понятным.
-    (function ensureLedgerStyles(){
-      if (document.getElementById("ledger-style-v151")) return;
-      const st = document.createElement("style");
-      st.id = "ledger-style-v151";
-      st.textContent = `
-        /* Ledger UI (v1.5.1) */
-        #paymentTableBody tr.row-accrual td { background: #f6f7f9; }
-        #paymentTableBody tr.row-accrual td:first-child { font-weight: 700; }
-        #paymentTableBody tr.row-accrual { border-top: 2px solid #d9dde3; }
-        #paymentTableBody tr.row-payment td { background: #ffffff; }
-        #paymentTableBody tr.row-payment td:first-child { padding-left: 16px; opacity: 0.95; }
-        #paymentTableBody tr.row-payment td:first-child .ym-title { font-weight: 500; }
-        #paymentTableBody tr.row-payment td:first-child .ym-sub { font-size: 11px; opacity: 0.75; }
-        #paymentTableBody tr.row-accrual td:first-child .ym-sub { font-size: 11px; opacity: 0.75; }
-        #paymentTableBody tr.row-payment td { border-top: 1px dashed #e3e6eb; }
-        #paymentTableBody tr.row-payment td { }
-        #paymentTableBody tr.ym-hidden { display: none; }
-        #paymentTableBody .ym-wrap .ym-title { display:flex; align-items:center; gap:6px; }
-        #paymentTableBody .ym-toggle { border:0; background:transparent; cursor:pointer; font-size:14px; line-height:1; padding:0 4px; }
-        #paymentTableBody .ym-toggle[disabled] { opacity:0.35; cursor:default; }
-        #paymentTableBody .ym-indent { display:inline-block; width:18px; }
-
-      `;
-      document.head.appendChild(st);
-    })();
-    if (!tbody) return;
-
-    let arr;
+    const totalStartedAt = perfNow();
+    try { console.time('[payment-table] init-total'); } catch(e) {}
     try {
-      arr = getPayments();
-    } catch (e) {
-      if (e && e.code === "LEDGER_JSON_INVALID") {
-        tbody.innerHTML = '<tr><td colspan="20" style="color:#b00020;font-weight:700;">' + LEDGER_FATAL_MESSAGE + '</td></tr>';
-        try { alert(LEDGER_FATAL_MESSAGE); } catch (_) {}
+      if (!isDataReady()) {
+        try { console.warn('[payment-table] load skipped: DATA_NOT_READY'); } catch(e) {}
         return;
       }
-      throw e;
+      const keyForReadiness = paymentsKey();
+      if (!keyForReadiness) {
+        try { console.warn('[payment-table] load skipped: PAYMENT_KEY_NOT_READY'); } catch(e) {}
+        return;
+      }
+
+      const tbody = qs("#paymentTableBody");
+
+      // UI: группировка ledger внутри месяца (начисление сверху, оплаты ниже)
+      // и скрытие "по пени" на строках оплат делаем визуально понятным.
+      (function ensureLedgerStyles(){
+        if (document.getElementById("ledger-style-v151")) return;
+        const st = document.createElement("style");
+        st.id = "ledger-style-v151";
+        st.textContent = `
+          /* Ledger UI (v1.5.1) */
+          #paymentTableBody tr.row-accrual td { background: #f6f7f9; }
+          #paymentTableBody tr.row-accrual td:first-child { font-weight: 700; }
+          #paymentTableBody tr.row-accrual { border-top: 2px solid #d9dde3; }
+          #paymentTableBody tr.row-payment td { background: #ffffff; }
+          #paymentTableBody tr.row-payment td:first-child { padding-left: 16px; opacity: 0.95; }
+          #paymentTableBody tr.row-payment td:first-child .ym-title { font-weight: 500; }
+          #paymentTableBody tr.row-payment td:first-child .ym-sub { font-size: 11px; opacity: 0.75; }
+          #paymentTableBody tr.row-accrual td:first-child .ym-sub { font-size: 11px; opacity: 0.75; }
+          #paymentTableBody tr.row-payment td { border-top: 1px dashed #e3e6eb; }
+          #paymentTableBody tr.row-payment td { }
+          #paymentTableBody tr.ym-hidden { display: none; }
+          #paymentTableBody .ym-wrap .ym-title { display:flex; align-items:center; gap:6px; }
+          #paymentTableBody .ym-toggle { border:0; background:transparent; cursor:pointer; font-size:14px; line-height:1; padding:0 4px; }
+          #paymentTableBody .ym-toggle[disabled] { opacity:0.35; cursor:default; }
+          #paymentTableBody .ym-indent { display:inline-block; width:18px; }
+
+        `;
+        document.head.appendChild(st);
+      })();
+      if (!tbody) return;
+
+      let arr;
+      const loadStartedAt = perfNow();
+      try { console.time('[payment-table] load-ledger'); } catch(e) {}
+      try {
+        arr = getPayments();
+      } catch (e) {
+        if (e && e.code === "LEDGER_JSON_INVALID") {
+          tbody.innerHTML = '<tr><td colspan="20" style="color:#b00020;font-weight:700;">' + LEDGER_FATAL_MESSAGE + '</td></tr>';
+          try { alert(LEDGER_FATAL_MESSAGE); } catch (_) {}
+          return;
+        }
+        throw e;
+      } finally {
+        try { console.timeEnd('[payment-table] load-ledger'); } catch(e) {}
+        perfLog('load-ledger', loadStartedAt);
+      }
+
+      const signature = ledgerSignatureForRows(arr);
+      if (__paymentTableRenderedSignature && __paymentTableRenderedSignature === signature) {
+        try { console.log("[payment-table][init-skipped-same-signature]", { abonentId: String(getAbonentId() || "") }); } catch(e) {}
+        return;
+      }
+
+      // Read-only load path: autoaccrual is not applied during page opening.
+
+      const normalizeStartedAt = perfNow();
+      try { console.time('[payment-table] normalize-rows'); } catch(e) {}
+      try {
+        // нормализуем даты + синхронизируем год/месяц
+        arr.forEach(r => {
+          normalizePaidDateISO(r);
+          if (String(r?.paid_date || "").trim()) syncYearMonthFromPaidDate(r);
+          normalizePeriod(r);
+          calcRowBase(r);
+        });
+      } finally {
+        try { console.timeEnd('[payment-table] normalize-rows'); } catch(e) {}
+        perfLog('normalize', normalizeStartedAt);
+      }
+
+      const periodActive = isCalcPeriodActive();
+      const selectedPeriod = periodActive ? getCalcPeriod() : null;
+      const view = applyResponsibilityRangeToView(applyCalcFilter(arr, periodActive, selectedPeriod)).slice();
+      const baseRows = runningTotalsBaseRows(view);
+
+      // сортировка отображения — год/месяц (новые сверху),
+      // внутри месяца: сначала строка начисления, ниже — оплаты (Excel и ручные)
+      const isAccrualRow = (r) => toNum(r?.accrued ?? 0) > 0.0000001;
+
+      // --- UI: сворачиваемые блоки месяца ---
+      __collapsedMonths = __collapsedMonths || loadCollapsedMap();
+      __monthHasPayments = {};
+      __monthPaidSum = {};
+      view.forEach(r => {
+        const YM = ymKeyOfRow(r);
+        if (!__monthHasPayments[YM]) __monthHasPayments[YM] = { hasPayments: false };
+        if (toNum(r?.paid ?? 0) > 0.0000001) {
+          __monthHasPayments[YM].hasPayments = true;
+          __monthPaidSum[YM] = r2((__monthPaidSum[YM] || 0) + toNum(r?.paid ?? 0));
+        }
+      });
+      view.sort((a, b) => {
+        const ay = Number(a.year) || 0;
+        const by = Number(b.year) || 0;
+        if (ay !== by) return by - ay;
+
+        const am = Number(String(a.month || "").padStart(2, "0")) || 0;
+        const bm = Number(String(b.month || "").padStart(2, "0")) || 0;
+        if (am !== bm) return bm - am;
+
+        const aa = isAccrualRow(a);
+        const ba = isAccrualRow(b);
+        if (aa !== ba) return aa ? -1 : 1; // начисление всегда выше оплат
+
+        // оплаты сортируем по дате оплаты (новые сверху)
+        const d = paidDateMs(b) - paidDateMs(a);
+        if (d !== 0) return d;
+
+        return (Number(a.id) || 0) - (Number(b.id) || 0);
+      });
+
+      const renderStartedAt = perfNow();
+      try { console.time('[payment-table] render'); } catch(e) {}
+      try {
+        await renderRowsChunked(tbody, view, 50);
+      } finally {
+        try { console.timeEnd('[payment-table] render'); } catch(e) {}
+        perfLog('render', renderStartedAt);
+      }
+
+      __paymentTableRenderedSignature = signature;
+      // Тяжёлый расчёт пени/долга не блокирует открытие карточки: строки сначала
+      // рисуются с уже сохранёнными значениями, затем ro-ячейки обновляются чанками.
+      scheduleRunningTotalsUpdate(view, baseRows, tbody, signature);
+      clearLastAddedPaymentId();
+    } finally {
+      try { console.timeEnd('[payment-table] init-total'); } catch(e) {}
+      perfLog('total', totalStartedAt);
     }
-
-    // Read-only load path: autoaccrual is not applied during page opening.
-
-    // нормализуем даты + синхронизируем год/месяц
-    arr.forEach(r => {
-      normalizePaidDateISO(r);
-      if (String(r?.paid_date || "").trim()) syncYearMonthFromPaidDate(r);
-      normalizePeriod(r);
-      calcRowBase(r);
-    });
-
-    const view = applyResponsibilityRangeToView(applyCalcFilter(arr)).slice();
-    try {
-      applyRunningTotals(view);
-    } catch (e) {
-      if (isRatesFatalError(e)) {
-        renderRatesFatal(tbody);
-        return;
-      }
-      if (isExcludesFatalError(e)) {
-        renderExcludesFatal(tbody);
-        return;
-      }
-      throw e;
-    }
-
-    // сортировка отображения — год/месяц (новые сверху),
-    // внутри месяца: сначала строка начисления, ниже — оплаты (Excel и ручные)
-    const isAccrualRow = (r) => toNum(r?.accrued ?? 0) > 0.0000001;
-
-    
-    // --- UI: сворачиваемые блоки месяца ---
-    __collapsedMonths = __collapsedMonths || loadCollapsedMap();
-    __monthHasPayments = {};
-    __monthPaidSum = {};
-    view.forEach(r => {
-      const YM = ymKeyOfRow(r);
-      if (!__monthHasPayments[YM]) __monthHasPayments[YM] = { hasPayments: false };
-      if (toNum(r?.paid ?? 0) > 0.0000001) {
-        __monthHasPayments[YM].hasPayments = true;
-        __monthPaidSum[YM] = r2((__monthPaidSum[YM] || 0) + toNum(r?.paid ?? 0));
-      }
-    });
-    view.sort((a, b) => {
-      const ay = Number(a.year) || 0;
-      const by = Number(b.year) || 0;
-      if (ay !== by) return by - ay;
-
-      const am = Number(String(a.month || "").padStart(2, "0")) || 0;
-      const bm = Number(String(b.month || "").padStart(2, "0")) || 0;
-      if (am !== bm) return bm - am;
-
-      const aa = isAccrualRow(a);
-      const ba = isAccrualRow(b);
-      if (aa !== ba) return aa ? -1 : 1; // начисление всегда выше оплат
-
-      // оплаты сортируем по дате оплаты (новые сверху)
-      const d = paidDateMs(b) - paidDateMs(a);
-      if (d !== 0) return d;
-
-      return (Number(a.id) || 0) - (Number(b.id) || 0);
-    });
-tbody.innerHTML = "";
-    view.forEach(r => {
-      tbody.appendChild(makeRow(r));
-    });
-
-    clearLastAddedPaymentId();
   }
 
   let __paymentTableLoadRunning = false;
   let __paymentTableLoadScheduled = false;
-  let __paymentTableLoadRunAgain = false;
-
   function requestLoadPaymentTable(reason){
-    if (__paymentTableLoadScheduled) return;
+    if (__paymentTableLoadScheduled) {
+      try { console.log("[payment-table][init-skipped-inflight]", { reason: String(reason || "scheduled"), phase: "scheduled" }); } catch(e) {}
+      return;
+    }
+    if (__paymentTableLoadRunning) {
+      try { console.log("[payment-table][init-skipped-inflight]", { reason: String(reason || "scheduled"), phase: "running" }); } catch(e) {}
+      return;
+    }
     __paymentTableLoadScheduled = true;
     setTimeout(function(){
       __paymentTableLoadScheduled = false;
@@ -2188,19 +2396,16 @@ tbody.innerHTML = "";
 
   async function loadPaymentTable(reason) {
     if (__paymentTableLoadRunning) {
-      __paymentTableLoadRunAgain = true;
-      try { if (window.JKH_DEBUG_PAYMENT_KEY) console.debug('[payment-table] rebuild skipped: already running', { reason: String(reason || '') }); } catch(e) {}
+      try { console.log("[payment-table][init-skipped-inflight]", { reason: String(reason || ""), phase: "running" }); } catch(e) {}
       return;
     }
     __paymentTableLoadRunning = true;
     try {
+      console.log("[payment-table][init-start]", { reason: String(reason || "") });
       await loadPaymentTableImpl();
+      console.log("[payment-table][init-done]", { reason: String(reason || "") });
     } finally {
       __paymentTableLoadRunning = false;
-      if (__paymentTableLoadRunAgain) {
-        __paymentTableLoadRunAgain = false;
-        requestLoadPaymentTable('queued-after-running');
-      }
     }
   }
 
@@ -2287,7 +2492,7 @@ tbody.innerHTML = "";
       </td>
     `;
 
-    bindRowEvents(tr, r.id);
+    bindRowEvents(tr, r.id, r);
     return tr;
   }
 
@@ -2304,13 +2509,11 @@ tbody.innerHTML = "";
     noteTimers.set(rowId, t);
   }
 
-  function bindRowEvents(tr, rowId) {
+  function bindRowEvents(tr, rowId, rowSnapshot) {
     // Если строка импортирована из Excel и заблокирована — запрещаем любые изменения/удаление.
     // UI уже ставит readonly/disabled, но дополнительно блокируем обработчики, чтобы нельзя было обойти через DevTools.
     try {
-      const arr0 = getPayments();
-      const row0 = arr0.find(x => String(x.id) === String(rowId));
-      if (isPaymentLocked(row0) || isAccrualRowGlobal(row0)) {
+      if (isPaymentLocked(rowSnapshot) || isAccrualRowGlobal(rowSnapshot)) {
         return;
       }
     } catch(e) { console.error(e); throw e; }
@@ -2789,24 +2992,20 @@ tbody.innerHTML = "";
   let started = false;
 
   function tryStart(){
-    if (started) return;
+    if (started) {
+      try { console.log("[payment-table][init-skipped-inflight]", { reason: "already-started" }); } catch(e) {}
+      return;
+    }
 
     if (isDataReady()) {
       started = true;
-      try { if (window.JKH_DEBUG_PAYMENT_KEY) console.debug("[payment-table] start after data-ready"); } catch(e) {}
+      try { window.removeEventListener("JKH_UI_STATE_CHANGED", tryStart); } catch(e) {}
       requestLoadPaymentTable('data-ready');
     }
   }
 
   tryStart();
-
-  window.addEventListener("JKH_UI_STATE_CHANGED", tryStart);
-
-  let tries = 0;
-  const t = setInterval(() => {
-    tryStart();
-    if (started || tries++ > 20) clearInterval(t);
-  }, 300);
+  if (!started) window.addEventListener("JKH_UI_STATE_CHANGED", tryStart);
 })();
 
 

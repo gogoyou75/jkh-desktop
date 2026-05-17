@@ -1,5 +1,66 @@
 # CHANGELOG
 
+## 2026-05-16 — Explicit abonent_summary rebuild write-path
+
+- Добавлен `POST /api/abonent_summary/rebuild` как отдельная авторизованная write-команда для заполнения `abonent_summary` по абонентам текущего owner из сессии.
+- `GET /api/abonent_summary` сохранён строго read-only: без расчёта, ledger fallback, чтения `payments_<uid>`, autoaccrual и hidden writes.
+- До реализации backend-расчёта rebuild пишет controlled `missing` / `SUMMARY_NOT_BUILT` с identity и period placeholders, не подставляя нулевые totals.
+- Добавлены тесты на read-only GET, запись rebuild, неизменность `web/calc_engine.js`, owner isolation и пустую базу.
+
+## 2026-05-16 — Passive summary integration for index.html
+
+- Главная страница начала поддерживать read-only summary-layer без recalculation и ledger fallback. Добавлено отображение `summary_status` и passive API loading.
+
+## 2026-05-16 — Summary infrastructure contract guards
+
+- Добавлены contract tests и read-only guards для infrastructure-only summary API. Endpoint подтверждён как derived-cache transport layer без recalculation, ledger fallback и hidden writes.
+
+## 2026-05-16 — Stage 1 calculation modernization design contract
+
+- Зафиксирован дизайн-контракт будущего summary-слоя и лёгкой главной страницы. Описаны `abonent_summary`, `summary_status`, dirty-механика, `affected_uids` и будущие API-контракты. Код не менялся.
+
+## 2026-05-16 — Calculation Modernization Stage 0 Freeze
+
+- Зафиксированы документальные запреты Этапа 0 перед оптимизацией расчётов: `web/calc_engine.js` остаётся юридическим ядром, перенос на Python/Pandas запрещён до summary-слоя, эталонных тестов и сверки 1:1.
+- Запрещены изменения формулы пени, FIFO-разнесения оплат, UID-ledger `payments_<uid>`, read-only поведения `index.html`, `/api/store_dump` и fatal-поведения вместо silent fallback.
+- Клиентские summary/cache/table totals закреплены только как derived data, не юридический source of truth.
+- Следующий безопасный этап определён как проектирование summary-слоя: `abonent_summary`, `summary_status` fresh/dirty/missing/error, batch recalculation только по `affected_uids`, `index.html` читает готовые итоги без массового пересчёта.
+
+## 2026-05-16 — Stable Canon Sync / CalcEngine Freeze Boundary
+
+- Проведён документальный аудит `LOGIC_SPEC.md`, `TRACEABILITY_MATRIX.md`, `CHANGELOG.md`, `CRITICAL_INDEX.md` для переноса safe canon в стабильную базовую ветку.
+- Зафиксирован `CalcEngine Freeze Boundary`: `web/calc_engine.js` остаётся юридическим ядром; performance/precompute/alternate-pass изменения внутри CalcEngine запрещены без отдельного архитектурного ТЗ.
+- Перенесены только SAFE CANON и SAFE HARDENING правила: server-first, UID-only `payments_<uid>`, fatal вместо silent fallback, canonical transfer flow, read-only page rules, calc summary integrity, import strict contract/audit, owner isolation, upload whitelist, canonical `calc_period_<uid>` / `calc_period_active_<uid>`, read-back validation before legacy cleanup.
+- Dangerous commits: `d535dba` и `6780a25` признаны источниками DO NOT PORT для `prepareLedgerState`, single-pass/precompute totals, precomputed penalty/FIFO, optimized FIFO, alternate totals and calc-engine perf pipelines.
+- Server Summary Layer подготовлен только как foundation/contract: summary remains derived cache only, без нового financial engine, без собственной формулы и без изменения FIFO/penalty/legal formulas.
+
+## 2026-05-14 — Calc Summary Docs Freeze
+
+- Зафиксирован завершённый канон Calc Summary: `calc_summary_<uid>` является derived cache, а не source of truth.
+- Source of truth для расчёта: `payments_<uid>`, tariffs, refinancing, excludes, moratorium, responsibility и выбранный calc period.
+- Summary разрешено использовать только при fresh state; stale/dirty/mismatch/invalid/missing состояния показывают «Требуется пересчёт» и не подставляют старые totals.
+- Пересчёт summary разрешён только по явному действию пользователя; read-only открытие страниц, dirty detection и prepare accruals не запускают пересчёт автоматически.
+- Выбранный `calc_period_<uid>` / `calc_period_active_<uid>` строго ограничивает summary; изменение периода делает ранее записанный summary not-fresh.
+- Missing accruals внутри выбранного периода блокируют fresh summary. `prepare accruals` только подготавливает ledger-начисления и не создаёт `calc_summary_<uid>`.
+- `prepare-and-recalc` закреплён как явная пользовательская команда, которая после подготовки начислений запускает пересчёт и только при успешном расчёте может записать fresh summary.
+- Acceptance test канона: `npm run test:calc-summary:acceptance`.
+- Цепочка коммитов Calc Summary freeze: `1994f4d` → `b092e78`.
+
+## 2026-05-14 — Calc engine versioning
+
+- `calc_checkpoint_<uid>` теперь хранит `calcEngineVersion`, `canonVersion` и `summaryFormatVersion`.
+- `Data.readCalcSummary(...)` инвалидирует старые summary со статусами `engine_version_mismatch` / `summary_version_mismatch`, если checkpoint создан другой версией расчётной логики или формата summary.
+- UI (`payment_table`, карточка абонента, индекс) не использует totals при version mismatch и показывает «Требуется пересчёт (Изменена версия расчёта)».
+- Зафиксировано правило: `calc_summary_<uid>` зависит от данных, версии финансовой логики и версии формата summary; silent upgrade/patch запрещён.
+
+## 2026-05-14 — Calc summary integrity
+
+- Усилен lifecycle `calc_summary_<uid>`: summary теперь считается cache-derived entity и используется только при `integrity=fresh`.
+- `Data.readCalcSummary(...)` возвращает structured state со статусами `fresh`, `missing`, `dirty`, `checkpoint_mismatch`, `invalid_json`, `invalid_structure`.
+- `Data.writeCalcSummary(...)` записывает summary вместе с `calc_checkpoint_<uid>` и валидирует структуру summary/checkpoint перед сохранением.
+- Checkpoint фиксирует период расчёта и lightweight fingerprints для ledger, тарифов, ставок рефинансирования, исключений, моратория, responsibility data и calc period.
+- UI (`payment_table`, карточка абонента, индекс) больше не показывает старые totals при dirty/mismatch/invalid состояниях и выводит «Требуется пересчёт».
+
 ## 2026-05-12 — Import XLS: единый сборщик новых платежей
 
 - import_xls: добавлен единый сборщик платежей `collectImportPaymentsToApply(...)`.

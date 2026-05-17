@@ -305,3 +305,72 @@
 | Rollback protection | LOGIC_SPEC → Canonical Financial Modes | web/data.js / transfer rollback snapshots | ✅ OK | Transfer snapshots raw keys и DB |
 | Merge premises responsibility boundary | LOGIC_SPEC → Canonical Financial Modes | web/data.js / Data.mergePremises TODO/CRITICAL | 🟡 PARTIAL | Merge работает, boundary отмечен к унификации |
 | Split premises future mode | LOGIC_SPEC → Canonical Financial Modes | web/data.js / Data.financialModes.SPLIT_PREMISES | ⚪ IDEA | Только enum/документационный режим, бизнес-логики split нет |
+
+---
+
+## 🧩 Блок: Calc summary integrity
+
+| Правило | Где в ТЗ | Где в коде | Статус | Комментарий |
+| --- | --- | --- | --- | --- |
+| `calc_summary_<uid>` является derived cache, не source of truth | Задание 12 → п.1 | `web/data.js`, `web/payment_table.js`, `web/index.html`, `web/abonent_card.html` | ✅ OK | Summary используется UI только при `status === "fresh"`; финансовым source of truth не является. |
+| Источники истины ограничены ledger/tariffs/rates/excludes/moratorium/responsibility/calc period | Задание 12 → п.2 | `web/data.js`, `web/calc_engine.js`, storage keys | ✅ OK | Source of truth: `payments_<uid>`, tariffs, refinancing, excludes, moratorium, responsibility, calc period; summary только derived cache. |
+| Checkpoint содержит identity, период, versions и fingerprints источников истины | Задание 3 → п.1; Задание 4 → п.2; Задание 12 → п.2 | `web/data.js` | ✅ OK | Хранит `calcEngineVersion`, `canonVersion`, `summaryFormatVersion` и lightweight deterministic fingerprints без crypto layer. |
+| `readCalcSummary` возвращает structured state | Задание 3 → п.3; Задание 4 → п.3; Задание 12 → п.3–4 | `web/data.js` | ✅ OK | Статусы: `fresh`, `missing`, `dirty`, `checkpoint_mismatch`, `engine_version_mismatch`, `summary_version_mismatch`, `invalid_json`, `invalid_structure`. |
+| Dirty/mismatch/version mismatch/invalid блокируют старые totals | Задание 3 → п.4–5, п.7; Задание 4 → п.4; Задание 12 → п.4 | `web/payment_table.js`, `web/index.html`, `web/abonent_card.html` | ✅ OK | UI показывает «Требуется пересчёт», reason «Изменена версия расчёта» для version mismatch и не делает silent fallback. |
+| Пересчёт summary выполняется только по явному действию пользователя | Задание 12 → п.5, п.8–9 | `web/abonent_card.html`, `web/payment_table.js` | ✅ OK | Read-only открытие страниц и prepare accruals не создают summary; `prepare-and-recalc` является явной пользовательской командой. |
+| Выбранный calc period строго ограничивает summary | Задание 12 → п.6 | `web/data.js`, `web/abonent_card.html` | ✅ OK | Fresh summary фиксирует `periodFrom`/`periodTo`; изменение `calc_period_<uid>` делает прежний summary not-fresh. |
+| Missing accruals блокируют fresh summary | Задание 12 → п.7 | `web/abonent_card.html`, `web/autoaccrual_engine.js` | ✅ OK | При отсутствующих начислениях UI показывает «Требуется пересчёт» / «Подготовить начисления», но не пишет fresh summary. |
+| Изменения ledger/tariffs/rates/excludes/moratorium/responsibility/calc period инвалидируют актуальность summary | Задание 3 → п.6; Задание 12 → п.2, п.4 | `web/data.js` | ✅ OK | Dirty ставится через storage hooks и сохранение responsibility snapshot. |
+| `calc_summary_<uid>` зависит от данных, версии финансовой логики и версии формата summary | Задание 4 → п.1–3, п.5–6; Задание 12 → п.1–4 | `web/data.js`, `docs/CORE/LOGIC_SPEC.md` | ✅ OK | Версии заданы ручными константами; silent upgrade/patch старого checkpoint запрещён. |
+| Acceptance test Calc Summary | Задание 12 → п.10 | `tests/calc_summary_acceptance.test.js`, `package.json` | ✅ OK | Каноническая проверка: `npm run test:calc-summary:acceptance`. |
+
+
+---
+
+## 🧩 Блок: Stable Canon Sync / CalcEngine Freeze Boundary
+
+| Правило | Где в ТЗ | Где в коде/документах | Статус | Комментарий |
+| --- | --- | --- | --- | --- |
+| `calc_engine.js` является единственным юридическим расчётным ядром | LOGIC_SPEC → CalcEngine Freeze Boundary | `web/calc_engine.js`; `docs/CORE/LOGIC_SPEC.md` | ✅ OK | Документально запрещён alternate calc path, second-pass/optimized-pass and perf rewrite без отдельного ТЗ. |
+| UI не считает долг, пеню, FIFO или frozen debt собственной формулой | LOGIC_SPEC → CalcEngine Freeze Boundary; Canonical Financial Modes | `web/payment_table.js`, `web/data.js`, `web/spravka_sud.js` | ✅ OK | UI/service layer должен использовать CalcEngine/service boundary, а не собственный financial engine. |
+| Summary/cache не являются вторым financial engine | LOGIC_SPEC → CalcEngine Freeze Boundary; Calc summary integrity | `web/data.js`, `web/payment_table.js`, `docs/CORE/LOGIC_SPEC.md` | ✅ OK | `calc_summary_<uid>` является derived cache only и используется только при `fresh`. |
+| Dangerous commits `d535dba` и `6780a25` не портируются | LOGIC_SPEC → Architecture Port Audit | `docs/CORE/CHANGELOG.md`, `docs/CORE/CRITICAL_INDEX.md` | ✅ OK | DO NOT PORT: `prepareLedgerState`, precompute/perf CalcEngine pipelines, alternate totals, optimized penalty/FIFO. |
+| Server Summary Layer ограничен foundation/contract | LOGIC_SPEC → Server Summary Layer — foundation only | `docs/CORE/LOGIC_SPEC.md` | 🟡 PARTIAL | Разрешены interface/contract/data boundaries; runtime engine не реализован. |
+| Canonical calc period keys ограничивают summary | LOGIC_SPEC → Calc summary integrity | `web/storage.js`, `web/data.js`, `web/payment_table.js` | ✅ OK | `calc_period_<uid>` / `calc_period_active_<uid>` входят в checkpoint; изменение периода делает summary not-fresh. |
+| Import strict contract and audit remain safe hardening | LOGIC_SPEC → Import contract/audit; CHANGELOG import sections | `web/import_xls.html`, backend import flow, `docs/CORE/CHANGELOG.md` | ✅ OK | Strict template/upload_rows, audit log, rollback and no silent date fallback are safe to keep. |
+| Read-back validation required before legacy cleanup | LOGIC_SPEC → Architecture Port Audit | `web/storage.js`, `web/data.js` | ✅ OK | Legacy cleanup must follow successful canonical read-back, especially UID and calc-period migration. |
+
+## 🧩 Блок: Calculation Modernization Stage 0 Freeze
+
+| Требование / запрет | Источник | Область | Статус | Комментарий |
+|---|---|---|---|---|
+| `web/calc_engine.js` остаётся юридическим ядром; перенос расчётов на Python/Pandas запрещён до summary-слоя, эталонных тестов и сверки 1:1 | LOGIC_SPEC 20.1 | docs / `web/calc_engine.js` | ✅ CANON | Этап 0 фиксирует запрет переноса, а не меняет код. |
+| Формула пени не меняется: 30 дней = 0, 31–90 = 1/300, 91+ = 1/130, ежедневная ставка, cap 9.5% до 01.01.2027, fatal при отсутствии ставок | LOGIC_SPEC 20.2 | `web/calc_engine.js` | ✅ CANON | Любое изменение требует отдельного этапа и сверки. |
+| FIFO не меняется: старые начисления закрываются первыми, платёж без периода не уходит в будущее, аванс не маскирует ошибки | LOGIC_SPEC 20.3 | `web/calc_engine.js` / ledger | ✅ CANON | Optimized/precomputed FIFO запрещён на текущем этапе. |
+| `index.html` остаётся read-only при открытии: нет autoaccrual apply, записи `payments_<uid>`, flush/upload и массового пересчёта | LOGIC_SPEC 20.4 | `web/index.html` | ✅ CANON | Главная страница должна читать готовые итоги, а не пересчитывать всех молча. |
+| Frontend summary/cache/table totals являются derived data only, не юридическим source of truth | LOGIC_SPEC 20.5 | frontend summary / UI totals | ✅ CANON | Долг и пеня остаются через канонический расчётный слой. |
+| SQL payments — будущий этап; canonical ledger остаётся `payments_<uid>` | LOGIC_SPEC 20.6 | storage / future SQL | ✅ CANON | Миграции БД и смена source of truth запрещены в Этапе 0. |
+| `/api/store_dump` нельзя удалять или ломать до завершения server-first summary-слоя | LOGIC_SPEC 20.7 | backend store dump | ✅ CANON | Старый механизм загрузки данных сохраняется для совместимости. |
+| silent fallback запрещён для LEDGER/RATES/EXCLUDES/START_DATE/RESPONSIBILITY ошибок | LOGIC_SPEC 20.8 | calc inputs / readers | ✅ CANON | Ошибки не превращаются в 0, пустой массив или успешный расчёт. |
+| Следующий этап — summary-дизайн: `abonent_summary`, `summary_status`, recalculation по `affected_uids`, `index.html` читает готовые итоги | LOGIC_SPEC 20.9 | future summary layer | ✅ CANON | Summary остаётся derived cache без собственной финансовой формулы. |
+
+
+## 🧩 Блок: Calculation Modernization Stage 1 — Summary Design Contract
+
+| Требование / запрет | Источник | Область | Статус | Комментарий |
+|---|---|---|---|---|
+| Future `abonent_summary` хранит производные итоги абонента для быстрой главной страницы и не является юридическим движком | LOGIC_SPEC 21.1 | future summary layer / docs only | ⚪ IDEA | Этап 1 фиксирует контракт без создания таблицы, миграции или runtime-кода. |
+| `abonent_summary` хранит результат только из канонического расчётного слоя и не имеет собственной формулы долга, пени или FIFO | LOGIC_SPEC 21.1 | future summary layer / CalcEngine boundary | ⚪ IDEA | Запрещён frontend/backend summary как второй financial engine. |
+| `summary_status` допускает только `fresh`, `dirty`, `missing`, `error` | LOGIC_SPEC 21.2 | future summary API / UI | ⚪ IDEA | `error` нельзя превращать в ноль, `missing` нельзя показывать как нулевой долг, `dirty` нельзя показывать как юридически свежий итог. |
+| `summary_reason` хранит диагностическую причину статуса | LOGIC_SPEC 21.3 | future summary API / UI | ⚪ IDEA | Базовые причины включают `OK`, `LEDGER_JSON_INVALID`, `RATES_MISSING`, `MISSING_REQUIRED_RATE`, `SUMMARY_NOT_BUILT`, `DATA_DIRTY`. |
+| Dirty-механика помечает конкретные UID вместо синхронного пересчёта всей базы | LOGIC_SPEC 21.4 | future mark-dirty flow | ⚪ IDEA | Изменения ledger, Excel-платежей, ручных начислений, calc period, excludes, moratorium, transfer/frozen debt, responsibility links и дат расчёта делают affected UID dirty. |
+| `affected_uids` описывает UID, затронутые операцией | LOGIC_SPEC 21.5 | future import/edit/tariff/rate flows | ⚪ IDEA | Excel import, правка платежа, изменение тарифа и изменение ставки должны формировать ограниченный список affected UID. |
+| Future `GET /api/abonents?page=1&limit=50&sort=total_debt&order=desc&query=` возвращает страницу абонентов и summary-итоги | LOGIC_SPEC 21.6 | future API / index page | ⚪ IDEA | API не реализован в Stage 1; контракт нужен для лёгкой главной страницы. |
+| `index.html` запрашивает только одну страницу и показывает `summary_status` рядом с итогами | LOGIC_SPEC 21.6 | future `index.html` | ⚪ IDEA | Главная страница не читает все `payments_<uid>`, не запускает autoaccrual/recalc и не делает flush/upload. |
+| `POST /api/abonent_summary/rebuild` является отдельным explicit write-path для заполнения `abonent_summary` | LOGIC_SPEC 21.7 | `backend/app.py`, `backend/tests/test_abonent_summary_rebuild.py` | ✅ OK | Endpoint требует авторизацию, берёт owner только из сессии и создаёт/обновляет controlled missing summary без расчёта. |
+| `GET /api/abonent_summary` остаётся строго read-only и не создаёт missing rows | LOGIC_SPEC 21.7, 21.9 | `backend/app.py`, `backend/tests/test_abonent_summary_contract.py`, `backend/tests/test_abonent_summary_rebuild.py` | ✅ OK | GET не пишет в БД, не читает `payments_<uid>` и не запускает rebuild/fallback. |
+| До появления backend-расчёта rebuild не пишет нулевые totals | LOGIC_SPEC 21.7 | `backend/app.py`, `backend/tests/test_abonent_summary_rebuild.py` | ✅ OK | `summary_json` содержит `missing` / `SUMMARY_NOT_BUILT`, identity и period placeholders; `total_debt` / `total_penalty` не синтезируются. |
+| Future `POST /api/recalc/mark-dirty` помечает `affected_uids` как dirty | LOGIC_SPEC 21.8 | future API | ⚪ IDEA | API не реализован в Stage 1. |
+| Future `POST /api/recalc/batch` пересчитывает только указанные UID и возвращает результат по каждому UID | LOGIC_SPEC 21.8 | future API / batch recalc | ⚪ IDEA | Один ошибочный UID не останавливает batch; ошибка сохраняется как `summary_status = error` и `summary_reason`. |
+| `index.html` при открытии является read-only страницей | LOGIC_SPEC 21.9 | future and current page-open boundary | ✅ CANON | Запрещены чтение всех `payments_<uid>`, autoaccrual apply, recalc all, запись ledger, flush/upload, создание missing ledger и маскировка missing/error summary нулями. |
+| Stage 1 PR не меняет код и не добавляет реализацию | LOGIC_SPEC 21.10 | limited backend write-path | ✅ CANON | Исторический Stage 1 был docs-only; текущий этап разрешает только explicit rebuild endpoint и тесты, не затрагивая frontend/calc engine. |

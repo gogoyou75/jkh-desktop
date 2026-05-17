@@ -1,7 +1,7 @@
 # LOGIC_SPEC.md
 
-Версия: **v1.9.3**<br>
-Дата фиксации: **2026-05-08**<br>
+Версия: **v1.9.4**<br>
+Дата фиксации: **2026-05-16**<br>
 Статус: **АКТУАЛЬНЫЙ КАНОН ДЛЯ ПРАВОК И ЗАДАНИЙ CODEX**
 
 ---
@@ -1487,3 +1487,413 @@ Fatal-правила:
 - `jkh_freeze_to_v1:*` и `jkh_transfer_to_v1:*` записываются только service layer в рамках transfer transaction.
 - Financial event log обязателен для ledger/transfer write-path и хранит минимум: `type`, `mode`, `sourceAbonentId`, `targetAbonentId`, `premiseId/regnum`, `date`, `ownerId`, `createdAt`, `debtAmount`, `balanceAmount` при наличии.
 - Merge/split должны быть приведены к тому же responsibility transaction boundary; `SPLIT_PREMISES` пока является документированным будущим режимом без бизнес-логики split.
+
+---
+
+## 12. Calc summary integrity (cache-derived entity)
+
+`calc_summary_<uid>` является derived cache, а не source of truth и не самостоятельным финансовым регистром. Источниками истины для расчёта остаются только:
+- `payments_<uid>`;
+- тарифы owner (`tariffs_<owner>` / `tariffs_v1`);
+- ставки рефинансирования;
+- исключённые периоды `exclude_periods_<abonentId>`;
+- мораторий;
+- responsibility data (`premises` / `links` / запись абонента);
+- выбранный расчётный период `calc_period_<uid>` / `calc_period_active_<uid>`;
+- статические версии финансовой логики: `CALC_SUMMARY_ENGINE_VERSION` / `CALC_SUMMARY_CANON_VERSION`;
+- версия формата summary: `CALC_SUMMARY_FORMAT_VERSION`.
+
+UI имеет право использовать `calc_summary_<uid>` только если `Data.readCalcSummary(...)` вернул `status: "fresh"`.
+Любой другой статус (`missing`, `dirty`, `checkpoint_mismatch`, `engine_version_mismatch`, `summary_version_mismatch`, `invalid_json`, `invalid_structure`) обязан блокировать показ старых totals как актуальных и показывать пользователю «Требуется пересчёт». Для version mismatch UI показывает reason «Изменена версия расчёта».
+
+`calc_checkpoint_<uid>` хранится вместе с summary и фиксирует `uid`, `abonentId`, `generatedAt`, `calcEngineVersion`, `summaryFormatVersion`, `canonVersion`, период расчёта, ключ/значение расчётного периода и lightweight fingerprints для ledger, тарифов, ставок, исключений, моратория и responsibility data.
+Checkpoint проверяется при каждом чтении summary. Несовпадение fingerprint или версии не исправляется автоматически, не очищается молча, не считается совместимым автоматически и не запускает автоматический пересчёт. Версии являются отдельными ручными константами и не вычисляются через hash файлов.
+
+Выбранный calc period является строгой границей summary: fresh summary может описывать только период, сохранённый в `calc_period_<uid>` / `calc_period_active_<uid>` на момент пересчёта. Изменение периода переводит ранее записанный summary в not-fresh состояние (`dirty` / mismatch) и требует явного пересчёта.
+
+Отсутствующие начисления внутри выбранного периода блокируют fresh summary. В этом состоянии UI должен показывать «Требуется пересчёт» и предлагать подготовить начисления, но не должен подменять отсутствующие строки нулевым итогом и не должен считать старый summary актуальным.
+
+Подготовка начислений (`prepare accruals` / «Подготовить начисления») не создаёт `calc_summary_<uid>` и не является пересчётом summary. Команда `prepare-and-recalc` / «Подготовить и пересчитать» является явным пользовательским действием: сначала подготавливает начисления, затем запускает пересчёт и только после успешного расчёта может записать fresh summary.
+
+Автоматический пересчёт summary запрещён. Пересчёт `calc_summary_<uid>` допускается только по явному действию пользователя: «Пересчитать» или «Подготовить и пересчитать». Read-only открытие страниц, prepare accruals, storage read, dirty/mismatch/invalid detection и version mismatch не запускают пересчёт автоматически.
+
+Повреждённые summary/checkpoint не превращаются в нулевые totals и не заменяются пустыми объектами. Допустимы только логирование, статус `invalid_json`/`invalid_structure` и явное предложение выполнить пересчёт.
+
+Acceptance-контракт Calc Summary фиксируется командой `npm run test:calc-summary:acceptance`. Этот тест проверяет, что открытие страниц не запускает пересчёт, missing summary отображается как «Требуется пересчёт», missing accruals блокируют fresh summary, `prepare-and-recalc` создаёт fresh summary, изменение calc period делает summary not-fresh, изменение платежей ставит dirty, debug panel показывает reason, а выбранный период ограничивает строки summary.
+
+
+---
+
+## 17. CalcEngine Freeze Boundary
+
+`web/calc_engine.js` является юридическим расчётным ядром и единственным местом, где допускается финансовая формула расчёта долга, FIFO-разнесения оплат и пени.
+
+Жёсткая граница заморозки:
+- `calc_engine.js` нельзя менять для performance optimization, precompute или alternate-pass без отдельного архитектурного ТЗ;
+- запрещены alternate calc pipeline, second-pass / optimized-pass CalcEngine, single-pass totals precompute, precomputed penalty/FIFO engine, vectorized penalty calculations и optimized FIFO path;
+- запрещено переносить code-paths из dangerous commits `d535dba` и `6780a25`, если они связаны с `prepareLedgerState`, precompute totals, precomputed penalty engine, optimized FIFO, alternate totals или calc-engine perf pipelines;
+- UI не имеет права считать долг, пеню, FIFO-разнесение или frozen debt собственной формулой;
+- summary/cache/read-only entities не являются вторым financial engine;
+- любой summary является только derived cache, построенным из результата канонического CalcEngine и проверенного checkpoint;
+- summary не может содержать собственную финансовую формулу и не может исправлять или дополнять результат CalcEngine;
+- stale/dirty/mismatch/invalid summary не подставляется как актуальный результат и не запускает автоматический пересчёт.
+
+Разрешённая оптимизация системы выполняется вне CalcEngine:
+- server-side prepared data для чтения и навигации;
+- pagination и lazy loading;
+- read-only cache entities;
+- summary layer как derived cache only;
+- явные integrity/status contracts, которые блокируют stale data вместо подмены расчёта.
+
+## 18. Architecture Port Audit — stable baseline
+
+Аудит изменений для стабильной базовой ветки делит найденные изменения на четыре класса.
+
+### SAFE CANON — переносить
+
+- server-first как источник восстановления owner-scoped runtime cache;
+- UID-only ledger: канонический ключ `payments_<uid>`; `payments_<LS>` только read-only legacy fallback внутри service layer;
+- canonical transfer flow через `Data.transferResponsibility(...)`, без самостоятельного расчёта долга в UI;
+- canonical financial modes `WITH_DEBT` и `WITHOUT_DEBT` / `NO_DEBT`;
+- canonical calc period keys `calc_period_<uid>` и `calc_period_active_<uid>` как граница расчёта и summary;
+- calc summary integrity: `calc_summary_<uid>` только derived cache with checkpoint, fresh-only usage and explicit recalc;
+- import strict contract: шаблонный upload_rows, строгие даты, запрет silent fallback и атомарный apply;
+- UID-only import storage: backend/import writes to `payments_<uid>`.
+
+### SAFE HARDENING — переносить
+
+- fatal вместо silent fallback для отсутствующих ставок, повреждённых исключений, повреждённых frozen debt/summary/checkpoint и ошибок `WITH_DEBT` расчёта;
+- read-only page rules: открытие страниц не должно запускать write-side-effect, autoaccrual apply или summary recalculation;
+- owner isolation: owner берётся только из серверной сессии, клиентский owner не является источником истины;
+- upload whitelist: legacy/admin/global keys and foreign-owner keys не отправляются на `/api/store`;
+- import audit log: batch-level и row-level diagnostics, rollback, duplicate/idempotency checks;
+- read-back validation before legacy cleanup для UID/calc-period migrations;
+- logging improvements вне CalcEngine: диагностические логи миграций, импорта, sync/upload и integrity state.
+
+### EXPERIMENTAL — не переносить в stable как runtime path
+
+- Server Summary Layer до отдельного этапа разрешён только как документационный foundation: интерфейс, contract, TODO/CRITICAL comments, data boundaries;
+- server-side prepared data может быть read-only projection только после явного contract и без собственной финансовой формулы;
+- pagination/lazy loading разрешены только как presentation/data delivery layer, не как расчётный слой.
+
+### DANGEROUS / DO NOT PORT
+
+Запрещено переносить в стабильную базовую ветку:
+- `prepareLedgerState`;
+- single-pass totals precompute;
+- precomputed FIFO/penalty path;
+- alternate totals calculation;
+- perf rewrite inside `calc_engine.js`;
+- vectorized penalty calculations;
+- multi-path financial execution;
+- любые code-paths из commits `d535dba` и `6780a25`, связанные с precompute/perf CalcEngine pipelines.
+
+## 19. Server Summary Layer — foundation only
+
+Следующий этап может добавить Server Summary Layer, но только как read-only derived-cache слой поверх результата CalcEngine.
+
+Минимальный contract будущего слоя:
+- input identity: `ownerId`, `abonentUid`, `calc_period_<uid>`, `calc_period_active_<uid>`;
+- source checkpoint: fingerprints/versions ledger, tariffs, rates, excludes, moratorium, responsibility data and CalcEngine/canon/format versions;
+- output: summary totals, period metadata, generatedAt, checkpoint, status;
+- allowed statuses for the Stage 1 `abonent_summary` contract: `fresh`, `dirty`, `missing`, `error`; detailed integrity causes must be preserved in `summary_reason` rather than becoming separate legal-success statuses;
+- write rule: only explicit successful canonical recalculation may create a fresh summary;
+- read rule: UI may display summary totals only for `fresh`; all other statuses require recalculation notice;
+- invalidation rule: any source/checkpoint/version/calc-period mismatch makes summary not-fresh.
+
+Запрещено для Server Summary Layer:
+- переносить CalcEngine на Python/Pandas или другой engine;
+- менять юридические формулы, FIFO logic или penalty logic;
+- вычислять долг/пеню по собственной формуле;
+- быть alternate totals path или fallback engine;
+- очищать legacy/source data до successful read-back validation of canonical keys.
+
+## 20. Calculation Modernization — Stage 0 Freeze
+
+Этап 0 перед любой оптимизацией расчётов фиксирует запреты. Цель Этапа 0 — не изменить расчёт, а защитить юридическое ядро до появления отдельного summary-слоя, эталонных тестов и сверки результатов 1:1.
+
+### 20.1. Запрет переноса CalcEngine
+
+`web/calc_engine.js` является юридическим ядром расчёта. До появления summary-слоя, эталонных тестов и сверки результатов 1:1 перенос расчётов на Python/Pandas запрещён.
+
+Запрещено создавать параллельный расчётный engine, переносить формулы долга/пени/FIFO в backend, Pandas, SQL, frontend summary или кэш и затем использовать такие итоги как юридические данные.
+
+### 20.2. Запрет изменения формулы пени
+
+На текущем этапе запрещено менять каноническую формулу пени:
+- первые 30 дней просрочки = 0;
+- 31–90 день = 1/300 ставки;
+- 91+ день = 1/130 ставки;
+- расчёт выполняется ежедневно по ставке, действующей на конкретный день;
+- до 01.01.2027 применяется ограничение ставки 9.5%;
+- отсутствие ставок, повреждённые ставки или пропущенная обязательная ставка являются fatal-состоянием, а не нулевой ставкой.
+
+### 20.3. Запрет изменения FIFO
+
+На текущем этапе запрещено менять FIFO-разнесение оплат:
+- старые начисления закрываются раньше новых;
+- платёж без периода не должен уходить в будущее;
+- переплата/аванс не должен маскировать ошибки расчёта;
+- оптимизированный, precomputed или альтернативный FIFO path запрещён до отдельного архитектурного ТЗ и сверки 1:1.
+
+### 20.4. Запрет массового пересчёта при открытии главной страницы
+
+`index.html` должен оставаться read-only при открытии:
+- не запускать autoaccrual apply;
+- не писать `payments_<uid>`;
+- не делать flush/upload;
+- не пересчитывать всех абонентов молча;
+- не создавать или обновлять summary без явной пользовательской команды.
+
+### 20.5. Запрет доверять клиентским итогам как юридическим данным
+
+Frontend summary, кэш, таблицы, виджеты и табличные totals являются только производными данными. Окончательная логика долга и пени должна оставаться через канонический расчётный слой, построенный вокруг `web/calc_engine.js` и source of truth данных.
+
+Повреждённый, устаревший, dirty, missing или mismatch summary не может подставляться как актуальный результат и не может превращать ошибку расчёта в ноль.
+
+### 20.6. Запрет немедленного переноса `payments_<uid>` в SQL
+
+SQL payments — отдельный будущий этап. На текущем этапе canonical ledger остаётся `payments_<uid>`.
+
+Запрещено заменять `payments_<uid>` SQL-таблицей как source of truth, менять ключи хранения ledger или создавать миграции БД для payments без отдельного этапа и плана совместимости.
+
+### 20.7. Запрет удаления `/api/store_dump`
+
+До завершения server-first summary-слоя старый механизм загрузки данных должен сохраняться. Запрещено удалять, ломать или делать несовместимым `/api/store_dump`, пока он нужен для восстановления owner-scoped runtime cache и совместимости существующих клиентов.
+
+### 20.8. Запрет silent fallback
+
+Любая расчётная или входная ошибка должна оставаться явной и не должна превращаться в `0`, пустой массив или «расчёт успешен».
+
+Fatal-состояния включают, но не ограничиваются:
+- `LEDGER_JSON_INVALID`;
+- `RATES_MISSING`;
+- `RATES_JSON_INVALID`;
+- `MISSING_REQUIRED_RATE`;
+- `EXCLUDES_JSON_INVALID`;
+- `EXCLUDES_INVALID`;
+- `START_DATE_MISSING`;
+- `RESPONSIBILITY_DATE_MISSING`.
+
+### 20.9. Безопасный следующий этап
+
+Следующий этап после фиксации запретов — проектирование summary-слоя без изменения юридического ядра:
+- `abonent_summary`;
+- `summary_status`: `fresh` / `dirty` / `missing` / `error`;
+- batch recalculation только по `affected_uids`;
+- `index.html` читает готовые итоги, а не пересчитывает всех;
+- summary остаётся derived cache и не получает собственной финансовой формулы.
+
+
+## 21. Calculation Modernization — Stage 1 Summary Design Contract
+
+Этап 1 является только документационным дизайн-контрактом. Код, backend API, миграции, таблицы БД, `index.html`, `data.js`, `payment_table.js`, `calc_engine.js` и `autoaccrual_engine.js` в рамках этого этапа не меняются.
+
+Цель Этапа 1: описать будущую лёгкую главную страницу и summary-слой так, чтобы `index.html` стал списком абонентов, а не расчётчиком. При открытии главная страница не должна читать все `payments_<uid>`, запускать autoaccrual, recalc или flush/upload.
+
+### 21.1. Abonent Summary Layer
+
+Будущая сущность: `abonent_summary`.
+
+Назначение `abonent_summary`: хранить производные итоги по абоненту для быстрого отображения на главной странице.
+
+Жёсткие границы:
+- `abonent_summary` не является юридическим движком;
+- `abonent_summary` не имеет права менять формулу расчёта;
+- `abonent_summary` не имеет собственной формулы долга, пени или FIFO;
+- `abonent_summary` хранит только результат, полученный через канонический расчётный слой;
+- damaged/stale/missing/error summary не может использоваться как юридически актуальный итог.
+
+Минимальные поля будущей сущности:
+- `owner_id`;
+- `abonent_id`;
+- `abonent_uid`;
+- `total_debt`;
+- `total_penalty`;
+- `total_accrued`;
+- `total_paid`;
+- `period_from`;
+- `period_to`;
+- `summary_status`;
+- `summary_reason`;
+- `recalc_fingerprint`;
+- `calc_engine_version`;
+- `canon_version`;
+- `updated_at`.
+
+### 21.2. `summary_status`
+
+Разрешённые статусы `summary_status`:
+- `fresh` — итог актуален и получен через канонический расчётный слой;
+- `dirty` — исходные данные изменились, нужен пересчёт;
+- `missing` — summary ещё не создан;
+- `error` — расчёт невозможен, причина обязана быть сохранена в `summary_reason`.
+
+Запрещено:
+- превращать `error` в `total_debt = 0`;
+- показывать `missing` как нулевой долг;
+- показывать `dirty` как юридически свежий итог;
+- маскировать любой не-`fresh` статус старым или синтетическим total.
+
+### 21.3. `summary_reason`
+
+`summary_reason` хранит причину текущего `summary_status` и должен быть пригоден для диагностики, UI-сообщения и batch-ответа.
+
+Базовые значения `summary_reason`:
+- `OK`;
+- `LEDGER_JSON_INVALID`;
+- `RATES_MISSING`;
+- `RATES_JSON_INVALID`;
+- `MISSING_REQUIRED_RATE`;
+- `EXCLUDES_JSON_INVALID`;
+- `EXCLUDES_INVALID`;
+- `START_DATE_MISSING`;
+- `RESPONSIBILITY_DATE_MISSING`;
+- `SUMMARY_NOT_BUILT`;
+- `DATA_DIRTY`.
+
+### 21.4. Dirty-механика
+
+При изменении исходных данных система не пересчитывает сразу всю базу, а помечает конкретные UID как `dirty`.
+
+`dirty` ставится при изменении:
+- `payments_<uid>`;
+- платежей из Excel;
+- ручных начислений;
+- `calc_period_<uid>`;
+- `exclude_periods_<abonentId>`;
+- `moratorium_<abonentId>`;
+- transfer/frozen debt данных;
+- responsibility links;
+- `calcStartDate` / `calcEndDate`.
+
+Если изменились тарифы или ставки:
+- `dirty` ставится всем `affected_uids` owner;
+- синхронный массовый пересчёт при открытии `index.html` запрещён.
+
+### 21.5. `affected_uids`
+
+`affected_uids` — список UID, которых затронула операция и которые должны быть помечены `dirty` или переданы в batch-пересчёт.
+
+Примеры:
+- Excel import: `affected_uids` = UID абонентов, по которым добавлены новые платежи;
+- изменение платежа в карточке: `affected_uids = [текущий uid]`;
+- изменение тарифа: `affected_uids` = все активные UID owner, на которых влияет тариф;
+- изменение ставки: `affected_uids` = все UID owner, у которых есть расчёт пени в затронутом периоде, либо все UID owner на первом этапе.
+
+### 21.6. Future API: лёгкая главная страница
+
+Будущий API-контракт без реализации:
+
+`GET /api/abonents?page=1&limit=50&sort=total_debt&order=desc&query=`
+
+Назначение: вернуть одну страницу абонентов и их summary-итоги.
+
+`index.html` должен:
+- запрашивать только одну страницу;
+- не читать все `payments_<uid>`;
+- не запускать autoaccrual;
+- не запускать recalc;
+- не делать flush/upload;
+- показывать `summary_status` рядом с итогами.
+
+Концептуальный пример ответа:
+
+```json
+{
+  "page": 1,
+  "limit": 50,
+  "total": 1234,
+  "items": [
+    {
+      "abonent_id": "1001",
+      "uid": "uid_...",
+      "fio": "...",
+      "address": "...",
+      "total_debt": 12345.67,
+      "total_penalty": 100.25,
+      "summary_status": "fresh",
+      "summary_reason": "OK",
+      "updated_at": "..."
+    }
+  ]
+}
+```
+
+### 21.7. Explicit write-path для заполнения `abonent_summary`
+
+Реализованный explicit write-path:
+
+`POST /api/abonent_summary/rebuild`
+
+Назначение: создать или обновить строки `abonent_summary` для абонентов текущего owner. Endpoint является отдельной write-командой и не должен вызываться из read-only `GET /api/abonent_summary`.
+
+Правила endpoint:
+- требует авторизацию;
+- owner определяется только из текущей сессии пользователя; request-параметр `owner` не даёт выбрать чужую базу;
+- список абонентов берётся из owner-scoped `abonents_db_v1` / `abonents_v1`;
+- для каждого абонента с UID создаётся или обновляется строка `abonent_summary`;
+- пока backend-расчёт не реализован, endpoint записывает controlled `missing` status с причиной `SUMMARY_NOT_BUILT`, а не нулевые totals;
+- `summary_json` обязан содержать status/reason, identity абонента и placeholder периода;
+- ответ возвращает counters: `created`, `updated`, `skipped`, `errors`.
+
+Запрещено для этого write-path:
+- читать `payments_<uid>`;
+- запускать autoaccrual;
+- запускать backend-аналог финансового расчёта;
+- менять формулу пени, FIFO, ставки, transfer/merge/split;
+- записывать синтетические `total_debt = 0` / `total_penalty = 0` вместо controlled status.
+
+### 21.8. Future API: dirty/recalc
+
+Будущий API-контракт без реализации:
+
+`POST /api/recalc/mark-dirty`
+
+Назначение: пометить `affected_uids` как `dirty`.
+
+`POST /api/recalc/batch`
+
+Вход:
+
+```json
+{
+  "uids": ["uid_1", "uid_2"],
+  "reason": "IMPORT_PAYMENTS_APPLIED"
+}
+```
+
+Поведение:
+- пересчитывать только указанные UID;
+- один ошибочный UID не должен останавливать весь batch;
+- ошибки сохранять в `summary_status = error` и `summary_reason`;
+- результат возвращать по каждому UID.
+
+### 21.9. Read-only правило для `index.html`
+
+`index.html` при открытии является read-only страницей.
+
+При открытии `index.html` запрещено:
+- читать все `payments_<uid>`;
+- запускать autoaccrual apply;
+- запускать recalc all;
+- писать `payments_<uid>`;
+- вызывать flush/upload;
+- создавать missing ledger;
+- маскировать missing/error summary нулями.
+
+### 21.10. Что не делать в Stage 1 PR
+
+Историческое правило Stage 1 было docs-only. Следующий этап разрешает минимальную backend-реализацию только для explicit write-path `POST /api/abonent_summary/rebuild` и соответствующих тестов.
+
+По-прежнему запрещено:
+- менять `index.html`;
+- менять `data.js`;
+- менять `payment_table.js`;
+- менять `calc_engine.js`;
+- менять `autoaccrual_engine.js`;
+- добавлять расчёт в `GET /api/abonent_summary`;
+- добавлять ledger fallback или чтение `payments_<uid>` в summary GET;
+- дублировать финансовые формулы на backend.
+
+Этап заполнения `abonent_summary` добавляет только controlled missing/dirty cache population без финансового расчёта.

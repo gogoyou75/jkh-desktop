@@ -1350,14 +1350,23 @@ function __r2(n){
 function __fmt2(n){
   return __r2(n).toFixed(2);
 }
-function storeGet(key){
-  try { return (window.JKHStore && JKHStore.getRaw) ? JKHStore.getRaw(key) : null; } catch(e){ return null; }
+function storeGet(key, ownerId){
+  try { return (window.JKHStore && JKHStore.getRaw) ? JKHStore.getRaw(key, ownerId) : null; } catch(e){ return null; }
 }
-function storeSet(key, value){
-  try { if (window.JKHStore && JKHStore.setRaw) JKHStore.setRaw(key, value); } catch(e){}
+function __isLegacyCalcPeriodWriteKey(key){
+  return /^calc_period_(active_)?(?!uid_)/.test(String(key || ""));
 }
-function storeRemove(key){
-  try { if (window.JKHStore && JKHStore.removeRaw) JKHStore.removeRaw(key); } catch(e){}
+function storeSet(key, value, ownerId){
+  try {
+    if (__isLegacyCalcPeriodWriteKey(key)) {
+      console.warn("[calc-period][legacy-write-prevented]", { key: String(key || ""), ownerId: String(ownerId || ""), source: "abonent_card.storeSet" });
+      return;
+    }
+    if (window.JKHStore && JKHStore.setRaw) JKHStore.setRaw(key, value, ownerId);
+  } catch(e){}
+}
+function storeRemove(key, ownerId){
+  try { if (window.JKHStore && JKHStore.removeRaw) JKHStore.removeRaw(key, ownerId); } catch(e){}
 }
 function storeKeysForOwner(ownerId){
   try { return (window.JKHStore && JKHStore.keysForOwner) ? JKHStore.keysForOwner(ownerId) : []; } catch(e){ return []; }
@@ -1750,8 +1759,6 @@ function migrateLocalKeys(oldId, newId) {
     const pairs = [
         ["note_", "note_"],
         ["moratorium_", "moratorium_"],
-        ["calc_period_", "calc_period_"],
-        ["calc_period_active_", "calc_period_active_"],
         ["exclude_periods_", "exclude_periods_"]
     ];
 
@@ -1763,6 +1770,42 @@ function migrateLocalKeys(oldId, newId) {
             storeSet(newKey, val);
         }
         if (val !== null) storeRemove(oldKey);
+    });
+
+    const db = getDb() || {};
+    const abonent = db[String(newId)] || db[String(oldId)] || null;
+    const uid = String(abonent?.uid || '').trim();
+    const ownerId = getCalcPeriodOwnerId();
+    if (!window.Data || typeof Data.isValidUid !== 'function' || !Data.isValidUid(uid)) {
+        try { console.warn("[uid][canonical-blocked-invalid]", { abonentId: String(newId || oldId || ""), uid: uid, source: "abonent_card.migrateLocalKeys" }); } catch (e) {}
+        return;
+    }
+
+    const calcCanonicalKey = (window.Data && typeof Data.resolveCalcPeriodStorageKey === "function") ? String(Data.resolveCalcPeriodStorageKey(abonent) || "") : "";
+    const calcActiveCanonicalKey = (window.Data && typeof Data.resolveCalcPeriodActiveStorageKey === "function") ? String(Data.resolveCalcPeriodActiveStorageKey(abonent) || "") : "";
+    [
+        { legacyPrefix: "calc_period_", canonicalKey: calcCanonicalKey },
+        { legacyPrefix: "calc_period_active_", canonicalKey: calcActiveCanonicalKey }
+    ].forEach((item) => {
+        if (!item.canonicalKey) return;
+        [String(oldId), String(newId)].forEach((id) => {
+            if (!id || id === uid) return;
+            const legacyKey = item.legacyPrefix + id;
+            const val = storeGet(legacyKey, ownerId);
+            if (val !== null && storeGet(item.canonicalKey, ownerId) === null) {
+                storeSet(item.canonicalKey, val, ownerId);
+            }
+            if (val !== null) {
+                const check = storeGet(item.canonicalKey, ownerId);
+                if (check === val) {
+                    try { console.warn("[calc-period][canonical-readback-ok]", { from: legacyKey, to: item.canonicalKey, ownerId: ownerId, abonentId: String(newId || oldId || ""), uid: uid }); } catch (eOk) {}
+                    storeRemove(legacyKey, ownerId);
+                    try { console.warn("[calc-period][legacy-cleanup]", { from: legacyKey, to: item.canonicalKey, ownerId: ownerId, abonentId: String(newId || oldId || ""), uid: uid }); } catch (e) {}
+                } else {
+                    try { console.warn("[calc-period][cleanup-skipped-readback-failed]", { from: legacyKey, to: item.canonicalKey, ownerId: ownerId, abonentId: String(newId || oldId || ""), uid: uid }); } catch (eFail) {}
+                }
+            }
+        });
     });
 }
 
@@ -2044,17 +2087,65 @@ function saveNotes() {
     alert("Примечание сохранено");
 }
 
-function calcPeriodKey(id){ return "calc_period_" + id; }
-function calcPeriodActiveKey(id){ return "calc_period_active_" + id; }
+const __calcPeriodNoCanonicalLogged = {};
+function __logCalcPeriodNoCanonicalOnce(payload){
+    try {
+        const key = String((payload && payload.abonentId) || (payload && payload.requestedId) || "") + "|" + String((payload && payload.reason) || "");
+        if (__calcPeriodNoCanonicalLogged[key]) return;
+        __calcPeriodNoCanonicalLogged[key] = true;
+        console.warn("[calc-period][save-skipped-no-canonical-key]", payload || {});
+    } catch (e) {}
+}
+function __logCalcPeriodCanonicalUsed(payload){
+    try { console.log("[calc-period][canonical-key-used]", payload || {}); } catch (e) {}
+}
+
+function getCalcPeriodOwnerId(){
+    try {
+        if (window.JKHStore && typeof JKHStore.getOwnerId === "function") return String(JKHStore.getOwnerId() || "").trim();
+        if (window.Auth && typeof Auth.getActiveDbOwnerId === "function") return String(Auth.getActiveDbOwnerId() || "").trim();
+    } catch (e) {}
+    return "";
+}
+
+function getCalcPeriodStorageMeta(){
+    const requestedId = getAbonentIdFromURL();
+    const db = getDb() || {};
+    const abonent = db[requestedId] || null;
+    const resolvedUid = String(abonent?.uid || '').trim();
+    const hasResolvers = !!(window.Data && typeof Data.resolveCalcPeriodStorageKey === "function" && typeof Data.resolveCalcPeriodActiveStorageKey === "function");
+    const storageKey = (hasResolvers && abonent) ? String(Data.resolveCalcPeriodStorageKey(abonent) || '') : '';
+    const activeStorageKey = (hasResolvers && abonent) ? String(Data.resolveCalcPeriodActiveStorageKey(abonent) || '') : '';
+    const ownerId = getCalcPeriodOwnerId();
+    if (storageKey && activeStorageKey) {
+        __logCalcPeriodCanonicalUsed({ requestedId: String(requestedId || ''), resolvedUid: resolvedUid, ownerId: ownerId, storageKey: storageKey, activeStorageKey: activeStorageKey, source: "abonent_card" });
+    }
+    return {
+        requestedId: String(requestedId || ''),
+        resolvedUid: resolvedUid,
+        storageKey: storageKey,
+        activeStorageKey: activeStorageKey,
+        ownerId: ownerId
+    };
+}
+
+function calcPeriodKey(){ return getCalcPeriodStorageMeta().storageKey; }
+function calcPeriodActiveKey(){ return getCalcPeriodStorageMeta().activeStorageKey; }
 
 function loadCalcPeriodUI(){
-    const id = getAbonentTechnicalIdFromURL();
+    const meta = getCalcPeriodStorageMeta();
     const fromEl = document.getElementById("calcFrom");
     const toEl   = document.getElementById("calcTo");
     if (!fromEl || !toEl) return;
+    if (!meta.storageKey || !meta.activeStorageKey || !meta.resolvedUid) {
+        __logCalcPeriodNoCanonicalOnce({ requestedId: meta.requestedId, abonentId: meta.requestedId, resolvedUid: meta.resolvedUid, ownerId: meta.ownerId, reason: "CANONICAL_KEY_NOT_READY", source: "abonent_card.load" });
+        fromEl.value = "";
+        toEl.value = "";
+        return;
+    }
 
     try {
-        const raw = storeGet(calcPeriodKey(id));
+        const raw = meta.storageKey ? storeGet(meta.storageKey, meta.ownerId) : null;
         if (raw) {
             const obj = JSON.parse(raw);
             fromEl.value = obj.from || "";
@@ -2067,17 +2158,171 @@ function loadCalcPeriodUI(){
         fromEl.value = "";
         toEl.value   = "";
     }
+
+    try {
+        console.log("[calc-period][load]", {
+            requestedId: meta.requestedId,
+            resolvedUid: meta.resolvedUid,
+            ownerId: meta.ownerId,
+            storageKey: meta.storageKey,
+            from: fromEl.value || "",
+            to: toEl.value || ""
+        });
+    } catch (e) {}
 }
 
 // intentionally local-only: период расчёта это UI-параметр и не отправляется на сервер
 function saveCalcPeriod(from, to){
-    const id = getAbonentTechnicalIdFromURL();
-    storeSet(calcPeriodKey(id), JSON.stringify({from: from || "", to: to || ""}));
+    saveCalcPeriod.lastError = "";
+    const meta = getCalcPeriodStorageMeta();
+    const fromEl = document.getElementById("calcFrom");
+    const toEl = document.getElementById("calcTo");
+    const fromInputValue = fromEl ? fromEl.value : "";
+    const toInputValue = toEl ? toEl.value : "";
+    const payloadFrom = String(fromInputValue || from || "").trim();
+    const payloadTo = String(toInputValue || to || "").trim();
+    const payload = { from: payloadFrom, to: payloadTo };
+
+    try {
+        console.log("[calc-period][save-inputs]", {
+            fromInputValue: fromInputValue,
+            toInputValue: toInputValue
+        });
+    } catch (e) {}
+
+    try {
+        console.log("[calc-period][save-payload]", payload);
+    } catch (e) {}
+
+    if (!payloadFrom || !payloadTo) {
+        saveCalcPeriod.lastError = "PERIOD_REQUIRED";
+        if (meta.storageKey) storeRemove(meta.storageKey, meta.ownerId);
+        if (meta.activeStorageKey) storeSet(meta.activeStorageKey, "0", meta.ownerId);
+        try {
+            console.warn("[calc-period][save-blocked]", {
+                requestedId: meta.requestedId,
+                resolvedUid: meta.resolvedUid,
+                ownerId: meta.ownerId,
+                storageKey: meta.storageKey,
+                activeStorageKey: meta.activeStorageKey,
+                from: payloadFrom,
+                to: payloadTo,
+                reason: "PERIOD_REQUIRED"
+            });
+        } catch (e) {}
+        alert("Укажите дату начала и дату окончания периода расчёта.");
+        return false;
+    }
+
+    if (!meta.storageKey || !meta.activeStorageKey || !meta.resolvedUid) {
+        saveCalcPeriod.lastError = "UID_REQUIRED";
+        __logCalcPeriodNoCanonicalOnce({ requestedId: meta.requestedId, abonentId: meta.requestedId, resolvedUid: meta.resolvedUid, ownerId: meta.ownerId, reason: "UID_REQUIRED", source: "abonent_card.save" });
+        try {
+            console.warn("[calc-period][save]", {
+                requestedId: meta.requestedId,
+                resolvedUid: meta.resolvedUid,
+                ownerId: meta.ownerId,
+                storageKey: meta.storageKey,
+                activeStorageKey: meta.activeStorageKey,
+                from: payloadFrom,
+                to: payloadTo,
+                reason: "UID_REQUIRED"
+            });
+        } catch (e) {}
+        return false;
+    }
+
+    storeSet(meta.storageKey, JSON.stringify(payload), meta.ownerId);
+    storeSet(meta.activeStorageKey, "1", meta.ownerId);
+    try {
+        console.log("[calc-period][save]", {
+            requestedId: meta.requestedId,
+            resolvedUid: meta.resolvedUid,
+            ownerId: meta.ownerId,
+            periodKey: meta.storageKey,
+            activeKey: meta.activeStorageKey,
+            from: payloadFrom,
+            to: payloadTo
+        });
+    } catch (e) {}
+    return true;
 }
 
 function setCalcPeriodActive(active){
-    const id = getAbonentTechnicalIdFromURL();
-    storeSet(calcPeriodActiveKey(id), active ? "1" : "0");
+    const meta = getCalcPeriodStorageMeta();
+    if (!meta.activeStorageKey || !meta.resolvedUid) return false;
+
+    if (active) {
+        let periodRaw = null;
+        let savedPeriod = null;
+        try {
+            periodRaw = (window.JKHStore && typeof JKHStore.getRaw === "function") ? JKHStore.getRaw(meta.storageKey, meta.ownerId) : null;
+            savedPeriod = periodRaw ? JSON.parse(periodRaw) : null;
+        } catch (e) {
+            savedPeriod = null;
+        }
+
+        if (!savedPeriod || !isValidPeriod(savedPeriod.from || "", savedPeriod.to || "")) {
+            storeSet(meta.activeStorageKey, "0", meta.ownerId);
+            try {
+                console.warn("[calc-period][active-blocked]", {
+                    ownerId: meta.ownerId,
+                    periodKey: meta.storageKey,
+                    activeKey: meta.activeStorageKey,
+                    periodRaw: periodRaw,
+                    reason: "PERIOD_REQUIRED"
+                });
+            } catch (e) {}
+            return false;
+        }
+    }
+
+    storeSet(meta.activeStorageKey, active ? "1" : "0", meta.ownerId);
+    return true;
+}
+
+function confirmCalcPeriodSaved(){
+    const meta = getCalcPeriodStorageMeta();
+    const periodKey = meta.storageKey;
+    const activeKey = meta.activeStorageKey;
+    const ownerId = meta.ownerId;
+    let periodRaw = null;
+    let activeRaw = null;
+    let parsedPeriod = null;
+
+    try {
+        if (window.JKHStore && typeof JKHStore.getRaw === "function") {
+            periodRaw = periodKey ? JKHStore.getRaw(periodKey, ownerId) : null;
+            activeRaw = activeKey ? JKHStore.getRaw(activeKey, ownerId) : null;
+        }
+        parsedPeriod = periodRaw ? JSON.parse(periodRaw) : null;
+    } catch (e) {
+        parsedPeriod = null;
+    }
+
+    try {
+        console.log("[calc-period][save-confirm]", {
+            ownerId: ownerId,
+            periodKey: periodKey,
+            activeKey: activeKey,
+            periodRaw: periodRaw,
+            activeRaw: activeRaw,
+            parsedPeriod: parsedPeriod
+        });
+    } catch (e) {}
+
+    if (!periodRaw || !parsedPeriod || !parsedPeriod.from || !parsedPeriod.to) {
+        if (activeKey) storeSet(activeKey, "0", ownerId);
+        alert("Период расчёта не сохранён в canonical UID key. Справка не будет открыта.");
+        return false;
+    }
+
+    if (activeRaw !== "1") {
+        alert("Флаг активного периода расчёта не сохранён. Справка не будет открыта.");
+        return false;
+    }
+
+    return true;
 }
 
 function isValidPeriod(from, to){
@@ -2097,8 +2342,9 @@ function bindCalcButtons(){
     const toEl   = document.getElementById("calcTo");
     if (!runBtn || !repBtn || !resetBtn || !fromEl || !toEl) return;
 
-    runBtn.addEventListener("click", () => {
+    runBtn.addEventListener("click", async () => {
         if (!canWriteOrExplainLocal()) return;
+        const currentAbonentId = getAbonentIdFromURL();
         const from = fromEl.value;
         const to   = toEl.value;
 
@@ -2111,16 +2357,39 @@ function bindCalcButtons(){
             return;
         }
 
-        saveCalcPeriod(from, to);
-        setCalcPeriodActive(true);
+        if (!window.Data || typeof Data.ensureAbonentUid !== "function") {
+            alert("Период расчёта не сохранён: сервис UID недоступен.");
+            return;
+        }
+
+        let uidResult = null;
+        try {
+            uidResult = await Data.ensureAbonentUid(currentAbonentId, { source: "abonent_card.calc" });
+        } catch (e) {
+            uidResult = { ok: false, reason: String(e && e.message || e) };
+        }
+
+        if (!uidResult || uidResult.ok !== true || !uidResult.uid) {
+            alert("Период расчёта не сохранён: UID абонента не сохранён.");
+            return;
+        }
+
+        if (!saveCalcPeriod(from, to)) {
+            if (saveCalcPeriod.lastError !== "PERIOD_REQUIRED") {
+                alert("Период расчёта не сохранён: не найден canonical UID key.");
+            }
+            return;
+        }
+        if (!confirmCalcPeriodSaved()) return;
 
         __safeLoadPaymentTableOnce();
     });
 
     resetBtn.addEventListener("click", () => {
         if (!canWriteOrExplainLocal()) return;
-        saveCalcPeriod("", "");
         setCalcPeriodActive(false);
+        const periodKey = calcPeriodKey();
+        if (periodKey) storeRemove(periodKey, getCalcPeriodOwnerId());
         fromEl.value = "";
         toEl.value = "";
         __safeLoadPaymentTableOnce();
@@ -2128,14 +2397,32 @@ function bindCalcButtons(){
 
     repBtn.addEventListener("click", () => {
         const id = getAbonentIdFromURL();
-	        // ✅ FIX: forward active db key (if present) to reports page
-	        // to keep correct data when multiple bases exist in localStorage.
-	        let dbKey = "";
-	        try{
-	            const p = new URLSearchParams(location.search);
-	            dbKey = String(p.get("db") || "").trim();
-	        }catch(e){ dbKey = ""; }
-	        location.href = "reports.html?abonent=" + encodeURIComponent(id) + (dbKey ? ("&db=" + encodeURIComponent(dbKey)) : "");
+        const from = fromEl.value;
+        const to = toEl.value;
+        if (from || to) {
+            if (isValidPeriod(from, to)) saveCalcPeriod(from, to);
+            else console.warn("[calc-period][save-skipped-invalid-before-reports]", { abonentId: String(id || ""), from: from || "", to: to || "" });
+        }
+        const meta = getCalcPeriodStorageMeta();
+        // ✅ FIX: forward active db key (if present) to reports page
+        // to keep correct data when multiple bases exist in localStorage.
+        let dbKey = "";
+        try{
+            const p = new URLSearchParams(location.search);
+            dbKey = String(p.get("db") || "").trim();
+        }catch(e){ dbKey = ""; }
+        if (!dbKey && meta.ownerId && window.JKHStore && typeof JKHStore.scopePrefixFor === "function") {
+            try { dbKey = String(JKHStore.scopePrefixFor(meta.ownerId) || "") + "abonents_db_v1"; } catch(e){ dbKey = ""; }
+        }
+        try {
+            console.log("[calc-period][open-spravka]", {
+                abonentId: String(id || ""),
+                ownerId: meta.ownerId,
+                periodKey: meta.storageKey,
+                activeKey: meta.activeStorageKey
+            });
+        } catch (e) {}
+        location.href = "reports.html?abonent=" + encodeURIComponent(id) + (dbKey ? ("&db=" + encodeURIComponent(dbKey)) : (meta.ownerId ? ("&owner=" + encodeURIComponent(meta.ownerId)) : ""));
     });
 }
 
