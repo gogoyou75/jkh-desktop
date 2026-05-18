@@ -234,7 +234,7 @@ def _parse_pagination_args(default_per_page: int = 50, max_per_page: int = 200):
     except (TypeError, ValueError):
         page = 1
     try:
-        per_page = int(request.args.get("per_page", str(default_per_page)))
+        per_page = int(request.args.get("per_page", request.args.get("limit", str(default_per_page))))
     except (TypeError, ValueError):
         per_page = default_per_page
 
@@ -1025,6 +1025,108 @@ def _build_missing_abonent_summary(target: dict):
         },
     }
 
+def _summary_status_from_payload(summary: dict | None):
+    if not isinstance(summary, dict):
+        return "missing"
+    status = _norm_text(summary.get("summary_status") or summary.get("status")).lower()
+    if status in {"fresh", "dirty", "missing", "error"}:
+        return status
+    return "missing"
+
+
+def _summary_without_stale_totals(summary: dict | None):
+    payload = summary.copy() if isinstance(summary, dict) else {}
+    status = _summary_status_from_payload(payload)
+    payload["summary_status"] = status
+    payload["status"] = status
+    if status != "fresh":
+        for key in (
+            "totals",
+            "total",
+            "total_debt",
+            "total_penalty",
+            "total_principal",
+            "debt",
+            "penalty",
+            "principal",
+            "nachisleno",
+            "oplacheno",
+            "accrued",
+            "paid",
+            "accrued_total",
+            "paid_total",
+            "accruedTotal",
+            "paidTotal",
+        ):
+            payload.pop(key, None)
+    return payload
+
+
+def _summary_from_row_or_missing(row: AbonentSummary | None, target: dict):
+    if not row:
+        return _build_missing_abonent_summary(target)
+    try:
+        summary = json.loads(row.summary_json or "{}")
+    except (TypeError, ValueError):
+        summary = {"summary_status": "error", "summary_reason": "SUMMARY_JSON_INVALID"}
+    return _summary_without_stale_totals(summary)
+
+
+def _parse_summary_status_filter(raw_value: str):
+    raw = _norm_text(raw_value).lower()
+    if not raw:
+        return None
+    parts = [x.strip() for x in re.split(r"[,\s]+", raw) if x.strip()]
+    statuses = set()
+    for part in parts:
+        if part in {"stale", "устаревшие", "устаревший"}:
+            statuses.update({"dirty", "missing", "error"})
+        elif part in {"fresh", "dirty", "missing", "error"}:
+            statuses.add(part)
+    return statuses if statuses else None
+
+
+def _target_matches_abonent_query(target: dict, query_text: str):
+    q = _norm_text(query_text).lower()
+    if not q:
+        return True
+    identity = target.get("identity") if isinstance(target.get("identity"), dict) else {}
+    values = [
+        target.get("abonent_id"),
+        target.get("account_uid"),
+        target.get("account_number"),
+        identity.get("fio"),
+        identity.get("address"),
+    ]
+    haystack = " ".join(_norm_text(value).lower() for value in values)
+    tokens = [x for x in re.split(r"\s+", q) if x]
+    return all(token in haystack for token in tokens)
+
+
+def _abonent_index_payload(target: dict, summary: dict):
+    identity = target.get("identity") if isinstance(target.get("identity"), dict) else {}
+    summary_payload = _summary_without_stale_totals(summary)
+    if "abonent" not in summary_payload or not isinstance(summary_payload.get("abonent"), dict):
+        summary_payload["abonent"] = {
+            "abonent_id": _norm_text(identity.get("abonent_id") or target.get("abonent_id")),
+            "account_uid": _norm_text(identity.get("account_uid") or target.get("account_uid")),
+            "account_number": _norm_text(identity.get("account_number") or target.get("account_number")),
+            "fio": _norm_text(identity.get("fio")),
+            "address": _norm_text(identity.get("address")),
+        }
+    if not _norm_text(summary_payload.get("fio")) and _norm_text(identity.get("fio")):
+        summary_payload["fio"] = _norm_text(identity.get("fio"))
+    if not _norm_text(summary_payload.get("address")) and _norm_text(identity.get("address")):
+        summary_payload["address"] = _norm_text(identity.get("address"))
+    return {
+        "abonent_id": _norm_text(target.get("abonent_id")),
+        "account_uid": _norm_text(target.get("account_uid")),
+        "account_number": _norm_text(target.get("account_number")),
+        "summary_status": _summary_status_from_payload(summary_payload),
+        "summary": summary_payload,
+    }
+
+
 def _row_human_error_payload(r: ImportBatchRow):
     return {
         "excel_row_ref": r.excel_row_ref,
@@ -1121,6 +1223,60 @@ def index():
 def initdb():
     db.create_all()
     return jsonify(ok=True, message="users + kv_store ready")
+
+
+@app.get("/api/abonents")
+def abonents_index_list():
+    # CRITICAL GUARD: lightweight index endpoint is a read-only list transport.
+    # Owner is always taken from session; never trust owner/query owner from client.
+    # Do not read payments_<uid>, do not run recalculation, and do not expose stale totals.
+    user, err = _require_user()
+    if err:
+        return err
+
+    owner = user.id
+    page, per_page = _parse_pagination_args()
+    query_text = request.args.get("query", "")
+    status_filter = _parse_summary_status_filter(
+        request.args.get("summary_status") or request.args.get("status") or ""
+    )
+
+    targets = [t for t in _owner_abonent_summary_targets(owner) if _target_matches_abonent_query(t, query_text)]
+    uids = [_norm_text(t.get("account_uid")) for t in targets if _norm_text(t.get("account_uid"))]
+
+    summary_rows = []
+    if uids:
+        summary_rows = (
+            AbonentSummary.query
+            .filter_by(owner_id=owner)
+            .filter(AbonentSummary.account_uid.in_(uids))
+            .order_by(AbonentSummary.updated_at.desc(), AbonentSummary.id.desc())
+            .all()
+        )
+    summaries_by_uid = {}
+    for row in summary_rows:
+        uid = _norm_text(row.account_uid)
+        if uid and uid not in summaries_by_uid:
+            summaries_by_uid[uid] = row
+
+    filtered = []
+    for target in targets:
+        uid = _norm_text(target.get("account_uid"))
+        summary = _summary_from_row_or_missing(summaries_by_uid.get(uid), target)
+        status = _summary_status_from_payload(summary)
+        if status_filter is not None and status not in status_filter:
+            continue
+        filtered.append((target, summary))
+
+    total = len(filtered)
+    start = (page - 1) * per_page
+    page_pairs = filtered[start:start + per_page]
+
+    return jsonify(
+        ok=True,
+        items=[_abonent_index_payload(target, summary) for target, summary in page_pairs],
+        pagination=_pagination_payload(page, per_page, total),
+    )
 
 
 @app.get("/api/abonent_summary")
