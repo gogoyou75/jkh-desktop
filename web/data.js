@@ -2699,15 +2699,31 @@ window.JKHBoot?.markReady?.('data');
     });
 
     // 7) платежи — намеренно как “проверочный кейс”
-    _setRawScoped("payments_1006", JSON.stringify([
-      { id: 1, year: "2025", month: "01", accrued: 200, paid: 0, paid_date: "", source: "Платёж 1", payment_period: "" },
-      { id: 2, year: "2025", month: "02", accrued: 200, paid: 0, paid_date: "", source: "Платёж 1", payment_period: "" },
-      { id: 3, year: "2025", month: "02", accrued: 0, paid: 3870, paid_date: "10.02.2025", source: "Платёж 1", payment_period: "" }
-    ]));
+    const demoLedgers = {
+      "1006": [
+        { id: 1, year: "2025", month: "01", accrued: 200, paid: 0, paid_date: "", source: "Платёж 1", payment_period: "" },
+        { id: 2, year: "2025", month: "02", accrued: 200, paid: 0, paid_date: "", source: "Платёж 1", payment_period: "" },
+        { id: 3, year: "2025", month: "02", accrued: 0, paid: 3870, paid_date: "10.02.2025", source: "Платёж 1", payment_period: "" }
+      ],
+      "1008": [
+        { id: 1, year: "2025", month: "01", accrued: 200, paid: 0, paid_date: "", source: "Платёж 1", payment_period: "" }
+      ]
+    };
 
-    _setRawScoped("payments_1008", JSON.stringify([
-      { id: 1, year: "2025", month: "01", accrued: 200, paid: 0, paid_date: "", source: "Платёж 1", payment_period: "" }
-    ]));
+    ["1006", "1008"].forEach((abonentId) => {
+      const abonent = demoDb && demoDb.abonents ? demoDb.abonents[abonentId] : null;
+      const uid = String(abonent && abonent.uid || "").trim();
+      if (!isValidUid(uid)) {
+        const err = new Error("DEMO_UID_REQUIRED: demo abonent " + abonentId + " must have a valid uid before seeding payments");
+        err.code = "DEMO_UID_REQUIRED";
+        err.abonentId = abonentId;
+        err.uid = uid;
+        throw err;
+      }
+      const key = "payments_" + uid;
+      console.info("[demo][uid-ledger-seed]", { abonentId: abonentId, uid: uid, key: key });
+      _setRawScoped(key, JSON.stringify(demoLedgers[abonentId]));
+    });
   }
 
   // ============================================================
