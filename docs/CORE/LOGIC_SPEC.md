@@ -1858,6 +1858,27 @@ Fatal-состояния включают, но не ограничиваютс�
 - `summary` должен быть объектом и сохраняется в `summary_json` без подстановки синтетических нулей;
 - fatal ошибка расчёта сохраняется как `summary_status = "error"` и диагностический `summary_reason`, но без `totals: 0`.
 
+### 21.7.2. Stage 3.2: frontend dirty tracking для `abonent_summary`
+
+`abonent_summary` имеет состояния `fresh`, `dirty`, `missing`, `error`.
+
+Правила dirty tracking:
+- `dirty` означает, что финансово значимые данные абонента изменились, поэтому summary нельзя использовать как актуальные totals;
+- dirty marking выполняется через `POST /api/abonent_summary/mark_dirty` по конкретному `account_uid`;
+- dirty marking не запускает автоматический пересчёт и не делает rebuild всех абонентов;
+- `fresh` появляется только после успешного явного UID-пересчёта и single upsert через `POST /api/abonent_summary/rebuild`;
+- ошибка dirty endpoint логируется на frontend как `[summary][mark-dirty-failed]` и не блокирует основное сохранение платежей, периода, исключений, моратория или ответственности;
+- dirty payload не должен подставлять fake totals (`total_debt = 0`, `total_penalty = 0`) и не должен читать ledger как fallback.
+
+Минимальные frontend write-path, которые помечают summary dirty после успешного изменения:
+- запись ledger `payments_<uid>` через `Data.writePaymentLedger(...)`: `LEDGER_WRITE` или более точная причина вызывающего кода;
+- сохранение платежей в таблице оплат: `PAYMENTS_CHANGED`;
+- успешное применение Excel-платежей: `IMPORT_PAYMENTS_APPLIED`;
+- изменение `calc_period_<uid>` / `calc_period_active_<uid>`: `CALC_PERIOD_CHANGED`;
+- изменение `exclude_periods_<abonentId>`: `EXCLUDES_CHANGED`;
+- изменение `moratorium_<uid>`: `MORATORIUM_CHANGED`;
+- `transferResponsibility(...)` / `mergePremises(...)`: `RESPONSIBILITY_CHANGED`.
+
 ### 21.8. Future API: dirty/recalc
 
 Будущий API-контракт без реализации:

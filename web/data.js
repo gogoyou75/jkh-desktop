@@ -589,6 +589,7 @@
         date: opts.date || ""
       }, opts.event || {}));
     }
+    if (ok !== false) markAbonentSummaryDirtyLater(abonent || id, opts.summaryDirtyReason || "LEDGER_WRITE");
     return ok;
   }
 
@@ -1239,6 +1240,51 @@
     return data;
   }
 
+  async function markAbonentSummaryDirty(abonentOrId, reason) {
+    try {
+      var found = _findAbonentByIdOrUid(abonentOrId);
+      var abonent = found && found.abonent ? found.abonent : null;
+      var abonentId = String(found && found.id || (abonent && abonent.id) || (typeof abonentOrId === "object" ? abonentOrId && abonentOrId.id : abonentOrId) || "").trim();
+      var uid = String(abonent && abonent.uid || (typeof abonentOrId === "object" ? abonentOrId && abonentOrId.uid : "") || "").trim();
+
+      if (!isValidUid(uid)) {
+        try { console.warn("[summary][mark-dirty-failed]", { reason: "INVALID_UID", abonentId: abonentId, uid: uid }); } catch (eWarn) {}
+        return { ok: false, skipped: true, reason: "INVALID_UID" };
+      }
+
+      var payload = {
+        account_uid: uid,
+        reason: String(reason || "UNKNOWN_CHANGE").trim() || "UNKNOWN_CHANGE"
+      };
+
+      var res = await fetch("/api/abonent_summary/mark_dirty", {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      });
+      var text = await res.text();
+      var data = null;
+      try { data = text ? JSON.parse(text) : null; } catch (eParse) { data = null; }
+      if (!res.ok || !data || data.ok === false) {
+        throw new Error((data && data.error) || ("HTTP_" + res.status));
+      }
+      return data;
+    } catch (e) {
+      try { console.warn("[summary][mark-dirty-failed]", { reason: String(e && e.message || e) }); } catch (eLog) {}
+      return { ok: false, error: String(e && e.message || e) };
+    }
+  }
+
+  function markAbonentSummaryDirtyLater(abonentOrId, reason) {
+    try {
+      var p = markAbonentSummaryDirty(abonentOrId, reason);
+      if (p && typeof p.catch === "function") p.catch(function(e){ try { console.warn("[summary][mark-dirty-failed]", e); } catch (_) {} });
+    } catch (e) {
+      try { console.warn("[summary][mark-dirty-failed]", e); } catch (_) {}
+    }
+  }
+
   async function saveAbonentSummaryAfterRecalc(abonentOrId, summary) {
     try {
       var found = _findAbonentByIdOrUid(abonentOrId);
@@ -1312,6 +1358,7 @@
     readPaymentLedger: readPaymentLedger,
     loadAbonentSummaryPage: loadAbonentSummaryPage,
     saveAbonentSummaryAfterRecalc: saveAbonentSummaryAfterRecalc,
+    markAbonentSummaryDirty: markAbonentSummaryDirty,
     writePaymentLedger: writePaymentLedger,
     createEmptyPaymentLedger: createEmptyPaymentLedger,
     normalizeFinancialMode: normalizeFinancialMode,
@@ -1736,6 +1783,8 @@
 
         await this.flushDbToServer();
         console.log("[premise-transform] flush success");
+        markAbonentSummaryDirtyLater(generatedNewId, "RESPONSIBILITY_CHANGED");
+        Object.keys(responsibleSet || {}).forEach(function(respId){ markAbonentSummaryDirtyLater(respId, "RESPONSIBILITY_CHANGED"); });
         return ev;
       } catch (e) {
         window.AbonentsDB = snapshot;
@@ -2215,7 +2264,11 @@
       if (!newLedgerRangeCheck || newLedgerRangeCheck.ok !== true) throw new Error("TRANSFER_NEW_LEDGER_RANGE_INVALID");
 
       var saved = !!window.saveAbonentsDB && window.saveAbonentsDB();
-      if (saved) __scheduleTransferFlushToServer();
+      if (saved) {
+        __scheduleTransferFlushToServer();
+        markAbonentSummaryDirtyLater(oldId, "RESPONSIBILITY_CHANGED");
+        markAbonentSummaryDirtyLater(newId, "RESPONSIBILITY_CHANGED");
+      }
       return saved;
     }catch(e){
       window.AbonentsDB = snapshot;

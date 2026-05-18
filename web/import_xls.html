@@ -624,6 +624,17 @@ function setPaymentsByUid(uid, arr){
   throw new Error('Data.writePaymentLedger is not available');
 }
 
+function markImportedPaymentSummariesDirty(rows){
+  if (!(window.Data && typeof window.Data.markAbonentSummaryDirty === 'function')) return;
+  const seen = {};
+  (Array.isArray(rows) ? rows : []).forEach(function(row){
+    const uid = normStr(row && row.account_uid);
+    if (!uid || seen[uid]) return;
+    seen[uid] = true;
+    window.Data.markAbonentSummaryDirty(uid, 'IMPORT_PAYMENTS_APPLIED');
+  });
+}
+
 function parseYearMonthFromAny(v){
   const s = normStr(v);
   if (!s) return null;
@@ -3027,6 +3038,7 @@ async function applyPayments(){
       appliedRowsCount++;
     }
   }
+  if (appliedCount > 0) markImportedPaymentSummariesDirty(rows);
   serverPaymentBatchId = 0;
   serverPaymentRows = [];
   clearImportResumeState();

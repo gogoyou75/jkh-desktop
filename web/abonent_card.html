@@ -1086,6 +1086,7 @@ function __clearBrokenExcludesAndReload(){
     const id = getAbonentTechnicalIdFromURL();
     const key = "exclude_periods_" + String(id || "").trim();
     storeSet(key, JSON.stringify([]));
+    markCurrentAbonentSummaryDirty("EXCLUDES_CHANGED");
     __hideExcludesFatalBox();
     __safeLoadPaymentTableOnce("clear-broken-excludes");
 }
@@ -1370,6 +1371,13 @@ function storeRemove(key, ownerId){
 }
 function storeKeysForOwner(ownerId){
   try { return (window.JKHStore && JKHStore.keysForOwner) ? JKHStore.keysForOwner(ownerId) : []; } catch(e){ return []; }
+}
+function markCurrentAbonentSummaryDirty(reason){
+  try {
+    if (window.Data && typeof window.Data.markAbonentSummaryDirty === "function") {
+      window.Data.markAbonentSummaryDirty(getAbonentIdFromURL(), reason);
+    }
+  } catch(e){}
 }
 function storeCurrentScopePrefix(){
   try {
@@ -2060,6 +2068,7 @@ function bindMoratoriumUI(){
             return;
         }
         storeSet(moratoriumKey(id), el.checked ? "1" : "0");
+        markCurrentAbonentSummaryDirty("MORATORIUM_CHANGED");
         __safeLoadPaymentTableOnce();
     });
 }
@@ -2234,6 +2243,7 @@ function saveCalcPeriod(from, to){
 
     storeSet(meta.storageKey, JSON.stringify(payload), meta.ownerId);
     storeSet(meta.activeStorageKey, "1", meta.ownerId);
+    markCurrentAbonentSummaryDirty("CALC_PERIOD_CHANGED");
     try {
         console.log("[calc-period][save]", {
             requestedId: meta.requestedId,
@@ -2278,6 +2288,7 @@ function setCalcPeriodActive(active){
     }
 
     storeSet(meta.activeStorageKey, active ? "1" : "0", meta.ownerId);
+    markCurrentAbonentSummaryDirty("CALC_PERIOD_CHANGED");
     return true;
 }
 

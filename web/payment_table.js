@@ -1385,7 +1385,7 @@ if (parts.length) {
       // локальная запись через canonical service boundary
       const abonentId = String(getAbonentId() || "");
       if (!(window.Data && typeof window.Data.writePaymentLedger === "function")) throw new Error("Data.writePaymentLedger not available");
-      const savedLedger = window.Data.writePaymentLedger(abonentId, arr, { eventType: "PAYMENT_TABLE_WRITE" });
+      const savedLedger = window.Data.writePaymentLedger(abonentId, arr, { eventType: "PAYMENT_TABLE_WRITE", summaryDirtyReason: "PAYMENTS_CHANGED" });
       if (savedLedger === false) throw new Error("PAYMENT_LEDGER_WRITE_BLOCKED");
       clearPaymentLedgerReadCache('save-payments');
 

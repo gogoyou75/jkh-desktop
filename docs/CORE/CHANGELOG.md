@@ -1,3 +1,10 @@
+## 2026-05-18 — Abonent summary: frontend dirty tracking
+
+- Добавлен frontend-сервис `Data.markAbonentSummaryDirty(abonentOrId, reason)` для безопасного вызова `POST /api/abonent_summary/mark_dirty` с `credentials: "include"`.
+- Dirty marking подключён после финансово значимых write-path: ledger/payment table, Excel payments apply, calc period, excludes, moratorium, transfer/merge responsibility.
+- Ошибки dirty endpoint логируются как `[summary][mark-dirty-failed]` и не блокируют основное сохранение.
+- Зафиксировано, что `abonent_summary` имеет состояния `fresh` / `dirty` / `missing` / `error`; `dirty` не запускает пересчёт, а `fresh` появляется только после явного UID-пересчёта и single upsert.
+
 # CHANGELOG
 
 ## 2026-05-17 — Abonent summary single UID integration
