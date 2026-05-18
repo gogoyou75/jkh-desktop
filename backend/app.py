@@ -1246,10 +1246,12 @@ def abonents_index_list():
     )
 
     targets = [t for t in _owner_abonent_summary_targets(owner) if _target_matches_abonent_query(t, query_text)]
-    uids = [_norm_text(t.get("account_uid")) for t in targets if _norm_text(t.get("account_uid"))]
+    start = (page - 1) * per_page
 
-    summary_rows = []
-    if uids:
+    def load_summaries_by_uid(page_targets):
+        uids = [_norm_text(t.get("account_uid")) for t in page_targets if _norm_text(t.get("account_uid"))]
+        if not uids:
+            return {}
         summary_rows = (
             AbonentSummary.query
             .filter_by(owner_id=owner)
@@ -1257,24 +1259,37 @@ def abonents_index_list():
             .order_by(AbonentSummary.updated_at.desc(), AbonentSummary.id.desc())
             .all()
         )
-    summaries_by_uid = {}
-    for row in summary_rows:
-        uid = _norm_text(row.account_uid)
-        if uid and uid not in summaries_by_uid:
-            summaries_by_uid[uid] = row
+        summaries = {}
+        for row in summary_rows:
+            uid = _norm_text(row.account_uid)
+            if uid and uid not in summaries:
+                summaries[uid] = row
+        return summaries
 
-    filtered = []
-    for target in targets:
-        uid = _norm_text(target.get("account_uid"))
-        summary = _summary_from_row_or_missing(summaries_by_uid.get(uid), target)
-        status = _summary_status_from_payload(summary)
-        if status_filter is not None and status not in status_filter:
-            continue
-        filtered.append((target, summary))
+    if status_filter is None:
+        total = len(targets)
+        page_targets = targets[start:start + per_page]
+        summaries_by_uid = load_summaries_by_uid(page_targets)
+        page_pairs = [
+            (target, _summary_from_row_or_missing(summaries_by_uid.get(_norm_text(target.get("account_uid"))), target))
+            for target in page_targets
+        ]
+    else:
+        # summary_status filtering must include missing summaries. Therefore only
+        # this branch inspects summaries for all query-matched targets; the
+        # default list path joins summaries for the requested page only.
+        summaries_by_uid = load_summaries_by_uid(targets)
+        filtered = []
+        for target in targets:
+            uid = _norm_text(target.get("account_uid"))
+            summary = _summary_from_row_or_missing(summaries_by_uid.get(uid), target)
+            status = _summary_status_from_payload(summary)
+            if status not in status_filter:
+                continue
+            filtered.append((target, summary))
 
-    total = len(filtered)
-    start = (page - 1) * per_page
-    page_pairs = filtered[start:start + per_page]
+        total = len(filtered)
+        page_pairs = filtered[start:start + per_page]
 
     return jsonify(
         ok=True,

@@ -331,7 +331,7 @@ Doc: docs/LOGIC_SPEC_v1.5.3.md
 let allRows = [];
 let filteredRows = [];
 let currentPage = 1;
-const pageSize = 20;
+const pageSize = 50;
 let sortField = null;
 let sortAsc = true;
 const filters = {};
@@ -858,20 +858,21 @@ function summaryStatusHtml(row){
 
 function buildIndexRowFromSummaryItem(item){
     const summary = (item && item.summary && typeof item.summary === "object") ? item.summary : {};
-    const status = normalizeSummaryStatus(summary.summary_status || summary.status);
+    const abonent = (summary.abonent && typeof summary.abonent === "object") ? summary.abonent : {};
+    const status = normalizeSummaryStatus(summary.summary_status || summary.status || item && item.summary_status);
     const reason = String(summary.summary_reason || summary.reason || "").trim();
     const isFresh = status === "fresh";
     const fioText = String(
-        summary.fio || summary.full_name || summary.abonent_name || summary.name_full || summary.display_name || ""
+        summary.fio || summary.full_name || summary.abonent_name || summary.name_full || summary.display_name || abonent.fio || ""
     ).trim();
     const fio = fioText.split(/\s+/);
-    const fam = summary.fam || summary.last_name || fio[0] || "";
-    const name = summary.name || summary.first_name || fio[1] || "";
-    const otch = summary.otch || summary.middle_name || fio.slice(2).join(" ") || "";
+    const fam = summary.fam || summary.last_name || abonent.fam || abonent.last_name || fio[0] || "";
+    const name = summary.name || summary.first_name || abonent.name || abonent.first_name || fio[1] || "";
+    const otch = summary.otch || summary.middle_name || abonent.otch || abonent.middle_name || fio.slice(2).join(" ") || "";
 
     return {
-        id: String(item && (item.abonent_id || item.account_number || item.account_uid || item.id) || ""),
-        accountUid: String(item && item.account_uid || summary.account_uid || summary.accountUid || ""),
+        id: String(item && (item.abonent_id || item.account_number || item.account_uid || item.id) || abonent.abonent_id || abonent.account_number || abonent.account_uid || ""),
+        accountUid: String(item && item.account_uid || summary.account_uid || summary.accountUid || abonent.account_uid || abonent.accountUid || ""),
         fam: String(fam || ""),
         name: String(name || ""),
         otch: String(otch || ""),
@@ -882,7 +883,7 @@ function buildIndexRowFromSummaryItem(item){
         startDate: isFresh ? formatSummaryDate(pickSummaryValue(summary, ["start_date", "startDate", "period_start", "date_from"])) : "",
         endDate: isFresh ? formatSummaryDate(pickSummaryValue(summary, ["end_date", "endDate", "period_end", "date_to", "as_of"])) : "",
         note: String(summary.note || summary.defaultNote || ""),
-        flatReg: String(summary.flat_reg || summary.regnum || summary.premise_regnum || ""),
+        flatReg: String(summary.flat_reg || summary.regnum || summary.premise_regnum || abonent.flat_reg || abonent.regnum || abonent.premise_regnum || ""),
         rowStatusMark: "",
         summaryStatus: status,
         summaryReason: reason
