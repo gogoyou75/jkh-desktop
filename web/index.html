@@ -908,6 +908,22 @@ function renderIndexSummaryError(message){
     if (controls) controls.innerHTML = "";
 }
 
+function getIndexServerSummaryStatusFilter(){
+    const raw = String(filters.summaryStatus || "").trim().toLowerCase();
+    if (!raw) return "";
+    if (raw === "stale" || raw === "устаревшие" || raw === "устаревший") return "dirty,missing,error";
+    return raw;
+}
+
+function getIndexServerQueryFilter(){
+    const parts = [];
+    ["id", "fam", "name", "otch", "note", "flatReg"].forEach(function(field){
+        const value = String(filters[field] || "").trim();
+        if (value) parts.push(value);
+    });
+    return parts.join(" ").trim();
+}
+
 async function loadPassiveSummaryPage(page){
     indexPassiveSummaryMode = true;
     currentPage = Math.max(1, Number(page) || 1);
@@ -920,7 +936,12 @@ async function loadPassiveSummaryPage(page){
     renderIndexSummaryLoading();
 
     try {
-        const payload = await window.Data.loadAbonentSummaryPage({ page: currentPage, per_page: pageSize });
+        const payload = await window.Data.loadAbonentSummaryPage({
+            page: currentPage,
+            limit: pageSize,
+            query: getIndexServerQueryFilter(),
+            status: getIndexServerSummaryStatusFilter()
+        });
         allRows = Array.isArray(payload.items) ? payload.items.map(buildIndexRowFromSummaryItem) : [];
         pruneSummaryBatchSelection();
         indexSummaryState.loading = false;
@@ -1168,7 +1189,11 @@ function initFilters() {
         input.addEventListener("input", () => {
             filters[field] = input.value;
             currentPage = 1;
-            render();
+            if (indexPassiveSummaryMode && indexSummaryState.mode === "summary") {
+                loadPassiveSummaryPage(1);
+            } else {
+                render();
+            }
         });
     });
 }
@@ -1311,8 +1336,10 @@ async function runSelectedSummaryBatch(){
      ОСНОВНОЙ РЕНДЕР (фильтры + сортировка + пагинация)
 ============================================================ */
 function render() {
+    const summaryMode = indexPassiveSummaryMode && indexSummaryState.mode === "summary";
+
     /* --- фильтрация --- */
-    filteredRows = allRows.filter(r => {
+    filteredRows = summaryMode ? allRows.slice() : allRows.filter(r => {
         for (const f in filters) {
             const val = String(filters[f] ?? "").toLowerCase().trim();
             if (!val) continue;
@@ -1340,10 +1367,8 @@ function render() {
     }
 
     /* --- пагинация --- */
-    const summaryMode = indexPassiveSummaryMode && indexSummaryState.mode === "summary";
-    const hasLocalFilters = Object.keys(filters).some(function(k){ return String(filters[k] || "").trim() !== ""; });
-    const total = summaryMode && !hasLocalFilters ? Number(indexSummaryState.pagination.total || filteredRows.length) : filteredRows.length;
-    const totalPages = summaryMode && !hasLocalFilters ? Math.max(1, Number(indexSummaryState.pagination.pages || 1)) : Math.max(1, Math.ceil(total / pageSize));
+    const total = summaryMode ? Number(indexSummaryState.pagination.total || filteredRows.length) : filteredRows.length;
+    const totalPages = summaryMode ? Math.max(1, Number(indexSummaryState.pagination.pages || 1)) : Math.max(1, Math.ceil(total / pageSize));
     if (!summaryMode && currentPage > totalPages) currentPage = totalPages;
 
     const startIndex = summaryMode ? 0 : ((currentPage - 1) * pageSize);
@@ -1489,7 +1514,7 @@ function renderPagination(total, from, to) {
         return;
     }
 
-    info.textContent = `Показано ${from}–${to} из ${total}`;
+    info.textContent = `Страница ${currentPage}, лимит ${pageSize}. Показано ${from}–${to} из ${total}`;
 
     const totalPages = Math.max(1, Math.ceil(total / pageSize));
 

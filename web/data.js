@@ -1215,19 +1215,27 @@
   async function loadAbonentSummaryPage(options) {
     var opts = options || {};
     var page = parseInt(opts.page, 10);
-    var perPage = parseInt(opts.per_page, 10);
+    var perPage = parseInt(opts.per_page || opts.limit, 10);
     if (!page || page < 1) page = 1;
     if (!perPage || perPage < 1) perPage = 20;
 
     var params = new URLSearchParams();
     params.set("page", String(page));
-    params.set("per_page", String(perPage));
 
-    if (opts.abonent_id) params.set("abonent_id", String(opts.abonent_id));
-    if (opts.account_uid) params.set("account_uid", String(opts.account_uid));
-    if (opts.account_number) params.set("account_number", String(opts.account_number));
+    var exactSummaryLookup = !!(opts.abonent_id || opts.account_uid || opts.account_number);
+    if (exactSummaryLookup) {
+      params.set("per_page", String(perPage));
+      if (opts.abonent_id) params.set("abonent_id", String(opts.abonent_id));
+      if (opts.account_uid) params.set("account_uid", String(opts.account_uid));
+      if (opts.account_number) params.set("account_number", String(opts.account_number));
+    } else {
+      params.set("limit", String(perPage));
+      if (opts.query) params.set("query", String(opts.query));
+      if (opts.status) params.set("status", String(opts.status));
+      if (opts.summary_status) params.set("summary_status", String(opts.summary_status));
+    }
 
-    var res = await fetch("/api/abonent_summary?" + params.toString(), {
+    var res = await fetch((exactSummaryLookup ? "/api/abonent_summary?" : "/api/abonents?") + params.toString(), {
       method: "GET",
       credentials: "include"
     });
