@@ -1577,6 +1577,60 @@
     return period;
   }
 
+  function resolveAbonentRegnumForSummary(abonentId, abonent) {
+    function clean(v) { return String(v || "").trim(); }
+
+    var direct = clean(abonent && abonent.regnum) ||
+      clean(abonent && abonent.premiseRegnum) ||
+      clean(abonent && abonent.premise_regnum) ||
+      clean(abonent && abonent.regNumber) ||
+      clean(abonent && abonent.reg_no) ||
+      clean(abonent && abonent.flatReg);
+    if (direct) return direct;
+
+    var id = clean(abonentId);
+    var db = window.AbonentsDB || {};
+    var links = Array.isArray(db.links) ? db.links.map(function (l, idx) {
+      return { link: l, idx: idx };
+    }).filter(function (item) {
+      return clean(item.link && item.link.abonentId) === id;
+    }) : [];
+    if (!id || !links.length) return "";
+
+    function linkRegnum(item) {
+      return clean(item && item.link && item.link.regnum);
+    }
+    function linkDateFrom(item) {
+      var l = item && item.link;
+      return clean(l && (l.dateFrom || l.from || l.start || l.startDate || l.date_start));
+    }
+    function linkOrder(item) {
+      var l = item && item.link;
+      var n = Number(l && (l.createdAt || l.updatedAt || l.id));
+      return Number.isFinite(n) ? n : 0;
+    }
+    function latestLink(a, b) {
+      var af = linkDateFrom(a);
+      var bf = linkDateFrom(b);
+      if (af !== bf) return af < bf ? 1 : -1;
+      var ao = linkOrder(a);
+      var bo = linkOrder(b);
+      if (ao !== bo) return bo - ao;
+      return (b && b.idx || 0) - (a && a.idx || 0);
+    }
+
+    var active = links.filter(function (item) {
+      var l = item && item.link;
+      return !clean(l && l.dateTo) && linkRegnum(item);
+    }).sort(latestLink)[0];
+    if (active) return linkRegnum(active);
+
+    var latest = links.filter(function (item) {
+      return !!linkRegnum(item);
+    }).sort(latestLink)[0];
+    return latest ? linkRegnum(latest) : "";
+  }
+
   function buildAbonentSummaryAfterExplicitRecalc(abonentOrId, from, to) {
     var found = _findAbonentByIdOrUid(abonentOrId);
     var abonent = found && found.abonent ? found.abonent : (abonentOrId && typeof abonentOrId === "object" ? abonentOrId : null);
@@ -1609,7 +1663,7 @@
     var fam = String(abonent && (abonent.fam || abonent.last_name || abonent.lastName) || fioParts[0] || "").trim();
     var name = String(abonent && (abonent.name || abonent.first_name || abonent.firstName) || fioParts[1] || "").trim();
     var otch = String(abonent && (abonent.otch || abonent.middle_name || abonent.middleName) || fioParts.slice(2).join(" ") || "").trim();
-    var regnum = String(abonent && (abonent.regnum || abonent.premiseRegnum) || "").trim();
+    var regnum = resolveAbonentRegnumForSummary(abonentId, abonent);
     return {
       status: "fresh",
       reason: "OK",
@@ -1622,6 +1676,7 @@
       regnum: regnum,
       flat_reg: regnum,
       premise_regnum: regnum,
+      premiseRegnum: regnum,
       account_uid: accountUid,
       account_number: accountNumber,
       id: abonentId,
@@ -1638,7 +1693,8 @@
         name: name,
         otch: otch,
         regnum: regnum,
-        premise_regnum: regnum
+        premise_regnum: regnum,
+        premiseRegnum: regnum
       },
       period: { from: periodFrom, to: periodTo },
       total_debt: total,
@@ -1723,6 +1779,7 @@
     readPaymentLedger: readPaymentLedger,
     loadAbonentSummaryPage: loadAbonentSummaryPage,
     validateAbonentSummaryRecalcBatch: validateAbonentSummaryRecalcBatch,
+    resolveAbonentRegnumForSummary: resolveAbonentRegnumForSummary,
     buildAbonentSummaryAfterExplicitRecalc: buildAbonentSummaryAfterExplicitRecalc,
     recalcAbonentSummaryExplicit: recalcAbonentSummaryExplicit,
     saveAbonentSummaryAfterRecalc: saveAbonentSummaryAfterRecalc,
