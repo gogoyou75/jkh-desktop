@@ -1370,6 +1370,66 @@
     return !!(d1 && d2 && d1.getTime() <= d2.getTime());
   }
 
+  function _summaryNumber(value) {
+    if (value === null || value === undefined || value === "") return 0;
+    var n = Number(String(value).replace(",", "."));
+    return Number.isFinite(n) ? n : 0;
+  }
+
+  function _summaryMonthKey(row) {
+    var y = Number(row && row.year);
+    var m = Number(row && row.month);
+    if (!Number.isFinite(y) || !Number.isFinite(m) || y < 1 || m < 1 || m > 12) return "";
+    return String(Math.trunc(y)).padStart(4, "0") + "-" + String(Math.trunc(m)).padStart(2, "0");
+  }
+
+  function _summaryPaidDate(row) {
+    var raw = row && row.paid_date;
+    if (!raw) return null;
+    var d = null;
+    if (window.JKHCalcEngine && typeof window.JKHCalcEngine.parseDateAnyToDate === "function") {
+      d = window.JKHCalcEngine.parseDateAnyToDate(raw);
+    } else {
+      d = _dateFromIsoLocal(raw);
+    }
+    return (d && d.toString() !== "Invalid Date") ? d : null;
+  }
+
+  function _summaryPeriodTotals(rows, from, to) {
+    var fromMonth = String(from || "").slice(0, 7);
+    var toMonth = String(to || "").slice(0, 7);
+    var fromDate = _dateFromIsoLocal(from);
+    var toDate = _dateFromIsoLocal(to);
+    var totalAccrued = 0;
+    var totalPaid = 0;
+
+    if (!Array.isArray(rows)) rows = [];
+    for (var i = 0; i < rows.length; i++) {
+      var row = rows[i] || {};
+      var monthKey = _summaryMonthKey(row);
+      var inMonthPeriod = !!(monthKey && monthKey >= fromMonth && monthKey <= toMonth);
+      if (inMonthPeriod) {
+        totalAccrued += _summaryNumber(row.accrued);
+      }
+
+      var paid = _summaryNumber(row.paid);
+      if (Math.abs(paid) <= 0.0000001) continue;
+      var paidDate = _summaryPaidDate(row);
+      if (paidDate && fromDate && toDate) {
+        if (paidDate.getTime() >= fromDate.getTime() && paidDate.getTime() <= toDate.getTime()) {
+          totalPaid += paid;
+        }
+      } else if (inMonthPeriod) {
+        totalPaid += paid;
+      }
+    }
+
+    return {
+      total_accrued: Math.round(totalAccrued * 100) / 100,
+      total_paid: Math.round(totalPaid * 100) / 100
+    };
+  }
+
   function _summaryCalcErrorCode(e) {
     if (e && e.code) return String(e.code);
     var msg = String(e && e.message || e || "CALC_FAILED");
@@ -1412,6 +1472,7 @@
     var principal = Number(totals && totals.principal);
     var penalty = Number(totals && totals.penaltyDebt);
     var total = Number(totals && totals.total);
+    var periodTotals = _summaryPeriodTotals(rows, from, to);
     if (!Number.isFinite(principal) || !Number.isFinite(penalty) || !Number.isFinite(total)) {
       throw new Error("CALC_TOTALS_INVALID");
     }
@@ -1422,11 +1483,18 @@
       summary_reason: "OK",
       period: { from: String(from || ""), to: String(to || "") },
       total_debt: total,
+      total_penalty: penalty,
+      total_accrued: periodTotals.total_accrued,
+      total_paid: periodTotals.total_paid,
       penalty: penalty,
       totals: {
         principal: principal,
         penalty: penalty,
-        total: total
+        total: total,
+        total_debt: total,
+        total_penalty: penalty,
+        total_accrued: periodTotals.total_accrued,
+        total_paid: periodTotals.total_paid
       },
       calc_engine_version: "JKHCalcEngine",
       generated_at: new Date().toISOString()
