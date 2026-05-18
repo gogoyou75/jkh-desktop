@@ -1328,6 +1328,138 @@
   }
 
 
+  async function validateAbonentSummaryRecalcBatch(uids) {
+    var list = Array.isArray(uids) ? uids : [];
+    var payload = { account_uids: list.map(function (x) { return String(x || "").trim(); }).filter(Boolean) };
+    if (!payload.account_uids.length) return { ok: false, error: "account_uids_required", allowed_uids: [], items: [] };
+
+    var res = await fetch("/api/abonent_summary/recalc_batch", {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+    var text = await res.text();
+    var data = null;
+    try { data = text ? JSON.parse(text) : null; } catch (eParse) { data = null; }
+    if (!res.ok || !data || data.ok === false) {
+      throw new Error((data && data.error) || ("HTTP_" + res.status));
+    }
+    return data;
+  }
+
+  function _dateFromIsoLocal(value) {
+    var s = String(value || "").trim();
+    var m = s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (!m) return null;
+    var d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]), 12, 0, 0);
+    return d.toString() === "Invalid Date" ? null : d;
+  }
+
+  function _isValidIsoPeriod(from, to) {
+    var d1 = _dateFromIsoLocal(from);
+    var d2 = _dateFromIsoLocal(to);
+    return !!(d1 && d2 && d1.getTime() <= d2.getTime());
+  }
+
+  function _summaryCalcErrorCode(e) {
+    if (e && e.code) return String(e.code);
+    var msg = String(e && e.message || e || "CALC_FAILED");
+    if (msg.indexOf("MISSING_REQUIRED_RATE") >= 0) return "MISSING_REQUIRED_RATE";
+    if (msg.indexOf("RATES_JSON_INVALID") >= 0) return "RATES_JSON_INVALID";
+    if (msg.indexOf("EXCLUDES_JSON_INVALID") >= 0) return "EXCLUDES_JSON_INVALID";
+    if (msg.indexOf("EXCLUDES_INVALID") >= 0) return "EXCLUDES_INVALID";
+    if (msg.indexOf("LEDGER_JSON_INVALID") >= 0) return "LEDGER_JSON_INVALID";
+    return msg || "CALC_FAILED";
+  }
+
+  function _readAbonentCalcPeriod(abonentOrId) {
+    var key = resolveCalcPeriodStorageKey(abonentOrId);
+    if (!key) return { ok: false, error: "UID_REQUIRED", from: "", to: "" };
+    var raw = _getRawScoped(key);
+    if (!raw) return { ok: false, error: "PERIOD_REQUIRED", from: "", to: "" };
+    var obj = null;
+    try { obj = JSON.parse(raw); } catch (e) { obj = null; }
+    var from = String(obj && obj.from || "").trim();
+    var to = String(obj && obj.to || "").trim();
+    if (!_isValidIsoPeriod(from, to)) return { ok: false, error: "PERIOD_INVALID", from: from, to: to };
+    return { ok: true, from: from, to: to, storageKey: key };
+  }
+
+  function buildAbonentSummaryAfterExplicitRecalc(abonentOrId, from, to) {
+    var found = _findAbonentByIdOrUid(abonentOrId);
+    var abonentId = String(found && found.id || (typeof abonentOrId === "object" ? abonentOrId && abonentOrId.id : abonentOrId) || "").trim();
+    if (!abonentId) throw new Error("ABONENT_ID_REQUIRED");
+    if (!window.JKHCalcEngine || typeof window.JKHCalcEngine.loadPaymentsForAbonent !== "function" || typeof window.JKHCalcEngine.calcTotalsAsOfAdjusted !== "function") {
+      throw new Error("CALC_ENGINE_UNAVAILABLE");
+    }
+    var asOf = _dateFromIsoLocal(to);
+    if (!asOf) throw new Error("PERIOD_INVALID");
+    var rows = window.JKHCalcEngine.loadPaymentsForAbonent(String(abonentId));
+    var totals = window.JKHCalcEngine.calcTotalsAsOfAdjusted(rows, asOf, {
+      abonentId: String(abonentId),
+      applyAdvanceOffset: true,
+      allowNegativePrincipal: true
+    });
+    var principal = Number(totals && totals.principal);
+    var penalty = Number(totals && totals.penaltyDebt);
+    var total = Number(totals && totals.total);
+    if (!Number.isFinite(principal) || !Number.isFinite(penalty) || !Number.isFinite(total)) {
+      throw new Error("CALC_TOTALS_INVALID");
+    }
+    return {
+      status: "fresh",
+      reason: "OK",
+      summary_status: "fresh",
+      summary_reason: "OK",
+      period: { from: String(from || ""), to: String(to || "") },
+      total_debt: total,
+      penalty: penalty,
+      totals: {
+        principal: principal,
+        penalty: penalty,
+        total: total
+      },
+      calc_engine_version: "JKHCalcEngine",
+      generated_at: new Date().toISOString()
+    };
+  }
+
+  async function recalcAbonentSummaryExplicit(abonentOrId, options) {
+    var opts = options || {};
+    var period = opts.period && typeof opts.period === "object"
+      ? { ok: _isValidIsoPeriod(opts.period.from, opts.period.to), from: String(opts.period.from || ""), to: String(opts.period.to || ""), error: "PERIOD_INVALID" }
+      : _readAbonentCalcPeriod(abonentOrId);
+    var summary = null;
+
+    try {
+      if (!period.ok) throw new Error(period.error || "PERIOD_INVALID");
+      summary = buildAbonentSummaryAfterExplicitRecalc(abonentOrId, period.from, period.to);
+    } catch (e) {
+      var reason = _summaryCalcErrorCode(e);
+      summary = {
+        status: "error",
+        reason: reason,
+        summary_status: "error",
+        summary_reason: reason,
+        period: { from: String(period.from || ""), to: String(period.to || "") },
+        calc_engine_version: "JKHCalcEngine",
+        generated_at: new Date().toISOString()
+      };
+    }
+
+    var saveResult = await saveAbonentSummaryAfterRecalc(abonentOrId, summary);
+    return {
+      ok: !!(saveResult && saveResult.ok === true),
+      summary: summary,
+      save: saveResult,
+      status: summary.summary_status || summary.status || "error",
+      reason: summary.summary_reason || summary.reason || ""
+    };
+  }
+
+
+
   // ============================================================
   // Service layer API (CANON v1.6)
   // ============================================================
@@ -1357,6 +1489,9 @@
     resolvePaymentLedgerKey: resolvePaymentLedgerKey,
     readPaymentLedger: readPaymentLedger,
     loadAbonentSummaryPage: loadAbonentSummaryPage,
+    validateAbonentSummaryRecalcBatch: validateAbonentSummaryRecalcBatch,
+    buildAbonentSummaryAfterExplicitRecalc: buildAbonentSummaryAfterExplicitRecalc,
+    recalcAbonentSummaryExplicit: recalcAbonentSummaryExplicit,
     saveAbonentSummaryAfterRecalc: saveAbonentSummaryAfterRecalc,
     markAbonentSummaryDirty: markAbonentSummaryDirty,
     writePaymentLedger: writePaymentLedger,
