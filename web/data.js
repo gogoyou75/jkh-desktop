@@ -1579,6 +1579,7 @@
 
   function buildAbonentSummaryAfterExplicitRecalc(abonentOrId, from, to) {
     var found = _findAbonentByIdOrUid(abonentOrId);
+    var abonent = found && found.abonent ? found.abonent : (abonentOrId && typeof abonentOrId === "object" ? abonentOrId : null);
     var abonentId = String(found && found.id || (typeof abonentOrId === "object" ? abonentOrId && abonentOrId.id : abonentOrId) || "").trim();
     if (!abonentId) throw new Error("ABONENT_ID_REQUIRED");
     if (!window.JKHCalcEngine || typeof window.JKHCalcEngine.loadPaymentsForAbonent !== "function" || typeof window.JKHCalcEngine.calcTotalsAsOfAdjusted !== "function") {
@@ -1599,12 +1600,47 @@
     if (!Number.isFinite(principal) || !Number.isFinite(penalty) || !Number.isFinite(total)) {
       throw new Error("CALC_TOTALS_INVALID");
     }
+    var periodFrom = String(from || "");
+    var periodTo = String(to || "");
+    var accountUid = String(abonent && (abonent.uid || abonent.account_uid || abonent.accountUid) || "").trim();
+    var accountNumber = String(abonent && (abonent.account_number || abonent.accountNumber || abonent.ls || abonent.id) || abonentId || "").trim();
+    var fio = String(abonent && (abonent.fio || abonent.full_name || abonent.fullName || abonent.name_full || abonent.display_name) || "").trim();
+    var fioParts = fio ? fio.split(/\s+/) : [];
+    var fam = String(abonent && (abonent.fam || abonent.last_name || abonent.lastName) || fioParts[0] || "").trim();
+    var name = String(abonent && (abonent.name || abonent.first_name || abonent.firstName) || fioParts[1] || "").trim();
+    var otch = String(abonent && (abonent.otch || abonent.middle_name || abonent.middleName) || fioParts.slice(2).join(" ") || "").trim();
+    var regnum = String(abonent && (abonent.regnum || abonent.premiseRegnum) || "").trim();
     return {
       status: "fresh",
       reason: "OK",
       summary_status: "fresh",
       summary_reason: "OK",
-      period: { from: String(from || ""), to: String(to || "") },
+      start_date: periodFrom,
+      end_date: periodTo,
+      period_start: periodFrom,
+      period_end: periodTo,
+      regnum: regnum,
+      flat_reg: regnum,
+      premise_regnum: regnum,
+      account_uid: accountUid,
+      account_number: accountNumber,
+      id: abonentId,
+      fio: fio,
+      fam: fam,
+      name: name,
+      otch: otch,
+      abonent: {
+        id: abonentId,
+        account_number: accountNumber,
+        account_uid: accountUid,
+        fio: fio,
+        fam: fam,
+        name: name,
+        otch: otch,
+        regnum: regnum,
+        premise_regnum: regnum
+      },
+      period: { from: periodFrom, to: periodTo },
       total_debt: total,
       total_penalty: penalty,
       total_accrued: periodTotals.total_accrued,
