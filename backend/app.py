@@ -1227,6 +1227,64 @@ def abonent_summary_mark_dirty():
     )
 
 
+@app.post("/api/abonent_summary/recalc_batch")
+def abonent_summary_recalc_batch():
+    user, err = _require_user()
+    if err:
+        return err
+
+    body = request.get_json(silent=True) or {}
+    if not isinstance(body, dict):
+        return jsonify(ok=False, error="summary_invalid"), 400
+
+    raw_uids = body.get("account_uids")
+    if raw_uids is None:
+        raw_uids = body.get("uids")
+    if raw_uids is None:
+        raw_uids = body.get("account_uid")
+    if isinstance(raw_uids, str):
+        raw_uids = [raw_uids]
+    if not isinstance(raw_uids, list):
+        return jsonify(ok=False, error="account_uids_required"), 400
+
+    requested = []
+    seen = set()
+    for value in raw_uids:
+        uid = _norm_text(value)
+        if not uid or uid in seen:
+            continue
+        seen.add(uid)
+        requested.append(uid)
+
+    if not requested:
+        return jsonify(ok=False, error="account_uids_required"), 400
+
+    targets = _owner_abonent_summary_targets(user.id)
+    targets_by_uid = {_norm_text(t.get("account_uid")): t for t in targets if _norm_text(t.get("account_uid"))}
+
+    items = []
+    allowed_uids = []
+    for uid in requested:
+        target = targets_by_uid.get(uid)
+        if target:
+            allowed_uids.append(uid)
+            items.append({
+                "account_uid": uid,
+                "abonent_id": _norm_text(target.get("abonent_id")),
+                "account_number": _norm_text(target.get("account_number")),
+                "allowed": True,
+                "status": "allowed",
+            })
+        else:
+            items.append({
+                "account_uid": uid,
+                "allowed": False,
+                "status": "not_found",
+            })
+
+    return jsonify(ok=True, allowed_uids=allowed_uids, items=items)
+
+
 @app.post("/api/abonent_summary/rebuild")
 def abonent_summary_rebuild():
     user, err = _require_user()
