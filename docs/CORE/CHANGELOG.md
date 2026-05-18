@@ -1,4 +1,19 @@
+## 2026-05-18 — Abonent summary: frontend dirty tracking
+
+- Добавлен frontend-сервис `Data.markAbonentSummaryDirty(abonentOrId, reason)` для безопасного вызова `POST /api/abonent_summary/mark_dirty` с `credentials: "include"`.
+- Dirty marking подключён после финансово значимых write-path: ledger/payment table, Excel payments apply, calc period, excludes, moratorium, transfer/merge responsibility.
+- Ошибки dirty endpoint логируются как `[summary][mark-dirty-failed]` и не блокируют основное сохранение.
+- Зафиксировано, что `abonent_summary` имеет состояния `fresh` / `dirty` / `missing` / `error`; `dirty` не запускает пересчёт, а `fresh` появляется только после явного UID-пересчёта и single upsert.
+
 # CHANGELOG
+
+## 2026-05-17 — Abonent summary single UID integration
+
+- `POST /api/abonent_summary/rebuild` теперь поддерживает два режима: пустой body сохраняет прежний controlled missing rebuild по owner, а body с `account_uid` и `summary` выполняет single upsert только этого UID.
+- Single upsert принимает только owner из серверной сессии, проверяет принадлежность UID текущему owner и сохраняет `summary_json` как derived-cache, полученный после канонического frontend UID-пересчёта.
+- Backend по-прежнему не считает долг, пеню, FIFO и не читает `payments_<uid>`; `GET /api/abonent_summary` остаётся read-only без hidden writes.
+- Карточка абонента после успешного UID-пересчёта отправляет fresh summary через `Data.saveAbonentSummaryAfterRecalc(...)`; fatal error сохраняется как `summary_status = error` / `summary_reason` без подстановки нулевых totals.
+- Добавлены тесты single create/update, owner isolation, spoofing, invalid summary, unknown UID и сохранения legacy controlled missing rebuild.
 
 ## 2026-05-16 — Explicit abonent_summary rebuild write-path
 

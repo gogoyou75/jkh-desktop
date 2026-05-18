@@ -44,6 +44,19 @@ IMPORT_BATCH_CRITICAL_COLUMNS = (
     "error_message",
 )
 
+
+ABONENT_SUMMARY_DIRTY_REASONS = {
+    "PAYMENTS_CHANGED",
+    "IMPORT_PAYMENTS_APPLIED",
+    "CALC_PERIOD_CHANGED",
+    "EXCLUDES_CHANGED",
+    "MORATORIUM_CHANGED",
+    "RESPONSIBILITY_CHANGED",
+    "AUTOACCRUAL_CHANGED",
+    "LEDGER_WRITE",
+    "UNKNOWN_CHANGE",
+}
+
 IMPORT_BATCH_AUDIT_FIELDS_MIGRATION_SQL = (
     "ALTER TABLE import_batches "
     "ADD COLUMN rows_skipped INT NOT NULL DEFAULT 0, "
@@ -221,7 +234,7 @@ def _parse_pagination_args(default_per_page: int = 50, max_per_page: int = 200):
     except (TypeError, ValueError):
         page = 1
     try:
-        per_page = int(request.args.get("per_page", str(default_per_page)))
+        per_page = int(request.args.get("per_page", request.args.get("limit", str(default_per_page))))
     except (TypeError, ValueError):
         per_page = default_per_page
 
@@ -865,6 +878,83 @@ def _summary_identity_value(abonent: dict, keys, fallback: str = ""):
     return fallback
 
 
+
+
+def _owner_abonents_db_v1_summary_targets(owner_id: str):
+    targets = []
+    seen_uids = set()
+
+    row = KVStore.query.filter_by(owner=owner_id, k="abonents_db_v1").first()
+    if not row or not row.v:
+        return targets
+
+    try:
+        obj = json.loads(row.v)
+    except Exception:
+        return targets
+
+    for ls_key, abonent in _extract_abonents_items(obj):
+        if not isinstance(abonent, dict):
+            continue
+        account_uid = _norm_text(abonent.get("uid"))
+        if not account_uid or account_uid in seen_uids:
+            continue
+        seen_uids.add(account_uid)
+
+        key_account_number = _norm_text(ls_key)
+        account_number = _summary_identity_value(
+            abonent,
+            ("account_number", "accountNumber", "ls", "id"),
+            key_account_number,
+        )
+        abonent_id = _summary_identity_value(
+            abonent,
+            ("abonent_id", "abonentId", "id"),
+            key_account_number or account_number,
+        )
+
+        targets.append({
+            "abonent_id": abonent_id,
+            "account_uid": account_uid,
+            "account_number": account_number,
+            "identity": {
+                "abonent_id": abonent_id,
+                "account_uid": account_uid,
+                "account_number": account_number,
+                "fio": _summary_identity_value(abonent, ("fio", "fullName", "full_name")),
+                "address": _summary_identity_value(abonent, ("address", "addr")),
+            },
+        })
+
+    return targets
+
+
+def _dirty_abonent_summary_payload(existing_summary: dict | None, reason: str):
+    payload = existing_summary.copy() if isinstance(existing_summary, dict) else {}
+    for key in (
+        "totals",
+        "total",
+        "total_debt",
+        "total_penalty",
+        "total_accrued",
+        "total_paid",
+        "total_principal",
+        "debt",
+        "penalty",
+        "principal",
+    ):
+        payload.pop(key, None)
+    payload.update({
+        "summary_status": "dirty",
+        "summary_reason": reason,
+        "status": "dirty",
+        "reason": reason,
+        "dirty_at": datetime.utcnow().isoformat() + "Z",
+    })
+    if "period" not in payload or not isinstance(payload.get("period"), dict):
+        payload["period"] = {"from": None, "to": None}
+    return payload
+
 def _owner_abonent_summary_targets(owner_id: str):
     targets = []
     seen_uids = set()
@@ -936,6 +1026,110 @@ def _build_missing_abonent_summary(target: dict):
             "to": None,
         },
     }
+
+def _summary_status_from_payload(summary: dict | None):
+    if not isinstance(summary, dict):
+        return "missing"
+    status = _norm_text(summary.get("summary_status") or summary.get("status")).lower()
+    if status in {"fresh", "dirty", "missing", "error"}:
+        return status
+    return "missing"
+
+
+def _summary_without_stale_totals(summary: dict | None):
+    payload = summary.copy() if isinstance(summary, dict) else {}
+    status = _summary_status_from_payload(payload)
+    payload["summary_status"] = status
+    payload["status"] = status
+    if status != "fresh":
+        for key in (
+            "totals",
+            "total",
+            "total_debt",
+            "total_penalty",
+            "total_accrued",
+            "total_paid",
+            "total_principal",
+            "debt",
+            "penalty",
+            "principal",
+            "nachisleno",
+            "oplacheno",
+            "accrued",
+            "paid",
+            "accrued_total",
+            "paid_total",
+            "accruedTotal",
+            "paidTotal",
+        ):
+            payload.pop(key, None)
+    return payload
+
+
+def _summary_from_row_or_missing(row: AbonentSummary | None, target: dict):
+    if not row:
+        return _build_missing_abonent_summary(target)
+    try:
+        summary = json.loads(row.summary_json or "{}")
+    except (TypeError, ValueError):
+        summary = {"summary_status": "error", "summary_reason": "SUMMARY_JSON_INVALID"}
+    return _summary_without_stale_totals(summary)
+
+
+def _parse_summary_status_filter(raw_value: str):
+    raw = _norm_text(raw_value).lower()
+    if not raw:
+        return None
+    parts = [x.strip() for x in re.split(r"[,\s]+", raw) if x.strip()]
+    statuses = set()
+    for part in parts:
+        if part in {"stale", "устаревшие", "устаревший"}:
+            statuses.update({"dirty", "missing", "error"})
+        elif part in {"fresh", "dirty", "missing", "error"}:
+            statuses.add(part)
+    return statuses if statuses else None
+
+
+def _target_matches_abonent_query(target: dict, query_text: str):
+    q = _norm_text(query_text).lower()
+    if not q:
+        return True
+    identity = target.get("identity") if isinstance(target.get("identity"), dict) else {}
+    values = [
+        target.get("abonent_id"),
+        target.get("account_uid"),
+        target.get("account_number"),
+        identity.get("fio"),
+        identity.get("address"),
+    ]
+    haystack = " ".join(_norm_text(value).lower() for value in values)
+    tokens = [x for x in re.split(r"\s+", q) if x]
+    return all(token in haystack for token in tokens)
+
+
+def _abonent_index_payload(target: dict, summary: dict):
+    identity = target.get("identity") if isinstance(target.get("identity"), dict) else {}
+    summary_payload = _summary_without_stale_totals(summary)
+    if "abonent" not in summary_payload or not isinstance(summary_payload.get("abonent"), dict):
+        summary_payload["abonent"] = {
+            "abonent_id": _norm_text(identity.get("abonent_id") or target.get("abonent_id")),
+            "account_uid": _norm_text(identity.get("account_uid") or target.get("account_uid")),
+            "account_number": _norm_text(identity.get("account_number") or target.get("account_number")),
+            "fio": _norm_text(identity.get("fio")),
+            "address": _norm_text(identity.get("address")),
+        }
+    if not _norm_text(summary_payload.get("fio")) and _norm_text(identity.get("fio")):
+        summary_payload["fio"] = _norm_text(identity.get("fio"))
+    if not _norm_text(summary_payload.get("address")) and _norm_text(identity.get("address")):
+        summary_payload["address"] = _norm_text(identity.get("address"))
+    return {
+        "abonent_id": _norm_text(target.get("abonent_id")),
+        "account_uid": _norm_text(target.get("account_uid")),
+        "account_number": _norm_text(target.get("account_number")),
+        "summary_status": _summary_status_from_payload(summary_payload),
+        "summary": summary_payload,
+    }
+
 
 def _row_human_error_payload(r: ImportBatchRow):
     return {
@@ -1035,6 +1229,75 @@ def initdb():
     return jsonify(ok=True, message="users + kv_store ready")
 
 
+@app.get("/api/abonents")
+def abonents_index_list():
+    # CRITICAL GUARD: lightweight index endpoint is a read-only list transport.
+    # Owner is always taken from session; never trust owner/query owner from client.
+    # Do not read payments_<uid>, do not run recalculation, and do not expose stale totals.
+    user, err = _require_user()
+    if err:
+        return err
+
+    owner = user.id
+    page, per_page = _parse_pagination_args()
+    query_text = request.args.get("query", "")
+    status_filter = _parse_summary_status_filter(
+        request.args.get("summary_status") or request.args.get("status") or ""
+    )
+
+    targets = [t for t in _owner_abonent_summary_targets(owner) if _target_matches_abonent_query(t, query_text)]
+    start = (page - 1) * per_page
+
+    def load_summaries_by_uid(page_targets):
+        uids = [_norm_text(t.get("account_uid")) for t in page_targets if _norm_text(t.get("account_uid"))]
+        if not uids:
+            return {}
+        summary_rows = (
+            AbonentSummary.query
+            .filter_by(owner_id=owner)
+            .filter(AbonentSummary.account_uid.in_(uids))
+            .order_by(AbonentSummary.updated_at.desc(), AbonentSummary.id.desc())
+            .all()
+        )
+        summaries = {}
+        for row in summary_rows:
+            uid = _norm_text(row.account_uid)
+            if uid and uid not in summaries:
+                summaries[uid] = row
+        return summaries
+
+    if status_filter is None:
+        total = len(targets)
+        page_targets = targets[start:start + per_page]
+        summaries_by_uid = load_summaries_by_uid(page_targets)
+        page_pairs = [
+            (target, _summary_from_row_or_missing(summaries_by_uid.get(_norm_text(target.get("account_uid"))), target))
+            for target in page_targets
+        ]
+    else:
+        # summary_status filtering must include missing summaries. Therefore only
+        # this branch inspects summaries for all query-matched targets; the
+        # default list path joins summaries for the requested page only.
+        summaries_by_uid = load_summaries_by_uid(targets)
+        filtered = []
+        for target in targets:
+            uid = _norm_text(target.get("account_uid"))
+            summary = _summary_from_row_or_missing(summaries_by_uid.get(uid), target)
+            status = _summary_status_from_payload(summary)
+            if status not in status_filter:
+                continue
+            filtered.append((target, summary))
+
+        total = len(filtered)
+        page_pairs = filtered[start:start + per_page]
+
+    return jsonify(
+        ok=True,
+        items=[_abonent_index_payload(target, summary) for target, summary in page_pairs],
+        pagination=_pagination_payload(page, per_page, total),
+    )
+
+
 @app.get("/api/abonent_summary")
 def abonent_summary_list():
     # CRITICAL GUARD: Summary API is read-only derived-cache transport.
@@ -1078,6 +1341,125 @@ def abonent_summary_list():
     )
 
 
+@app.post("/api/abonent_summary/mark_dirty")
+def abonent_summary_mark_dirty():
+    user, err = _require_user()
+    if err:
+        return err
+
+    owner = user.id
+    counters = {"created": 0, "updated": 0, "skipped": 0, "errors": 0}
+    body = request.get_json(silent=True) or {}
+    if not isinstance(body, dict):
+        return jsonify(ok=False, error="summary_invalid", counters=counters), 400
+
+    account_uid = _norm_text(body.get("account_uid"))
+    if not account_uid:
+        return jsonify(ok=False, error="account_uid_required", counters=counters), 400
+
+    reason = _norm_text(body.get("reason")) or "UNKNOWN_CHANGE"
+    if reason not in ABONENT_SUMMARY_DIRTY_REASONS:
+        return jsonify(ok=False, error="invalid_reason", counters=counters), 400
+
+    try:
+        targets = _owner_abonents_db_v1_summary_targets(owner)
+        target = next((t for t in targets if _norm_text(t.get("account_uid")) == account_uid), None)
+        if not target:
+            return jsonify(ok=False, error="uid_not_found"), 404
+
+        row = AbonentSummary.query.filter_by(owner_id=owner, account_uid=account_uid).order_by(AbonentSummary.id.asc()).first()
+        if row:
+            try:
+                existing_summary = json.loads(row.summary_json or "{}")
+            except (TypeError, ValueError):
+                existing_summary = {}
+            row.abonent_id = _norm_text(target.get("abonent_id"))
+            row.account_number = _norm_text(target.get("account_number"))
+            row.summary_json = json.dumps(_dirty_abonent_summary_payload(existing_summary, reason), ensure_ascii=False, sort_keys=True)
+            counters["updated"] += 1
+        else:
+            db.session.add(AbonentSummary(
+                owner_id=owner,
+                abonent_id=_norm_text(target.get("abonent_id")),
+                account_uid=account_uid,
+                account_number=_norm_text(target.get("account_number")),
+                summary_json=json.dumps(_dirty_abonent_summary_payload(None, reason), ensure_ascii=False, sort_keys=True),
+            ))
+            counters["created"] += 1
+
+        db.session.commit()
+    except SQLAlchemyError as exc:
+        db.session.rollback()
+        app.logger.exception("abonent_summary mark_dirty failed for owner=%s", owner)
+        return jsonify(ok=False, error="summary_mark_dirty_failed", counters=counters, details=str(exc)), 500
+
+    return jsonify(
+        ok=True,
+        account_uid=account_uid,
+        status="dirty",
+        reason=reason,
+        counters=counters,
+    )
+
+
+@app.post("/api/abonent_summary/recalc_batch")
+def abonent_summary_recalc_batch():
+    user, err = _require_user()
+    if err:
+        return err
+
+    body = request.get_json(silent=True) or {}
+    if not isinstance(body, dict):
+        return jsonify(ok=False, error="summary_invalid"), 400
+
+    raw_uids = body.get("account_uids")
+    if raw_uids is None:
+        raw_uids = body.get("uids")
+    if raw_uids is None:
+        raw_uids = body.get("account_uid")
+    if isinstance(raw_uids, str):
+        raw_uids = [raw_uids]
+    if not isinstance(raw_uids, list):
+        return jsonify(ok=False, error="account_uids_required"), 400
+
+    requested = []
+    seen = set()
+    for value in raw_uids:
+        uid = _norm_text(value)
+        if not uid or uid in seen:
+            continue
+        seen.add(uid)
+        requested.append(uid)
+
+    if not requested:
+        return jsonify(ok=False, error="account_uids_required"), 400
+
+    targets = _owner_abonent_summary_targets(user.id)
+    targets_by_uid = {_norm_text(t.get("account_uid")): t for t in targets if _norm_text(t.get("account_uid"))}
+
+    items = []
+    allowed_uids = []
+    for uid in requested:
+        target = targets_by_uid.get(uid)
+        if target:
+            allowed_uids.append(uid)
+            items.append({
+                "account_uid": uid,
+                "abonent_id": _norm_text(target.get("abonent_id")),
+                "account_number": _norm_text(target.get("account_number")),
+                "allowed": True,
+                "status": "allowed",
+            })
+        else:
+            items.append({
+                "account_uid": uid,
+                "allowed": False,
+                "status": "not_found",
+            })
+
+    return jsonify(ok=True, allowed_uids=allowed_uids, items=items)
+
+
 @app.post("/api/abonent_summary/rebuild")
 def abonent_summary_rebuild():
     user, err = _require_user()
@@ -1086,8 +1468,48 @@ def abonent_summary_rebuild():
 
     owner = user.id
     counters = {"created": 0, "updated": 0, "skipped": 0, "errors": 0}
+    body = request.get_json(silent=True)
 
     try:
+        if body:
+            if not isinstance(body, dict):
+                return jsonify(ok=False, error="summary_invalid", counters=counters), 400
+
+            account_uid = _norm_text(body.get("account_uid"))
+            if not account_uid:
+                return jsonify(ok=False, error="account_uid_required", counters=counters), 400
+
+            summary = body.get("summary")
+            if not isinstance(summary, dict):
+                return jsonify(ok=False, error="summary_invalid", counters=counters), 400
+
+            targets = _owner_abonent_summary_targets(owner)
+            target = next((t for t in targets if _norm_text(t.get("account_uid")) == account_uid), None)
+            if not target:
+                return jsonify(ok=False, error="uid_not_found", counters=counters), 404
+
+            abonent_id = _norm_text(body.get("abonent_id")) or _norm_text(target.get("abonent_id"))
+            account_number = _norm_text(body.get("account_number")) or _norm_text(target.get("account_number"))
+            summary_json = json.dumps(summary, ensure_ascii=False, sort_keys=True)
+            row = AbonentSummary.query.filter_by(owner_id=owner, account_uid=account_uid).order_by(AbonentSummary.id.asc()).first()
+            if row:
+                row.abonent_id = abonent_id
+                row.account_number = account_number
+                row.summary_json = summary_json
+                counters["updated"] += 1
+            else:
+                db.session.add(AbonentSummary(
+                    owner_id=owner,
+                    abonent_id=abonent_id,
+                    account_uid=account_uid,
+                    account_number=account_number,
+                    summary_json=summary_json,
+                ))
+                counters["created"] += 1
+
+            db.session.commit()
+            return jsonify(ok=True, counters=counters)
+
         targets = _owner_abonent_summary_targets(owner)
         for target in targets:
             account_uid = _norm_text(target.get("account_uid"))

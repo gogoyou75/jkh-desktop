@@ -589,6 +589,7 @@
         date: opts.date || ""
       }, opts.event || {}));
     }
+    if (ok !== false) markAbonentSummaryDirtyLater(abonent || id, opts.summaryDirtyReason || "LEDGER_WRITE");
     return ok;
   }
 
@@ -1214,19 +1215,27 @@
   async function loadAbonentSummaryPage(options) {
     var opts = options || {};
     var page = parseInt(opts.page, 10);
-    var perPage = parseInt(opts.per_page, 10);
+    var perPage = parseInt(opts.per_page || opts.limit, 10);
     if (!page || page < 1) page = 1;
     if (!perPage || perPage < 1) perPage = 20;
 
     var params = new URLSearchParams();
     params.set("page", String(page));
-    params.set("per_page", String(perPage));
 
-    if (opts.abonent_id) params.set("abonent_id", String(opts.abonent_id));
-    if (opts.account_uid) params.set("account_uid", String(opts.account_uid));
-    if (opts.account_number) params.set("account_number", String(opts.account_number));
+    var exactSummaryLookup = !!(opts.abonent_id || opts.account_uid || opts.account_number);
+    if (exactSummaryLookup) {
+      params.set("per_page", String(perPage));
+      if (opts.abonent_id) params.set("abonent_id", String(opts.abonent_id));
+      if (opts.account_uid) params.set("account_uid", String(opts.account_uid));
+      if (opts.account_number) params.set("account_number", String(opts.account_number));
+    } else {
+      params.set("limit", String(perPage));
+      if (opts.query) params.set("query", String(opts.query));
+      if (opts.status) params.set("status", String(opts.status));
+      if (opts.summary_status) params.set("summary_status", String(opts.summary_status));
+    }
 
-    var res = await fetch("/api/abonent_summary?" + params.toString(), {
+    var res = await fetch((exactSummaryLookup ? "/api/abonent_summary?" : "/api/abonents?") + params.toString(), {
       method: "GET",
       credentials: "include"
     });
@@ -1238,6 +1247,484 @@
     }
     return data;
   }
+
+  async function markAbonentSummaryDirty(abonentOrId, reason) {
+    try {
+      var found = _findAbonentByIdOrUid(abonentOrId);
+      var abonent = found && found.abonent ? found.abonent : null;
+      var abonentId = String(found && found.id || (abonent && abonent.id) || (typeof abonentOrId === "object" ? abonentOrId && abonentOrId.id : abonentOrId) || "").trim();
+      var uid = String(abonent && abonent.uid || (typeof abonentOrId === "object" ? abonentOrId && abonentOrId.uid : "") || "").trim();
+
+      if (!isValidUid(uid)) {
+        try { console.warn("[summary][mark-dirty-failed]", { reason: "INVALID_UID", abonentId: abonentId, uid: uid }); } catch (eWarn) {}
+        return { ok: false, skipped: true, reason: "INVALID_UID" };
+      }
+
+      var payload = {
+        account_uid: uid,
+        reason: String(reason || "UNKNOWN_CHANGE").trim() || "UNKNOWN_CHANGE"
+      };
+
+      var res = await fetch("/api/abonent_summary/mark_dirty", {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      });
+      var text = await res.text();
+      var data = null;
+      try { data = text ? JSON.parse(text) : null; } catch (eParse) { data = null; }
+      if (!res.ok || !data || data.ok === false) {
+        throw new Error((data && data.error) || ("HTTP_" + res.status));
+      }
+      return data;
+    } catch (e) {
+      try { console.warn("[summary][mark-dirty-failed]", { reason: String(e && e.message || e) }); } catch (eLog) {}
+      return { ok: false, error: String(e && e.message || e) };
+    }
+  }
+
+  function markAbonentSummaryDirtyLater(abonentOrId, reason) {
+    try {
+      var p = markAbonentSummaryDirty(abonentOrId, reason);
+      if (p && typeof p.catch === "function") p.catch(function(e){ try { console.warn("[summary][mark-dirty-failed]", e); } catch (_) {} });
+    } catch (e) {
+      try { console.warn("[summary][mark-dirty-failed]", e); } catch (_) {}
+    }
+  }
+
+  async function saveAbonentSummaryAfterRecalc(abonentOrId, summary) {
+    try {
+      var found = _findAbonentByIdOrUid(abonentOrId);
+      var abonent = found && found.abonent ? found.abonent : null;
+      var abonentId = String(found && found.id || (abonent && abonent.id) || (typeof abonentOrId === "object" ? abonentOrId && abonentOrId.id : abonentOrId) || "").trim();
+      var uid = String(abonent && abonent.uid || (typeof abonentOrId === "object" ? abonentOrId && abonentOrId.uid : "") || "").trim();
+
+      if (!isValidUid(uid)) {
+        try { console.warn("[summary][save-failed]", { reason: "INVALID_UID", abonentId: abonentId, uid: uid }); } catch (eWarn) {}
+        return { ok: false, skipped: true, reason: "INVALID_UID" };
+      }
+      if (!summary || typeof summary !== "object" || Array.isArray(summary)) {
+        try { console.warn("[summary][save-failed]", { reason: "SUMMARY_INVALID", abonentId: abonentId, uid: uid }); } catch (eSummary) {}
+        return { ok: false, skipped: true, reason: "SUMMARY_INVALID" };
+      }
+
+      var payload = {
+        account_uid: uid,
+        abonent_id: String(abonentId || abonent && abonent.id || ""),
+        account_number: String(abonent && (abonent.account_number || abonent.accountNumber || abonent.ls || abonent.id) || abonentId || ""),
+        summary: summary
+      };
+
+      var res = await fetch("/api/abonent_summary/rebuild", {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      });
+      var text = await res.text();
+      var data = null;
+      try { data = text ? JSON.parse(text) : null; } catch (eParse) { data = null; }
+      if (!res.ok || !data || data.ok === false) {
+        throw new Error((data && data.error) || ("HTTP_" + res.status));
+      }
+      return data;
+    } catch (e) {
+      try { console.warn("[summary][save-failed]", { reason: String(e && e.message || e) }); } catch (eLog) {}
+      return { ok: false, error: String(e && e.message || e) };
+    }
+  }
+
+
+  async function validateAbonentSummaryRecalcBatch(uids) {
+    var list = Array.isArray(uids) ? uids : [];
+    var payload = { account_uids: list.map(function (x) { return String(x || "").trim(); }).filter(Boolean) };
+    if (!payload.account_uids.length) return { ok: false, error: "account_uids_required", allowed_uids: [], items: [] };
+
+    var res = await fetch("/api/abonent_summary/recalc_batch", {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+    var text = await res.text();
+    var data = null;
+    try { data = text ? JSON.parse(text) : null; } catch (eParse) { data = null; }
+    if (!res.ok || !data || data.ok === false) {
+      throw new Error((data && data.error) || ("HTTP_" + res.status));
+    }
+    return data;
+  }
+
+  function _dateFromIsoLocal(value) {
+    var s = String(value || "").trim();
+    var m = s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (!m) return null;
+    var d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]), 12, 0, 0);
+    return d.toString() === "Invalid Date" ? null : d;
+  }
+
+  function _isValidIsoPeriod(from, to) {
+    var d1 = _dateFromIsoLocal(from);
+    var d2 = _dateFromIsoLocal(to);
+    return !!(d1 && d2 && d1.getTime() <= d2.getTime());
+  }
+
+  function _summaryNumber(value) {
+    if (value === null || value === undefined || value === "") return 0;
+    var n = Number(String(value).replace(",", "."));
+    return Number.isFinite(n) ? n : 0;
+  }
+
+  function _summaryMonthKey(row) {
+    var y = Number(row && row.year);
+    var m = Number(row && row.month);
+    if (!Number.isFinite(y) || !Number.isFinite(m) || y < 1 || m < 1 || m > 12) return "";
+    return String(Math.trunc(y)).padStart(4, "0") + "-" + String(Math.trunc(m)).padStart(2, "0");
+  }
+
+  function _summaryPaidDate(row) {
+    var raw = row && row.paid_date;
+    if (!raw) return null;
+    var d = null;
+    if (window.JKHCalcEngine && typeof window.JKHCalcEngine.parseDateAnyToDate === "function") {
+      d = window.JKHCalcEngine.parseDateAnyToDate(raw);
+    } else {
+      d = _dateFromIsoLocal(raw);
+    }
+    return (d && d.toString() !== "Invalid Date") ? d : null;
+  }
+
+  function _summaryPeriodTotals(rows, from, to) {
+    var fromMonth = String(from || "").slice(0, 7);
+    var toMonth = String(to || "").slice(0, 7);
+    var fromDate = _dateFromIsoLocal(from);
+    var toDate = _dateFromIsoLocal(to);
+    var totalAccrued = 0;
+    var totalPaid = 0;
+
+    if (!Array.isArray(rows)) rows = [];
+    for (var i = 0; i < rows.length; i++) {
+      var row = rows[i] || {};
+      var monthKey = _summaryMonthKey(row);
+      var inMonthPeriod = !!(monthKey && monthKey >= fromMonth && monthKey <= toMonth);
+      if (inMonthPeriod) {
+        totalAccrued += _summaryNumber(row.accrued);
+      }
+
+      var paid = _summaryNumber(row.paid);
+      if (Math.abs(paid) <= 0.0000001) continue;
+      var paidDate = _summaryPaidDate(row);
+      if (paidDate && fromDate && toDate) {
+        if (paidDate.getTime() >= fromDate.getTime() && paidDate.getTime() <= toDate.getTime()) {
+          totalPaid += paid;
+        }
+      } else if (inMonthPeriod) {
+        totalPaid += paid;
+      }
+    }
+
+    return {
+      total_accrued: Math.round(totalAccrued * 100) / 100,
+      total_paid: Math.round(totalPaid * 100) / 100
+    };
+  }
+
+  function _summaryCalcErrorCode(e) {
+    if (e && e.code) return String(e.code);
+    var msg = String(e && e.message || e || "CALC_FAILED");
+    if (msg.indexOf("MISSING_REQUIRED_RATE") >= 0) return "MISSING_REQUIRED_RATE";
+    if (msg.indexOf("RATES_JSON_INVALID") >= 0) return "RATES_JSON_INVALID";
+    if (msg.indexOf("EXCLUDES_JSON_INVALID") >= 0) return "EXCLUDES_JSON_INVALID";
+    if (msg.indexOf("EXCLUDES_INVALID") >= 0) return "EXCLUDES_INVALID";
+    if (msg.indexOf("LEDGER_JSON_INVALID") >= 0) return "LEDGER_JSON_INVALID";
+    return msg || "CALC_FAILED";
+  }
+
+  function _todayIsoLocal() {
+    var d = new Date();
+    var y = d.getFullYear();
+    var m = String(d.getMonth() + 1).padStart(2, "0");
+    var day = String(d.getDate()).padStart(2, "0");
+    return y + "-" + m + "-" + day;
+  }
+
+  function _dateAnyToIsoLocal(value) {
+    var s = String(value || "").trim();
+    if (!s) return "";
+    if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+    var m = s.match(/^(\d{1,2})\.(\d{1,2})\.(\d{4})$/);
+    if (m) return m[3] + "-" + String(m[2]).padStart(2, "0") + "-" + String(m[1]).padStart(2, "0");
+    var d = null;
+    if (window.JKHCalcEngine && typeof window.JKHCalcEngine.parseDateAnyToDate === "function") {
+      d = window.JKHCalcEngine.parseDateAnyToDate(s);
+    }
+    if (d && d.toString() !== "Invalid Date") {
+      return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
+    }
+    return "";
+  }
+
+  function _normalizeSummaryPeriodCandidate(from, to) {
+    var f = _dateAnyToIsoLocal(from);
+    var t = _dateAnyToIsoLocal(to) || _todayIsoLocal();
+    if (!_isValidIsoPeriod(f, t)) return null;
+    return { ok: true, from: f, to: t, source: "fallback" };
+  }
+
+  function _readAbonentCalcPeriod(abonentOrId) {
+    var key = resolveCalcPeriodStorageKey(abonentOrId);
+    if (!key) return { ok: false, error: "UID_REQUIRED", from: "", to: "" };
+    var raw = _getRawScoped(key);
+    if (!raw) return { ok: false, error: "PERIOD_REQUIRED", from: "", to: "", missing: true, storageKey: key };
+    var obj = null;
+    try { obj = JSON.parse(raw); } catch (e) { obj = null; }
+    var from = String(obj && obj.from || "").trim();
+    var to = String(obj && obj.to || "").trim();
+    if (!_isValidIsoPeriod(from, to)) return { ok: false, error: "PERIOD_INVALID", from: from, to: to, storageKey: key };
+    return { ok: true, from: from, to: to, storageKey: key };
+  }
+
+  function _extractPeriodFromSummaryObject(summary) {
+    if (!summary || typeof summary !== "object") return null;
+    var p = summary.period && typeof summary.period === "object" ? summary.period : null;
+    return _normalizeSummaryPeriodCandidate(
+      p && (p.from || p.period_from || p.date_from || p.start_date) || summary.period_from || summary.period_start || summary.date_from || summary.start_date,
+      p && (p.to || p.period_to || p.date_to || p.end_date || p.as_of) || summary.period_to || summary.period_end || summary.date_to || summary.end_date || summary.as_of
+    );
+  }
+
+  async function _readCurrentAbonentSummaryPeriod(abonentOrId) {
+    try {
+      var found = _findAbonentByIdOrUid(abonentOrId);
+      var abonent = found && found.abonent ? found.abonent : null;
+      var uid = String(abonent && abonent.uid || (typeof abonentOrId === "object" ? abonentOrId && abonentOrId.uid : "") || "").trim();
+      var abonentId = String(found && found.id || (abonent && abonent.id) || (typeof abonentOrId === "object" ? abonentOrId && abonentOrId.id : abonentOrId) || "").trim();
+      var opts = { page: 1, per_page: 1 };
+      if (isValidUid(uid)) opts.account_uid = uid;
+      else if (abonentId) opts.abonent_id = abonentId;
+      else return null;
+      var payload = await loadAbonentSummaryPage(opts);
+      var items = Array.isArray(payload && payload.items) ? payload.items : [];
+      var item = items[0] || null;
+      var summary = item && item.summary && typeof item.summary === "object" ? item.summary : null;
+      var period = _extractPeriodFromSummaryObject(summary);
+      if (period) period.source = "summary";
+      return period;
+    } catch (e) {
+      try { console.warn("[summary][period-fallback-summary-failed]", { reason: String(e && e.message || e) }); } catch (eLog) {}
+      return null;
+    }
+  }
+
+  function _readActiveResponsibilityPeriod(abonentOrId) {
+    var found = _findAbonentByIdOrUid(abonentOrId);
+    var id = String(found && found.id || (typeof abonentOrId === "object" ? abonentOrId && abonentOrId.id : abonentOrId) || "").trim();
+    if (!id) return null;
+    var db = window.AbonentsDB || {};
+    var abonent = found && found.abonent ? found.abonent : (db.abonents && db.abonents[id] ? db.abonents[id] : {});
+    var linksRaw = Array.isArray(db.links) ? db.links : (Array.isArray(db.abonentPremiseLinks) ? db.abonentPremiseLinks : []);
+    var links = linksRaw.filter(function (l) {
+      var aId = l && (l.abonentId || l.abonent_id || l.abonent || l.accountId || l.ls || l.personalAccount);
+      return String(aId || "") === id;
+    }).map(function (l) {
+      return {
+        from: _dateAnyToIsoLocal(l && (l.dateFrom || l.from || l.start || l.startDate || l.date_start || l.respFrom)),
+        to: _dateAnyToIsoLocal(l && (l.dateTo || l.to || l.end || l.endDate || l.date_end || l.respTo))
+      };
+    }).filter(function (l) { return !!l.from; });
+
+    var strictFrom = _dateAnyToIsoLocal(abonent && (abonent.calcStartDate || abonent.calc_start_date || abonent.calcStart || abonent.calc_start || abonent.startCalc || abonent.start_calc || abonent.dateStartCalc || abonent.date_start_calc || abonent.calcDateStart || abonent.calc_date_start || abonent.calcDate || abonent.calc_date));
+    var strictTo = _dateAnyToIsoLocal(abonent && (abonent.calcEndDate || abonent.calc_end_date || abonent.calcEnd || abonent.calc_end));
+
+    function clamp(range, openEnded) {
+      if (!range || !range.from) return null;
+      var from = range.from;
+      var to = range.to || "";
+      if (strictFrom && strictFrom > from) from = strictFrom;
+      if (strictTo && !openEnded && (!to || strictTo < to)) to = strictTo;
+      return _normalizeSummaryPeriodCandidate(from, to);
+    }
+
+    if (links.length) {
+      var active = links.filter(function (l) { return !l.to; });
+      var pick = (active.length ? active : links).sort(function (a, b) { return a.from < b.from ? 1 : -1; })[0];
+      var linkPeriod = clamp({ from: pick.from, to: pick.to || "" }, !pick.to);
+      if (linkPeriod) { linkPeriod.source = "responsibility"; return linkPeriod; }
+    }
+
+    var directPeriod = clamp({
+      from: _dateAnyToIsoLocal(abonent && (abonent.calcStartDate || abonent.calc_start_date || abonent.dateFrom || abonent.date_from || abonent.calcFrom || abonent.calc_from || abonent.startCalc || abonent.start_calc || abonent.dateStartCalc || abonent.date_start_calc || abonent.responsibilityFrom || abonent.respFrom)),
+      to: _dateAnyToIsoLocal(abonent && (abonent.calcEndDate || abonent.calc_end_date || abonent.dateTo || abonent.date_to || abonent.calcTo || abonent.calc_to || abonent.endCalc || abonent.end_calc || abonent.dateEndCalc || abonent.date_end_calc || abonent.responsibilityTo || abonent.respTo))
+    }, !strictTo);
+    if (directPeriod) { directPeriod.source = "responsibility"; return directPeriod; }
+    return null;
+  }
+
+  async function _resolveAbonentSummaryRecalcPeriod(abonentOrId, explicitPeriod) {
+    if (explicitPeriod && typeof explicitPeriod === "object") {
+      return { ok: _isValidIsoPeriod(explicitPeriod.from, explicitPeriod.to), from: String(explicitPeriod.from || ""), to: String(explicitPeriod.to || ""), error: "PERIOD_INVALID" };
+    }
+    var period = _readAbonentCalcPeriod(abonentOrId);
+    if (period.ok || period.error !== "PERIOD_REQUIRED") return period;
+
+    var summaryPeriod = await _readCurrentAbonentSummaryPeriod(abonentOrId);
+    if (summaryPeriod) return summaryPeriod;
+
+    var responsibilityPeriod = _readActiveResponsibilityPeriod(abonentOrId);
+    if (responsibilityPeriod) return responsibilityPeriod;
+
+    return period;
+  }
+
+  function resolveAbonentRegnumForSummary(abonentId, abonent) {
+    function clean(v) { return String(v || "").trim(); }
+
+    var direct = clean(abonent && abonent.regnum) ||
+      clean(abonent && abonent.premiseRegnum) ||
+      clean(abonent && abonent.premise_regnum) ||
+      clean(abonent && abonent.regNumber) ||
+      clean(abonent && abonent.reg_no) ||
+      clean(abonent && abonent.flatReg);
+    if (direct) return direct;
+
+    var id = clean(abonentId);
+    var db = window.AbonentsDB || {};
+    var links = Array.isArray(db.links) ? db.links.filter(function (l) {
+      return clean(l && l.abonentId) === id;
+    }) : [];
+    if (!id || !links.length) return "";
+
+    function linkRegnum(link) {
+      return clean(link && link.regnum);
+    }
+
+    for (var i = links.length - 1; i >= 0; i--) {
+      if (!clean(links[i] && links[i].dateTo) && linkRegnum(links[i])) return linkRegnum(links[i]);
+    }
+
+    for (var j = links.length - 1; j >= 0; j--) {
+      if (linkRegnum(links[j])) return linkRegnum(links[j]);
+    }
+    return "";
+  }
+
+  function buildAbonentSummaryAfterExplicitRecalc(abonentOrId, from, to) {
+    var found = _findAbonentByIdOrUid(abonentOrId);
+    var abonent = found && found.abonent ? found.abonent : (abonentOrId && typeof abonentOrId === "object" ? abonentOrId : null);
+    var abonentId = String(found && found.id || (typeof abonentOrId === "object" ? abonentOrId && abonentOrId.id : abonentOrId) || "").trim();
+    if (!abonentId) throw new Error("ABONENT_ID_REQUIRED");
+    if (!window.JKHCalcEngine || typeof window.JKHCalcEngine.loadPaymentsForAbonent !== "function" || typeof window.JKHCalcEngine.calcTotalsAsOfAdjusted !== "function") {
+      throw new Error("CALC_ENGINE_UNAVAILABLE");
+    }
+    var asOf = _dateFromIsoLocal(to);
+    if (!asOf) throw new Error("PERIOD_INVALID");
+    var rows = window.JKHCalcEngine.loadPaymentsForAbonent(String(abonentId));
+    var totals = window.JKHCalcEngine.calcTotalsAsOfAdjusted(rows, asOf, {
+      abonentId: String(abonentId),
+      applyAdvanceOffset: true,
+      allowNegativePrincipal: true
+    });
+    var principal = Number(totals && totals.principal);
+    var penalty = Number(totals && totals.penaltyDebt);
+    var total = Number(totals && totals.total);
+    var periodTotals = _summaryPeriodTotals(rows, from, to);
+    if (!Number.isFinite(principal) || !Number.isFinite(penalty) || !Number.isFinite(total)) {
+      throw new Error("CALC_TOTALS_INVALID");
+    }
+    var periodFrom = String(from || "");
+    var periodTo = String(to || "");
+    var accountUid = String(abonent && (abonent.uid || abonent.account_uid || abonent.accountUid) || "").trim();
+    var accountNumber = String(abonent && (abonent.account_number || abonent.accountNumber || abonent.ls || abonent.id) || abonentId || "").trim();
+    var fio = String(abonent && (abonent.fio || abonent.full_name || abonent.fullName || abonent.name_full || abonent.display_name) || "").trim();
+    var fioParts = fio ? fio.split(/\s+/) : [];
+    var fam = String(abonent && (abonent.fam || abonent.last_name || abonent.lastName) || fioParts[0] || "").trim();
+    var name = String(abonent && (abonent.name || abonent.first_name || abonent.firstName) || fioParts[1] || "").trim();
+    var otch = String(abonent && (abonent.otch || abonent.middle_name || abonent.middleName) || fioParts.slice(2).join(" ") || "").trim();
+    var regnum = resolveAbonentRegnumForSummary(abonentId, abonent);
+    return {
+      status: "fresh",
+      reason: "OK",
+      summary_status: "fresh",
+      summary_reason: "OK",
+      start_date: periodFrom,
+      end_date: periodTo,
+      period_start: periodFrom,
+      period_end: periodTo,
+      regnum: regnum,
+      flat_reg: regnum,
+      premise_regnum: regnum,
+      premiseRegnum: regnum,
+      account_uid: accountUid,
+      account_number: accountNumber,
+      id: abonentId,
+      fio: fio,
+      fam: fam,
+      name: name,
+      otch: otch,
+      abonent: {
+        id: abonentId,
+        account_number: accountNumber,
+        account_uid: accountUid,
+        fio: fio,
+        fam: fam,
+        name: name,
+        otch: otch,
+        regnum: regnum,
+        premise_regnum: regnum,
+        premiseRegnum: regnum
+      },
+      period: { from: periodFrom, to: periodTo },
+      total_debt: total,
+      total_penalty: penalty,
+      total_accrued: periodTotals.total_accrued,
+      total_paid: periodTotals.total_paid,
+      penalty: penalty,
+      totals: {
+        principal: principal,
+        penalty: penalty,
+        total: total,
+        total_debt: total,
+        total_penalty: penalty,
+        total_accrued: periodTotals.total_accrued,
+        total_paid: periodTotals.total_paid
+      },
+      calc_engine_version: "JKHCalcEngine",
+      generated_at: new Date().toISOString()
+    };
+  }
+
+  async function recalcAbonentSummaryExplicit(abonentOrId, options) {
+    var opts = options || {};
+    var period = await _resolveAbonentSummaryRecalcPeriod(abonentOrId, opts.period);
+    var summary = null;
+
+    try {
+      if (!period.ok) throw new Error(period.error || "PERIOD_INVALID");
+      summary = buildAbonentSummaryAfterExplicitRecalc(abonentOrId, period.from, period.to);
+    } catch (e) {
+      var reason = _summaryCalcErrorCode(e);
+      summary = {
+        status: "error",
+        reason: reason,
+        summary_status: "error",
+        summary_reason: reason,
+        period: { from: String(period.from || ""), to: String(period.to || "") },
+        calc_engine_version: "JKHCalcEngine",
+        generated_at: new Date().toISOString()
+      };
+    }
+
+    var saveResult = await saveAbonentSummaryAfterRecalc(abonentOrId, summary);
+    return {
+      ok: !!(saveResult && saveResult.ok === true),
+      summary: summary,
+      save: saveResult,
+      status: summary.summary_status || summary.status || "error",
+      reason: summary.summary_reason || summary.reason || ""
+    };
+  }
+
 
 
   // ============================================================
@@ -1269,6 +1756,12 @@
     resolvePaymentLedgerKey: resolvePaymentLedgerKey,
     readPaymentLedger: readPaymentLedger,
     loadAbonentSummaryPage: loadAbonentSummaryPage,
+    validateAbonentSummaryRecalcBatch: validateAbonentSummaryRecalcBatch,
+    resolveAbonentRegnumForSummary: resolveAbonentRegnumForSummary,
+    buildAbonentSummaryAfterExplicitRecalc: buildAbonentSummaryAfterExplicitRecalc,
+    recalcAbonentSummaryExplicit: recalcAbonentSummaryExplicit,
+    saveAbonentSummaryAfterRecalc: saveAbonentSummaryAfterRecalc,
+    markAbonentSummaryDirty: markAbonentSummaryDirty,
     writePaymentLedger: writePaymentLedger,
     createEmptyPaymentLedger: createEmptyPaymentLedger,
     normalizeFinancialMode: normalizeFinancialMode,
@@ -1693,6 +2186,8 @@
 
         await this.flushDbToServer();
         console.log("[premise-transform] flush success");
+        markAbonentSummaryDirtyLater(generatedNewId, "RESPONSIBILITY_CHANGED");
+        Object.keys(responsibleSet || {}).forEach(function(respId){ markAbonentSummaryDirtyLater(respId, "RESPONSIBILITY_CHANGED"); });
         return ev;
       } catch (e) {
         window.AbonentsDB = snapshot;
@@ -2172,7 +2667,11 @@
       if (!newLedgerRangeCheck || newLedgerRangeCheck.ok !== true) throw new Error("TRANSFER_NEW_LEDGER_RANGE_INVALID");
 
       var saved = !!window.saveAbonentsDB && window.saveAbonentsDB();
-      if (saved) __scheduleTransferFlushToServer();
+      if (saved) {
+        __scheduleTransferFlushToServer();
+        markAbonentSummaryDirtyLater(oldId, "RESPONSIBILITY_CHANGED");
+        markAbonentSummaryDirtyLater(newId, "RESPONSIBILITY_CHANGED");
+      }
       return saved;
     }catch(e){
       window.AbonentsDB = snapshot;
@@ -2392,15 +2891,31 @@ window.JKHBoot?.markReady?.('data');
     });
 
     // 7) платежи — намеренно как “проверочный кейс”
-    _setRawScoped("payments_1006", JSON.stringify([
-      { id: 1, year: "2025", month: "01", accrued: 200, paid: 0, paid_date: "", source: "Платёж 1", payment_period: "" },
-      { id: 2, year: "2025", month: "02", accrued: 200, paid: 0, paid_date: "", source: "Платёж 1", payment_period: "" },
-      { id: 3, year: "2025", month: "02", accrued: 0, paid: 3870, paid_date: "10.02.2025", source: "Платёж 1", payment_period: "" }
-    ]));
+    const demoLedgers = {
+      "1006": [
+        { id: 1, year: "2025", month: "01", accrued: 200, paid: 0, paid_date: "", source: "Платёж 1", payment_period: "" },
+        { id: 2, year: "2025", month: "02", accrued: 200, paid: 0, paid_date: "", source: "Платёж 1", payment_period: "" },
+        { id: 3, year: "2025", month: "02", accrued: 0, paid: 3870, paid_date: "10.02.2025", source: "Платёж 1", payment_period: "" }
+      ],
+      "1008": [
+        { id: 1, year: "2025", month: "01", accrued: 200, paid: 0, paid_date: "", source: "Платёж 1", payment_period: "" }
+      ]
+    };
 
-    _setRawScoped("payments_1008", JSON.stringify([
-      { id: 1, year: "2025", month: "01", accrued: 200, paid: 0, paid_date: "", source: "Платёж 1", payment_period: "" }
-    ]));
+    ["1006", "1008"].forEach((abonentId) => {
+      const abonent = demoDb && demoDb.abonents ? demoDb.abonents[abonentId] : null;
+      const uid = String(abonent && abonent.uid || "").trim();
+      if (!isValidUid(uid)) {
+        const err = new Error("DEMO_UID_REQUIRED: demo abonent " + abonentId + " must have a valid uid before seeding payments");
+        err.code = "DEMO_UID_REQUIRED";
+        err.abonentId = abonentId;
+        err.uid = uid;
+        throw err;
+      }
+      const key = "payments_" + uid;
+      console.info("[demo][uid-ledger-seed]", { abonentId: abonentId, uid: uid, key: key });
+      _setRawScoped(key, JSON.stringify(demoLedgers[abonentId]));
+    });
   }
 
   // ============================================================

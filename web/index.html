@@ -70,6 +70,10 @@ Doc: docs/LOGIC_SPEC_v1.5.3.md
         .summary-status-missing { background:#f1f1f1; color:#555; }
         .summary-status-error { background:#fde2e2; color:#9b0015; }
         .summary-reason { display:block; margin-top:3px; font-size:11px; color:#666; }
+        .summary-batch-panel { margin:10px 0 12px; padding:10px 12px; border:1px solid #d9e2ef; border-radius:8px; background:#f7fbff; font-size:13px; }
+        .summary-batch-panel button { margin-right:8px; }
+        .summary-batch-progress { margin-top:7px; color:#345; }
+        .summary-row-select { text-align:center; width:34px; }
 
         /* ===== PAGINATION ===== */
         #paginationInfo {
@@ -229,11 +233,18 @@ Doc: docs/LOGIC_SPEC_v1.5.3.md
 })();
 </script>
 
+<div id="summaryBatchPanel" class="summary-batch-panel" style="display:none;">
+    <button id="summaryBatchSelectStaleBtn" type="button">Выбрать устаревшие на странице</button>
+    <button id="summaryBatchRunBtn" type="button">Пересчитать выбранные/устаревшие</button>
+    <span id="summaryBatchCount">Нет выбранных UID</span>
+    <div id="summaryBatchProgress" class="summary-batch-progress"></div>
+</div>
 
 <table id="abonentsTable" class="sticky-header">
     <thead>
         <!-- === ШАПКА === -->
         <tr>
+            <th class="summary-row-select"></th>
             <th data-field="id">
                 <span class="label-text">лицевой счёт</span>
                 <span class="sort-arrow"></span>
@@ -290,6 +301,7 @@ Doc: docs/LOGIC_SPEC_v1.5.3.md
 
         <!-- === ФИЛЬТРЫ === -->
         <tr class="filters-row">
+            <th></th>
             <th><input data-field="id"></th>
             <th><input data-field="fam"></th>
             <th><input data-field="name"></th>
@@ -319,7 +331,7 @@ Doc: docs/LOGIC_SPEC_v1.5.3.md
 let allRows = [];
 let filteredRows = [];
 let currentPage = 1;
-const pageSize = 20;
+const pageSize = 50;
 let sortField = null;
 let sortAsc = true;
 const filters = {};
@@ -341,6 +353,8 @@ let indexSummaryState = {
     error: "",
     pagination: { page: 1, per_page: pageSize, total: 0, pages: 0, has_next: false, has_prev: false }
 };
+let summaryBatchSelectedUids = {};
+let summaryBatchRunning = false;
 
 function __indexOwnerId(){
     try {
@@ -809,7 +823,11 @@ function summaryNumberToDisplay(value){
 
 function pickSummaryValue(summary, keys){
     for (let i = 0; i < keys.length; i++) {
-        const v = summary ? summary[keys[i]] : undefined;
+        const key = String(keys[i] || "");
+        let v = summary ? summary[key] : undefined;
+        if ((v === null || v === undefined || v === "") && key.indexOf("totals.") === 0 && summary && summary.totals && typeof summary.totals === "object") {
+            v = summary.totals[key.slice(7)];
+        }
         if (v !== null && v !== undefined && v !== "") return v;
     }
     return "";
@@ -821,10 +839,10 @@ function formatSummaryDate(value){
 }
 
 function summaryStatusText(status){
-    if (status === "fresh") return "fresh";
+    if (status === "fresh") return "fresh — итог актуален";
     if (status === "dirty") return "dirty — требуется пересчёт";
-    if (status === "missing") return "missing — summary отсутствует";
-    if (status === "error") return "error";
+    if (status === "missing") return "missing — итог ещё не создан";
+    if (status === "error") return "error — расчёт невозможен";
     return status || "missing";
 }
 
@@ -840,30 +858,34 @@ function summaryStatusHtml(row){
 
 function buildIndexRowFromSummaryItem(item){
     const summary = (item && item.summary && typeof item.summary === "object") ? item.summary : {};
-    const status = normalizeSummaryStatus(summary.summary_status || summary.status);
+    const abonent = (summary.abonent && typeof summary.abonent === "object") ? summary.abonent : {};
+    const status = normalizeSummaryStatus(summary.summary_status || summary.status || item && item.summary_status);
     const reason = String(summary.summary_reason || summary.reason || "").trim();
     const isFresh = status === "fresh";
     const fioText = String(
-        summary.fio || summary.full_name || summary.abonent_name || summary.name_full || summary.display_name || ""
+        summary.fio || summary.full_name || summary.abonent_name || summary.name_full || summary.display_name || abonent.fio || ""
     ).trim();
     const fio = fioText.split(/\s+/);
-    const fam = summary.fam || summary.last_name || fio[0] || "";
-    const name = summary.name || summary.first_name || fio[1] || "";
-    const otch = summary.otch || summary.middle_name || fio.slice(2).join(" ") || "";
+    const fam = summary.fam || summary.last_name || abonent.fam || abonent.last_name || fio[0] || "";
+    const name = summary.name || summary.first_name || abonent.name || abonent.first_name || fio[1] || "";
+    const otch = summary.otch || summary.middle_name || abonent.otch || abonent.middle_name || fio.slice(2).join(" ") || "";
+
+    const period = (summary.period && typeof summary.period === "object") ? summary.period : {};
 
     return {
-        id: String(item && (item.abonent_id || item.account_number || item.account_uid || item.id) || ""),
+        id: String(item && (item.abonent_id || item.account_number || item.account_uid || item.id) || abonent.id || abonent.abonent_id || abonent.account_number || abonent.account_uid || ""),
+        accountUid: String(item && item.account_uid || summary.account_uid || summary.accountUid || abonent.account_uid || abonent.accountUid || ""),
         fam: String(fam || ""),
         name: String(name || ""),
         otch: String(otch || ""),
-        totalDebt: isFresh ? summaryNumberToDisplay(pickSummaryValue(summary, ["total_debt", "totalDebt", "debt_total", "total"])) : "",
-        penalty: isFresh ? summaryNumberToDisplay(pickSummaryValue(summary, ["penalty", "pay_penalty", "penalty_debt", "penaltyDebt"])) : "",
-        nachisleno: isFresh ? summaryNumberToDisplay(pickSummaryValue(summary, ["nachisleno", "accrued", "accrued_total", "accruedTotal"])) : "",
-        oplacheno: isFresh ? summaryNumberToDisplay(pickSummaryValue(summary, ["oplacheno", "paid", "paid_total", "paidTotal"])) : "",
-        startDate: isFresh ? formatSummaryDate(pickSummaryValue(summary, ["start_date", "startDate", "period_start", "date_from"])) : "",
-        endDate: isFresh ? formatSummaryDate(pickSummaryValue(summary, ["end_date", "endDate", "period_end", "date_to", "as_of"])) : "",
+        totalDebt: isFresh ? summaryNumberToDisplay(pickSummaryValue(summary, ["total_debt", "totals.total_debt", "totalDebt", "debt_total", "total", "totals.total"])) : "",
+        penalty: isFresh ? summaryNumberToDisplay(pickSummaryValue(summary, ["total_penalty", "totals.total_penalty", "penalty", "pay_penalty", "penalty_debt", "penaltyDebt", "totals.penalty"])) : "",
+        nachisleno: isFresh ? summaryNumberToDisplay(pickSummaryValue(summary, ["total_accrued", "totals.total_accrued", "nachisleno", "accrued", "accrued_total", "accruedTotal"])) : "",
+        oplacheno: isFresh ? summaryNumberToDisplay(pickSummaryValue(summary, ["total_paid", "totals.total_paid", "oplacheno", "paid", "paid_total", "paidTotal"])) : "",
+        startDate: isFresh ? formatSummaryDate(pickSummaryValue(summary, ["start_date", "startDate", "period_start", "date_from", "period_from", "period.from"]) || period.from || period.period_from || period.date_from || period.start_date) : "",
+        endDate: isFresh ? formatSummaryDate(pickSummaryValue(summary, ["end_date", "endDate", "period_end", "date_to", "period_to", "as_of", "period.to"]) || period.to || period.period_to || period.date_to || period.end_date || period.as_of) : "",
         note: String(summary.note || summary.defaultNote || ""),
-        flatReg: String(summary.flat_reg || summary.regnum || summary.premise_regnum || ""),
+        flatReg: String(summary.flat_reg || summary.regnum || summary.premise_regnum || summary.premiseRegnum || abonent.flat_reg || abonent.regnum || abonent.premise_regnum || abonent.premiseRegnum || ""),
         rowStatusMark: "",
         summaryStatus: status,
         summaryReason: reason
@@ -872,7 +894,7 @@ function buildIndexRowFromSummaryItem(item){
 
 function renderIndexSummaryLoading(){
     const tbody = document.querySelector("#abonentsTable tbody");
-    if (tbody) tbody.innerHTML = '<tr><td colspan="13">Загрузка summary-layer…</td></tr>';
+    if (tbody) tbody.innerHTML = '<tr><td colspan="14">Загрузка summary-layer…</td></tr>';
     const info = document.getElementById("paginationInfo");
     const controls = document.getElementById("paginationControls");
     if (info) info.textContent = "Загрузка summary-layer…";
@@ -882,11 +904,27 @@ function renderIndexSummaryLoading(){
 function renderIndexSummaryError(message){
     const safe = escapeHtml(message || "Ошибка загрузки summary-layer");
     const tbody = document.querySelector("#abonentsTable tbody");
-    if (tbody) tbody.innerHTML = '<tr><td colspan="13">Ошибка summary API: ' + safe + '</td></tr>';
+    if (tbody) tbody.innerHTML = '<tr><td colspan="14">Ошибка summary API: ' + safe + '</td></tr>';
     const info = document.getElementById("paginationInfo");
     const controls = document.getElementById("paginationControls");
     if (info) info.textContent = "Ошибка загрузки summary-layer";
     if (controls) controls.innerHTML = "";
+}
+
+function getIndexServerSummaryStatusFilter(){
+    const raw = String(filters.summaryStatus || "").trim().toLowerCase();
+    if (!raw) return "";
+    if (raw === "stale" || raw === "устаревшие" || raw === "устаревший") return "dirty,missing,error";
+    return raw;
+}
+
+function getIndexServerQueryFilter(){
+    const parts = [];
+    ["id", "fam", "name", "otch", "note", "flatReg"].forEach(function(field){
+        const value = String(filters[field] || "").trim();
+        if (value) parts.push(value);
+    });
+    return parts.join(" ").trim();
 }
 
 async function loadPassiveSummaryPage(page){
@@ -901,8 +939,14 @@ async function loadPassiveSummaryPage(page){
     renderIndexSummaryLoading();
 
     try {
-        const payload = await window.Data.loadAbonentSummaryPage({ page: currentPage, per_page: pageSize });
+        const payload = await window.Data.loadAbonentSummaryPage({
+            page: currentPage,
+            limit: pageSize,
+            query: getIndexServerQueryFilter(),
+            status: getIndexServerSummaryStatusFilter()
+        });
         allRows = Array.isArray(payload.items) ? payload.items.map(buildIndexRowFromSummaryItem) : [];
+        pruneSummaryBatchSelection();
         indexSummaryState.loading = false;
         indexSummaryState.error = "";
         indexSummaryState.pagination = Object.assign({ page: currentPage, per_page: pageSize, total: allRows.length, pages: 0, has_next: false, has_prev: false }, payload.pagination || {});
@@ -927,7 +971,6 @@ function rebuildIndexRows(){
         const fam = fio[0] || "";
         const name = fio[1] || "";
         const otch = fio[2] || "";
-        const totals = calcTotalsFromPayments(id, a);
         const regnum = String(a.regnum || a.premiseRegnum || a.premise_regnum || a.regNumber || a.reg_no || a.flat || '').trim();
         const premise = regnum ? premises[regnum] : null;
         const ownLinks = links.filter(l => String(l?.abonentId || '').trim() === id && String(l?.regnum || '').trim() === regnum);
@@ -938,20 +981,21 @@ function rebuildIndexRows(){
         const rowStatusMark = isMerged ? 'объединена' : (hasNoActiveButClosed ? 'расчёт остановлен' : '');
         allRows.push({
             id,
+            accountUid: String(a && a.uid || ""),
             fam,
             name,
             otch,
-            totalDebt: (totals?.totalDebt ?? a.totalDebt ?? a.total_debt ?? a.mainDebtTotal ?? ""),
-            penalty:   (totals?.penalty   ?? a.penalty ?? a.penaltyTotal ?? ""),
-            nachisleno: (totals?.nachisleno ?? ""),
-            oplacheno:  (totals?.oplacheno  ?? ""),
-            startDate:  (totals?.startDate ?? ""),
-            endDate:    (totals?.endDate   ?? ""),
+            totalDebt: "",
+            penalty: "",
+            nachisleno: "",
+            oplacheno: "",
+            startDate: "",
+            endDate: "",
             note: getAbonentNote(id, a),
             flatReg: regnum,
             rowStatusMark,
-            summaryStatus: "legacy",
-            summaryReason: ""
+            summaryStatus: "missing",
+            summaryReason: "SUMMARY_NOT_BUILT"
         });
     }
 }
@@ -1148,7 +1192,11 @@ function initFilters() {
         input.addEventListener("input", () => {
             filters[field] = input.value;
             currentPage = 1;
-            render();
+            if (indexPassiveSummaryMode && indexSummaryState.mode === "summary") {
+                loadPassiveSummaryPage(1);
+            } else {
+                render();
+            }
         });
     });
 }
@@ -1176,12 +1224,125 @@ function initSorting() {
     });
 }
 
+
+function isSummaryBatchStatus(status){
+    const s = normalizeSummaryStatus(status);
+    return s === "dirty" || s === "missing" || s === "error";
+}
+
+function getSummaryBatchUid(row){
+    return String(row && row.accountUid || "").trim();
+}
+
+function getCurrentSummaryBatchRows(){
+    return (filteredRows || []).filter(function(r){
+        const uid = getSummaryBatchUid(r);
+        return uid && isSummaryBatchStatus(r && r.summaryStatus);
+    });
+}
+
+function pruneSummaryBatchSelection(){
+    const known = {};
+    (allRows || []).forEach(function(r){
+        const uid = getSummaryBatchUid(r);
+        if (uid) known[uid] = true;
+    });
+    Object.keys(summaryBatchSelectedUids).forEach(function(uid){
+        if (!known[uid]) delete summaryBatchSelectedUids[uid];
+    });
+}
+
+function updateSummaryBatchPanel(){
+    const panel = document.getElementById("summaryBatchPanel");
+    const countEl = document.getElementById("summaryBatchCount");
+    const runBtn = document.getElementById("summaryBatchRunBtn");
+    const selectBtn = document.getElementById("summaryBatchSelectStaleBtn");
+    if (!panel) return;
+    const summaryMode = indexPassiveSummaryMode && indexSummaryState.mode === "summary";
+    panel.style.display = summaryMode ? "block" : "none";
+    if (!summaryMode) return;
+    const selected = Object.keys(summaryBatchSelectedUids).filter(function(uid){ return summaryBatchSelectedUids[uid]; });
+    const staleOnPage = getCurrentSummaryBatchRows().length;
+    if (countEl) countEl.textContent = selected.length ? ("Выбрано UID: " + selected.length) : ("Устаревших на странице: " + staleOnPage);
+    if (runBtn) runBtn.disabled = summaryBatchRunning || (!selected.length && !staleOnPage);
+    if (selectBtn) selectBtn.disabled = summaryBatchRunning || !staleOnPage;
+}
+
+function bindSummaryBatchPanelOnce(){
+    const panel = document.getElementById("summaryBatchPanel");
+    if (!panel || panel.dataset.bound === "1") return;
+    panel.dataset.bound = "1";
+    const selectBtn = document.getElementById("summaryBatchSelectStaleBtn");
+    const runBtn = document.getElementById("summaryBatchRunBtn");
+    if (selectBtn) {
+        selectBtn.onclick = function(){
+            getCurrentSummaryBatchRows().forEach(function(r){
+                const uid = getSummaryBatchUid(r);
+                if (uid) summaryBatchSelectedUids[uid] = true;
+            });
+            render();
+        };
+    }
+    if (runBtn) runBtn.onclick = runSelectedSummaryBatch;
+}
+
+async function runSelectedSummaryBatch(){
+    if (summaryBatchRunning) return;
+    if (!window.Data || typeof Data.validateAbonentSummaryRecalcBatch !== "function" || typeof Data.recalcAbonentSummaryExplicit !== "function") {
+        alert("Batch UID-recalc недоступен: Data API не загружен.");
+        return;
+    }
+    let selected = Object.keys(summaryBatchSelectedUids).filter(function(uid){ return summaryBatchSelectedUids[uid]; });
+    if (!selected.length) {
+        selected = getCurrentSummaryBatchRows().map(getSummaryBatchUid).filter(Boolean);
+    }
+    selected = Array.from(new Set(selected));
+    if (!selected.length) return;
+
+    const progress = document.getElementById("summaryBatchProgress");
+    summaryBatchRunning = true;
+    updateSummaryBatchPanel();
+    if (progress) progress.textContent = "Проверка UID на сервере…";
+
+    try {
+        const validation = await Data.validateAbonentSummaryRecalcBatch(selected);
+        const allowed = Array.isArray(validation.allowed_uids) ? validation.allowed_uids : [];
+        const denied = (Array.isArray(validation.items) ? validation.items : []).filter(function(x){ return !x.allowed; }).length;
+        let done = 0;
+        let ok = 0;
+        let errors = denied;
+        for (const uid of allowed) {
+            done++;
+            if (progress) progress.textContent = "Пересчёт " + done + " из " + allowed.length + " (UID " + uid + ")…" + (denied ? " Не разрешено: " + denied + "." : "");
+            try {
+                const result = await Data.recalcAbonentSummaryExplicit(uid);
+                if (result && result.ok === true) ok++;
+                else errors++;
+            } catch (e) {
+                errors++;
+                try { console.warn("[summary][batch-recalc-one-failed]", { uid: uid, error: String(e && e.message || e) }); } catch (_) {}
+            }
+            delete summaryBatchSelectedUids[uid];
+        }
+        if (progress) progress.textContent = "Готово. Успешно: " + ok + ", ошибок/пропущено: " + errors + ". Обновление summary…";
+        await loadPassiveSummaryPage(currentPage);
+        if (progress) progress.textContent = "Готово. Успешно: " + ok + ", ошибок/пропущено: " + errors + ".";
+    } catch (e) {
+        if (progress) progress.textContent = "Ошибка batch-проверки: " + String(e && e.message || e);
+    } finally {
+        summaryBatchRunning = false;
+        updateSummaryBatchPanel();
+    }
+}
+
 /* ============================================================
      ОСНОВНОЙ РЕНДЕР (фильтры + сортировка + пагинация)
 ============================================================ */
 function render() {
+    const summaryMode = indexPassiveSummaryMode && indexSummaryState.mode === "summary";
+
     /* --- фильтрация --- */
-    filteredRows = allRows.filter(r => {
+    filteredRows = summaryMode ? allRows.slice() : allRows.filter(r => {
         for (const f in filters) {
             const val = String(filters[f] ?? "").toLowerCase().trim();
             if (!val) continue;
@@ -1209,14 +1370,14 @@ function render() {
     }
 
     /* --- пагинация --- */
-    const summaryMode = indexPassiveSummaryMode && indexSummaryState.mode === "summary";
-    const hasLocalFilters = Object.keys(filters).some(function(k){ return String(filters[k] || "").trim() !== ""; });
-    const total = summaryMode && !hasLocalFilters ? Number(indexSummaryState.pagination.total || filteredRows.length) : filteredRows.length;
-    const totalPages = summaryMode && !hasLocalFilters ? Math.max(1, Number(indexSummaryState.pagination.pages || 1)) : Math.max(1, Math.ceil(total / pageSize));
+    const total = summaryMode ? Number(indexSummaryState.pagination.total || filteredRows.length) : filteredRows.length;
+    const totalPages = summaryMode ? Math.max(1, Number(indexSummaryState.pagination.pages || 1)) : Math.max(1, Math.ceil(total / pageSize));
     if (!summaryMode && currentPage > totalPages) currentPage = totalPages;
 
     const startIndex = summaryMode ? 0 : ((currentPage - 1) * pageSize);
     const pageRows = summaryMode ? filteredRows : filteredRows.slice(startIndex, startIndex + pageSize);
+    bindSummaryBatchPanelOnce();
+    updateSummaryBatchPanel();
 
     /* --- вывод строк --- */
     const tbody = document.querySelector("#abonentsTable tbody");
@@ -1224,7 +1385,7 @@ function render() {
 
     if (pageRows.length === 0 && summaryMode) {
         const tr = document.createElement("tr");
-        tr.innerHTML = '<td colspan="13">Summary-layer пуст: controlled empty state, ledger fallback не выполняется.</td>';
+        tr.innerHTML = '<td colspan="14">Summary-layer пуст: controlled empty state, ledger fallback не выполняется.</td>';
         tbody.appendChild(tr);
     }
 
@@ -1244,7 +1405,12 @@ function render() {
         if (r.rowStatusMark === "объединена") tr.classList.add("row-merged");
         else if (r.rowStatusMark === "расчёт остановлен") tr.classList.add("row-stopped");
 
+        const batchUid = getSummaryBatchUid(r);
+        const canBatchSelect = summaryMode && batchUid && isSummaryBatchStatus(r.summaryStatus);
+        const batchChecked = canBatchSelect && !!summaryBatchSelectedUids[batchUid];
+
         tr.innerHTML = `
+            <td class="summary-row-select">${canBatchSelect ? '<input type="checkbox" class="summary-batch-row-check" data-uid="' + escapeHtml(batchUid) + '" ' + (batchChecked ? 'checked' : '') + ' title="Выбрать UID для пересчёта">' : ''}</td>
             <td>${r.id}</td>
             <td>${r.fam}</td>
             <td>${r.name}</td>
@@ -1273,6 +1439,17 @@ function render() {
             window.location.href = "abonent_card.html?abonent=" + encodeURIComponent(tr.dataset.id);
         }
     };
+
+    tbody.querySelectorAll("input.summary-batch-row-check").forEach(function(cb){
+        cb.addEventListener("click", function(ev){ ev.stopPropagation(); });
+        cb.addEventListener("change", function(){
+            const uid = String(cb.dataset.uid || "").trim();
+            if (!uid) return;
+            if (cb.checked) summaryBatchSelectedUids[uid] = true;
+            else delete summaryBatchSelectedUids[uid];
+            updateSummaryBatchPanel();
+        });
+    });
 
     
     // --- сохранение "Примечание абонента" прямо из общей таблицы ---
@@ -1340,7 +1517,7 @@ function renderPagination(total, from, to) {
         return;
     }
 
-    info.textContent = `Показано ${from}–${to} из ${total}`;
+    info.textContent = `Страница ${currentPage}, лимит ${pageSize}. Показано ${from}–${to} из ${total}`;
 
     const totalPages = Math.max(1, Math.ceil(total / pageSize));
 
