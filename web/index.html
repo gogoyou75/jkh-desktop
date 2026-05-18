@@ -809,7 +809,11 @@ function summaryNumberToDisplay(value){
 
 function pickSummaryValue(summary, keys){
     for (let i = 0; i < keys.length; i++) {
-        const v = summary ? summary[keys[i]] : undefined;
+        const key = String(keys[i] || "");
+        let v = summary ? summary[key] : undefined;
+        if ((v === null || v === undefined || v === "") && key.indexOf("totals.") === 0 && summary && summary.totals && typeof summary.totals === "object") {
+            v = summary.totals[key.slice(7)];
+        }
         if (v !== null && v !== undefined && v !== "") return v;
     }
     return "";
@@ -821,10 +825,10 @@ function formatSummaryDate(value){
 }
 
 function summaryStatusText(status){
-    if (status === "fresh") return "fresh";
+    if (status === "fresh") return "fresh — итог актуален";
     if (status === "dirty") return "dirty — требуется пересчёт";
-    if (status === "missing") return "missing — summary отсутствует";
-    if (status === "error") return "error";
+    if (status === "missing") return "missing — итог ещё не создан";
+    if (status === "error") return "error — расчёт невозможен";
     return status || "missing";
 }
 
@@ -856,8 +860,8 @@ function buildIndexRowFromSummaryItem(item){
         fam: String(fam || ""),
         name: String(name || ""),
         otch: String(otch || ""),
-        totalDebt: isFresh ? summaryNumberToDisplay(pickSummaryValue(summary, ["total_debt", "totalDebt", "debt_total", "total"])) : "",
-        penalty: isFresh ? summaryNumberToDisplay(pickSummaryValue(summary, ["penalty", "pay_penalty", "penalty_debt", "penaltyDebt"])) : "",
+        totalDebt: isFresh ? summaryNumberToDisplay(pickSummaryValue(summary, ["total_debt", "totalDebt", "debt_total", "total", "totals.total"])) : "",
+        penalty: isFresh ? summaryNumberToDisplay(pickSummaryValue(summary, ["penalty", "pay_penalty", "penalty_debt", "penaltyDebt", "totals.penalty"])) : "",
         nachisleno: isFresh ? summaryNumberToDisplay(pickSummaryValue(summary, ["nachisleno", "accrued", "accrued_total", "accruedTotal"])) : "",
         oplacheno: isFresh ? summaryNumberToDisplay(pickSummaryValue(summary, ["oplacheno", "paid", "paid_total", "paidTotal"])) : "",
         startDate: isFresh ? formatSummaryDate(pickSummaryValue(summary, ["start_date", "startDate", "period_start", "date_from"])) : "",
@@ -927,7 +931,6 @@ function rebuildIndexRows(){
         const fam = fio[0] || "";
         const name = fio[1] || "";
         const otch = fio[2] || "";
-        const totals = calcTotalsFromPayments(id, a);
         const regnum = String(a.regnum || a.premiseRegnum || a.premise_regnum || a.regNumber || a.reg_no || a.flat || '').trim();
         const premise = regnum ? premises[regnum] : null;
         const ownLinks = links.filter(l => String(l?.abonentId || '').trim() === id && String(l?.regnum || '').trim() === regnum);
@@ -941,17 +944,17 @@ function rebuildIndexRows(){
             fam,
             name,
             otch,
-            totalDebt: (totals?.totalDebt ?? a.totalDebt ?? a.total_debt ?? a.mainDebtTotal ?? ""),
-            penalty:   (totals?.penalty   ?? a.penalty ?? a.penaltyTotal ?? ""),
-            nachisleno: (totals?.nachisleno ?? ""),
-            oplacheno:  (totals?.oplacheno  ?? ""),
-            startDate:  (totals?.startDate ?? ""),
-            endDate:    (totals?.endDate   ?? ""),
+            totalDebt: "",
+            penalty: "",
+            nachisleno: "",
+            oplacheno: "",
+            startDate: "",
+            endDate: "",
             note: getAbonentNote(id, a),
             flatReg: regnum,
             rowStatusMark,
-            summaryStatus: "legacy",
-            summaryReason: ""
+            summaryStatus: "missing",
+            summaryReason: "SUMMARY_NOT_BUILT"
         });
     }
 }

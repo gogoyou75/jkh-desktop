@@ -156,6 +156,36 @@ Doc: docs/LOGIC_SPEC_v1.5.3.md
             color: #fff;
             border-color: #4b0f0f;
         }
+        .summary-status-card {
+            margin: 10px 0 12px 0;
+            padding: 10px 12px;
+            border: 2px solid #000;
+            background: #fff;
+            font-size: 13px;
+        }
+        .summary-status-card .summary-title {
+            font-weight: 700;
+            margin-bottom: 6px;
+        }
+        .summary-status-card .summary-warning {
+            display: none;
+            margin-top: 8px;
+            padding: 8px;
+            border: 1px solid #c27a00;
+            background: #fff8e1;
+            color: #5f4300;
+        }
+        .summary-status-card .summary-warning.summary-error {
+            border-color: #b00020;
+            background: #fff4f4;
+            color: #7a0016;
+        }
+        .summary-status-badge { display:inline-block; padding:2px 6px; border-radius:999px; font-size:11px; font-weight:700; }
+        .summary-status-fresh { background:#e7f6e7; color:#116611; }
+        .summary-status-dirty { background:#fff3cd; color:#7a5300; }
+        .summary-status-missing { background:#f1f1f1; color:#555; }
+        .summary-status-error { background:#fde2e2; color:#9b0015; }
+        .summary-reason { display:block; margin-top:3px; font-size:11px; color:#666; }
         .readonly-hint {
             font-size: 12px;
             opacity: 0.85;
@@ -461,9 +491,18 @@ Doc: docs/LOGIC_SPEC_v1.5.3.md
     </div>
 
     <div class="calc-inline-actions">
-        <button class="calc-btn" id="calcRunBtn" type="button">расчёт</button>
+        <button class="calc-btn" id="calcRunBtn" type="button">явный UID‑пересчёт</button>
         <button class="calc-btn" id="calcReportsBtn" type="button">справки</button>
         <button class="calc-btn" id="calcResetBtn" type="button">сбросить</button>
+    </div>
+</div>
+
+<div id="abonentSummaryStatusCard" class="summary-status-card">
+    <div class="summary-title">Статус итогового summary</div>
+    <div>Состояние: <span id="summaryStatusBadge" class="summary-status-badge summary-status-missing">missing — summary отсутствует</span></div>
+    <div id="summaryStatusReason" class="summary-reason"></div>
+    <div id="summaryStatusWarning" class="summary-warning">
+        Итог не актуален. Старые totals не считаются свежими и не должны использоваться как актуальный расчёт. Нажмите «явный UID‑пересчёт», чтобы обновить summary.
     </div>
 </div>
 
@@ -1205,9 +1244,10 @@ async function __initAbonentCardSafe(){
     await __repairEmptyExcludePeriodsKeysAfterServerLoad();
 
     try { fillAbonentCard(); } catch(e) { try { console.error('[abonent_card] fill failed', e); } catch(_){} }
+    try { loadAbonentSummaryStatus(); } catch(e) { try { console.warn('[summary][status-load-failed]', e); } catch(_){} }
 
     setTimeout(() => {
-        __runAutoAccrualRepairOnce();
+        // Opening the card is read-only for summary/accrual state: no auto-recalc here.
         __safeLoadPaymentTableOnce('DOMContentLoaded');
     }, 0);
 }
@@ -2345,6 +2385,76 @@ function isValidPeriod(from, to){
     } catch (e) { return false; }
 }
 
+
+
+function __normalizeSummaryStatus(status){
+    const s = String(status || "missing").trim().toLowerCase();
+    return (s === "fresh" || s === "dirty" || s === "missing" || s === "error") ? s : "error";
+}
+
+function __summaryStatusText(status){
+    if (status === "fresh") return "fresh — итог актуален";
+    if (status === "dirty") return "dirty — требуется пересчёт";
+    if (status === "missing") return "missing — итог ещё не создан";
+    if (status === "error") return "error — расчёт невозможен";
+    return status || "missing";
+}
+
+function __summaryWarningText(status){
+    if (status === "dirty") return "Итог устарел после изменений. Старые totals не показываются как свежие. Нажмите «явный UID‑пересчёт», чтобы обновить summary.";
+    if (status === "missing") return "Итог ещё не создан. Старые totals не подставляются. Нажмите «явный UID‑пересчёт», чтобы создать summary.";
+    if (status === "error") return "Расчёт summary невозможен. Проверьте причину ошибки и выполните «явный UID‑пересчёт» после исправления данных.";
+    return "";
+}
+
+function renderAbonentSummaryStatus(status, reason){
+    const normalized = __normalizeSummaryStatus(status);
+    const badge = document.getElementById("summaryStatusBadge");
+    const reasonEl = document.getElementById("summaryStatusReason");
+    const warningEl = document.getElementById("summaryStatusWarning");
+
+    if (badge) {
+        badge.className = "summary-status-badge summary-status-" + normalized;
+        badge.textContent = __summaryStatusText(normalized);
+    }
+    if (reasonEl) {
+        const r = String(reason || "").trim();
+        reasonEl.textContent = r ? ("Причина: " + r) : "";
+    }
+    if (warningEl) {
+        const text = __summaryWarningText(normalized);
+        warningEl.textContent = text;
+        warningEl.style.display = text ? "block" : "none";
+        warningEl.className = "summary-warning" + (normalized === "error" ? " summary-error" : "");
+    }
+}
+
+async function loadAbonentSummaryStatus(){
+    const { id, a } = getCurrentAbonent();
+    const uid = String(a && a.uid || "").trim();
+    if (!id || !uid) {
+        renderAbonentSummaryStatus("missing", "UID_REQUIRED");
+        return;
+    }
+    if (!window.Data || typeof Data.loadAbonentSummaryPage !== "function") {
+        renderAbonentSummaryStatus("missing", "SUMMARY_API_UNAVAILABLE");
+        return;
+    }
+
+    try {
+        const payload = await Data.loadAbonentSummaryPage({ page: 1, per_page: 1, account_uid: uid });
+        const item = payload && Array.isArray(payload.items) && payload.items.length ? payload.items[0] : null;
+        const summary = item && item.summary && typeof item.summary === "object" ? item.summary : null;
+        if (!summary) {
+            renderAbonentSummaryStatus("missing", "SUMMARY_NOT_BUILT");
+            return;
+        }
+        renderAbonentSummaryStatus(summary.summary_status || summary.status || "missing", summary.summary_reason || summary.reason || "");
+    } catch (e) {
+        renderAbonentSummaryStatus("error", String(e && e.message || e || "SUMMARY_API_ERROR"));
+    }
+}
+
 function __summaryCalcErrorCode(e){
     if (e && e.code) return String(e.code);
     const msg = String(e && e.message || e || "CALC_FAILED");
@@ -2380,6 +2490,8 @@ function __buildAbonentSummaryAfterUidRecalc(abonentId, from, to){
         summary_status: "fresh",
         summary_reason: "OK",
         period: { from: String(from || ""), to: String(to || "") },
+        total_debt: total,
+        penalty: penalty,
         totals: {
             principal: principal,
             penalty: penalty,
@@ -2407,7 +2519,13 @@ async function __saveAbonentSummaryAfterUidRecalc(abonentId, from, to){
             generated_at: new Date().toISOString()
         };
     }
-    await Data.saveAbonentSummaryAfterRecalc(abonentId, summary);
+    const saveResult = await Data.saveAbonentSummaryAfterRecalc(abonentId, summary);
+    if (saveResult && saveResult.ok === true) {
+        renderAbonentSummaryStatus(summary.summary_status || summary.status || "missing", summary.summary_reason || summary.reason || "");
+    } else {
+        renderAbonentSummaryStatus("error", String(saveResult && (saveResult.reason || saveResult.error) || "SUMMARY_SAVE_FAILED"));
+    }
+    return saveResult;
 }
 
 function bindCalcButtons(){
