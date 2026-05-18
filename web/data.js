@@ -1590,45 +1590,23 @@
 
     var id = clean(abonentId);
     var db = window.AbonentsDB || {};
-    var links = Array.isArray(db.links) ? db.links.map(function (l, idx) {
-      return { link: l, idx: idx };
-    }).filter(function (item) {
-      return clean(item.link && item.link.abonentId) === id;
+    var links = Array.isArray(db.links) ? db.links.filter(function (l) {
+      return clean(l && l.abonentId) === id;
     }) : [];
     if (!id || !links.length) return "";
 
-    function linkRegnum(item) {
-      return clean(item && item.link && item.link.regnum);
-    }
-    function linkDateFrom(item) {
-      var l = item && item.link;
-      return clean(l && (l.dateFrom || l.from || l.start || l.startDate || l.date_start));
-    }
-    function linkOrder(item) {
-      var l = item && item.link;
-      var n = Number(l && (l.createdAt || l.updatedAt || l.id));
-      return Number.isFinite(n) ? n : 0;
-    }
-    function latestLink(a, b) {
-      var af = linkDateFrom(a);
-      var bf = linkDateFrom(b);
-      if (af !== bf) return af < bf ? 1 : -1;
-      var ao = linkOrder(a);
-      var bo = linkOrder(b);
-      if (ao !== bo) return bo - ao;
-      return (b && b.idx || 0) - (a && a.idx || 0);
+    function linkRegnum(link) {
+      return clean(link && link.regnum);
     }
 
-    var active = links.filter(function (item) {
-      var l = item && item.link;
-      return !clean(l && l.dateTo) && linkRegnum(item);
-    }).sort(latestLink)[0];
-    if (active) return linkRegnum(active);
+    for (var i = links.length - 1; i >= 0; i--) {
+      if (!clean(links[i] && links[i].dateTo) && linkRegnum(links[i])) return linkRegnum(links[i]);
+    }
 
-    var latest = links.filter(function (item) {
-      return !!linkRegnum(item);
-    }).sort(latestLink)[0];
-    return latest ? linkRegnum(latest) : "";
+    for (var j = links.length - 1; j >= 0; j--) {
+      if (linkRegnum(links[j])) return linkRegnum(links[j]);
+    }
+    return "";
   }
 
   function buildAbonentSummaryAfterExplicitRecalc(abonentOrId, from, to) {
