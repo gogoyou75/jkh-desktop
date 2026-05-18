@@ -241,9 +241,44 @@ class AbonentSummaryContractTest(unittest.TestCase):
         self.assertIn("implicit refresh", source)
         self.assertNotIn("commit(", source)
         self.assertNotIn("flush(", source)
-        self.assertNotIn("add(", source)
+        self.assertNotIn("db.session.add", source)
         self.assertNotIn("KVStore", source)
         self.assertNotIn("_classify_payment", source)
+
+    def test_recalc_batch_validates_owner_scoped_uids_without_rebuild(self):
+        user = self._user("owner_batch")
+        targets = [
+            {"abonent_id": "1001", "account_uid": "uid_batch_1001", "account_number": "1001"},
+            {"abonent_id": "1002", "account_uid": "uid_batch_1002", "account_number": "1002"},
+        ]
+
+        with app_module.app.test_request_context("/api/abonent_summary/recalc_batch", method="POST", json={
+            "account_uids": ["uid_batch_1001", "uid_foreign", "uid_batch_1002", "uid_batch_1001"]
+        }):
+            with patch.object(app_module, "_require_user", return_value=(user, None)):
+                with patch.object(app_module, "_owner_abonent_summary_targets", return_value=targets) as targets_mock:
+                    response = app_module.abonent_summary_recalc_batch()
+
+        body = response.get_json()
+        self.assertEqual(response.status_code, 200)
+        targets_mock.assert_called_once_with("owner_batch")
+        self.assertEqual(body["allowed_uids"], ["uid_batch_1001", "uid_batch_1002"])
+        statuses = {item["account_uid"]: item["status"] for item in body["items"]}
+        self.assertEqual(statuses["uid_batch_1001"], "allowed")
+        self.assertEqual(statuses["uid_batch_1002"], "allowed")
+        self.assertEqual(statuses["uid_foreign"], "not_found")
+
+    def test_recalc_batch_source_does_not_calculate_or_write(self):
+        source = inspect.getsource(app_module.abonent_summary_recalc_batch)
+
+        self.assertIn("_require_user", source)
+        self.assertIn("_owner_abonent_summary_targets", source)
+        self.assertNotIn("commit(", source)
+        self.assertNotIn("flush(", source)
+        self.assertNotIn("db.session.add", source)
+        self.assertNotIn("calc", source.lower().replace("recalc_batch", ""))
+        self.assertNotIn("payments_", source)
+
 
 
 if __name__ == "__main__":
