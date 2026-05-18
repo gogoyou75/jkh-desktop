@@ -161,6 +161,97 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
             self.assertEqual(rows[0].account_number, "1001-new")
             self.assertEqual(json.loads(rows[0].summary_json)["totals"]["total"], 37)
 
+    def test_single_upsert_one_uid_does_not_touch_other_uid_same_owner(self):
+        with app_module.app.app_context():
+            self._add_user("owner-single-two-uids")
+            self._put_abonents("owner-single-two-uids", {
+                "1001": {"uid": "uid_single_one_1001", "id": "1001"},
+                "1002": {"uid": "uid_single_one_1002", "id": "1002"},
+            })
+            app_module.db.session.add(app_module.AbonentSummary(
+                owner_id="owner-single-two-uids",
+                abonent_id="1002",
+                account_uid="uid_single_one_1002",
+                account_number="1002",
+                summary_json=json.dumps(self._fresh_summary(90, 9, 99)),
+            ))
+            app_module.db.session.commit()
+        self._login("owner-single-two-uids")
+
+        response = self.client.post("/api/abonent_summary/rebuild", json={
+            "account_uid": "uid_single_one_1001",
+            "abonent_id": "1001",
+            "account_number": "1001",
+            "summary": self._fresh_summary(10, 2, 12),
+        })
+
+        self.assertEqual(response.status_code, 200)
+        with app_module.app.app_context():
+            rows = {r.account_uid: json.loads(r.summary_json) for r in app_module.AbonentSummary.query.all()}
+            self.assertEqual(rows["uid_single_one_1001"]["totals"]["total"], 12)
+            self.assertEqual(rows["uid_single_one_1002"]["totals"]["total"], 99)
+
+    def test_dirty_uid_becomes_fresh_after_single_upsert(self):
+        with app_module.app.app_context():
+            self._add_user("owner-dirty-to-fresh")
+            self._put_abonents("owner-dirty-to-fresh", {
+                "1001": {"uid": "uid_dirty_to_fresh_1001", "id": "1001"},
+            })
+            app_module.db.session.add(app_module.AbonentSummary(
+                owner_id="owner-dirty-to-fresh",
+                abonent_id="1001",
+                account_uid="uid_dirty_to_fresh_1001",
+                account_number="1001",
+                summary_json=json.dumps({"summary_status": "dirty", "summary_reason": "PAYMENTS_CHANGED"}),
+            ))
+            app_module.db.session.commit()
+        self._login("owner-dirty-to-fresh")
+
+        response = self.client.post("/api/abonent_summary/rebuild", json={
+            "account_uid": "uid_dirty_to_fresh_1001",
+            "abonent_id": "1001",
+            "account_number": "1001",
+            "summary": self._fresh_summary(7, 1, 8),
+        })
+
+        self.assertEqual(response.status_code, 200)
+        with app_module.app.app_context():
+            payload = json.loads(app_module.AbonentSummary.query.one().summary_json)
+            self.assertEqual(payload["summary_status"], "fresh")
+            self.assertEqual(payload["summary_reason"], "OK")
+            self.assertEqual(payload["totals"]["total"], 8)
+
+    def test_single_upsert_calculation_error_has_no_fake_zero_totals(self):
+        with app_module.app.app_context():
+            self._add_user("owner-error-summary")
+            self._put_abonents("owner-error-summary", {
+                "1001": {"uid": "uid_error_summary_1001", "id": "1001"},
+            })
+            app_module.db.session.commit()
+        self._login("owner-error-summary")
+
+        response = self.client.post("/api/abonent_summary/rebuild", json={
+            "account_uid": "uid_error_summary_1001",
+            "abonent_id": "1001",
+            "account_number": "1001",
+            "summary": {
+                "summary_status": "error",
+                "summary_reason": "LEDGER_JSON_INVALID",
+                "account_uid": "uid_error_summary_1001",
+                "account_number": "1001",
+                "period_start": "2026-01-01",
+                "period_end": "2026-01-31",
+            },
+        })
+
+        self.assertEqual(response.status_code, 200)
+        with app_module.app.app_context():
+            payload = json.loads(app_module.AbonentSummary.query.one().summary_json)
+            self.assertEqual(payload["summary_status"], "error")
+            self.assertEqual(payload["summary_reason"], "LEDGER_JSON_INVALID")
+            self.assertNotIn("totals", payload)
+            self.assertNotEqual(payload.get("total_debt"), 0)
+
     def test_single_upsert_does_not_touch_other_owner(self):
         with app_module.app.app_context():
             self._add_user("owner-single-a")
@@ -286,6 +377,15 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
             self.assertEqual(payload["period"], {"from": None, "to": None})
             self.assertNotIn("total_debt", payload)
             self.assertNotIn("total_penalty", payload)
+
+    def test_data_write_payment_ledger_blocks_account_number_write_path(self):
+        data_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "web", "data.js"))
+        with open(data_path, "r", encoding="utf-8") as fh:
+            src = fh.read()
+
+        self.assertIn("LS_LEDGER_WRITE_FORBIDDEN", src)
+        self.assertIn('key === "payments_" + id', src)
+        self.assertIn('key !== "payments_" + uid', src)
 
     def test_rebuild_does_not_touch_calc_engine_js(self):
         calc_engine_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "web", "calc_engine.js"))

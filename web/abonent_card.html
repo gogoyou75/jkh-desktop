@@ -491,7 +491,7 @@ Doc: docs/LOGIC_SPEC_v1.5.3.md
     </div>
 
     <div class="calc-inline-actions">
-        <button class="calc-btn" id="calcRunBtn" type="button">явный UID‑пересчёт</button>
+        <button class="calc-btn" id="calcRunBtn" type="button">Пересчитать</button>
         <button class="calc-btn" id="calcReportsBtn" type="button">справки</button>
         <button class="calc-btn" id="calcResetBtn" type="button">сбросить</button>
     </div>
@@ -502,7 +502,7 @@ Doc: docs/LOGIC_SPEC_v1.5.3.md
     <div>Состояние: <span id="summaryStatusBadge" class="summary-status-badge summary-status-missing">missing — summary отсутствует</span></div>
     <div id="summaryStatusReason" class="summary-reason"></div>
     <div id="summaryStatusWarning" class="summary-warning">
-        Итог не актуален. Старые totals не считаются свежими и не должны использоваться как актуальный расчёт. Нажмите «явный UID‑пересчёт», чтобы обновить summary.
+        Итог не актуален. Старые totals не считаются свежими и не должны использоваться как актуальный расчёт. Нажмите «Пересчитать», чтобы обновить summary.
     </div>
 </div>
 
@@ -2401,9 +2401,9 @@ function __summaryStatusText(status){
 }
 
 function __summaryWarningText(status){
-    if (status === "dirty") return "Итог устарел после изменений. Старые totals не показываются как свежие. Нажмите «явный UID‑пересчёт», чтобы обновить summary.";
-    if (status === "missing") return "Итог ещё не создан. Старые totals не подставляются. Нажмите «явный UID‑пересчёт», чтобы создать summary.";
-    if (status === "error") return "Расчёт summary невозможен. Проверьте причину ошибки и выполните «явный UID‑пересчёт» после исправления данных.";
+    if (status === "dirty") return "Итог устарел после изменений. Старые totals не показываются как свежие. Нажмите «Пересчитать», чтобы обновить summary.";
+    if (status === "missing") return "Итог ещё не создан. Старые totals не подставляются. Нажмите «Пересчитать», чтобы создать summary.";
+    if (status === "error") return "Расчёт summary невозможен. Проверьте причину ошибки и выполните «Пересчитать» после исправления данных.";
     return "";
 }
 
@@ -2466,23 +2466,44 @@ function __summaryCalcErrorCode(e){
     return msg || "CALC_FAILED";
 }
 
-function __buildAbonentSummaryAfterUidRecalc(abonentId, from, to){
-    if (!window.Data || typeof Data.buildAbonentSummaryAfterExplicitRecalc !== "function") {
-        throw new Error("SUMMARY_RECALC_UNAVAILABLE");
+function __renderAbonentTotalsFromFreshSummary(summary){
+    const status = __normalizeSummaryStatus(summary && (summary.summary_status || summary.status));
+    if (status !== "fresh") return;
+    const totals = summary && summary.totals && typeof summary.totals === "object" ? summary.totals : null;
+    if (!totals) return;
+
+    function finite(v){
+        const n = Number(v);
+        return Number.isFinite(n) ? n : null;
     }
-    return Data.buildAbonentSummaryAfterExplicitRecalc(abonentId, from, to);
+    function put(el, value){
+        if (!el || value === null) return;
+        el.textContent = value.toFixed(2);
+    }
+
+    const total = finite(totals.total != null ? totals.total : totals.total_debt);
+    const principal = finite(totals.principal != null ? totals.principal : totals.total_principal);
+    const penalty = finite(totals.penalty != null ? totals.penalty : totals.total_penalty);
+
+    put(document.getElementById('abonent_total_debt') || document.getElementById('total_debt') || document.querySelector('[data-field="total_debt"]') || document.querySelector('[data-total="debt"]'), total);
+    put(document.getElementById('abonent_total_main_debt') || document.getElementById('total_main_debt') || document.querySelector('[data-field="total_main_debt"]'), principal);
+    put(document.getElementById('abonent_total_penalty_debt') || document.getElementById('total_penalty_debt') || document.querySelector('[data-field="total_penalty_debt"]'), penalty);
 }
 
 async function __saveAbonentSummaryAfterUidRecalc(abonentId, from, to){
-    if (!window.Data || typeof Data.recalcAbonentSummaryExplicit !== "function") return;
-    const result = await Data.recalcAbonentSummaryExplicit(abonentId, { period: { from: from, to: to } });
-    if (result && result.ok === true) {
-        const summary = result.summary || {};
-        renderAbonentSummaryStatus(summary.summary_status || summary.status || "missing", summary.summary_reason || summary.reason || "");
-    } else {
-        renderAbonentSummaryStatus("error", String(result && result.save && (result.save.reason || result.save.error) || result && result.reason || "SUMMARY_SAVE_FAILED"));
+    if (!window.Data || typeof Data.recalculateAbonentCard !== "function") {
+        renderAbonentSummaryStatus("error", "SUMMARY_RECALC_UNAVAILABLE");
+        return { ok: false, summary_status: "error", summary_reason: "SUMMARY_RECALC_UNAVAILABLE" };
     }
-    return result && result.save ? result.save : result;
+    const result = await Data.recalculateAbonentCard(abonentId, { period: { from: from, to: to } });
+    const summary = result && result.summary && typeof result.summary === "object" ? result.summary : null;
+    const status = result && (result.summary_status || result.status) || summary && (summary.summary_status || summary.status) || "error";
+    const reason = result && (result.summary_reason || result.reason) || summary && (summary.summary_reason || summary.reason) || "SUMMARY_SAVE_FAILED";
+    renderAbonentSummaryStatus(status, reason);
+    if (__normalizeSummaryStatus(status) === "fresh" && summary) {
+        __renderAbonentTotalsFromFreshSummary(summary);
+    }
+    return result;
 }
 
 function bindCalcButtons(){
@@ -2494,10 +2515,12 @@ function bindCalcButtons(){
     if (!runBtn || !repBtn || !resetBtn || !fromEl || !toEl) return;
 
     runBtn.addEventListener("click", async () => {
+        if (runBtn.disabled) return;
         if (!canWriteOrExplainLocal()) return;
         const currentAbonentId = getAbonentIdFromURL();
         const from = fromEl.value;
         const to   = toEl.value;
+        const prevText = runBtn.textContent;
 
         if (!isValidPeriod(from, to)) {
             if (!from || !to) {
@@ -2513,28 +2536,40 @@ function bindCalcButtons(){
             return;
         }
 
-        let uidResult = null;
+        runBtn.disabled = true;
+        runBtn.textContent = "Пересчёт…";
+
         try {
-            uidResult = await Data.ensureAbonentUid(currentAbonentId, { source: "abonent_card.calc" });
-        } catch (e) {
-            uidResult = { ok: false, reason: String(e && e.message || e) };
-        }
-
-        if (!uidResult || uidResult.ok !== true || !uidResult.uid) {
-            alert("Период расчёта не сохранён: UID абонента не сохранён.");
-            return;
-        }
-
-        if (!saveCalcPeriod(from, to)) {
-            if (saveCalcPeriod.lastError !== "PERIOD_REQUIRED") {
-                alert("Период расчёта не сохранён: не найден canonical UID key.");
+            let uidResult = null;
+            try {
+                uidResult = await Data.ensureAbonentUid(currentAbonentId, { source: "abonent_card.calc" });
+            } catch (e) {
+                uidResult = { ok: false, reason: String(e && e.message || e) };
             }
-            return;
-        }
-        if (!confirmCalcPeriodSaved()) return;
 
-        await __saveAbonentSummaryAfterUidRecalc(currentAbonentId, from, to);
-        __safeLoadPaymentTableOnce();
+            if (!uidResult || uidResult.ok !== true || !uidResult.uid) {
+                alert("Период расчёта не сохранён: UID абонента не сохранён.");
+                return;
+            }
+
+            if (!saveCalcPeriod(from, to)) {
+                if (saveCalcPeriod.lastError !== "PERIOD_REQUIRED") {
+                    alert("Период расчёта не сохранён: не найден canonical UID key.");
+                }
+                return;
+            }
+            if (!confirmCalcPeriodSaved()) return;
+
+            const result = await __saveAbonentSummaryAfterUidRecalc(currentAbonentId, from, to);
+            if (result && __normalizeSummaryStatus(result.summary_status || result.status) === "error") {
+                alert("Пересчёт не выполнен: " + String(result.summary_reason || result.reason || "SUMMARY_RECALC_FAILED"));
+                return;
+            }
+            __safeLoadPaymentTableOnce();
+        } finally {
+            runBtn.disabled = false;
+            runBtn.textContent = prevText || "Пересчитать";
+        }
     });
 
     resetBtn.addEventListener("click", () => {
