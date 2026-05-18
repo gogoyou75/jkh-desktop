@@ -1300,7 +1300,7 @@ if (parts.length) {
      ========================================================= */
 
   function makePaymentPeriodError(code, row, details){
-    const err = new Error(code === "PAYMENT_YEAR_REQUIRED" ? "Не указан корректный год платежа." : "Не указан корректный период платежа.");
+    const err = new Error(code === "PAYMENT_DATE_REQUIRED" ? "Укажите дату оплаты перед сохранением строки платежа." : (code === "PAYMENT_YEAR_REQUIRED" ? "Не указан корректный год платежа." : "Не указан корректный период платежа."));
     err.code = code || "PAYMENT_PERIOD_INVALID";
     err.row = row || null;
     err.details = details || {};
@@ -1330,6 +1330,10 @@ if (parts.length) {
     r.id = Number(r.id) || 0;
 
     // paid_date: если валидна — расчётный месяц/год синхронизируются из неё.
+    // Для строк ручной оплаты с суммой > 0 дата обязательна: без неё нельзя
+    // вывести корректные year/month и нельзя отправлять запись на сервер.
+    const paidAmount = r2(Math.max(0, toNum(r.paid)));
+    const accruedAmount = r2(toNum(r.accrued));
     const paidDateObj = parseDateAnyToDate(r.paid_date);
     if (paidDateObj) {
       r.paid_date = toISODateString(paidDateObj);
@@ -1337,6 +1341,9 @@ if (parts.length) {
       r.month = pad2(paidDateObj.getMonth() + 1);
     } else {
       r.paid_date = '';
+      if (paidAmount > 0.0000001 && accruedAmount <= 0.0000001) {
+        throwPaymentPeriodInvalid("PAYMENT_DATE_REQUIRED", r, { paid: paidAmount, paid_date: "" });
+      }
     }
 
     // month/year: запрещено молча заменять повреждённый период текущей датой.
@@ -1353,8 +1360,8 @@ if (parts.length) {
     r.year = yy;
 
     // amounts
-    r.accrued = r2(toNum(r.accrued));
-    r.paid = r2(Math.max(0, toNum(r.paid)));
+    r.accrued = accruedAmount;
+    r.paid = paidAmount;
 
     // period
     r.use_period = !!r.use_period;
@@ -1398,7 +1405,13 @@ if (parts.length) {
 
     } catch(e){
       console.error("SAVE PAYMENTS FAILED", e);
-      alert("Ошибка сохранения оплат. Данные НЕ записаны на сервер.");
+      if (e && e.code === "PAYMENT_DATE_REQUIRED") {
+        alert(e.message || "Укажите дату оплаты перед сохранением строки платежа.");
+      } else if (e && (e.code === "PAYMENT_YEAR_REQUIRED" || e.code === "PAYMENT_PERIOD_INVALID")) {
+        alert(e.message || "Не указан корректный период платежа.");
+      } else {
+        alert("Ошибка сохранения оплат. Данные НЕ записаны на сервер.");
+      }
       throw e;
     }
   }

@@ -1441,17 +1441,140 @@
     return msg || "CALC_FAILED";
   }
 
+  function _todayIsoLocal() {
+    var d = new Date();
+    var y = d.getFullYear();
+    var m = String(d.getMonth() + 1).padStart(2, "0");
+    var day = String(d.getDate()).padStart(2, "0");
+    return y + "-" + m + "-" + day;
+  }
+
+  function _dateAnyToIsoLocal(value) {
+    var s = String(value || "").trim();
+    if (!s) return "";
+    if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+    var m = s.match(/^(\d{1,2})\.(\d{1,2})\.(\d{4})$/);
+    if (m) return m[3] + "-" + String(m[2]).padStart(2, "0") + "-" + String(m[1]).padStart(2, "0");
+    var d = null;
+    if (window.JKHCalcEngine && typeof window.JKHCalcEngine.parseDateAnyToDate === "function") {
+      d = window.JKHCalcEngine.parseDateAnyToDate(s);
+    }
+    if (d && d.toString() !== "Invalid Date") {
+      return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
+    }
+    return "";
+  }
+
+  function _normalizeSummaryPeriodCandidate(from, to) {
+    var f = _dateAnyToIsoLocal(from);
+    var t = _dateAnyToIsoLocal(to) || _todayIsoLocal();
+    if (!_isValidIsoPeriod(f, t)) return null;
+    return { ok: true, from: f, to: t, source: "fallback" };
+  }
+
   function _readAbonentCalcPeriod(abonentOrId) {
     var key = resolveCalcPeriodStorageKey(abonentOrId);
     if (!key) return { ok: false, error: "UID_REQUIRED", from: "", to: "" };
     var raw = _getRawScoped(key);
-    if (!raw) return { ok: false, error: "PERIOD_REQUIRED", from: "", to: "" };
+    if (!raw) return { ok: false, error: "PERIOD_REQUIRED", from: "", to: "", missing: true, storageKey: key };
     var obj = null;
     try { obj = JSON.parse(raw); } catch (e) { obj = null; }
     var from = String(obj && obj.from || "").trim();
     var to = String(obj && obj.to || "").trim();
-    if (!_isValidIsoPeriod(from, to)) return { ok: false, error: "PERIOD_INVALID", from: from, to: to };
+    if (!_isValidIsoPeriod(from, to)) return { ok: false, error: "PERIOD_INVALID", from: from, to: to, storageKey: key };
     return { ok: true, from: from, to: to, storageKey: key };
+  }
+
+  function _extractPeriodFromSummaryObject(summary) {
+    if (!summary || typeof summary !== "object") return null;
+    var p = summary.period && typeof summary.period === "object" ? summary.period : null;
+    return _normalizeSummaryPeriodCandidate(
+      p && (p.from || p.period_from || p.date_from || p.start_date) || summary.period_from || summary.period_start || summary.date_from || summary.start_date,
+      p && (p.to || p.period_to || p.date_to || p.end_date || p.as_of) || summary.period_to || summary.period_end || summary.date_to || summary.end_date || summary.as_of
+    );
+  }
+
+  async function _readCurrentAbonentSummaryPeriod(abonentOrId) {
+    try {
+      var found = _findAbonentByIdOrUid(abonentOrId);
+      var abonent = found && found.abonent ? found.abonent : null;
+      var uid = String(abonent && abonent.uid || (typeof abonentOrId === "object" ? abonentOrId && abonentOrId.uid : "") || "").trim();
+      var abonentId = String(found && found.id || (abonent && abonent.id) || (typeof abonentOrId === "object" ? abonentOrId && abonentOrId.id : abonentOrId) || "").trim();
+      var opts = { page: 1, per_page: 1 };
+      if (isValidUid(uid)) opts.account_uid = uid;
+      else if (abonentId) opts.abonent_id = abonentId;
+      else return null;
+      var payload = await loadAbonentSummaryPage(opts);
+      var items = Array.isArray(payload && payload.items) ? payload.items : [];
+      var item = items[0] || null;
+      var summary = item && item.summary && typeof item.summary === "object" ? item.summary : null;
+      var period = _extractPeriodFromSummaryObject(summary);
+      if (period) period.source = "summary";
+      return period;
+    } catch (e) {
+      try { console.warn("[summary][period-fallback-summary-failed]", { reason: String(e && e.message || e) }); } catch (eLog) {}
+      return null;
+    }
+  }
+
+  function _readActiveResponsibilityPeriod(abonentOrId) {
+    var found = _findAbonentByIdOrUid(abonentOrId);
+    var id = String(found && found.id || (typeof abonentOrId === "object" ? abonentOrId && abonentOrId.id : abonentOrId) || "").trim();
+    if (!id) return null;
+    var db = window.AbonentsDB || {};
+    var abonent = found && found.abonent ? found.abonent : (db.abonents && db.abonents[id] ? db.abonents[id] : {});
+    var linksRaw = Array.isArray(db.links) ? db.links : (Array.isArray(db.abonentPremiseLinks) ? db.abonentPremiseLinks : []);
+    var links = linksRaw.filter(function (l) {
+      var aId = l && (l.abonentId || l.abonent_id || l.abonent || l.accountId || l.ls || l.personalAccount);
+      return String(aId || "") === id;
+    }).map(function (l) {
+      return {
+        from: _dateAnyToIsoLocal(l && (l.dateFrom || l.from || l.start || l.startDate || l.date_start || l.respFrom)),
+        to: _dateAnyToIsoLocal(l && (l.dateTo || l.to || l.end || l.endDate || l.date_end || l.respTo))
+      };
+    }).filter(function (l) { return !!l.from; });
+
+    var strictFrom = _dateAnyToIsoLocal(abonent && (abonent.calcStartDate || abonent.calc_start_date || abonent.calcStart || abonent.calc_start || abonent.startCalc || abonent.start_calc || abonent.dateStartCalc || abonent.date_start_calc || abonent.calcDateStart || abonent.calc_date_start || abonent.calcDate || abonent.calc_date));
+    var strictTo = _dateAnyToIsoLocal(abonent && (abonent.calcEndDate || abonent.calc_end_date || abonent.calcEnd || abonent.calc_end));
+
+    function clamp(range, openEnded) {
+      if (!range || !range.from) return null;
+      var from = range.from;
+      var to = range.to || "";
+      if (strictFrom && strictFrom > from) from = strictFrom;
+      if (strictTo && !openEnded && (!to || strictTo < to)) to = strictTo;
+      return _normalizeSummaryPeriodCandidate(from, to);
+    }
+
+    if (links.length) {
+      var active = links.filter(function (l) { return !l.to; });
+      var pick = (active.length ? active : links).sort(function (a, b) { return a.from < b.from ? 1 : -1; })[0];
+      var linkPeriod = clamp({ from: pick.from, to: pick.to || "" }, !pick.to);
+      if (linkPeriod) { linkPeriod.source = "responsibility"; return linkPeriod; }
+    }
+
+    var directPeriod = clamp({
+      from: _dateAnyToIsoLocal(abonent && (abonent.calcStartDate || abonent.calc_start_date || abonent.dateFrom || abonent.date_from || abonent.calcFrom || abonent.calc_from || abonent.startCalc || abonent.start_calc || abonent.dateStartCalc || abonent.date_start_calc || abonent.responsibilityFrom || abonent.respFrom)),
+      to: _dateAnyToIsoLocal(abonent && (abonent.calcEndDate || abonent.calc_end_date || abonent.dateTo || abonent.date_to || abonent.calcTo || abonent.calc_to || abonent.endCalc || abonent.end_calc || abonent.dateEndCalc || abonent.date_end_calc || abonent.responsibilityTo || abonent.respTo))
+    }, !strictTo);
+    if (directPeriod) { directPeriod.source = "responsibility"; return directPeriod; }
+    return null;
+  }
+
+  async function _resolveAbonentSummaryRecalcPeriod(abonentOrId, explicitPeriod) {
+    if (explicitPeriod && typeof explicitPeriod === "object") {
+      return { ok: _isValidIsoPeriod(explicitPeriod.from, explicitPeriod.to), from: String(explicitPeriod.from || ""), to: String(explicitPeriod.to || ""), error: "PERIOD_INVALID" };
+    }
+    var period = _readAbonentCalcPeriod(abonentOrId);
+    if (period.ok || period.error !== "PERIOD_REQUIRED") return period;
+
+    var summaryPeriod = await _readCurrentAbonentSummaryPeriod(abonentOrId);
+    if (summaryPeriod) return summaryPeriod;
+
+    var responsibilityPeriod = _readActiveResponsibilityPeriod(abonentOrId);
+    if (responsibilityPeriod) return responsibilityPeriod;
+
+    return period;
   }
 
   function buildAbonentSummaryAfterExplicitRecalc(abonentOrId, from, to) {
@@ -1503,9 +1626,7 @@
 
   async function recalcAbonentSummaryExplicit(abonentOrId, options) {
     var opts = options || {};
-    var period = opts.period && typeof opts.period === "object"
-      ? { ok: _isValidIsoPeriod(opts.period.from, opts.period.to), from: String(opts.period.from || ""), to: String(opts.period.to || ""), error: "PERIOD_INVALID" }
-      : _readAbonentCalcPeriod(abonentOrId);
+    var period = await _resolveAbonentSummaryRecalcPeriod(abonentOrId, opts.period);
     var summary = null;
 
     try {
