@@ -468,6 +468,7 @@ class ImportPaymentsE2ETest(unittest.TestCase):
             self.assertEqual(apply_resp.status_code, 200)
             self.assertEqual(apply_resp.json["batch"]["status"], "applied")
             self.assertEqual(apply_resp.json["batch"]["rows_applied"], 1)
+            self.assertEqual(apply_resp.json["summary"]["affected_uids"], [self.account_uid])
 
         with app_module.app.app_context():
             batch = app_module.ImportBatch.query.filter_by(id=batch_id).first()
@@ -592,6 +593,7 @@ class ImportPaymentsE2ETest(unittest.TestCase):
             self.assertEqual(second_apply_resp.json["batch"]["rows_applied"], 0)
             self.assertEqual(second_apply_resp.json["batch"]["rows_skipped"], 1)
             self.assertEqual(second_apply_resp.json["summary"]["duplicate_count"], 1)
+            self.assertEqual(second_apply_resp.json["summary"]["affected_uids"], [])
 
         with app_module.app.app_context():
             ledger_row = app_module.KVStore.query.filter_by(
