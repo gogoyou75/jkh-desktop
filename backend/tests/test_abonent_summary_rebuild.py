@@ -129,6 +129,36 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
             self.assertEqual(payload["summary_reason"], "OK")
             self.assertEqual(payload["totals"], {"principal": 10, "penalty": 2, "total": 12})
 
+    def test_single_upsert_preserves_fresh_summary_metadata_fields(self):
+        with app_module.app.app_context():
+            self._add_user("owner-single-metadata")
+            self._put_abonents("owner-single-metadata", {
+                "1001": {"uid": "uid_single_metadata_1001", "id": "1001"},
+            })
+            app_module.db.session.commit()
+        self._login("owner-single-metadata")
+
+        response = self.client.post("/api/abonent_summary/rebuild", json={
+            "account_uid": "uid_single_metadata_1001",
+            "abonent_id": "1001",
+            "account_number": "1001",
+            "summary": {
+                **self._fresh_summary(21, 3, 24),
+                "canon_version": "canon-v1",
+                "recalc_fingerprint": hashlib.sha256(b"uid_single_metadata_1001").hexdigest(),
+                "updated_at": "2026-02-01T00:00:01Z",
+            },
+        })
+
+        self.assertEqual(response.status_code, 200)
+        with app_module.app.app_context():
+            payload = json.loads(app_module.AbonentSummary.query.one().summary_json)
+            self.assertEqual(payload["calc_engine_version"], "test")
+            self.assertEqual(payload["canon_version"], "canon-v1")
+            self.assertIn("recalc_fingerprint", payload)
+            self.assertEqual(payload["generated_at"], "2026-02-01T00:00:00Z")
+            self.assertEqual(payload["updated_at"], "2026-02-01T00:00:01Z")
+
     def test_single_upsert_updates_existing_row(self):
         with app_module.app.app_context():
             self._add_user("owner-single-update")
