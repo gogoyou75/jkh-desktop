@@ -2262,6 +2262,7 @@ def import_payments_apply(batch_id):
             details={"count": len(not_ready)},
         ), 400
     applied_count = skipped_count = duplicate_count = conflict_count = failed_count = 0
+    affected_uids = set()
     sources_map = _load_owner_sources(batch.owner_id)
     current_row_id = None
     try:
@@ -2395,6 +2396,8 @@ def import_payments_apply(batch_id):
                 details_json=json.dumps({"account_uid": normalized_uid, "payment_date": normalized_paid_date, "amount": normalized_amount, "source_index": normalized_source_index, "result": "APPLIED", "payment_id": payment_id, "fingerprint": fingerprint}, ensure_ascii=False),
             ))
             applied_count += 1
+            if normalized_uid:
+                affected_uids.add(normalized_uid)
 
         batch.rows_applied = applied_count
         batch.rows_skipped = duplicate_count + conflict_count + skipped_count
@@ -2474,6 +2477,7 @@ def import_payments_apply(batch_id):
         "duplicate_count": duplicate_count,
         "conflict_count": conflict_count,
         "failed_count": failed_count,
+        "affected_uids": sorted(affected_uids),
     }
     return jsonify(ok=True, batch=_batch_payload(batch), summary=summary)
 

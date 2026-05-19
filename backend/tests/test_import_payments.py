@@ -486,6 +486,32 @@ class ImportPaymentsE2ETest(unittest.TestCase):
         self.assertEqual(ledger[0]["paid"], 1000.0)
         self.assertEqual(ledger[0]["paid_date"], "15.01.2026")
         self.assertEqual(ledger[0]["payment_period"], "2026-01")
+        self.assertEqual(apply_resp.json["summary"]["affected_uids"], [self.account_uid])
+
+    def test_apply_summary_affected_uids_deduplicated_and_owner_scoped(self):
+        rows = [
+            {
+                "account_uid": self.account_uid,
+                "payment_date": "2026-01-15",
+                "payment_period": "2026-01",
+                "amount": 1000,
+                "source_index": 1,
+            },
+            {
+                "account_uid": self.account_uid,
+                "payment_date": "2026-01-16",
+                "payment_period": "2026-01",
+                "amount": 1100,
+                "source_index": 2,
+            },
+        ]
+        with patch.object(app_module, "_import_schema_error_response", return_value=None):
+            upload_resp = self._upload_rows(rows=rows)
+            batch_id = upload_resp.json["batch"]["id"]
+            self.client.post(f"/api/import/{batch_id}/validate")
+            apply_resp = self.client.post(f"/api/import/{batch_id}/apply")
+            self.assertEqual(apply_resp.status_code, 200)
+            self.assertEqual(apply_resp.json["summary"]["affected_uids"], [self.account_uid])
 
 
     def test_upload_rows_missing_payment_period_is_invalid(self):

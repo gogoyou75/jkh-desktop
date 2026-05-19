@@ -116,6 +116,14 @@
       <div class="hint small mono" id="restoredFileLine"></div>
       <div class="hint" id="uidHint"></div>
       <div class="hint" id="errorsBox"></div>
+      <div id="affectedAbonentsBox" class="hint" style="display:none;">
+        <div><b>Затронутые абоненты</b>: <span id="affectedAbonentsCount">0</span></div>
+        <div id="affectedAbonentsList" class="small mono"></div>
+        <div style="margin-top:8px;">
+          <button class="btn" id="btnRecalcAffected" disabled>Пересчитать затронутых абонентов</button>
+        </div>
+        <div id="affectedRecalcProgress" class="small mono" style="margin-top:6px;"></div>
+      </div>
     </div>
 
     <div class="block">
@@ -1084,6 +1092,7 @@ function saveImportDraftState(){
       parseMeta: parseMeta || null,
       fileYearValidation: fileYearValidation || null,
       fileYearBlockReason: fileYearBlockReason || '',
+      affectedUids: Array.isArray(affectedUids) ? affectedUids : [],
       ownerId: getCurrentOwnerId(),
       fileName: normStr(currentFileName),
       savedAt: new Date().toISOString()
@@ -1097,6 +1106,47 @@ function loadImportDraftState(){
 function clearImportDraftState(){
   if (!window.JKHStore || !JKHStore.setJSON) return;
   try{ JKHStore.setJSON('import_xls_draft_v1', null, null); }catch(e){}
+}
+function setAffectedUids(list){
+  const seen = {};
+  const out = [];
+  const arr = Array.isArray(list) ? list : [];
+  for (let i=0;i<arr.length;i++){
+    const uid = normStr(arr[i]);
+    if (!uid || seen[uid]) continue;
+    seen[uid] = true;
+    out.push(uid);
+  }
+  affectedUids = out;
+  renderAffectedAbonents();
+}
+function renderAffectedAbonents(){
+  const box = $('affectedAbonentsBox');
+  const countEl = $('affectedAbonentsCount');
+  const listEl = $('affectedAbonentsList');
+  const runBtn = $('btnRecalcAffected');
+  if (!box || !countEl || !listEl || !runBtn) return;
+  const db = getDB();
+  countEl.textContent = String(affectedUids.length);
+  if (!affectedUids.length){
+    box.style.display = 'none';
+    listEl.innerHTML = '';
+    runBtn.disabled = true;
+    return;
+  }
+  box.style.display = 'block';
+  const lines = [];
+  for (let i=0;i<Math.min(affectedUids.length, 25);i++){
+    const uid = affectedUids[i];
+    const found = findAbonentByUid(db, uid);
+    const a = found && found.abonent;
+    const ls = normStr(a && (a.id || found.key));
+    const fio = toFio(a && a.fam, a && a.name, a && a.otch) || normStr(a && a.fio) || '—';
+    lines.push((i+1) + ') ЛС ' + (ls || '—') + ' / ' + fio + ' / UID ' + uid + ' / summary: dirty');
+  }
+  if (affectedUids.length > 25) lines.push('... и ещё ' + (affectedUids.length - 25));
+  listEl.innerHTML = lines.join('<br>');
+  runBtn.disabled = importApplyBusy || !affectedUids.length;
 }
 function getCurrentOwnerId(){
   try{ return (window.JKHStore && typeof JKHStore.getOwnerId === 'function') ? normStr(JKHStore.getOwnerId()) : ''; }
@@ -1735,6 +1785,7 @@ let serverPaymentRows = [];
 let importApplyBusy = false;
 let fileYearValidation = null;
 let fileYearBlockReason = '';
+let affectedUids = [];
 
 async function apiJson(url, options){
   const res = await fetch(url, Object.assign({ credentials:'include' }, options || {}));
@@ -2711,6 +2762,39 @@ function updateStateLine(){
   else $('stepStateLine').textContent = canEnterPaymentsMode() ? 'Шаг 1 не применён. Шаг 2 доступен для строк с UID.' : 'Шаг 1 не применён. Шаг 2 заблокирован до успешной первички.';
 }
 
+async function runAffectedRecalcBatch(){
+  if (importApplyBusy || !affectedUids.length) return;
+  const progress = $('affectedRecalcProgress');
+  setImportBusy(true, 'Пересчёт summary по затронутым UID…');
+  try{
+    const validation = await Data.validateAbonentSummaryRecalcBatch(affectedUids);
+    const allowed = Array.isArray(validation && validation.allowed_uids) ? validation.allowed_uids : [];
+    const deniedItems = Array.isArray(validation && validation.items) ? validation.items.filter(function(x){ return !x.allowed; }) : [];
+    let fresh = 0, errors = 0, skipped = deniedItems.length;
+    const errorLines = [];
+    if (progress) progress.textContent = 'Отправлено UID: ' + affectedUids.length + '. Разрешено: ' + allowed.length + '.';
+    for (let i=0;i<allowed.length;i++){
+      const uid = allowed[i];
+      try{
+        const one = await Data.recalcAbonentSummaryExplicit(uid);
+        if (one && one.ok === true) fresh++;
+        else { errors++; errorLines.push(uid + ': ' + normStr(one && (one.summary_reason || one.error) || 'UNKNOWN_ERROR')); }
+      }catch(e){
+        errors++;
+        errorLines.push(uid + ': ' + String(e && e.message || e));
+      }
+      if (progress) progress.textContent = 'Отправлено UID: ' + allowed.length + '. fresh: ' + fresh + '. error: ' + errors + '. skipped: ' + skipped + '.';
+    }
+    if (errorLines.length) $('errorsBox').innerHTML = '<b>Ошибки пересчёта summary:</b><br>' + errorLines.map(escHtml).join('<br>');
+    if (window.JKHDataLoader && typeof window.JKHDataLoader.loadFromServer === 'function'){
+      await window.JKHDataLoader.loadFromServer({ reason:'import_affected_recalc_done', force:true });
+    }
+    if (progress) progress.textContent = 'Отправлено UID: ' + allowed.length + '. fresh: ' + fresh + '. error: ' + errors + '. skipped: ' + skipped + '.';
+  } finally {
+    setImportBusy(false);
+  }
+}
+
 function setButtons(){
   const hasFile = !!$('fileInput').files && $('fileInput').files.length>0;
   $('btnParse').disabled = !hasFile || importApplyBusy;
@@ -2986,6 +3070,7 @@ async function applyPayments(){
     const duplicateCount = Number(s.duplicate_count || 0);
     const conflictCount = Number(s.conflict_count || 0);
     const summaryMsg = 'Импорт завершён. Добавлено платежей: ' + appliedCount + '. Пропущено: ' + skippedCount + '. Дубликатов: ' + duplicateCount + '. Конфликтов: ' + conflictCount + '.';
+    setAffectedUids(s.affected_uids || []);
     const hardReject = rows.length > 0 && appliedCount === 0;
     setImportStatus(summaryMsg, hardReject ? 'err' : 'ok');
 
@@ -3209,6 +3294,7 @@ $('previewBody').addEventListener('click', function(ev){
       if (typeof draft.allowCreate !== 'undefined') $('optAllowCreate').checked = !!draft.allowCreate;
       if (typeof draft.allowSquareUpdate !== 'undefined') $('optAllowSquareUpdate').checked = !!draft.allowSquareUpdate;
       if (draft.parseMeta && typeof draft.parseMeta === 'object') parseMeta = draft.parseMeta;
+      setAffectedUids(draft.affectedUids || []);
       currentFileName = normStr(draft.fileName);
       if (draft.fileYearValidation && typeof draft.fileYearValidation === 'object'){
         fileYearValidation = draft.fileYearValidation;
@@ -3230,6 +3316,7 @@ $('previewBody').addEventListener('click', function(ev){
   $('fileInput').addEventListener('change', function(){ setButtons(); });
   $('optAllowCreate').addEventListener('change', function(){ renderPreview(); saveImportDraftState(); });
   $('optAllowSquareUpdate').addEventListener('change', function(){ renderPreview(); saveImportDraftState(); });
+  $('btnRecalcAffected').addEventListener('click', runAffectedRecalcBatch);
 
   $('btnModePrimary').addEventListener('click', function(){ mode='primary'; buildPreview(); });
   $('btnModePayments').addEventListener('click', function(){ if (!canEnterPaymentsMode()) return; mode='payments'; buildPreview(); });
