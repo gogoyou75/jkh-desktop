@@ -437,3 +437,10 @@ rg -n "splitPremise|premise-transform\]\[split|type: ['\"]split" web LOGIC_SPEC.
 - `payments_<uid>` закреплён как единственный write-path ledger.
 - Legacy `payments_<LS>` оставлен только для read fallback внутри service layer.
 - Добавлены нормализация `WITH_DEBT` / `WITHOUT_DEBT` / `NO_DEBT` и минимальный financial event log.
+
+## 2026-05-19 — Stage 9 Backend Batch Orchestration
+- backend стал coordinator batch-пересчёта abonent_summary;
+- frontend создаёт job и читает progress;
+- owner/UID allowlist проверяются только на backend;
+- batch не делает full-scan и не падает целиком из-за одного UID;
+- calc_engine.js не изменялся.

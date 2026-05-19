@@ -1421,6 +1421,46 @@
     return data;
   }
 
+  async function createAbonentSummaryRecalcBatchJob(uids, reason) {
+    var list = Array.isArray(uids) ? uids : [];
+    var payload = { uids: list.map(function(x){ return String(x || "").trim(); }).filter(Boolean), reason: String(reason || "MANUAL_RECALC") };
+    var res = await fetch("/api/abonent_summary/recalc_batch_job", {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+    var text = await res.text();
+    var data = null;
+    try { data = text ? JSON.parse(text) : null; } catch (e) { data = null; }
+    if (!res.ok || !data || data.ok === false) throw new Error((data && data.error) || ("HTTP_" + res.status));
+    return data;
+  }
+
+  async function runAbonentSummaryRecalcBatchJob(jobId) {
+    var res = await fetch("/api/abonent_summary/recalc_batch_job/" + encodeURIComponent(String(jobId)) + "/run", {
+      method: "POST",
+      credentials: "include"
+    });
+    var text = await res.text();
+    var data = null;
+    try { data = text ? JSON.parse(text) : null; } catch (e) { data = null; }
+    if (!res.ok || !data || data.ok === false) throw new Error((data && data.error) || ("HTTP_" + res.status));
+    return data;
+  }
+
+  async function getAbonentSummaryRecalcBatchJob(jobId) {
+    var res = await fetch("/api/abonent_summary/recalc_batch_job/" + encodeURIComponent(String(jobId)), {
+      method: "GET",
+      credentials: "include"
+    });
+    var text = await res.text();
+    var data = null;
+    try { data = text ? JSON.parse(text) : null; } catch (e) { data = null; }
+    if (!res.ok || !data || data.ok === false) throw new Error((data && data.error) || ("HTTP_" + res.status));
+    return data;
+  }
+
   function _dateFromIsoLocal(value) {
     var s = String(value || "").trim();
     var m = s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
@@ -1944,6 +1984,9 @@
     readPaymentLedger: readPaymentLedger,
     loadAbonentSummaryPage: loadAbonentSummaryPage,
     validateAbonentSummaryRecalcBatch: validateAbonentSummaryRecalcBatch,
+    createAbonentSummaryRecalcBatchJob: createAbonentSummaryRecalcBatchJob,
+    runAbonentSummaryRecalcBatchJob: runAbonentSummaryRecalcBatchJob,
+    getAbonentSummaryRecalcBatchJob: getAbonentSummaryRecalcBatchJob,
     resolveAbonentRegnumForSummary: resolveAbonentRegnumForSummary,
     buildAbonentSummaryAfterExplicitRecalc: buildAbonentSummaryAfterExplicitRecalc,
     recalcAbonentSummaryExplicit: recalcAbonentSummaryExplicit,

@@ -377,3 +377,5 @@
 | Future `POST /api/recalc/batch` пересчитывает только указанные UID и возвращает результат по каждому UID | LOGIC_SPEC 21.8 | future API / batch recalc | ⚪ IDEA | Один ошибочный UID не останавливает batch; ошибка сохраняется как `summary_status = error` и `summary_reason`. |
 | `index.html` при открытии является read-only страницей | LOGIC_SPEC 21.9 | future and current page-open boundary | ✅ CANON | Запрещены чтение всех `payments_<uid>`, autoaccrual apply, recalc all, запись ledger, flush/upload, создание missing ledger и маскировка missing/error summary нулями. |
 | Stage 1 PR не меняет код и не добавляет реализацию | LOGIC_SPEC 21.10 | limited backend write-path | ✅ CANON | Исторический Stage 1 был docs-only; текущий этап разрешает только explicit rebuild endpoint и тесты, не затрагивая frontend/calc engine. |
+
+| STAGE9-BATCH-JOBS | `/api/abonent_summary/recalc_batch_job*` backend orchestration with owner-scoped UID filtering and per-item status | backend/app.py, backend/tests/test_recalc_batch_jobs.py |

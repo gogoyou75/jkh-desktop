@@ -1288,8 +1288,8 @@ function bindSummaryBatchPanelOnce(){
 
 async function runSelectedSummaryBatch(){
     if (summaryBatchRunning) return;
-    if (!window.Data || typeof Data.validateAbonentSummaryRecalcBatch !== "function" || typeof Data.recalcAbonentSummaryExplicit !== "function") {
-        alert("Batch UID-recalc недоступен: Data API не загружен.");
+    if (!window.Data || typeof Data.createAbonentSummaryRecalcBatchJob !== "function" || typeof Data.runAbonentSummaryRecalcBatchJob !== "function" || typeof Data.getAbonentSummaryRecalcBatchJob !== "function") {
+        alert("Batch job API недоступен: Data API не загружен.");
         return;
     }
     let selected = Object.keys(summaryBatchSelectedUids).filter(function(uid){ return summaryBatchSelectedUids[uid]; });
@@ -1305,26 +1305,15 @@ async function runSelectedSummaryBatch(){
     if (progress) progress.textContent = "Проверка UID на сервере…";
 
     try {
-        const validation = await Data.validateAbonentSummaryRecalcBatch(selected);
-        const allowed = Array.isArray(validation.allowed_uids) ? validation.allowed_uids : [];
-        const denied = (Array.isArray(validation.items) ? validation.items : []).filter(function(x){ return !x.allowed; }).length;
-        let done = 0;
-        let ok = 0;
-        let errors = denied;
-        for (const uid of allowed) {
-            done++;
-            if (progress) progress.textContent = "Пересчёт " + done + " из " + allowed.length + " (UID " + uid + ")…" + (denied ? " Не разрешено: " + denied + "." : "");
-            try {
-                const result = await Data.recalcAbonentSummaryExplicit(uid);
-                if (result && result.ok === true) ok++;
-                else errors++;
-            } catch (e) {
-                errors++;
-                try { console.warn("[summary][batch-recalc-one-failed]", { uid: uid, error: String(e && e.message || e) }); } catch (_) {}
-            }
-            delete summaryBatchSelectedUids[uid];
-        }
+        const created = await Data.createAbonentSummaryRecalcBatchJob(selected, "MANUAL_RECALC");
+        if (progress) progress.textContent = "Создано задание #" + created.job_id + ". Принято: " + created.accepted + ", пропущено: " + created.skipped + ".";
+        await Data.runAbonentSummaryRecalcBatchJob(created.job_id);
+        const statusPayload = await Data.getAbonentSummaryRecalcBatchJob(created.job_id);
+        const job = statusPayload.job || {};
+        const ok = Number(job.fresh_count || 0);
+        const errors = Number(job.error_count || 0) + Number(job.skipped_count || 0);
         if (progress) progress.textContent = "Готово. Успешно: " + ok + ", ошибок/пропущено: " + errors + ". Обновление summary…";
+        selected.forEach(function(uid){ delete summaryBatchSelectedUids[uid]; });
         await loadPassiveSummaryPage(currentPage);
         if (progress) progress.textContent = "Готово. Успешно: " + ok + ", ошибок/пропущено: " + errors + ".";
     } catch (e) {

@@ -1932,3 +1932,7 @@ Fatal-состояния включают, но не ограничиваютс�
 - дублировать финансовые формулы на backend.
 
 Этап заполнения `abonent_summary` добавляет только controlled missing/dirty cache population без финансового расчёта.
+
+## 2026-05-19 — Stage 9 Backend Batch Orchestration
+- Added backend batch-job coordinator API for abonent_summary recalculation requests.
+- Owner scope and UID allowlist are validated only on backend.
