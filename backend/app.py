@@ -224,6 +224,38 @@ class AbonentSummary(db.Model):
     )
 
 
+class RecalcBatchJob(db.Model):
+    __tablename__ = "recalc_batch_jobs"
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    owner_id = db.Column(db.String(128), nullable=False, index=True)
+    requested_by = db.Column(db.String(64), nullable=False, default="")
+    reason = db.Column(db.String(64), nullable=False, default="")
+    status = db.Column(db.String(32), nullable=False, default="queued", index=True)
+    total_count = db.Column(db.Integer, nullable=False, default=0)
+    processed_count = db.Column(db.Integer, nullable=False, default=0)
+    fresh_count = db.Column(db.Integer, nullable=False, default=0)
+    error_count = db.Column(db.Integer, nullable=False, default=0)
+    skipped_count = db.Column(db.Integer, nullable=False, default=0)
+    created_at = db.Column(db.DateTime, nullable=False, server_default=text("CURRENT_TIMESTAMP"))
+    started_at = db.Column(db.DateTime, nullable=True)
+    finished_at = db.Column(db.DateTime, nullable=True)
+    error_message = db.Column(db.Text, nullable=False, default="")
+
+
+class RecalcBatchJobItem(db.Model):
+    __tablename__ = "recalc_batch_job_items"
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    job_id = db.Column(db.Integer, db.ForeignKey("recalc_batch_jobs.id"), nullable=False, index=True)
+    owner_id = db.Column(db.String(128), nullable=False, index=True)
+    account_uid = db.Column(db.String(128), nullable=False, default="", index=True)
+    status = db.Column(db.String(32), nullable=False, default="queued", index=True)
+    summary_status = db.Column(db.String(32), nullable=False, default="")
+    summary_reason = db.Column(db.String(128), nullable=False, default="")
+    started_at = db.Column(db.DateTime, nullable=True)
+    finished_at = db.Column(db.DateTime, nullable=True)
+    error_message = db.Column(db.Text, nullable=False, default="")
+
+
 def _json_error(error: str, code: int):
     return jsonify(ok=False, error=error), code
 
@@ -1076,6 +1108,49 @@ def _summary_from_row_or_missing(row: AbonentSummary | None, target: dict):
     return _summary_without_stale_totals(summary)
 
 
+def _batch_job_payload(job: RecalcBatchJob):
+    return {
+        "id": int(job.id),
+        "status": _norm_text(job.status) or "queued",
+        "total_count": int(job.total_count or 0),
+        "processed_count": int(job.processed_count or 0),
+        "fresh_count": int(job.fresh_count or 0),
+        "error_count": int(job.error_count or 0),
+        "skipped_count": int(job.skipped_count or 0),
+    }
+
+
+def _recalc_batch_create_job(owner_id: str, user_id: str, raw_uids, reason: str):
+    requested = []
+    seen = set()
+    for value in (raw_uids or []):
+        uid = _norm_text(value)
+        if not uid or uid in seen:
+            continue
+        seen.add(uid)
+        requested.append(uid)
+    if not requested:
+        return None, {"requested": 0, "accepted": 0, "skipped": 0}
+    targets = _owner_abonent_summary_targets(owner_id)
+    targets_by_uid = {_norm_text(t.get("account_uid")): t for t in targets if _norm_text(t.get("account_uid"))}
+    accepted = [uid for uid in requested if uid in targets_by_uid]
+    skipped = len(requested) - len(accepted)
+    job = RecalcBatchJob(
+        owner_id=owner_id,
+        requested_by=user_id,
+        reason=_norm_text(reason) or "MANUAL_RECALC",
+        status="queued",
+        total_count=len(accepted),
+        skipped_count=skipped,
+    )
+    db.session.add(job)
+    db.session.flush()
+    for uid in accepted:
+        db.session.add(RecalcBatchJobItem(job_id=job.id, owner_id=owner_id, account_uid=uid, status="queued"))
+    db.session.commit()
+    return job, {"requested": len(requested), "accepted": len(accepted), "skipped": skipped}
+
+
 def _parse_summary_status_filter(raw_value: str):
     raw = _norm_text(raw_value).lower()
     if not raw:
@@ -1438,26 +1513,92 @@ def abonent_summary_recalc_batch():
     targets_by_uid = {_norm_text(t.get("account_uid")): t for t in targets if _norm_text(t.get("account_uid"))}
 
     items = []
-    allowed_uids = []
     for uid in requested:
         target = targets_by_uid.get(uid)
-        if target:
-            allowed_uids.append(uid)
-            items.append({
-                "account_uid": uid,
-                "abonent_id": _norm_text(target.get("abonent_id")),
-                "account_number": _norm_text(target.get("account_number")),
-                "allowed": True,
-                "status": "allowed",
-            })
-        else:
-            items.append({
-                "account_uid": uid,
-                "allowed": False,
-                "status": "not_found",
-            })
+        items.append({
+            "account_uid": uid,
+            "allowed": bool(target),
+            "status": "allowed" if target else "not_found",
+        })
 
-    return jsonify(ok=True, allowed_uids=allowed_uids, items=items)
+    return jsonify(ok=True, allowed_uids=[i["account_uid"] for i in items if i["allowed"]], items=items)
+
+
+@app.post("/api/abonent_summary/recalc_batch_job")
+def abonent_summary_recalc_batch_job_create():
+    user, err = _require_user()
+    if err:
+        return err
+    body = request.get_json(silent=True) or {}
+    raw_uids = body.get("uids")
+    if raw_uids is None:
+        raw_uids = body.get("account_uids")
+    if isinstance(raw_uids, str):
+        raw_uids = [raw_uids]
+    if not isinstance(raw_uids, list):
+        return jsonify(ok=False, error="account_uids_required"), 400
+    job, counters = _recalc_batch_create_job(user.id, user.id, raw_uids, body.get("reason"))
+    if not job:
+        return jsonify(ok=False, error="account_uids_required"), 400
+    return jsonify(ok=True, job_id=int(job.id), status="queued", **counters)
+
+
+@app.post("/api/abonent_summary/recalc_batch_job/<int:job_id>/run")
+def abonent_summary_recalc_batch_job_run(job_id: int):
+    user, err = _require_user()
+    if err:
+        return err
+    job = RecalcBatchJob.query.filter_by(id=job_id, owner_id=user.id).first()
+    if not job:
+        return jsonify(ok=False, error="job_not_found"), 404
+    if job.status == "running":
+        return jsonify(ok=False, error="job_already_running"), 409
+    now = datetime.utcnow()
+    job.status = "running"
+    job.started_at = now
+    db.session.commit()
+    items = RecalcBatchJobItem.query.filter_by(job_id=job.id, owner_id=user.id).order_by(RecalcBatchJobItem.id.asc()).all()
+    for item in items:
+        item.status = "running"
+        item.started_at = datetime.utcnow()
+        db.session.commit()
+        row = AbonentSummary.query.filter_by(owner_id=user.id, account_uid=item.account_uid).order_by(AbonentSummary.id.asc()).first()
+        summary = _summary_from_row_or_missing(row, {"account_uid": item.account_uid, "abonent_id": "", "account_number": "", "identity": {}})
+        s_status = _summary_status_from_payload(summary)
+        s_reason = _norm_text(summary.get("summary_reason") or summary.get("reason") or "")
+        if s_status == "fresh":
+            item.status = "fresh"
+            job.fresh_count += 1
+        else:
+            item.status = "error"
+            item.error_message = s_reason or s_status
+            job.error_count += 1
+        item.summary_status = s_status
+        item.summary_reason = s_reason
+        item.finished_at = datetime.utcnow()
+        job.processed_count += 1
+        db.session.commit()
+    job.status = "done"
+    job.finished_at = datetime.utcnow()
+    db.session.commit()
+    return jsonify(ok=True, job=_batch_job_payload(job))
+
+
+@app.get("/api/abonent_summary/recalc_batch_job/<int:job_id>")
+def abonent_summary_recalc_batch_job_status(job_id: int):
+    user, err = _require_user()
+    if err:
+        return err
+    job = RecalcBatchJob.query.filter_by(id=job_id, owner_id=user.id).first()
+    if not job:
+        return jsonify(ok=False, error="job_not_found"), 404
+    items = RecalcBatchJobItem.query.filter_by(job_id=job.id, owner_id=user.id).order_by(RecalcBatchJobItem.id.asc()).all()
+    return jsonify(ok=True, job=_batch_job_payload(job), items=[{
+        "account_uid": _norm_text(x.account_uid),
+        "status": _norm_text(x.status),
+        "summary_status": _norm_text(x.summary_status),
+        "summary_reason": _norm_text(x.summary_reason),
+    } for x in items])
 
 
 @app.post("/api/abonent_summary/rebuild")

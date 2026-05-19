@@ -128,6 +128,12 @@
 
 ## 2026-05-08 — Import XLS: мягкая проверка ЛС/ФИО по UID
 
+
+## 2026-05-19 — Stage 9 DB migration for recalc batch jobs
+
+- added migration for recalc_batch_jobs and recalc_batch_job_items
+- fixed schema drift after backend batch orchestration deploy
+
 - Исправлено ложное UID_MISMATCH в Excel-импорте: при найденном UID различия форматирования ЛС/ФИО теперь дают предупреждение, а не блокировку. Блокировка сохранена только для структурных конфликтов UID/active link/regnum.
 
 ## 2026-05-07 — Import XLS: защита открытия квартиры по контексту
@@ -437,3 +443,10 @@ rg -n "splitPremise|premise-transform\]\[split|type: ['\"]split" web LOGIC_SPEC.
 - `payments_<uid>` закреплён как единственный write-path ledger.
 - Legacy `payments_<LS>` оставлен только для read fallback внутри service layer.
 - Добавлены нормализация `WITH_DEBT` / `WITHOUT_DEBT` / `NO_DEBT` и минимальный financial event log.
+
+## 2026-05-19 — Stage 9 Backend Batch Orchestration
+- backend стал coordinator batch-пересчёта abonent_summary;
+- frontend создаёт job и читает progress;
+- owner/UID allowlist проверяются только на backend;
+- batch не делает full-scan и не падает целиком из-за одного UID;
+- calc_engine.js не изменялся.

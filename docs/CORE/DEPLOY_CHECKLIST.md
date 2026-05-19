@@ -28,3 +28,15 @@ DESCRIBE import_batches;
 - `file_name`
 - `uploaded_by`
 - `error_message`
+
+
+### Stage 9 recalc batch orchestration
+
+После Stage 9 deploy выполнить:
+
+```sql
+SHOW TABLES LIKE 'recalc_batch%';
+DESCRIBE recalc_batch_jobs;
+DESCRIBE recalc_batch_job_items;
+```
+
