@@ -1932,3 +1932,9 @@ Fatal-состояния включают, но не ограничиваютс�
 - дублировать финансовые формулы на backend.
 
 Этап заполнения `abonent_summary` добавляет только controlled missing/dirty cache population без финансового расчёта.
+
+## 14. Batch recalculation scope (Stage 7)
+
+- Batch recalculation `abonent_summary` допускается только по явно переданному списку `affected_uids`.
+- Массовый read-only пересчёт всей owner-базы без явного списка UID запрещён.
+- Batch путь не является новым финансовым движком и использует только канонический single-UID recalculation flow.

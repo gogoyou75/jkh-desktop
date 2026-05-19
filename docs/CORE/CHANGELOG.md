@@ -437,3 +437,7 @@ rg -n "splitPremise|premise-transform\]\[split|type: ['\"]split" web LOGIC_SPEC.
 - `payments_<uid>` закреплён как единственный write-path ledger.
 - Legacy `payments_<LS>` оставлен только для read fallback внутри service layer.
 - Добавлены нормализация `WITH_DEBT` / `WITHOUT_DEBT` / `NO_DEBT` и минимальный financial event log.
+
+## 2026-05-19 — Этап 7: Batch recalculation по affected_uids
+
+- Этап 7 — Batch recalculation по affected_uids: добавлен управляемый пакетный пересчёт abonent_summary только по явно переданным UID; ошибки сохраняются по каждому UID без fake totals; calc_engine.js не изменялся.

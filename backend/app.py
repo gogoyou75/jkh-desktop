@@ -1412,15 +1412,15 @@ def abonent_summary_recalc_batch():
     if not isinstance(body, dict):
         return jsonify(ok=False, error="summary_invalid"), 400
 
-    raw_uids = body.get("account_uids")
+    raw_uids = body.get("uids")
     if raw_uids is None:
-        raw_uids = body.get("uids")
+        raw_uids = body.get("account_uids")
     if raw_uids is None:
         raw_uids = body.get("account_uid")
     if isinstance(raw_uids, str):
         raw_uids = [raw_uids]
     if not isinstance(raw_uids, list):
-        return jsonify(ok=False, error="account_uids_required"), 400
+        return jsonify(ok=False, error="uids_required"), 400
 
     requested = []
     seen = set()
@@ -1432,7 +1432,7 @@ def abonent_summary_recalc_batch():
         requested.append(uid)
 
     if not requested:
-        return jsonify(ok=False, error="account_uids_required"), 400
+        return jsonify(ok=False, error="uids_required"), 400
 
     targets = _owner_abonent_summary_targets(user.id)
     targets_by_uid = {_norm_text(t.get("account_uid")): t for t in targets if _norm_text(t.get("account_uid"))}
@@ -1443,21 +1443,64 @@ def abonent_summary_recalc_batch():
         target = targets_by_uid.get(uid)
         if target:
             allowed_uids.append(uid)
-            items.append({
-                "account_uid": uid,
-                "abonent_id": _norm_text(target.get("abonent_id")),
-                "account_number": _norm_text(target.get("account_number")),
-                "allowed": True,
-                "status": "allowed",
-            })
+            items.append({"account_uid": uid, "allowed": True, "status": "allowed"})
         else:
-            items.append({
-                "account_uid": uid,
-                "allowed": False,
-                "status": "not_found",
-            })
-
+            items.append({"account_uid": uid, "allowed": False, "status": "not_found"})
     return jsonify(ok=True, allowed_uids=allowed_uids, items=items)
+
+
+@app.post("/api/abonent_summary/recalculate_batch")
+def abonent_summary_recalculate_batch():
+    return abonent_summary_recalculate_batch_impl()
+
+
+def abonent_summary_recalculate_batch_impl():
+    user, err = _require_user()
+    if err:
+        return err
+    body = request.get_json(silent=True) or {}
+    raw_uids = body.get("uids")
+    if isinstance(raw_uids, str):
+        raw_uids = [raw_uids]
+    if not isinstance(raw_uids, list):
+        return jsonify(ok=False, error="uids_required"), 400
+    requested = []
+    for value in raw_uids:
+        uid = _norm_text(value)
+        if uid and uid not in requested:
+            requested.append(uid)
+    targets_by_uid = {_norm_text(t.get("account_uid")): t for t in _owner_abonent_summary_targets(user.id)}
+    summaries_by_uid = body.get("summaries") if isinstance(body.get("summaries"), dict) else {}
+    results = []
+    processed = fresh = error = skipped = 0
+    for uid in requested:
+        target = targets_by_uid.get(uid)
+        if not target:
+            skipped += 1
+            results.append({"uid": uid, "status": "skipped", "reason": "UID_NOT_FOUND"})
+            continue
+        processed += 1
+        summary = summaries_by_uid.get(uid)
+        if not isinstance(summary, dict):
+            summary = {"summary_status": "error", "summary_reason": "SUMMARY_REQUIRED"}
+        status = _summary_status_from_payload(summary)
+        if status != "fresh":
+            summary = _summary_without_stale_totals(summary)
+            error += 1
+            reason = _norm_text(summary.get("summary_reason") or summary.get("reason")) or "UNKNOWN"
+            results.append({"uid": uid, "status": "error", "reason": reason})
+        else:
+            fresh += 1
+            results.append({"uid": uid, "status": "fresh", "reason": "OK"})
+        row = AbonentSummary.query.filter_by(owner_id=user.id, account_uid=uid).order_by(AbonentSummary.id.asc()).first()
+        if row:
+            row.abonent_id = _norm_text(target.get("abonent_id"))
+            row.account_number = _norm_text(target.get("account_number"))
+            row.summary_json = json.dumps(summary, ensure_ascii=False, sort_keys=True)
+        else:
+            db.session.add(AbonentSummary(owner_id=user.id, abonent_id=_norm_text(target.get("abonent_id")), account_uid=uid, account_number=_norm_text(target.get("account_number")), summary_json=json.dumps(summary, ensure_ascii=False, sort_keys=True)))
+    db.session.commit()
+    return jsonify(ok=True, requested=len(requested), processed=processed, fresh=fresh, error=error, skipped=skipped, results=results)
 
 
 @app.post("/api/abonent_summary/rebuild")

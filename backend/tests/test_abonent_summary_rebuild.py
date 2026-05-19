@@ -628,6 +628,72 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         with app_module.app.app_context():
             self.assertEqual(app_module.AbonentSummary.query.count(), 0)
 
+    def test_recalculate_batch_processes_only_requested_uids(self):
+        with app_module.app.app_context():
+            self._add_user("owner-batch-only")
+            self._put_abonents("owner-batch-only", {
+                "1001": {"uid": "uid_batch_1001", "id": "1001"},
+                "1002": {"uid": "uid_batch_1002", "id": "1002"},
+            })
+            app_module.db.session.commit()
+        self._login("owner-batch-only")
+        response = self.client.post("/api/abonent_summary/recalculate_batch", json={
+            "uids": ["uid_batch_1001"],
+            "reason": "IMPORT_PAYMENTS_APPLIED",
+            "summaries": {"uid_batch_1001": self._fresh_summary(5, 1, 6)},
+            "owner": "spoofed",
+        })
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["processed"], 1)
+        with app_module.app.app_context():
+            rows = app_module.AbonentSummary.query.order_by(app_module.AbonentSummary.account_uid.asc()).all()
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0].owner_id, "owner-batch-only")
+            self.assertEqual(rows[0].account_uid, "uid_batch_1001")
+
+    def test_recalculate_batch_skips_foreign_and_unknown_uids(self):
+        with app_module.app.app_context():
+            self._add_user("owner-batch-a")
+            self._add_user("owner-batch-b")
+            self._put_abonents("owner-batch-a", {"1001": {"uid": "uid_batch_a_1001", "id": "1001"}})
+            self._put_abonents("owner-batch-b", {"2001": {"uid": "uid_batch_b_2001", "id": "2001"}})
+            app_module.db.session.commit()
+        self._login("owner-batch-a")
+        response = self.client.post("/api/abonent_summary/recalculate_batch", json={
+            "uids": ["uid_batch_a_1001", "uid_batch_b_2001", "uid_batch_unknown"],
+            "summaries": {"uid_batch_a_1001": self._fresh_summary()},
+        })
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["processed"], 1)
+        self.assertEqual(payload["skipped"], 2)
+
+    def test_recalculate_batch_uid_error_does_not_stop_and_removes_fake_totals(self):
+        with app_module.app.app_context():
+            self._add_user("owner-batch-errors")
+            self._put_abonents("owner-batch-errors", {
+                "1001": {"uid": "uid_batch_err_1001", "id": "1001"},
+                "1002": {"uid": "uid_batch_err_1002", "id": "1002"},
+            })
+            app_module.db.session.commit()
+        self._login("owner-batch-errors")
+        response = self.client.post("/api/abonent_summary/recalculate_batch", json={
+            "uids": ["uid_batch_err_1001", "uid_batch_err_1002"],
+            "summaries": {
+                "uid_batch_err_1001": self._fresh_summary(10, 2, 12),
+                "uid_batch_err_1002": {"summary_status": "error", "summary_reason": "LEDGER_JSON_INVALID", "totals": {"total": 0}},
+            },
+        })
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["fresh"], 1)
+        self.assertEqual(payload["error"], 1)
+        with app_module.app.app_context():
+            rows = {r.account_uid: json.loads(r.summary_json) for r in app_module.AbonentSummary.query.all()}
+            self.assertEqual(rows["uid_batch_err_1001"]["totals"]["total"], 12)
+            self.assertEqual(rows["uid_batch_err_1002"]["summary_reason"], "LEDGER_JSON_INVALID")
+            self.assertNotIn("totals", rows["uid_batch_err_1002"])
+
 
 if __name__ == "__main__":
     unittest.main()
