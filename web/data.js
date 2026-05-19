@@ -1293,6 +1293,71 @@
     }
   }
 
+  function _isServerFirstDataReadyForAbonentCard() {
+    try {
+      var st = window.JKH_UI_STATE && window.JKH_UI_STATE.data;
+      if (!st) return false;
+      var status = String(st.status || "");
+      if (status !== "ready" && status !== "empty") return false;
+      if (Object.prototype.hasOwnProperty.call(st, "source") && String(st.source || "") !== "server") return false;
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  async function waitForServerFirstDataReady(options) {
+    var opts = options || {};
+    var timeoutMs = Number(opts.timeoutMs || opts.timeout || 8000);
+    if (!Number.isFinite(timeoutMs) || timeoutMs < 0) timeoutMs = 8000;
+
+    if (_isServerFirstDataReadyForAbonentCard()) return { ok: true, status: "ready" };
+
+    if (window.__JKH_DATA_LOADER_IN_FLIGHT && typeof window.__JKH_DATA_LOADER_IN_FLIGHT.then === "function") {
+      try { await window.__JKH_DATA_LOADER_IN_FLIGHT; } catch (e0) {}
+      if (_isServerFirstDataReadyForAbonentCard()) return { ok: true, status: "ready" };
+    }
+
+    if (window.JKHDataLoader && typeof window.JKHDataLoader.loadFromServer === "function") {
+      var st = window.JKH_UI_STATE && window.JKH_UI_STATE.data;
+      var status = String(st && st.status || "");
+      if (!st || status === "loading") {
+        try { await window.JKHDataLoader.loadFromServer({ reason: "abonent_card_recalc_wait", force: false }); } catch (e1) {}
+        if (_isServerFirstDataReadyForAbonentCard()) return { ok: true, status: "ready" };
+      }
+    }
+
+    return await new Promise(function(resolve) {
+      var done = false;
+      var startedAt = Date.now();
+      var timer = null;
+
+      function finish(payload) {
+        if (done) return;
+        done = true;
+        try { window.removeEventListener("JKH_UI_STATE_CHANGED", onState); } catch (e2) {}
+        if (timer) clearTimeout(timer);
+        resolve(payload);
+      }
+
+      function check() {
+        if (_isServerFirstDataReadyForAbonentCard()) {
+          finish({ ok: true, status: "ready" });
+          return;
+        }
+        if ((Date.now() - startedAt) >= timeoutMs) {
+          var st2 = window.JKH_UI_STATE && window.JKH_UI_STATE.data || {};
+          finish({ ok: false, status: String(st2.status || "not_ready"), reason: "SERVER_FIRST_DATA_NOT_READY" });
+        }
+      }
+
+      function onState() { check(); }
+      try { window.addEventListener("JKH_UI_STATE_CHANGED", onState); } catch (e3) {}
+      timer = setInterval(check, 100);
+      check();
+    });
+  }
+
   async function saveAbonentSummaryAfterRecalc(abonentOrId, summary) {
     try {
       var found = _findAbonentByIdOrUid(abonentOrId);
@@ -1434,10 +1499,14 @@
     if (e && e.code) return String(e.code);
     var msg = String(e && e.message || e || "CALC_FAILED");
     if (msg.indexOf("MISSING_REQUIRED_RATE") >= 0) return "MISSING_REQUIRED_RATE";
-    if (msg.indexOf("RATES_JSON_INVALID") >= 0) return "RATES_JSON_INVALID";
-    if (msg.indexOf("EXCLUDES_JSON_INVALID") >= 0) return "EXCLUDES_JSON_INVALID";
+    if (msg.indexOf("RATES_JSON_INVALID") >= 0) return "RATES_MISSING";
+    if (msg.indexOf("RATES_MISSING") >= 0) return "RATES_MISSING";
+    if (msg.indexOf("EXCLUDES_JSON_INVALID") >= 0) return "EXCLUDES_INVALID";
     if (msg.indexOf("EXCLUDES_INVALID") >= 0) return "EXCLUDES_INVALID";
     if (msg.indexOf("LEDGER_JSON_INVALID") >= 0) return "LEDGER_JSON_INVALID";
+    if (msg.indexOf("START_DATE_MISSING") >= 0) return "START_DATE_MISSING";
+    if (msg.indexOf("RESPONSIBILITY_DATE_MISSING") >= 0) return "RESPONSIBILITY_DATE_MISSING";
+    if (msg.indexOf("PERIOD_REQUIRED") >= 0) return "START_DATE_MISSING";
     return msg || "CALC_FAILED";
   }
 
@@ -1619,6 +1688,12 @@
     }
     var asOf = _dateFromIsoLocal(to);
     if (!asOf) throw new Error("PERIOD_INVALID");
+    var uid = String(abonent && (abonent.uid || abonent.account_uid || abonent.accountUid) || "").trim();
+    if (!isValidUid(uid)) throw new Error("UID_REQUIRED");
+    var ledgerKey = resolvePaymentLedgerKey(abonentOrId);
+    if (ledgerKey !== ("payments_" + uid)) throw new Error("UID_LEDGER_PATH_REQUIRED");
+    var rawLedger = _getProjectRaw(ledgerKey);
+    if (rawLedger !== null && rawLedger !== undefined) _parseLedgerRows(rawLedger, ledgerKey);
     var rows = window.JKHCalcEngine.loadPaymentsForAbonent(String(abonentId));
     var totals = window.JKHCalcEngine.calcTotalsAsOfAdjusted(rows, asOf, {
       abonentId: String(abonentId),
@@ -1656,7 +1731,9 @@
       premise_regnum: regnum,
       premiseRegnum: regnum,
       account_uid: accountUid,
+      uid: accountUid,
       account_number: accountNumber,
+      abonent_id: abonentId,
       id: abonentId,
       fio: fio,
       fam: fam,
@@ -1664,6 +1741,7 @@
       otch: otch,
       abonent: {
         id: abonentId,
+        abonent_id: abonentId,
         account_number: accountNumber,
         account_uid: accountUid,
         fio: fio,
@@ -1694,6 +1772,61 @@
     };
   }
 
+  function buildAbonentSummaryErrorAfterExplicitRecalc(abonentOrId, period, reason) {
+    var found = _findAbonentByIdOrUid(abonentOrId);
+    var abonent = found && found.abonent ? found.abonent : (abonentOrId && typeof abonentOrId === "object" ? abonentOrId : null);
+    var abonentId = String(found && found.id || (typeof abonentOrId === "object" ? abonentOrId && abonentOrId.id : abonentOrId) || "").trim();
+    var periodFrom = String(period && period.from || "");
+    var periodTo = String(period && period.to || "");
+    var accountUid = String(abonent && (abonent.uid || abonent.account_uid || abonent.accountUid) || "").trim();
+    var accountNumber = String(abonent && (abonent.account_number || abonent.accountNumber || abonent.ls || abonent.id) || abonentId || "").trim();
+    var fio = String(abonent && (abonent.fio || abonent.full_name || abonent.fullName || abonent.name_full || abonent.display_name) || "").trim();
+    var fioParts = fio ? fio.split(/\s+/) : [];
+    var fam = String(abonent && (abonent.fam || abonent.last_name || abonent.lastName) || fioParts[0] || "").trim();
+    var name = String(abonent && (abonent.name || abonent.first_name || abonent.firstName) || fioParts[1] || "").trim();
+    var otch = String(abonent && (abonent.otch || abonent.middle_name || abonent.middleName) || fioParts.slice(2).join(" ") || "").trim();
+    var regnum = resolveAbonentRegnumForSummary(abonentId, abonent);
+    return {
+      status: "error",
+      reason: String(reason || "CALC_FAILED"),
+      summary_status: "error",
+      summary_reason: String(reason || "CALC_FAILED"),
+      start_date: periodFrom,
+      end_date: periodTo,
+      period_start: periodFrom,
+      period_end: periodTo,
+      regnum: regnum,
+      flat_reg: regnum,
+      premise_regnum: regnum,
+      premiseRegnum: regnum,
+      account_uid: accountUid,
+      uid: accountUid,
+      account_number: accountNumber,
+      abonent_id: abonentId,
+      id: abonentId,
+      fio: fio,
+      fam: fam,
+      name: name,
+      otch: otch,
+      abonent: {
+        id: abonentId,
+        abonent_id: abonentId,
+        account_number: accountNumber,
+        account_uid: accountUid,
+        fio: fio,
+        fam: fam,
+        name: name,
+        otch: otch,
+        regnum: regnum,
+        premise_regnum: regnum,
+        premiseRegnum: regnum
+      },
+      period: { from: periodFrom, to: periodTo },
+      calc_engine_version: "JKHCalcEngine",
+      generated_at: new Date().toISOString()
+    };
+  }
+
   async function recalcAbonentSummaryExplicit(abonentOrId, options) {
     var opts = options || {};
     var period = await _resolveAbonentSummaryRecalcPeriod(abonentOrId, opts.period);
@@ -1704,24 +1837,78 @@
       summary = buildAbonentSummaryAfterExplicitRecalc(abonentOrId, period.from, period.to);
     } catch (e) {
       var reason = _summaryCalcErrorCode(e);
-      summary = {
-        status: "error",
-        reason: reason,
-        summary_status: "error",
-        summary_reason: reason,
-        period: { from: String(period.from || ""), to: String(period.to || "") },
-        calc_engine_version: "JKHCalcEngine",
-        generated_at: new Date().toISOString()
-      };
+      summary = buildAbonentSummaryErrorAfterExplicitRecalc(abonentOrId, period, reason);
     }
 
     var saveResult = await saveAbonentSummaryAfterRecalc(abonentOrId, summary);
+    var status = summary.summary_status || summary.status || "error";
+    var reasonOut = summary.summary_reason || summary.reason || "";
     return {
-      ok: !!(saveResult && saveResult.ok === true),
+      ok: !!(saveResult && saveResult.ok === true && status === "fresh"),
+      uid: String(summary.account_uid || summary.uid || ""),
+      summary_status: status,
+      summary_reason: reasonOut,
       summary: summary,
       save: saveResult,
-      status: summary.summary_status || summary.status || "error",
-      reason: summary.summary_reason || summary.reason || ""
+      status: status,
+      reason: reasonOut
+    };
+  }
+
+  async function recalculateAbonentCard(abonentOrId, options) {
+    var opts = options || {};
+    var ready = await waitForServerFirstDataReady({ timeoutMs: opts.timeoutMs || opts.timeout || 8000 });
+    if (!ready || ready.ok !== true) {
+      return { ok: false, uid: "", summary_status: "error", summary_reason: "SERVER_FIRST_DATA_NOT_READY", summary: null };
+    }
+
+    var found = _findAbonentByIdOrUid(abonentOrId);
+    var abonent = found && found.abonent ? found.abonent : null;
+    var abonentId = String(found && found.id || (abonent && abonent.id) || (typeof abonentOrId === "object" ? abonentOrId && abonentOrId.id : abonentOrId) || "").trim();
+    var uid = String(abonent && abonent.uid || (typeof abonentOrId === "object" ? abonentOrId && abonentOrId.uid : "") || "").trim();
+
+    if (!abonent || !abonentId) {
+      return { ok: false, uid: uid, summary_status: "error", summary_reason: "ABONENT_NOT_FOUND", summary: null };
+    }
+    if (!isValidUid(uid)) {
+      return { ok: false, uid: uid, summary_status: "error", summary_reason: "UID_REQUIRED", summary: null };
+    }
+
+    var ledgerKey = resolvePaymentLedgerKey(abonentOrId);
+    if (ledgerKey !== ("payments_" + uid)) {
+      return { ok: false, uid: uid, summary_status: "error", summary_reason: "UID_LEDGER_PATH_REQUIRED", summary: null };
+    }
+
+    try {
+      var raw = _getProjectRaw(ledgerKey);
+      if (raw !== null && raw !== undefined) _parseLedgerRows(raw, ledgerKey);
+    } catch (e) {
+      var ledgerReason = _summaryCalcErrorCode(e);
+      var periodForError = await _resolveAbonentSummaryRecalcPeriod(abonentOrId, opts.period);
+      var errorSummary = buildAbonentSummaryErrorAfterExplicitRecalc(abonentOrId, periodForError, ledgerReason);
+      var errorSave = await saveAbonentSummaryAfterRecalc(abonentOrId, errorSummary);
+      return {
+        ok: false,
+        uid: uid,
+        summary_status: "error",
+        summary_reason: ledgerReason,
+        summary: errorSummary,
+        save: errorSave,
+        status: "error",
+        reason: ledgerReason
+      };
+    }
+
+    var result = await recalcAbonentSummaryExplicit(abonentOrId, opts);
+    return {
+      ok: !!(result && result.ok === true),
+      uid: uid,
+      summary_status: result && (result.summary_status || result.status) || "error",
+      summary_reason: result && (result.summary_reason || result.reason) || "",
+      summary: result && result.summary || null,
+      save: result && result.save,
+      status: result && (result.summary_status || result.status) || "error",
+      reason: result && (result.summary_reason || result.reason) || ""
     };
   }
 
@@ -1760,6 +1947,8 @@
     resolveAbonentRegnumForSummary: resolveAbonentRegnumForSummary,
     buildAbonentSummaryAfterExplicitRecalc: buildAbonentSummaryAfterExplicitRecalc,
     recalcAbonentSummaryExplicit: recalcAbonentSummaryExplicit,
+    recalculateAbonentCard: recalculateAbonentCard,
+    waitForServerFirstDataReady: waitForServerFirstDataReady,
     saveAbonentSummaryAfterRecalc: saveAbonentSummaryAfterRecalc,
     markAbonentSummaryDirty: markAbonentSummaryDirty,
     writePaymentLedger: writePaymentLedger,

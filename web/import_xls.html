@@ -624,11 +624,11 @@ function setPaymentsByUid(uid, arr){
   throw new Error('Data.writePaymentLedger is not available');
 }
 
-function markImportedPaymentSummariesDirty(rows){
+function markImportedPaymentSummariesDirty(affectedUids){
   if (!(window.Data && typeof window.Data.markAbonentSummaryDirty === 'function')) return;
   const seen = {};
-  (Array.isArray(rows) ? rows : []).forEach(function(row){
-    const uid = normStr(row && row.account_uid);
+  (Array.isArray(affectedUids) ? affectedUids : []).forEach(function(value){
+    const uid = normStr(value);
     if (!uid || seen[uid]) return;
     seen[uid] = true;
     window.Data.markAbonentSummaryDirty(uid, 'IMPORT_PAYMENTS_APPLIED');
@@ -2971,6 +2971,7 @@ async function applyPayments(){
   if (!rows.length){ setImportStatus('Нет платежей для добавления.', 'err'); setImportBusy(false); if (window.JKHBusy && typeof JKHBusy.hide === 'function') JKHBusy.hide(); return; }
 
   let appliedCount = 0;
+  let affectedUids = [];
   try{
     const uploaded = await apiJson('/api/import/payments/upload_rows', {
       method:'POST',
@@ -2985,9 +2986,13 @@ async function applyPayments(){
     const skippedCount = Number(s.skipped_count || 0);
     const duplicateCount = Number(s.duplicate_count || 0);
     const conflictCount = Number(s.conflict_count || 0);
+    affectedUids = Array.isArray(s.affected_uids) ? s.affected_uids.map(normStr).filter(Boolean) : [];
     const summaryMsg = 'Импорт завершён. Добавлено платежей: ' + appliedCount + '. Пропущено: ' + skippedCount + '. Дубликатов: ' + duplicateCount + '. Конфликтов: ' + conflictCount + '.';
     const hardReject = rows.length > 0 && appliedCount === 0;
     setImportStatus(summaryMsg, hardReject ? 'err' : 'ok');
+    if (appliedCount > 0 && !affectedUids.length) {
+      throw new Error('IMPORT_APPLY_AFFECTED_UIDS_MISSING');
+    }
 
     if (serverPaymentBatchId){
       try{
@@ -3038,7 +3043,7 @@ async function applyPayments(){
       appliedRowsCount++;
     }
   }
-  if (appliedCount > 0) markImportedPaymentSummariesDirty(rows);
+  if (appliedCount > 0) markImportedPaymentSummariesDirty(affectedUids);
   serverPaymentBatchId = 0;
   serverPaymentRows = [];
   clearImportResumeState();

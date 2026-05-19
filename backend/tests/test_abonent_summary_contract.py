@@ -268,6 +268,26 @@ class AbonentSummaryContractTest(unittest.TestCase):
         self.assertEqual(statuses["uid_batch_1002"], "allowed")
         self.assertEqual(statuses["uid_foreign"], "not_found")
 
+
+    def test_recalc_batch_deduplicates_same_uid(self):
+        user = self._user("owner_batch_dupe")
+        targets = [
+            {"abonent_id": "1001", "account_uid": "uid_batch_dupe_1001", "account_number": "1001"},
+        ]
+
+        with app_module.app.test_request_context("/api/abonent_summary/recalc_batch", method="POST", json={
+            "account_uids": ["uid_batch_dupe_1001", "uid_batch_dupe_1001", "uid_batch_dupe_1001"]
+        }):
+            with patch.object(app_module, "_require_user", return_value=(user, None)):
+                with patch.object(app_module, "_owner_abonent_summary_targets", return_value=targets):
+                    response = app_module.abonent_summary_recalc_batch()
+
+        body = response.get_json()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(body["allowed_uids"], ["uid_batch_dupe_1001"])
+        self.assertEqual(len(body["items"]), 1)
+        self.assertEqual(body["items"][0]["status"], "allowed")
+
     def test_recalc_batch_source_does_not_calculate_or_write(self):
         source = inspect.getsource(app_module.abonent_summary_recalc_batch)
 
