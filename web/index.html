@@ -859,6 +859,7 @@ function summaryStatusHtml(row){
 
 function buildIndexRowFromSummaryItem(item){
     const summary = (item && item.summary && typeof item.summary === "object") ? item.summary : {};
+    const totalsObj = (summary && summary.totals && typeof summary.totals === "object") ? summary.totals : null;
     const abonent = (summary.abonent && typeof summary.abonent === "object") ? summary.abonent : {};
     const status = normalizeSummaryStatus(summary.summary_status || summary.status || item && item.summary_status);
     const reason = String(summary.summary_reason || summary.reason || "").trim();
@@ -872,6 +873,8 @@ function buildIndexRowFromSummaryItem(item){
     const otch = summary.otch || summary.middle_name || abonent.otch || abonent.middle_name || fio.slice(2).join(" ") || "";
 
     const period = (summary.period && typeof summary.period === "object") ? summary.period : {};
+    const totalsTotal = totalsObj ? Number(totalsObj.total != null ? totalsObj.total : totalsObj.total_debt) : NaN;
+    const hasValidMainTotals = !!(totalsObj && Number.isFinite(totalsTotal));
 
     return {
         id: String(item && (item.abonent_id || item.account_number || item.account_uid || item.id) || abonent.id || abonent.abonent_id || abonent.account_number || abonent.account_uid || ""),
@@ -879,17 +882,18 @@ function buildIndexRowFromSummaryItem(item){
         fam: String(fam || ""),
         name: String(name || ""),
         otch: String(otch || ""),
-        totalDebt: isFresh ? summaryNumberToDisplay(pickSummaryValue(summary, ["total_debt", "totals.total_debt", "totalDebt", "debt_total", "total", "totals.total"])) : "",
-        penalty: isFresh ? summaryNumberToDisplay(pickSummaryValue(summary, ["total_penalty", "totals.total_penalty", "penalty", "pay_penalty", "penalty_debt", "penaltyDebt", "totals.penalty"])) : "",
-        nachisleno: isFresh ? summaryNumberToDisplay(pickSummaryValue(summary, ["total_accrued", "totals.total_accrued", "nachisleno", "accrued", "accrued_total", "accruedTotal"])) : "",
-        oplacheno: isFresh ? summaryNumberToDisplay(pickSummaryValue(summary, ["total_paid", "totals.total_paid", "oplacheno", "paid", "paid_total", "paidTotal"])) : "",
+        totalDebt: (isFresh && hasValidMainTotals) ? summaryNumberToDisplay(pickSummaryValue(summary, ["totals.total_debt", "totals.total", "total_debt", "totalDebt", "debt_total", "total"])) : "",
+        penalty: (isFresh && hasValidMainTotals) ? summaryNumberToDisplay(pickSummaryValue(summary, ["totals.total_penalty", "totals.penalty", "total_penalty", "penalty", "pay_penalty", "penalty_debt", "penaltyDebt"])) : "",
+        nachisleno: (isFresh && hasValidMainTotals) ? summaryNumberToDisplay(pickSummaryValue(summary, ["totals.total_accrued", "total_accrued", "nachisleno", "accrued", "accrued_total", "accruedTotal"])) : "",
+        oplacheno: (isFresh && hasValidMainTotals) ? summaryNumberToDisplay(pickSummaryValue(summary, ["totals.total_paid", "total_paid", "oplacheno", "paid", "paid_total", "paidTotal"])) : "",
         startDate: isFresh ? formatSummaryDate(pickSummaryValue(summary, ["start_date", "startDate", "period_start", "date_from", "period_from", "period.from"]) || period.from || period.period_from || period.date_from || period.start_date) : "",
         endDate: isFresh ? formatSummaryDate(pickSummaryValue(summary, ["end_date", "endDate", "period_end", "date_to", "period_to", "as_of", "period.to"]) || period.to || period.period_to || period.date_to || period.end_date || period.as_of) : "",
         note: String(summary.note || summary.defaultNote || ""),
         flatReg: String(summary.flat_reg || summary.regnum || summary.premise_regnum || summary.premiseRegnum || abonent.flat_reg || abonent.regnum || abonent.premise_regnum || abonent.premiseRegnum || ""),
         rowStatusMark: "",
-        summaryStatus: status,
-        summaryReason: reason
+        summaryStatus: (status === "fresh" && !hasValidMainTotals) ? "dirty" : status,
+        summaryReason: (status === "fresh" && !hasValidMainTotals) ? (reason || "FULL_TOTALS_MISSING_AFTER_TEMP_PERIOD") : reason,
+        hasMainTotals: hasValidMainTotals
     };
 }
 
@@ -1227,9 +1231,10 @@ function initSorting() {
 }
 
 
-function isSummaryBatchStatus(status){
+function isSummaryBatchStatus(status, row){
     const s = normalizeSummaryStatus(status);
-    return s === "dirty" || s === "missing" || s === "error";
+    if (s !== "fresh") return true;
+    return !(row && row.hasMainTotals === true);
 }
 
 function getSummaryBatchUid(row){
@@ -1239,7 +1244,7 @@ function getSummaryBatchUid(row){
 function getCurrentSummaryBatchRows(){
     return (filteredRows || []).filter(function(r){
         const uid = getSummaryBatchUid(r);
-        return uid && isSummaryBatchStatus(r && r.summaryStatus);
+        return uid && isSummaryBatchStatus(r && r.summaryStatus, r);
     });
 }
 
@@ -1471,7 +1476,7 @@ function render() {
         else if (r.rowStatusMark === "расчёт остановлен") tr.classList.add("row-stopped");
 
         const batchUid = getSummaryBatchUid(r);
-        const canBatchSelect = summaryMode && batchUid && isSummaryBatchStatus(r.summaryStatus);
+        const canBatchSelect = summaryMode && batchUid && isSummaryBatchStatus(r.summaryStatus, r);
         const batchChecked = canBatchSelect && !!summaryBatchSelectedUids[batchUid];
 
         tr.innerHTML = `

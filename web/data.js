@@ -1793,6 +1793,20 @@
     return "";
   }
 
+  function _repairTemporaryPeriodFreshSummary(existingSummary) {
+    if (!existingSummary || typeof existingSummary !== "object") return null;
+    var hasPeriod = !!(existingSummary.period_report_totals && typeof existingSummary.period_report_totals === "object");
+    var hasTotals = !!(existingSummary.totals && typeof existingSummary.totals === "object");
+    var status = String(existingSummary.summary_status || existingSummary.status || "").toLowerCase();
+    if (status === "fresh" && hasPeriod && !hasTotals) {
+      existingSummary.summary_status = "dirty";
+      existingSummary.status = "dirty";
+      existingSummary.summary_reason = "FULL_TOTALS_MISSING_AFTER_TEMP_PERIOD";
+      existingSummary.reason = "FULL_TOTALS_MISSING_AFTER_TEMP_PERIOD";
+    }
+    return existingSummary;
+  }
+
   function buildAbonentSummaryAfterExplicitRecalc(abonentOrId, from, to, mode) {
     var found = _findAbonentByIdOrUid(abonentOrId);
     var abonent = found && found.abonent ? found.abonent : (abonentOrId && typeof abonentOrId === "object" ? abonentOrId : null);
@@ -1964,12 +1978,34 @@
       summary = buildAbonentSummaryAfterExplicitRecalc(abonentOrId, period.from, period.to, mode);
       if (mode === "temporary_court_period") {
         var existingSummaryWrap = loadAbonentSummaryById(abonentOrId);
-        var existingSummary = existingSummaryWrap && existingSummaryWrap.summary && typeof existingSummaryWrap.summary === "object" ? existingSummaryWrap.summary : null;
-        if (existingSummary && existingSummary.totals && typeof existingSummary.totals === "object") {
+        var existingSummary = existingSummaryWrap && existingSummaryWrap.summary && typeof existingSummaryWrap.summary === "object" ? deepClone(existingSummaryWrap.summary) : null;
+        existingSummary = _repairTemporaryPeriodFreshSummary(existingSummary);
+
+        var previousStatus = existingSummary && (existingSummary.summary_status || existingSummary.status);
+        var previousReason = existingSummary && (existingSummary.summary_reason || existingSummary.reason);
+        var hasFullTotals = !!(existingSummary && existingSummary.totals && typeof existingSummary.totals === "object");
+
+        summary.summary_status = previousStatus ? String(previousStatus) : (hasFullTotals ? "fresh" : "dirty");
+        summary.status = summary.summary_status;
+        summary.summary_reason = previousReason ? String(previousReason) : (hasFullTotals ? "OK" : "CALC_PERIOD_CHANGED");
+        summary.reason = summary.summary_reason;
+
+        summary.period_report_totals = periodReportTotals;
+        summary.period_report_status = "fresh";
+        summary.period_report_mode = "temporary_court_period";
+        summary.period_report_generated_at = new Date().toISOString();
+        summary.periodTotals = periodReportTotals;
+
+        if (hasFullTotals) {
           summary.totals = deepClone(existingSummary.totals);
           if (summary.totals.total_debt != null) summary.total_debt = summary.totals.total_debt;
           if (summary.totals.total_penalty != null) summary.total_penalty = summary.totals.total_penalty;
           if (summary.totals.penalty != null) summary.penalty = summary.totals.penalty;
+        } else {
+          summary.totals = null;
+          summary.total_debt = null;
+          summary.total_penalty = null;
+          summary.penalty = null;
         }
       }
     } catch (e) {

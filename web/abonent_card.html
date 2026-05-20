@@ -2423,8 +2423,14 @@ function __summaryWarningText(status){
     return "";
 }
 
-function renderAbonentSummaryStatus(status, reason){
-    const normalized = __normalizeSummaryStatus(status);
+function renderAbonentSummaryStatus(status, reason, summary){
+    let normalized = __normalizeSummaryStatus(status);
+    const totals = summary && summary.totals && typeof summary.totals === "object" ? summary.totals : null;
+    const totalNum = totals ? Number(totals.total != null ? totals.total : totals.total_debt) : NaN;
+    if (normalized === "fresh" && !(totals && Number.isFinite(totalNum))) {
+        normalized = "dirty";
+        if (!reason) reason = "FULL_TOTALS_MISSING_AFTER_TEMP_PERIOD";
+    }
     const badge = document.getElementById("summaryStatusBadge");
     const reasonEl = document.getElementById("summaryStatusReason");
     const warningEl = document.getElementById("summaryStatusWarning");
@@ -2449,11 +2455,11 @@ async function loadAbonentSummaryStatus(){
     const { id, a } = getCurrentAbonent();
     const uid = String(a && a.uid || "").trim();
     if (!id || !uid) {
-        renderAbonentSummaryStatus("missing", "UID_REQUIRED");
+        renderAbonentSummaryStatus("missing", "UID_REQUIRED", null);
         return;
     }
     if (!window.Data || typeof Data.loadAbonentSummaryPage !== "function") {
-        renderAbonentSummaryStatus("missing", "SUMMARY_API_UNAVAILABLE");
+        renderAbonentSummaryStatus("missing", "SUMMARY_API_UNAVAILABLE", null);
         return;
     }
 
@@ -2462,12 +2468,12 @@ async function loadAbonentSummaryStatus(){
         const item = payload && Array.isArray(payload.items) && payload.items.length ? payload.items[0] : null;
         const summary = item && item.summary && typeof item.summary === "object" ? item.summary : null;
         if (!summary) {
-            renderAbonentSummaryStatus("missing", "SUMMARY_NOT_BUILT");
+            renderAbonentSummaryStatus("missing", "SUMMARY_NOT_BUILT", null);
             return;
         }
-        renderAbonentSummaryStatus(summary.summary_status || summary.status || "missing", summary.summary_reason || summary.reason || "");
+        renderAbonentSummaryStatus(summary.summary_status || summary.status || "missing", summary.summary_reason || summary.reason || "", summary);
     } catch (e) {
-        renderAbonentSummaryStatus("error", String(e && e.message || e || "SUMMARY_API_ERROR"));
+        renderAbonentSummaryStatus("error", String(e && e.message || e || "SUMMARY_API_ERROR"), null);
     }
 }
 
@@ -2535,9 +2541,9 @@ function __hideTemporaryPeriodReportCard(){
 }
 
 function __renderTemporaryPeriodReportCard(summary){
-    const status = __normalizeSummaryStatus(summary && (summary.summary_status || summary.status));
+    const reportStatus = String(summary && summary.period_report_status || "").trim().toLowerCase();
     const periodTotals = summary && (summary.period_report_totals || summary.periodTotals);
-    if (status !== "fresh" || !periodTotals || typeof periodTotals !== "object") return __hideTemporaryPeriodReportCard();
+    if (reportStatus !== "fresh" || !periodTotals || typeof periodTotals !== "object") return __hideTemporaryPeriodReportCard();
     const card = document.getElementById("periodReportTotalsCard");
     if (!card) return;
     document.getElementById("periodReportRange").textContent = String(periodTotals.from || "") + " — " + String(periodTotals.to || "");
@@ -2550,15 +2556,15 @@ function __renderTemporaryPeriodReportCard(summary){
 
 async function __saveAbonentSummaryAfterUidRecalc(abonentId, from, to){
     if (!window.Data || typeof Data.recalculateAbonentCard !== "function") {
-        renderAbonentSummaryStatus("error", "SUMMARY_RECALC_UNAVAILABLE");
+        renderAbonentSummaryStatus("error", "SUMMARY_RECALC_UNAVAILABLE", null);
         return { ok: false, summary_status: "error", summary_reason: "SUMMARY_RECALC_UNAVAILABLE" };
     }
     const result = await Data.recalculateAbonentCard(abonentId, { period: { from: from, to: to }, mode: "temporary_court_period" });
     const summary = result && result.summary && typeof result.summary === "object" ? result.summary : null;
     const status = result && (result.summary_status || result.status) || summary && (summary.summary_status || summary.status) || "error";
     const reason = result && (result.summary_reason || result.reason) || summary && (summary.summary_reason || summary.reason) || "SUMMARY_SAVE_FAILED";
-    renderAbonentSummaryStatus(status, reason);
-    if (__normalizeSummaryStatus(status) === "fresh" && summary) {
+    renderAbonentSummaryStatus(status, reason, summary);
+    if (summary) {
         __renderAbonentTotalsFromFreshSummary(summary);
         __renderTemporaryPeriodReportCard(summary);
     } else {
