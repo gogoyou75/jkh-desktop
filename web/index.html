@@ -1332,10 +1332,11 @@ async function runSelectedSummaryBatch(){
 
     try {
         const created = await Data.createAbonentSummaryRecalcBatchJob(selected, "MANUAL_RECALC");
-        if (!created || !created.job_id) throw new Error("job_create_failed");
-        if (progress) progress.textContent = "Создано задание #" + created.job_id + ". Принято: " + created.accepted + ", пропущено: " + created.skipped + ".";
-        summaryBatchJobState.jobId = created.job_id;
-        await Data.runAbonentSummaryRecalcBatchJob(created.job_id);
+        const createdJobId = (created && (created.job_id || created.id || (created.job && created.job.id))) ? (created.job_id || created.id || (created.job && created.job.id)) : null;
+        if (!createdJobId) throw new Error("job_create_failed");
+        if (progress) progress.textContent = "Создано задание #" + createdJobId + ". Принято: " + created.accepted + ", пропущено: " + created.skipped + ".";
+        summaryBatchJobState.jobId = createdJobId;
+        await Data.runAbonentSummaryRecalcBatchJob(createdJobId);
         await pollSummaryBatchJobStatus();
     } catch (e) {
         const msg = String(e && e.message || e);
@@ -1384,6 +1385,14 @@ async function pollSummaryBatchJobStatus(){
         }
         summaryBatchJobState.timer = setTimeout(pollSummaryBatchJobStatus, intervalMs);
     } catch (e) {
+        const msg = String(e && e.message || e || "");
+        if (msg === "job_not_found" || msg === "HTTP_404") {
+            if (progress) progress.textContent = "Job не найдена (404). Проверьте активную базу/пользователя и повторите запуск.";
+            summaryBatchRunning = false;
+            summaryBatchJobState.jobId = null;
+            updateSummaryBatchPanel();
+            return;
+        }
         summaryBatchJobState.retries += 1;
         if (summaryBatchJobState.retries > maxRetries) {
             if (progress) progress.textContent = "Не удалось получить статус job";

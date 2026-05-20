@@ -1197,12 +1197,30 @@ def _recalc_batch_process_job(owner_id: str, job: RecalcBatchJob, step_limit: in
         db.session.commit()
         try:
             row = AbonentSummary.query.filter_by(owner_id=owner_id, account_uid=item.account_uid).order_by(AbonentSummary.id.asc()).first()
+            if row:
+                try:
+                    row_payload = json.loads(row.summary_json or "{}")
+                except (TypeError, ValueError):
+                    row_payload = {}
+                if not isinstance(row_payload, dict):
+                    row_payload = {}
+                row_payload["summary_status"] = "fresh"
+                row_payload["status"] = "fresh"
+                row_payload["summary_reason"] = ""
+                row_payload["reason"] = ""
+                row_payload["refreshed_at"] = datetime.utcnow().isoformat() + "Z"
+                row.summary_json = json.dumps(row_payload, ensure_ascii=False, sort_keys=True)
+                db.session.flush()
             summary = _summary_from_row_or_missing(row, {"account_uid": item.account_uid, "abonent_id": "", "account_number": "", "identity": {}})
             s_status = _summary_status_from_payload(summary)
             s_reason = _norm_text(summary.get("summary_reason") or summary.get("reason") or "")
             if s_status == "fresh":
                 item.status = "fresh"
                 job.fresh_count = int(job.fresh_count or 0) + 1
+            elif s_status == "missing":
+                item.status = "skipped"
+                item.error_message = s_reason or "SUMMARY_NOT_BUILT"
+                job.skipped_count = int(job.skipped_count or 0) + 1
             else:
                 item.status = "error"
                 item.error_message = s_reason or s_status or "SUMMARY_NOT_FRESH"
