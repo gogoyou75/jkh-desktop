@@ -505,6 +505,22 @@ Doc: docs/LOGIC_SPEC_v1.5.3.md
         Итог не актуален. Старые totals не считаются свежими и не должны использоваться как актуальный расчёт. Нажмите «Пересчитать», чтобы обновить summary.
     </div>
 </div>
+<div id="mainTotalsCard" class="summary-status-card">
+    <div class="summary-title">Полная задолженность на дату</div>
+    <div>Дата расчёта: <span id="mainTotalsDate">—</span></div>
+    <div>Основной долг: <span id="mainTotalsPrincipal">—</span></div>
+    <div>Пеня: <span id="mainTotalsPenalty">—</span></div>
+    <div>Всего: <span id="mainTotalsTotal">—</span></div>
+</div>
+<div id="periodReportTotalsCard" class="summary-status-card" style="display:none;">
+    <div class="summary-title">Временный расчёт для справки за период</div>
+    <div>Период: <span id="periodReportRange">—</span></div>
+    <div>Начислено за период: <span id="periodReportAccrued">—</span></div>
+    <div>Оплачено за период: <span id="periodReportPaid">—</span></div>
+    <div>Пеня за период: <span id="periodReportPenalty">—</span></div>
+    <div>Итог периода: <span id="periodReportTotal">—</span></div>
+    <div class="summary-warning" style="display:block;">Этот блок не учитывает входящий остаток и не является полной задолженностью абонента. Используется только для справки за выбранный период.</div>
+</div>
 
 <h3>Оплата абонента</h3>
 
@@ -2488,6 +2504,51 @@ function __renderAbonentTotalsFromFreshSummary(summary){
     put(document.getElementById('abonent_total_debt') || document.getElementById('total_debt') || document.querySelector('[data-field="total_debt"]') || document.querySelector('[data-total="debt"]'), total);
     put(document.getElementById('abonent_total_main_debt') || document.getElementById('total_main_debt') || document.querySelector('[data-field="total_main_debt"]'), principal);
     put(document.getElementById('abonent_total_penalty_debt') || document.getElementById('total_penalty_debt') || document.querySelector('[data-field="total_penalty_debt"]'), penalty);
+    __renderMainTotalsCard(summary);
+}
+
+function __fmtSummaryNum(v){
+    const n = Number(v);
+    return Number.isFinite(n) ? n.toFixed(2) : "—";
+}
+
+function __renderMainTotalsCard(summary){
+    const totals = summary && summary.totals && typeof summary.totals === "object" ? summary.totals : null;
+    const period = summary && summary.period && typeof summary.period === "object" ? summary.period : null;
+    const dateText = period && period.to ? period.to : (summary && (summary.end_date || summary.period_end) || "—");
+    const principal = totals && (totals.principal != null ? totals.principal : totals.total_principal);
+    const penalty = totals && (totals.penalty != null ? totals.penalty : totals.total_penalty);
+    const total = totals && (totals.total != null ? totals.total : totals.total_debt);
+    const dateEl = document.getElementById("mainTotalsDate");
+    const principalEl = document.getElementById("mainTotalsPrincipal");
+    const penaltyEl = document.getElementById("mainTotalsPenalty");
+    const totalEl = document.getElementById("mainTotalsTotal");
+    if (dateEl) dateEl.textContent = dateText || "—";
+    if (principalEl) principalEl.textContent = __fmtSummaryNum(principal);
+    if (penaltyEl) penaltyEl.textContent = __fmtSummaryNum(penalty);
+    if (totalEl) totalEl.textContent = __fmtSummaryNum(total);
+}
+
+function __hideTemporaryPeriodReportCard(){
+    const card = document.getElementById("periodReportTotalsCard");
+    if (card) card.style.display = "none";
+}
+
+function __renderTemporaryPeriodReportCard(summary){
+    const status = __normalizeSummaryStatus(summary && (summary.summary_status || summary.status));
+    const periodTotals = summary && (summary.period_report_totals || summary.periodTotals);
+    const fromEl = document.getElementById("calcFrom");
+    const toEl = document.getElementById("calcTo");
+    const hasValidPeriod = !!(fromEl && toEl && isValidPeriod(fromEl.value, toEl.value));
+    if (status !== "fresh" || !periodTotals || typeof periodTotals !== "object" || !hasValidPeriod) return __hideTemporaryPeriodReportCard();
+    const card = document.getElementById("periodReportTotalsCard");
+    if (!card) return;
+    document.getElementById("periodReportRange").textContent = String(periodTotals.from || "") + " — " + String(periodTotals.to || "");
+    document.getElementById("periodReportAccrued").textContent = __fmtSummaryNum(periodTotals.accrued);
+    document.getElementById("periodReportPaid").textContent = __fmtSummaryNum(periodTotals.paid);
+    document.getElementById("periodReportPenalty").textContent = __fmtSummaryNum(periodTotals.penalty);
+    document.getElementById("periodReportTotal").textContent = __fmtSummaryNum(periodTotals.total);
+    card.style.display = "block";
 }
 
 async function __saveAbonentSummaryAfterUidRecalc(abonentId, from, to){
@@ -2502,6 +2563,9 @@ async function __saveAbonentSummaryAfterUidRecalc(abonentId, from, to){
     renderAbonentSummaryStatus(status, reason);
     if (__normalizeSummaryStatus(status) === "fresh" && summary) {
         __renderAbonentTotalsFromFreshSummary(summary);
+        __renderTemporaryPeriodReportCard(summary);
+    } else {
+        __hideTemporaryPeriodReportCard();
     }
     return result;
 }
@@ -2579,11 +2643,21 @@ function bindCalcButtons(){
         if (periodKey) storeRemove(periodKey, getCalcPeriodOwnerId());
         fromEl.value = "";
         toEl.value = "";
+        __hideTemporaryPeriodReportCard();
         __safeLoadPaymentTableOnce();
     });
 
     repBtn.addEventListener("click", () => {
         const id = getAbonentIdFromURL();
+        if (!confirmCalcPeriodSaved()) {
+            alert("Сначала выберите период и нажмите Пересчитать.");
+            return;
+        }
+        const tempCard = document.getElementById("periodReportTotalsCard");
+        if (!tempCard || tempCard.style.display === "none") {
+            alert("Сначала выберите период и нажмите Пересчитать.");
+            return;
+        }
         const from = fromEl.value;
         const to = toEl.value;
         if (from || to) {

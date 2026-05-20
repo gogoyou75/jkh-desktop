@@ -455,3 +455,7 @@ rg -n "splitPremise|premise-transform\]\[split|type: ['\"]split" web LOGIC_SPEC.
 - Добавлен расширенный status payload для `GET /api/abonent_summary/recalc_batch_job/<job_id>`: top-level `job_id/status/total/processed/fresh/error/skipped/message/affected_uids` + совместимый `job` блок.
 - Backend status endpoint теперь продвигает queued/running job по шагам, что даёт реальный polling progress без скрытого full-recalc.
 - Frontend index добавил runtime polling (ограниченные retry, без бесконечных таймеров), блокировку кнопки запуска во время active job, вывод прогресса и авто-refresh текущей summary-страницы после completed.
+
+## 2026-05-20 — Temporary court period report
+
+- Добавлен временный отчётный расчёт для судебной справки за выбранный период. Полная задолженность и `period_report_totals` разделены в UI и summary.

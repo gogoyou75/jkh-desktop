@@ -1936,3 +1936,10 @@ Fatal-состояния включают, но не ограничиваютс�
 ## 2026-05-19 — Stage 9 Backend Batch Orchestration
 - Added backend batch-job coordinator API for abonent_summary recalculation requests.
 - Owner scope and UID allowlist are validated only on backend.
+
+## 2026-05-20 — Temporary court period report in abonent card
+
+- `summary.totals` — полная задолженность на дату окончания выбранного периода или на текущую расчётную дату.
+- `summary.period_report_totals` — временный отчётный расчёт для судебной справки за выбранный период без входящего остатка.
+- `period_report_totals` не является ledger, не является полной задолженностью, не изменяет `payments_<uid>`.
+- `period_report_totals` скрывается/деактивируется после сброса периода и используется только для печатной судебной справки.

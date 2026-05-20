@@ -1548,6 +1548,68 @@
     };
   }
 
+  function _buildTemporaryCourtPeriodTotals(rows, from, to) {
+    if (!Array.isArray(rows)) throw new Error("LEDGER_ROWS_INVALID");
+    var asOf = _dateFromIsoLocal(to);
+    if (!asOf) throw new Error("PERIOD_INVALID");
+    if (!window.JKHCalcEngine || typeof window.JKHCalcEngine.calcTotalsAsOfAdjusted !== "function") {
+      throw new Error("CALC_ENGINE_UNAVAILABLE");
+    }
+    var fromMonth = String(from || "").slice(0, 7);
+    var toMonth = String(to || "").slice(0, 7);
+    var fromDate = _dateFromIsoLocal(from);
+    var toDate = _dateFromIsoLocal(to);
+    var accrued = 0;
+    var paid = 0;
+    for (var i = 0; i < rows.length; i++) {
+      var row = rows[i] || {};
+      var monthKey = _summaryMonthKey(row);
+      var inMonthPeriod = !!(monthKey && monthKey >= fromMonth && monthKey <= toMonth);
+      if (inMonthPeriod) accrued += _summaryNumber(row.accrued);
+      var paidValue = _summaryNumber(row.paid);
+      if (Math.abs(paidValue) > 0.0000001) {
+        var paidDate = _summaryPaidDate(row);
+        if (paidDate && fromDate && toDate) {
+          if (paidDate.getTime() >= fromDate.getTime() && paidDate.getTime() <= toDate.getTime()) paid += paidValue;
+        } else if (inMonthPeriod) {
+          paid += paidValue;
+        }
+      }
+    }
+    var filteredRows = rows.filter(function (row) {
+      var monthKey = _summaryMonthKey(row || {});
+      return !!(monthKey && monthKey >= fromMonth && monthKey <= toMonth);
+    }).map(function (row) { return Object.assign({}, row || {}); });
+    for (var j = 0; j < filteredRows.length; j++) {
+      var r = filteredRows[j] || {};
+      r.paid = 0;
+      r.to_penalty = 0;
+      r.paid_date = "";
+      filteredRows[j] = r;
+    }
+    var periodTotals = window.JKHCalcEngine.calcTotalsAsOfAdjusted(filteredRows, asOf, {
+      applyAdvanceOffset: true,
+      allowNegativePrincipal: true
+    });
+    var periodPenalty = Number(periodTotals && periodTotals.penaltyDebt);
+    if (!Number.isFinite(periodPenalty)) throw new Error("CALC_TOTALS_INVALID");
+    var accruedRounded = Math.round(accrued * 100) / 100;
+    var paidRounded = Math.round(paid * 100) / 100;
+    var penaltyRounded = Math.round(periodPenalty * 100) / 100;
+    var totalRounded = Math.round((accruedRounded - paidRounded + penaltyRounded) * 100) / 100;
+    var block = {
+      mode: "temporary_court_period_without_opening_balance",
+      from: String(from || ""),
+      to: String(to || ""),
+      accrued: accruedRounded,
+      paid: paidRounded,
+      penalty: penaltyRounded,
+      total: totalRounded,
+      note: "Временный отчётный расчёт. Не является полной задолженностью."
+    };
+    return block;
+  }
+
   function _summaryCalcErrorCode(e) {
     if (e && e.code) return String(e.code);
     var msg = String(e && e.message || e || "CALC_FAILED");
@@ -1757,6 +1819,7 @@
     var penalty = Number(totals && totals.penaltyDebt);
     var total = Number(totals && totals.total);
     var periodTotals = _summaryPeriodTotals(rows, from, to);
+    var periodReportTotals = _buildTemporaryCourtPeriodTotals(rows, from, to);
     if (!Number.isFinite(principal) || !Number.isFinite(penalty) || !Number.isFinite(total)) {
       throw new Error("CALC_TOTALS_INVALID");
     }
@@ -1820,6 +1883,8 @@
         total_accrued: periodTotals.total_accrued,
         total_paid: periodTotals.total_paid
       },
+      period_report_totals: periodReportTotals,
+      periodTotals: periodReportTotals,
       calc_engine_version: "JKHCalcEngine",
       generated_at: new Date().toISOString()
     };

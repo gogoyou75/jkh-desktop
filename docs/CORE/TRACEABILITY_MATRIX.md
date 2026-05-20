@@ -379,3 +379,10 @@
 | Stage 1 PR не меняет код и не добавляет реализацию | LOGIC_SPEC 21.10 | limited backend write-path | ✅ CANON | Исторический Stage 1 был docs-only; текущий этап разрешает только explicit rebuild endpoint и тесты, не затрагивая frontend/calc engine. |
 
 | STAGE9-BATCH-JOBS | `/api/abonent_summary/recalc_batch_job*` backend orchestration with owner-scoped UID filtering and per-item status | backend/app.py, backend/tests/test_recalc_batch_jobs.py |
+
+## Stage 12 — Temporary court period report traceability
+
+- Карточка различает полную задолженность и временный расчёт справки.
+- `period_report_totals` не меняет ledger.
+- Сброс периода очищает временный режим.
+- `index.html` не использует `period_report_totals` как полный долг.
