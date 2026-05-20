@@ -506,6 +506,14 @@ Doc: docs/LOGIC_SPEC_v1.5.3.md
     </div>
     <div id="periodReportStatus" class="summary-warning" style="display:none;">Временный расчёт для справки готов.</div>
 </div>
+<div id="periodReportTotalsCard" class="summary-status-card" style="display:none;">
+    <div class="summary-title">Временный расчёт для справки за период</div>
+    <div id="periodReportRange"></div>
+    <div>Начислено: <b id="periodReportAccrued">0.00</b></div>
+    <div>Оплачено: <b id="periodReportPaid">0.00</b></div>
+    <div>Пени: <b id="periodReportPenalty">0.00</b></div>
+    <div>Итого: <b id="periodReportTotal">0.00</b></div>
+</div>
 
 <h3>Оплата абонента</h3>
 
@@ -1150,7 +1158,7 @@ function __safeLoadPaymentTableOnce(reason){
         __paymentTableLoadScheduled = false;
         __paymentTableLoading = true;
         try {
-            window.__loadPaymentTable(reason || 'abonent-card');
+            window.__loadPaymentTable({ reason: reason || 'abonent-card', mode: 'readonly_no_recalc' });
             __hideExcludesFatalBox();
         } catch(e) {
             if (__isExcludesFatalError(e)) __showExcludesFatalBox(e);
@@ -2497,15 +2505,32 @@ async function __saveAbonentSummaryAfterUidRecalc(abonentId, from, to){
         return { ok: false, summary_status: "error", summary_reason: "SUMMARY_RECALC_UNAVAILABLE" };
     }
     const result = await Data.recalculateAbonentCard(abonentId, { period: { from: from, to: to }, mode: "temporary_court_period" });
-    const summary = result && result.summary && typeof result.summary === "object" ? result.summary : null;
-    const periodStatus = document.getElementById("periodReportStatus");
-    if (periodStatus) periodStatus.style.display = (summary && summary.period_report_totals) ? "block" : "none";
-    await loadAbonentSummaryStatus();
     if (!result || result.ok !== true) {
         const reason = result && (result.summary_reason || result.reason) || "SUMMARY_RECALC_FAILED";
-        renderAbonentSummaryStatus("error", reason);
+        return { ok: false, summary_status: "error", summary_reason: reason, reason: reason };
     }
     return result;
+}
+
+function __renderTemporaryPeriodReport(result, from, to){
+    const periodStatus = document.getElementById("periodReportStatus");
+    const totalsCard = document.getElementById("periodReportTotalsCard");
+    const summary = result && result.summary && typeof result.summary === "object" ? result.summary : null;
+    const totals = (summary && summary.period_report_totals) || (result && result.period_report_totals) || (summary && summary.periodTotals) || null;
+    if (!totals) throw new Error("Временный расчёт периода не сформирован.");
+    function num(v){ const n = Number(v); return Number.isFinite(n) ? n : 0; }
+    const rangeEl = document.getElementById("periodReportRange");
+    const accruedEl = document.getElementById("periodReportAccrued");
+    const paidEl = document.getElementById("periodReportPaid");
+    const penaltyEl = document.getElementById("periodReportPenalty");
+    const totalEl = document.getElementById("periodReportTotal");
+    if (rangeEl) rangeEl.textContent = "Период: " + String(from) + " — " + String(to);
+    if (accruedEl) accruedEl.textContent = num(totals.accrued).toFixed(2);
+    if (paidEl) paidEl.textContent = num(totals.paid).toFixed(2);
+    if (penaltyEl) penaltyEl.textContent = num(totals.penalty).toFixed(2);
+    if (totalEl) totalEl.textContent = num(totals.total).toFixed(2);
+    if (totalsCard) totalsCard.style.display = "block";
+    if (periodStatus) periodStatus.style.display = "block";
 }
 
 function bindCalcButtons(){
@@ -2567,7 +2592,10 @@ function bindCalcButtons(){
                 alert("Пересчёт не выполнен: " + String(result.summary_reason || result.reason || "SUMMARY_RECALC_FAILED"));
                 return;
             }
-            __safeLoadPaymentTableOnce();
+            __renderTemporaryPeriodReport(result, from, to);
+            alert("Временный расчёт для справки готов.");
+        } catch (e) {
+            alert((e && e.message) ? e.message : "Временный расчёт периода не сформирован.");
         } finally {
             runBtn.disabled = false;
             runBtn.textContent = prevText || "Пересчитать";

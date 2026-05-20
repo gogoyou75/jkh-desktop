@@ -2243,7 +2243,10 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
     }
   }
 
-  async function loadPaymentTableImpl() {
+  async function loadPaymentTableImpl(options) {
+    const opts = (options && typeof options === "object") ? options : {};
+    const mode = String(opts.mode || "");
+    const readonlyNoRecalc = (mode === "readonly_no_recalc");
     const totalStartedAt = perfNow();
     try { console.time('[payment-table] init-total'); } catch(e) {}
     try {
@@ -2381,7 +2384,9 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
       __paymentTableRenderedSignature = signature;
       // Тяжёлый расчёт пени/долга не блокирует открытие карточки: строки сначала
       // рисуются с уже сохранёнными значениями, затем ro-ячейки обновляются чанками.
-      scheduleRunningTotalsUpdate(view, baseRows, tbody, signature);
+      if (!readonlyNoRecalc) {
+        scheduleRunningTotalsUpdate(view, baseRows, tbody, signature);
+      }
       clearLastAddedPaymentId();
     } finally {
       try { console.timeEnd('[payment-table] init-total'); } catch(e) {}
@@ -2391,32 +2396,40 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
 
   let __paymentTableLoadRunning = false;
   let __paymentTableLoadScheduled = false;
-  function requestLoadPaymentTable(reason){
+  function requestLoadPaymentTable(reasonOrOptions){
+    const opts = (reasonOrOptions && typeof reasonOrOptions === "object")
+      ? reasonOrOptions
+      : { reason: reasonOrOptions };
+    const reason = String(opts.reason || "scheduled");
     if (__paymentTableLoadScheduled) {
-      try { console.log("[payment-table][init-skipped-inflight]", { reason: String(reason || "scheduled"), phase: "scheduled" }); } catch(e) {}
+      try { console.log("[payment-table][init-skipped-inflight]", { reason: reason, mode: String(opts.mode || ""), phase: "scheduled" }); } catch(e) {}
       return;
     }
     if (__paymentTableLoadRunning) {
-      try { console.log("[payment-table][init-skipped-inflight]", { reason: String(reason || "scheduled"), phase: "running" }); } catch(e) {}
+      try { console.log("[payment-table][init-skipped-inflight]", { reason: reason, mode: String(opts.mode || ""), phase: "running" }); } catch(e) {}
       return;
     }
     __paymentTableLoadScheduled = true;
     setTimeout(function(){
       __paymentTableLoadScheduled = false;
-      try { loadPaymentTable(reason || 'scheduled'); } catch(e) { console.error(e); throw e; }
+      try { loadPaymentTable(opts); } catch(e) { console.error(e); throw e; }
     }, 0);
   }
 
-  async function loadPaymentTable(reason) {
+  async function loadPaymentTable(reasonOrOptions) {
+    const opts = (reasonOrOptions && typeof reasonOrOptions === "object")
+      ? reasonOrOptions
+      : { reason: reasonOrOptions };
+    const reason = String(opts.reason || "");
     if (__paymentTableLoadRunning) {
-      try { console.log("[payment-table][init-skipped-inflight]", { reason: String(reason || ""), phase: "running" }); } catch(e) {}
+      try { console.log("[payment-table][init-skipped-inflight]", { reason: reason, mode: String(opts.mode || ""), phase: "running" }); } catch(e) {}
       return;
     }
     __paymentTableLoadRunning = true;
     try {
-      console.log("[payment-table][init-start]", { reason: String(reason || "") });
-      await loadPaymentTableImpl();
-      console.log("[payment-table][init-done]", { reason: String(reason || "") });
+      console.log("[payment-table][init-start]", { reason: reason, mode: String(opts.mode || "") });
+      await loadPaymentTableImpl(opts);
+      console.log("[payment-table][init-done]", { reason: reason, mode: String(opts.mode || "") });
     } finally {
       __paymentTableLoadRunning = false;
     }
