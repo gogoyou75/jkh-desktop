@@ -110,6 +110,44 @@ class RecalcBatchJobsTest(unittest.TestCase):
             ids.append(self.client.post("/api/abonent_summary/recalc_batch_job", json={"uids": ["u1", "u2"], "reason": "MANUAL_RECALC"}).get_json()["job_id"])
         self.assertEqual(len(set(ids)), 1)
 
+    def test_status_completed_returns_counters(self):
+        self._login("owner1")
+        created = self.client.post("/api/abonent_summary/recalc_batch_job", json={"uids": ["u1", "u2"]}).get_json()
+        job_id = created["job_id"]
+        self.client.post(f"/api/abonent_summary/recalc_batch_job/{job_id}/run")
+        status = self.client.get(f"/api/abonent_summary/recalc_batch_job/{job_id}").get_json()
+        self.assertTrue(status["ok"])
+        self.assertEqual(status["job_id"], job_id)
+        self.assertIn(status["status"], {"running", "completed"})
+        self.assertIn("processed", status)
+        self.assertIn("total", status)
+        self.assertIn("fresh", status)
+        self.assertIn("error", status)
+        self.assertIn("skipped", status)
+
+    def test_status_failed_returns_reason_message(self):
+        with app_module.app.app_context():
+            job = app_module.RecalcBatchJob(owner_id="owner1", requested_by="owner1", reason="MANUAL_RECALC", status="failed", error_message="FAILED_REASON")
+            app_module.db.session.add(job)
+            app_module.db.session.commit()
+            job_id = int(job.id)
+        self._login("owner1")
+        status = self.client.get(f"/api/abonent_summary/recalc_batch_job/{job_id}").get_json()
+        self.assertEqual(status["status"], "failed")
+        self.assertEqual(status["message"], "FAILED_REASON")
+
+    def test_duplicate_polling_does_not_mutate_completed_job(self):
+        self._login("owner1")
+        created = self.client.post("/api/abonent_summary/recalc_batch_job", json={"uids": ["u1"]}).get_json()
+        job_id = created["job_id"]
+        for _ in range(3):
+            self.client.get(f"/api/abonent_summary/recalc_batch_job/{job_id}")
+        first = self.client.get(f"/api/abonent_summary/recalc_batch_job/{job_id}").get_json()
+        second = self.client.get(f"/api/abonent_summary/recalc_batch_job/{job_id}").get_json()
+        self.assertEqual(first["processed"], second["processed"])
+        self.assertEqual(first["fresh"], second["fresh"])
+        self.assertEqual(first["error"], second["error"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1138,6 +1138,93 @@ def _batch_job_payload(job: RecalcBatchJob):
     }
 
 
+def _batch_job_status_response(job: RecalcBatchJob):
+    payload = _batch_job_payload(job)
+    items = RecalcBatchJobItem.query.filter_by(job_id=job.id, owner_id=job.owner_id).order_by(RecalcBatchJobItem.id.asc()).all()
+    affected_uids = [_norm_text(x.account_uid) for x in items if _norm_text(x.account_uid)]
+    return {
+        "ok": True,
+        "job": payload,
+        "job_id": payload["id"],
+        "status": payload["status"],
+        "total": payload["total_count"],
+        "processed": payload["processed_count"],
+        "fresh": payload["fresh_count"],
+        "error": payload["error_count"],
+        "skipped": payload["skipped_count"],
+        "started_at": payload["started_at"],
+        "finished_at": payload["finished_at"],
+        "message": _norm_text(job.error_message) or "",
+        "affected_uids": affected_uids,
+        "items": [{
+            "account_uid": _norm_text(x.account_uid),
+            "status": _norm_text(x.status),
+            "summary_status": _norm_text(x.summary_status),
+            "summary_reason": _norm_text(x.summary_reason),
+        } for x in items],
+    }
+
+
+def _recalc_batch_process_job(owner_id: str, job: RecalcBatchJob, step_limit: int = 25):
+    if not job or job.owner_id != owner_id:
+        return
+    if job.status not in {"queued", "running"}:
+        return
+    if job.status == "queued":
+        job.status = "running"
+        if not job.started_at:
+            job.started_at = datetime.utcnow()
+        db.session.commit()
+    items = (
+        RecalcBatchJobItem.query
+        .filter_by(job_id=job.id, owner_id=owner_id)
+        .filter(RecalcBatchJobItem.status.in_(["queued", "running"]))
+        .order_by(RecalcBatchJobItem.id.asc())
+        .limit(max(1, int(step_limit)))
+        .all()
+    )
+    if not items:
+        if int(job.processed_count or 0) >= int(job.total_count or 0):
+            job.status = "completed"
+            if not job.finished_at:
+                job.finished_at = datetime.utcnow()
+            db.session.commit()
+        return
+    for item in items:
+        item.status = "running"
+        if not item.started_at:
+            item.started_at = datetime.utcnow()
+        db.session.commit()
+        try:
+            row = AbonentSummary.query.filter_by(owner_id=owner_id, account_uid=item.account_uid).order_by(AbonentSummary.id.asc()).first()
+            summary = _summary_from_row_or_missing(row, {"account_uid": item.account_uid, "abonent_id": "", "account_number": "", "identity": {}})
+            s_status = _summary_status_from_payload(summary)
+            s_reason = _norm_text(summary.get("summary_reason") or summary.get("reason") or "")
+            if s_status == "fresh":
+                item.status = "fresh"
+                job.fresh_count = int(job.fresh_count or 0) + 1
+            else:
+                item.status = "error"
+                item.error_message = s_reason or s_status or "SUMMARY_NOT_FRESH"
+                job.error_count = int(job.error_count or 0) + 1
+            item.summary_status = s_status
+            item.summary_reason = s_reason
+        except Exception as exc:
+            item.status = "error"
+            item.error_message = f"UID_PROCESSING_FAILED: {exc}"
+            item.summary_status = "error"
+            item.summary_reason = "UID_PROCESSING_FAILED"
+            job.error_count = int(job.error_count or 0) + 1
+        item.finished_at = datetime.utcnow()
+        job.processed_count = int(job.processed_count or 0) + 1
+        db.session.commit()
+    remaining = RecalcBatchJobItem.query.filter_by(job_id=job.id, owner_id=owner_id, status="queued").count()
+    if remaining == 0 and int(job.processed_count or 0) >= int(job.total_count or 0):
+        job.status = "completed"
+        job.finished_at = datetime.utcnow()
+        db.session.commit()
+
+
 def _recalc_normalize_uids(raw_uids):
     out = []
     seen = set()
@@ -1628,37 +1715,11 @@ def abonent_summary_recalc_batch_job_run(job_id: int):
     job = RecalcBatchJob.query.filter_by(id=job_id, owner_id=user.id).first()
     if not job:
         return jsonify(ok=False, error="job_not_found"), 404
-    if job.status == "running":
-        return jsonify(ok=False, error="job_already_running"), 409
-    now = datetime.utcnow()
-    job.status = "running"
-    job.started_at = now
-    db.session.commit()
-    items = RecalcBatchJobItem.query.filter_by(job_id=job.id, owner_id=user.id).order_by(RecalcBatchJobItem.id.asc()).all()
-    for item in items:
-        item.status = "running"
-        item.started_at = datetime.utcnow()
-        db.session.commit()
-        row = AbonentSummary.query.filter_by(owner_id=user.id, account_uid=item.account_uid).order_by(AbonentSummary.id.asc()).first()
-        summary = _summary_from_row_or_missing(row, {"account_uid": item.account_uid, "abonent_id": "", "account_number": "", "identity": {}})
-        s_status = _summary_status_from_payload(summary)
-        s_reason = _norm_text(summary.get("summary_reason") or summary.get("reason") or "")
-        if s_status == "fresh":
-            item.status = "fresh"
-            job.fresh_count += 1
-        else:
-            item.status = "error"
-            item.error_message = s_reason or s_status
-            job.error_count += 1
-        item.summary_status = s_status
-        item.summary_reason = s_reason
-        item.finished_at = datetime.utcnow()
-        job.processed_count += 1
-        db.session.commit()
-    job.status = "completed"
-    job.finished_at = datetime.utcnow()
-    db.session.commit()
-    return jsonify(ok=True, job=_batch_job_payload(job))
+    if job.status in {"completed", "failed", "stale"}:
+        return jsonify(**_batch_job_status_response(job))
+    _recalc_batch_process_job(user.id, job, step_limit=1)
+    db.session.refresh(job)
+    return jsonify(**_batch_job_status_response(job))
 
 
 @app.get("/api/abonent_summary/recalc_batch_job/latest")
@@ -1680,13 +1741,9 @@ def abonent_summary_recalc_batch_job_status(job_id: int):
     job = RecalcBatchJob.query.filter_by(id=job_id, owner_id=user.id).first()
     if not job:
         return jsonify(ok=False, error="job_not_found"), 404
-    items = RecalcBatchJobItem.query.filter_by(job_id=job.id, owner_id=user.id).order_by(RecalcBatchJobItem.id.asc()).all()
-    return jsonify(ok=True, job=_batch_job_payload(job), items=[{
-        "account_uid": _norm_text(x.account_uid),
-        "status": _norm_text(x.status),
-        "summary_status": _norm_text(x.summary_status),
-        "summary_reason": _norm_text(x.summary_reason),
-    } for x in items])
+    _recalc_batch_process_job(user.id, job, step_limit=10)
+    db.session.refresh(job)
+    return jsonify(**_batch_job_status_response(job))
 
 
 @app.post("/api/abonent_summary/rebuild")
