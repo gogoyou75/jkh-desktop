@@ -386,3 +386,14 @@
 - `period_report_totals` не меняет ledger.
 - Сброс периода очищает временный режим.
 - `index.html` не использует `period_report_totals` как полный долг.
+
+
+## Stage 12.1/12.2 — Temporary court period and UI separation (2026-05-20)
+
+| Правило | Где в ТЗ | Где в коде | Статус | Комментарий |
+|---|---|---|---|---|
+| `summary.totals` хранит только полную задолженность на дату | LOGIC_SPEC §12 | web/data.js `buildAbonentSummaryAfterExplicitRecalc` | ✅ OK | Временный режим не подменяет totals |
+| `summary.period_report_totals` хранит временный расчёт за выбранный период без входящего остатка | LOGIC_SPEC §12 | web/data.js `_buildTemporaryCourtPeriodTotals` | ✅ OK | `mode=temporary_court_period_without_opening_balance` |
+| Временный режим не запускает полный пересчёт всей истории для totals | LOGIC_SPEC §12 | web/data.js `buildAbonentSummaryAfterExplicitRecalc` | ✅ OK | `calcTotalsAsOfAdjusted` для полного ledger вызывается только в full mode |
+| UI раздельно рендерит full totals и period report | LOGIC_SPEC §12 | web/abonent_card.html `__renderMainTotalsCard` + `__renderTemporaryPeriodReportCard` | ✅ OK | Отдельные DOM-блоки `mainTotals*` и `periodReport*` |
+| Кнопка «справки» доступна только после расчёта периода | LOGIC_SPEC §12 | web/abonent_card.html `bindCalcButtons` | ✅ OK | Проверяется период/active/наличие periodReportCard |

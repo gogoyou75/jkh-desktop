@@ -2087,7 +2087,7 @@ async function saveAbonentEdit() {
 
     loadMoratoriumUI();
 
-    __safeLoadPaymentTableOnce();
+    
 
     alert("Изменения сохранены");
     if (activeRegnum) renderResponsibilityHistory(activeRegnum);
@@ -2125,7 +2125,7 @@ function bindMoratoriumUI(){
         }
         storeSet(moratoriumKey(id), el.checked ? "1" : "0");
         markCurrentAbonentSummaryDirty("MORATORIUM_CHANGED");
-        __safeLoadPaymentTableOnce();
+        
     });
 }
 document.addEventListener("DOMContentLoaded", () => {
@@ -2537,9 +2537,7 @@ function __hideTemporaryPeriodReportCard(){
 function __renderTemporaryPeriodReportCard(summary){
     const status = __normalizeSummaryStatus(summary && (summary.summary_status || summary.status));
     const periodTotals = summary && (summary.period_report_totals || summary.periodTotals);
-    const fromEl = document.getElementById("calcFrom");
-    const toEl = document.getElementById("calcTo");
-    const hasValidPeriod = !!(fromEl && toEl && isValidPeriod(fromEl.value, toEl.value));
+    const hasValidPeriod = !!(periodTotals && periodTotals.from && periodTotals.to && isValidPeriod(String(periodTotals.from), String(periodTotals.to)));
     if (status !== "fresh" || !periodTotals || typeof periodTotals !== "object" || !hasValidPeriod) return __hideTemporaryPeriodReportCard();
     const card = document.getElementById("periodReportTotalsCard");
     if (!card) return;
@@ -2556,7 +2554,7 @@ async function __saveAbonentSummaryAfterUidRecalc(abonentId, from, to){
         renderAbonentSummaryStatus("error", "SUMMARY_RECALC_UNAVAILABLE");
         return { ok: false, summary_status: "error", summary_reason: "SUMMARY_RECALC_UNAVAILABLE" };
     }
-    const result = await Data.recalculateAbonentCard(abonentId, { period: { from: from, to: to } });
+    const result = await Data.recalculateAbonentCard(abonentId, { period: { from: from, to: to }, mode: "temporary_court_period" });
     const summary = result && result.summary && typeof result.summary === "object" ? result.summary : null;
     const status = result && (result.summary_status || result.status) || summary && (summary.summary_status || summary.status) || "error";
     const reason = result && (result.summary_reason || result.reason) || summary && (summary.summary_reason || summary.reason) || "SUMMARY_SAVE_FAILED";
@@ -2629,7 +2627,7 @@ function bindCalcButtons(){
                 alert("Пересчёт не выполнен: " + String(result.summary_reason || result.reason || "SUMMARY_RECALC_FAILED"));
                 return;
             }
-            __safeLoadPaymentTableOnce();
+            
         } finally {
             runBtn.disabled = false;
             runBtn.textContent = prevText || "Пересчитать";
@@ -2644,7 +2642,7 @@ function bindCalcButtons(){
         fromEl.value = "";
         toEl.value = "";
         __hideTemporaryPeriodReportCard();
-        __safeLoadPaymentTableOnce();
+        
     });
 
     repBtn.addEventListener("click", () => {

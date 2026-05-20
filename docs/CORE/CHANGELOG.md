@@ -1,3 +1,12 @@
+
+
+## 2026-05-20 — Stage 12.1/12.2 temporary court period mode
+
+- В `Data.recalculateAbonentCard(..., { mode: "temporary_court_period" })` добавлен быстрый режим: формируется только `summary.period_report_totals` за выбранный период без пересчёта полного `summary.totals` по всей истории.
+- `summary.totals` закреплён как полная задолженность на дату и в temporary-режиме сохраняется из предыдущего `fresh`/кэш summary (если был), без подмены временным периодом.
+- `summary.period_report_totals` закреплён как временный судебный расчёт за период без входящего остатка (`mode = temporary_court_period_without_opening_balance`), не меняет ledger и не является полной задолженностью.
+- Карточка абонента рендерит отдельные блоки: основной долг (`mainTotals*`) и временный период (`periodReport*`); кнопка «справки» открывается только после успешного расчёта выбранного периода.
+- Кнопка «сбросить» деактивирует/очищает `calc_period_<uid>` и `calc_period_active_<uid>`, скрывает временный блок, не меняет `payments_<uid>`, не запускает пересчёт.
 ## 2026-05-18 — Abonent summary: frontend dirty tracking
 
 - Добавлен frontend-сервис `Data.markAbonentSummaryDirty(abonentOrId, reason)` для безопасного вызова `POST /api/abonent_summary/mark_dirty` с `credentials: "include"`.
