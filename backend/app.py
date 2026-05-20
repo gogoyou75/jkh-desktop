@@ -66,6 +66,14 @@ IMPORT_BATCH_AUDIT_FIELDS_MIGRATION_SQL = (
 )
 
 
+
+RECALC_BATCH_ACTIVE_STATUSES = {"queued", "running"}
+RECALC_BATCH_FINAL_STATUSES = {"completed", "failed", "stale"}
+RECALC_BATCH_RUNNING_TTL_SECONDS = 30 * 60
+RECALC_BATCH_MAX_UIDS = 100
+RECALC_BATCH_KEEP_PER_OWNER = 20
+RECALC_BATCH_RETENTION_DAYS = 7
+
 class User(db.Model):
     __tablename__ = "users"
 
@@ -1109,46 +1117,113 @@ def _summary_from_row_or_missing(row: AbonentSummary | None, target: dict):
 
 
 def _batch_job_payload(job: RecalcBatchJob):
+    status = _norm_text(job.status) or "queued"
+    done = int(job.processed_count or 0)
+    total = int(job.total_count or 0)
+    errors = int(job.error_count or 0) + int(job.skipped_count or 0)
     return {
         "id": int(job.id),
-        "status": _norm_text(job.status) or "queued",
-        "total_count": int(job.total_count or 0),
-        "processed_count": int(job.processed_count or 0),
+        "status": status,
+        "reason": _norm_text(job.reason),
+        "total_count": total,
+        "processed_count": done,
         "fresh_count": int(job.fresh_count or 0),
         "error_count": int(job.error_count or 0),
         "skipped_count": int(job.skipped_count or 0),
+        "started_at": job.started_at.isoformat() + "Z" if job.started_at else None,
+        "finished_at": job.finished_at.isoformat() + "Z" if job.finished_at else None,
+        "total": total,
+        "done": done,
+        "errors": errors,
     }
 
 
-def _recalc_batch_create_job(owner_id: str, user_id: str, raw_uids, reason: str):
-    requested = []
+def _recalc_normalize_uids(raw_uids):
+    out = []
     seen = set()
     for value in (raw_uids or []):
         uid = _norm_text(value)
         if not uid or uid in seen:
             continue
         seen.add(uid)
-        requested.append(uid)
+        out.append(uid)
+    out.sort()
+    return out
+
+
+def _recalc_job_fingerprint(owner_id: str, reason: str, normalized_uids):
+    raw = "|".join([_norm_text(owner_id), _norm_text(reason) or "MANUAL_RECALC", ",".join(normalized_uids)])
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _recalc_recover_stale_running_jobs(owner_id: str):
+    now = datetime.utcnow()
+    jobs = RecalcBatchJob.query.filter_by(owner_id=owner_id).filter(RecalcBatchJob.status.in_(["queued", "running"])).all()
+    for job in jobs:
+        anchor = job.started_at or job.created_at
+        if not anchor:
+            continue
+        age = (now - anchor).total_seconds()
+        if age <= RECALC_BATCH_RUNNING_TTL_SECONDS:
+            continue
+        job.status = "stale"
+        job.error_message = "STALE_RUNNING_RECOVERED"
+        job.finished_at = now
+    db.session.flush()
+
+
+def _recalc_cleanup_old_jobs(owner_id: str):
+    now = datetime.utcnow()
+    threshold = now.timestamp() - (RECALC_BATCH_RETENTION_DAYS * 86400)
+    final_jobs = RecalcBatchJob.query.filter_by(owner_id=owner_id).filter(RecalcBatchJob.status.in_(["completed", "failed", "stale"])).order_by(RecalcBatchJob.id.desc()).all()
+    keep_ids = set(j.id for j in final_jobs[:RECALC_BATCH_KEEP_PER_OWNER])
+    for job in final_jobs[RECALC_BATCH_KEEP_PER_OWNER:]:
+        finished_ts = (job.finished_at or job.created_at)
+        should_delete = True
+        if finished_ts:
+            should_delete = finished_ts.timestamp() < threshold
+        if not should_delete:
+            continue
+        db.session.query(RecalcBatchJobItem).filter_by(job_id=job.id, owner_id=owner_id).delete()
+        db.session.delete(job)
+
+
+def _recalc_batch_create_job(owner_id: str, user_id: str, raw_uids, reason: str):
+    requested = _recalc_normalize_uids(raw_uids)
     if not requested:
         return None, {"requested": 0, "accepted": 0, "skipped": 0}
+    if len(requested) > RECALC_BATCH_MAX_UIDS:
+        return "TOO_MANY_UIDS", {"max_uids": RECALC_BATCH_MAX_UIDS, "requested": len(requested)}
+    reason_norm = _norm_text(reason) or "MANUAL_RECALC"
+
+    _recalc_recover_stale_running_jobs(owner_id)
+
+    fp = _recalc_job_fingerprint(owner_id, reason_norm, requested)
+    active_jobs = RecalcBatchJob.query.filter_by(owner_id=owner_id, reason=reason_norm).filter(RecalcBatchJob.status.in_(["queued", "running"])).order_by(RecalcBatchJob.id.desc()).all()
+    for active_job in active_jobs:
+        item_uids = [
+            _norm_text(x.account_uid)
+            for x in RecalcBatchJobItem.query.filter_by(job_id=active_job.id, owner_id=owner_id).all()
+            if _norm_text(x.account_uid)
+        ]
+        if _recalc_job_fingerprint(owner_id, reason_norm, sorted(set(item_uids))) == fp:
+            db.session.commit()
+            return active_job, {"requested": len(requested), "accepted": int(active_job.total_count or 0), "skipped": int(active_job.skipped_count or 0)}
+
     targets = _owner_abonent_summary_targets(owner_id)
     targets_by_uid = {_norm_text(t.get("account_uid")): t for t in targets if _norm_text(t.get("account_uid"))}
     accepted = [uid for uid in requested if uid in targets_by_uid]
     skipped = len(requested) - len(accepted)
-    job = RecalcBatchJob(
-        owner_id=owner_id,
-        requested_by=user_id,
-        reason=_norm_text(reason) or "MANUAL_RECALC",
-        status="queued",
-        total_count=len(accepted),
-        skipped_count=skipped,
-    )
+    job = RecalcBatchJob(owner_id=owner_id, requested_by=user_id, reason=reason_norm, status="queued", total_count=len(accepted), skipped_count=skipped)
     db.session.add(job)
     db.session.flush()
     for uid in accepted:
         db.session.add(RecalcBatchJobItem(job_id=job.id, owner_id=owner_id, account_uid=uid, status="queued"))
+
+    _recalc_cleanup_old_jobs(owner_id)
     db.session.commit()
     return job, {"requested": len(requested), "accepted": len(accepted), "skipped": skipped}
+
 
 
 def _parse_summary_status_filter(raw_value: str):
@@ -1538,6 +1613,8 @@ def abonent_summary_recalc_batch_job_create():
     if not isinstance(raw_uids, list):
         return jsonify(ok=False, error="account_uids_required"), 400
     job, counters = _recalc_batch_create_job(user.id, user.id, raw_uids, body.get("reason"))
+    if job == "TOO_MANY_UIDS":
+        return jsonify(ok=False, error="TOO_MANY_UIDS", details={"max_uids": counters.get("max_uids"), "requested": counters.get("requested")}), 400
     if not job:
         return jsonify(ok=False, error="account_uids_required"), 400
     return jsonify(ok=True, job_id=int(job.id), status="queued", **counters)
@@ -1578,9 +1655,20 @@ def abonent_summary_recalc_batch_job_run(job_id: int):
         item.finished_at = datetime.utcnow()
         job.processed_count += 1
         db.session.commit()
-    job.status = "done"
+    job.status = "completed"
     job.finished_at = datetime.utcnow()
     db.session.commit()
+    return jsonify(ok=True, job=_batch_job_payload(job))
+
+
+@app.get("/api/abonent_summary/recalc_batch_job/latest")
+def abonent_summary_recalc_batch_job_latest():
+    user, err = _require_user()
+    if err:
+        return err
+    job = RecalcBatchJob.query.filter_by(owner_id=user.id).order_by(RecalcBatchJob.id.desc()).first()
+    if not job:
+        return jsonify(ok=True, job=None)
     return jsonify(ok=True, job=_batch_job_payload(job))
 
 

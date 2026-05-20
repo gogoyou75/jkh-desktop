@@ -4,13 +4,28 @@ import os
 import sys
 import tempfile
 import unittest
+from pathlib import Path
 from sqlalchemy import create_engine
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import app as app_module
 
 
 class AbonentSummaryRebuildTest(unittest.TestCase):
+    @staticmethod
+    def _find_repo_file(*parts: str):
+        tests_dir = Path(__file__).resolve().parent
+        backend_dir = tests_dir.parent
+        repo_root = backend_dir.parent
+        candidates = [
+            repo_root.joinpath(*parts),
+            Path("/app").joinpath(*parts),
+        ]
+        for candidate in candidates:
+            if candidate.exists():
+                return candidate
+        return None
+
     @classmethod
     def setUpClass(cls):
         cls._db_file = tempfile.NamedTemporaryFile(prefix="jkh_summary_rebuild_", suffix=".sqlite", delete=False)
@@ -409,18 +424,20 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
             self.assertNotIn("total_penalty", payload)
 
     def test_data_write_payment_ledger_blocks_account_number_write_path(self):
-        data_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "web", "data.js"))
-        with open(data_path, "r", encoding="utf-8") as fh:
-            src = fh.read()
+        data_path = self._find_repo_file("web", "data.js")
+        if data_path is None:
+            self.skipTest("web/data.js is unavailable in this runtime image")
+        src = data_path.read_text(encoding="utf-8")
 
         self.assertIn("LS_LEDGER_WRITE_FORBIDDEN", src)
         self.assertIn('key === "payments_" + id', src)
         self.assertIn('key !== "payments_" + uid', src)
 
     def test_rebuild_does_not_touch_calc_engine_js(self):
-        calc_engine_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "web", "calc_engine.js"))
-        with open(calc_engine_path, "rb") as fh:
-            before = hashlib.sha256(fh.read()).hexdigest()
+        calc_engine_path = self._find_repo_file("web", "calc_engine.js")
+        if calc_engine_path is None:
+            self.skipTest("web/calc_engine.js is unavailable in this runtime image")
+        before = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
         with app_module.app.app_context():
             self._add_user("owner-calc-engine")
             self._put_abonents("owner-calc-engine", {
@@ -431,8 +448,7 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
 
         response = self.client.post("/api/abonent_summary/rebuild")
 
-        with open(calc_engine_path, "rb") as fh:
-            after = hashlib.sha256(fh.read()).hexdigest()
+        after = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
         self.assertEqual(response.status_code, 200)
         self.assertEqual(before, after)
 

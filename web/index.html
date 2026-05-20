@@ -1107,6 +1107,7 @@ async function initIndexPage(){
             indexTableInitDone = true;
         }
         await loadPassiveSummaryPage(currentPage);
+        await loadLatestSummaryBatchStatus();
         return;
     } else if (uiState.data && uiState.data.status === "error") {
         const table = document.getElementById("abonentsTable");
@@ -1286,6 +1287,25 @@ function bindSummaryBatchPanelOnce(){
     if (runBtn) runBtn.onclick = runSelectedSummaryBatch;
 }
 
+
+async function loadLatestSummaryBatchStatus(){
+    const progress = document.getElementById("summaryBatchProgress");
+    if (!window.Data || typeof Data.getAbonentSummaryRecalcBatchJobLatest !== "function") return;
+    try {
+        const payload = await Data.getAbonentSummaryRecalcBatchJobLatest();
+        const job = payload && payload.job;
+        if (!job) return;
+        const status = String(job.status || "");
+        if (status === "running" || status === "queued") {
+            if (progress) progress.textContent = "Идёт пересчёт…";
+        } else if (status === "completed") {
+            if (progress) progress.textContent = "Последний пересчёт завершён";
+        } else if (status === "failed" || status === "stale") {
+            if (progress) progress.textContent = "Последний пересчёт завершился ошибкой / был восстановлен";
+        }
+    } catch(e) {}
+}
+
 async function runSelectedSummaryBatch(){
     if (summaryBatchRunning) return;
     if (!window.Data || typeof Data.createAbonentSummaryRecalcBatchJob !== "function" || typeof Data.runAbonentSummaryRecalcBatchJob !== "function" || typeof Data.getAbonentSummaryRecalcBatchJob !== "function") {
@@ -1306,6 +1326,7 @@ async function runSelectedSummaryBatch(){
 
     try {
         const created = await Data.createAbonentSummaryRecalcBatchJob(selected, "MANUAL_RECALC");
+        if (!created || !created.job_id) throw new Error("job_create_failed");
         if (progress) progress.textContent = "Создано задание #" + created.job_id + ". Принято: " + created.accepted + ", пропущено: " + created.skipped + ".";
         await Data.runAbonentSummaryRecalcBatchJob(created.job_id);
         const statusPayload = await Data.getAbonentSummaryRecalcBatchJob(created.job_id);
@@ -1317,7 +1338,12 @@ async function runSelectedSummaryBatch(){
         await loadPassiveSummaryPage(currentPage);
         if (progress) progress.textContent = "Готово. Успешно: " + ok + ", ошибок/пропущено: " + errors + ".";
     } catch (e) {
-        if (progress) progress.textContent = "Ошибка batch-проверки: " + String(e && e.message || e);
+        const msg = String(e && e.message || e);
+        if (msg === "TOO_MANY_UIDS") {
+            if (progress) progress.textContent = "Слишком много UID в одном запуске (максимум 100).";
+        } else {
+            if (progress) progress.textContent = "Ошибка batch-проверки: " + msg;
+        }
     } finally {
         summaryBatchRunning = false;
         updateSummaryBatchPanel();

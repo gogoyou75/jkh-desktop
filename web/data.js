@@ -1461,6 +1461,19 @@
     return data;
   }
 
+
+  async function getAbonentSummaryRecalcBatchJobLatest() {
+    var res = await fetch("/api/abonent_summary/recalc_batch_job/latest", {
+      method: "GET",
+      credentials: "include"
+    });
+    var text = await res.text();
+    var data = null;
+    try { data = text ? JSON.parse(text) : null; } catch (e) { data = null; }
+    if (!res.ok || !data || data.ok === false) throw new Error((data && data.error) || ("HTTP_" + res.status));
+    return data;
+  }
+
   function _dateFromIsoLocal(value) {
     var s = String(value || "").trim();
     var m = s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
@@ -1987,6 +2000,7 @@
     createAbonentSummaryRecalcBatchJob: createAbonentSummaryRecalcBatchJob,
     runAbonentSummaryRecalcBatchJob: runAbonentSummaryRecalcBatchJob,
     getAbonentSummaryRecalcBatchJob: getAbonentSummaryRecalcBatchJob,
+    getAbonentSummaryRecalcBatchJobLatest: getAbonentSummaryRecalcBatchJobLatest,
     resolveAbonentRegnumForSummary: resolveAbonentRegnumForSummary,
     buildAbonentSummaryAfterExplicitRecalc: buildAbonentSummaryAfterExplicitRecalc,
     recalcAbonentSummaryExplicit: recalcAbonentSummaryExplicit,
