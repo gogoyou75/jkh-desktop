@@ -386,3 +386,8 @@
 - `period_report_totals` не меняет ledger.
 - Сброс периода очищает временный режим.
 - `index.html` не использует `period_report_totals` как полный долг.
+
+
+| STAGE-12.1-FAST-TEMP-PERIOD | Temporary court period mode without full-history recalculation | `web/data.js` mode `temporary_court_period`; `summary.period_report_totals` only |
+| STAGE-12.2-UI-RENDER-FIX | Correct rendering of full totals + period report block in abonent card | `web/abonent_card.html` ids `mainTotals*`, `periodReport*` |
+| STAGE-12.2-SPRAVKA-GATE | Report opening only after period recalculation; no autoaccrual side-effects | `web/abonent_card.html`, `web/spravka_sud.js` |

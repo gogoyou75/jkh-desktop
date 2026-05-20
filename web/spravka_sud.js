@@ -149,6 +149,17 @@
       return null;
     }
 
+    if (String(activeRaw || "0") !== "1") {
+      console.warn("[spravka][calc-period-read][inactive-period]", {
+        abonentId: requestedId,
+        readOwner: readOwner,
+        key: storageKey,
+        activeKey: activeStorageKey,
+        activeRaw: activeRaw
+      });
+      return null;
+    }
+
     if (!raw || !calcPeriod) {
       console.warn("[spravka][calc-period-read][missing-canonical-period]", {
         abonentId: requestedId,
@@ -621,26 +632,6 @@
           if ((Number(row.accrued) || 0) > 0 || (Number(row.paid) || 0) > 0) return true;
         }
         return false;
-      }
-
-      if (window.JKHAutoAccrual && typeof window.JKHAutoAccrual.recalcForAbonent === "function") {
-        let recalcResult = null;
-        try {
-          recalcResult = window.JKHAutoAccrual.recalcForAbonent(ctx.abonentId);
-        } catch (e) {
-          if (isLedgerJsonInvalidError(e)) {
-            showFatal(LEDGER_FATAL_MESSAGE, { abonentId: ctx.abonentId, error: e });
-            return;
-          }
-          throw e;
-        }
-        if (isLedgerJsonInvalidResult(recalcResult)) {
-          showFatal((recalcResult && recalcResult.message) || LEDGER_FATAL_MESSAGE, { abonentId: ctx.abonentId, result: recalcResult });
-          return;
-        }
-        if (recalcResult && recalcResult.ok && recalcResult.changed && window.Data && typeof window.Data.flushDbToServer === "function") {
-          await window.Data.flushDbToServer();
-        }
       }
 
       let allRowsRaw;

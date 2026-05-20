@@ -1793,7 +1793,7 @@
     return "";
   }
 
-  function buildAbonentSummaryAfterExplicitRecalc(abonentOrId, from, to) {
+  function buildAbonentSummaryAfterExplicitRecalc(abonentOrId, from, to, mode) {
     var found = _findAbonentByIdOrUid(abonentOrId);
     var abonent = found && found.abonent ? found.abonent : (abonentOrId && typeof abonentOrId === "object" ? abonentOrId : null);
     var abonentId = String(found && found.id || (typeof abonentOrId === "object" ? abonentOrId && abonentOrId.id : abonentOrId) || "").trim();
@@ -1810,19 +1810,27 @@
     var rawLedger = _getProjectRaw(ledgerKey);
     if (rawLedger !== null && rawLedger !== undefined) _parseLedgerRows(rawLedger, ledgerKey);
     var rows = window.JKHCalcEngine.loadPaymentsForAbonent(String(abonentId));
-    var totals = window.JKHCalcEngine.calcTotalsAsOfAdjusted(rows, asOf, {
-      abonentId: String(abonentId),
-      applyAdvanceOffset: true,
-      allowNegativePrincipal: true
-    });
-    var principal = Number(totals && totals.principal);
-    var penalty = Number(totals && totals.penaltyDebt);
-    var total = Number(totals && totals.total);
+    var recalcMode = String(mode || "full");
+    var isTemporaryCourtPeriod = recalcMode === "temporary_court_period";
+    var totals = null;
+    var principal = null;
+    var penalty = null;
+    var total = null;
+    if (!isTemporaryCourtPeriod) {
+      totals = window.JKHCalcEngine.calcTotalsAsOfAdjusted(rows, asOf, {
+        abonentId: String(abonentId),
+        applyAdvanceOffset: true,
+        allowNegativePrincipal: true
+      });
+      principal = Number(totals && totals.principal);
+      penalty = Number(totals && totals.penaltyDebt);
+      total = Number(totals && totals.total);
+      if (!Number.isFinite(principal) || !Number.isFinite(penalty) || !Number.isFinite(total)) {
+        throw new Error("CALC_TOTALS_INVALID");
+      }
+    }
     var periodTotals = _summaryPeriodTotals(rows, from, to);
     var periodReportTotals = _buildTemporaryCourtPeriodTotals(rows, from, to);
-    if (!Number.isFinite(principal) || !Number.isFinite(penalty) || !Number.isFinite(total)) {
-      throw new Error("CALC_TOTALS_INVALID");
-    }
     var periodFrom = String(from || "");
     var periodTo = String(to || "");
     var accountUid = String(abonent && (abonent.uid || abonent.account_uid || abonent.accountUid) || "").trim();
@@ -1869,12 +1877,12 @@
         premiseRegnum: regnum
       },
       period: { from: periodFrom, to: periodTo },
-      total_debt: total,
-      total_penalty: penalty,
+      total_debt: Number.isFinite(total) ? total : null,
+      total_penalty: Number.isFinite(penalty) ? penalty : null,
       total_accrued: periodTotals.total_accrued,
       total_paid: periodTotals.total_paid,
-      penalty: penalty,
-      totals: {
+      penalty: Number.isFinite(penalty) ? penalty : null,
+      totals: Number.isFinite(total) ? {
         principal: principal,
         penalty: penalty,
         total: total,
@@ -1882,7 +1890,7 @@
         total_penalty: penalty,
         total_accrued: periodTotals.total_accrued,
         total_paid: periodTotals.total_paid
-      },
+      } : null,
       period_report_totals: periodReportTotals,
       periodTotals: periodReportTotals,
       calc_engine_version: "JKHCalcEngine",
@@ -1952,7 +1960,18 @@
 
     try {
       if (!period.ok) throw new Error(period.error || "PERIOD_INVALID");
-      summary = buildAbonentSummaryAfterExplicitRecalc(abonentOrId, period.from, period.to);
+      var mode = String(opts.mode || "full");
+      summary = buildAbonentSummaryAfterExplicitRecalc(abonentOrId, period.from, period.to, mode);
+      if (mode === "temporary_court_period") {
+        var existingSummaryWrap = loadAbonentSummaryById(abonentOrId);
+        var existingSummary = existingSummaryWrap && existingSummaryWrap.summary && typeof existingSummaryWrap.summary === "object" ? existingSummaryWrap.summary : null;
+        if (existingSummary && existingSummary.totals && typeof existingSummary.totals === "object") {
+          summary.totals = deepClone(existingSummary.totals);
+          if (summary.totals.total_debt != null) summary.total_debt = summary.totals.total_debt;
+          if (summary.totals.total_penalty != null) summary.total_penalty = summary.totals.total_penalty;
+          if (summary.totals.penalty != null) summary.penalty = summary.totals.penalty;
+        }
+      }
     } catch (e) {
       var reason = _summaryCalcErrorCode(e);
       summary = buildAbonentSummaryErrorAfterExplicitRecalc(abonentOrId, period, reason);

@@ -2537,10 +2537,7 @@ function __hideTemporaryPeriodReportCard(){
 function __renderTemporaryPeriodReportCard(summary){
     const status = __normalizeSummaryStatus(summary && (summary.summary_status || summary.status));
     const periodTotals = summary && (summary.period_report_totals || summary.periodTotals);
-    const fromEl = document.getElementById("calcFrom");
-    const toEl = document.getElementById("calcTo");
-    const hasValidPeriod = !!(fromEl && toEl && isValidPeriod(fromEl.value, toEl.value));
-    if (status !== "fresh" || !periodTotals || typeof periodTotals !== "object" || !hasValidPeriod) return __hideTemporaryPeriodReportCard();
+    if (status !== "fresh" || !periodTotals || typeof periodTotals !== "object") return __hideTemporaryPeriodReportCard();
     const card = document.getElementById("periodReportTotalsCard");
     if (!card) return;
     document.getElementById("periodReportRange").textContent = String(periodTotals.from || "") + " — " + String(periodTotals.to || "");
@@ -2556,7 +2553,7 @@ async function __saveAbonentSummaryAfterUidRecalc(abonentId, from, to){
         renderAbonentSummaryStatus("error", "SUMMARY_RECALC_UNAVAILABLE");
         return { ok: false, summary_status: "error", summary_reason: "SUMMARY_RECALC_UNAVAILABLE" };
     }
-    const result = await Data.recalculateAbonentCard(abonentId, { period: { from: from, to: to } });
+    const result = await Data.recalculateAbonentCard(abonentId, { period: { from: from, to: to }, mode: "temporary_court_period" });
     const summary = result && result.summary && typeof result.summary === "object" ? result.summary : null;
     const status = result && (result.summary_status || result.status) || summary && (summary.summary_status || summary.status) || "error";
     const reason = result && (result.summary_reason || result.reason) || summary && (summary.summary_reason || summary.reason) || "SUMMARY_SAVE_FAILED";
@@ -2654,7 +2651,10 @@ function bindCalcButtons(){
             return;
         }
         const tempCard = document.getElementById("periodReportTotalsCard");
-        if (!tempCard || tempCard.style.display === "none") {
+        const calcActive = readCalcPeriodActiveFlag();
+        const currentSummary = window.AbonentSummaryState && AbonentSummaryState.summary && typeof AbonentSummaryState.summary === "object" ? AbonentSummaryState.summary : null;
+        const hasPeriodTotals = !!(currentSummary && (currentSummary.period_report_totals || currentSummary.periodTotals));
+        if (!calcActive || !tempCard || tempCard.style.display === "none" || !hasPeriodTotals) {
             alert("Сначала выберите период и нажмите Пересчитать.");
             return;
         }
