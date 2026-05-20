@@ -504,6 +504,7 @@ Doc: docs/LOGIC_SPEC_v1.5.3.md
     <div id="summaryStatusWarning" class="summary-warning">
         Итог не актуален. Старые totals не считаются свежими и не должны использоваться как актуальный расчёт. Нажмите «Пересчитать», чтобы обновить summary.
     </div>
+    <div id="periodReportStatus" class="summary-warning" style="display:none;">Временный расчёт для справки готов.</div>
 </div>
 
 <h3>Оплата абонента</h3>
@@ -2495,13 +2496,14 @@ async function __saveAbonentSummaryAfterUidRecalc(abonentId, from, to){
         renderAbonentSummaryStatus("error", "SUMMARY_RECALC_UNAVAILABLE");
         return { ok: false, summary_status: "error", summary_reason: "SUMMARY_RECALC_UNAVAILABLE" };
     }
-    const result = await Data.recalculateAbonentCard(abonentId, { period: { from: from, to: to } });
+    const result = await Data.recalculateAbonentCard(abonentId, { period: { from: from, to: to }, mode: "temporary_court_period" });
     const summary = result && result.summary && typeof result.summary === "object" ? result.summary : null;
-    const status = result && (result.summary_status || result.status) || summary && (summary.summary_status || summary.status) || "error";
-    const reason = result && (result.summary_reason || result.reason) || summary && (summary.summary_reason || summary.reason) || "SUMMARY_SAVE_FAILED";
-    renderAbonentSummaryStatus(status, reason);
-    if (__normalizeSummaryStatus(status) === "fresh" && summary) {
-        __renderAbonentTotalsFromFreshSummary(summary);
+    const periodStatus = document.getElementById("periodReportStatus");
+    if (periodStatus) periodStatus.style.display = (summary && summary.period_report_totals) ? "block" : "none";
+    await loadAbonentSummaryStatus();
+    if (!result || result.ok !== true) {
+        const reason = result && (result.summary_reason || result.reason) || "SUMMARY_RECALC_FAILED";
+        renderAbonentSummaryStatus("error", reason);
     }
     return result;
 }

@@ -1232,6 +1232,14 @@ function isSummaryBatchStatus(status){
     return s === "dirty" || s === "missing" || s === "error";
 }
 
+function hasValidSummaryTotals(summary){
+    if (!summary || typeof summary !== "object") return false;
+    const totals = summary.totals;
+    if (!totals || typeof totals !== "object") return false;
+    const totalRaw = totals.total != null ? totals.total : totals.total_debt;
+    return Number.isFinite(Number(totalRaw));
+}
+
 function getSummaryBatchUid(row){
     return String(row && row.accountUid || "").trim();
 }
@@ -1239,7 +1247,9 @@ function getSummaryBatchUid(row){
 function getCurrentSummaryBatchRows(){
     return (filteredRows || []).filter(function(r){
         const uid = getSummaryBatchUid(r);
-        return uid && isSummaryBatchStatus(r && r.summaryStatus);
+        if (!uid) return false;
+        if (isSummaryBatchStatus(r && r.summaryStatus)) return true;
+        return !hasValidSummaryTotals(r && r.summary);
     });
 }
 
@@ -1309,8 +1319,8 @@ async function loadLatestSummaryBatchStatus(){
 
 async function runSelectedSummaryBatch(){
     if (summaryBatchRunning) return;
-    if (!window.Data || typeof Data.createAbonentSummaryRecalcBatchJob !== "function" || typeof Data.runAbonentSummaryRecalcBatchJob !== "function" || typeof Data.getAbonentSummaryRecalcBatchJob !== "function") {
-        alert("Batch job API недоступен: Data API не загружен.");
+    if (!window.Data || typeof Data.recalculateAbonentCard !== "function") {
+        alert("Frontend recalc недоступен: Data API не загружен.");
         return;
     }
     let selected = Object.keys(summaryBatchSelectedUids).filter(function(uid){ return summaryBatchSelectedUids[uid]; });
@@ -1328,15 +1338,49 @@ async function runSelectedSummaryBatch(){
     summaryBatchJobState.retries = 0;
     summaryBatchRunning = true;
     updateSummaryBatchPanel();
-    if (progress) progress.textContent = "Проверка UID на сервере…";
+    if (progress) progress.textContent = "Запуск controlled frontend full recalc…";
 
+    let backendInfo = null;
     try {
-        const created = await Data.createAbonentSummaryRecalcBatchJob(selected, "MANUAL_RECALC");
-        if (!created || !created.job_id) throw new Error("job_create_failed");
-        if (progress) progress.textContent = "Создано задание #" + created.job_id + ". Принято: " + created.accepted + ", пропущено: " + created.skipped + ".";
-        summaryBatchJobState.jobId = created.job_id;
-        await Data.runAbonentSummaryRecalcBatchJob(created.job_id);
-        await pollSummaryBatchJobStatus();
+        if (typeof Data.createAbonentSummaryRecalcBatchJob === "function" && typeof Data.runAbonentSummaryRecalcBatchJob === "function" && typeof Data.getAbonentSummaryRecalcBatchJob === "function") {
+            try {
+                const created = await Data.createAbonentSummaryRecalcBatchJob(selected, "MANUAL_RECALC");
+                if (created && created.job_id) {
+                    summaryBatchJobState.jobId = created.job_id;
+                    await Data.runAbonentSummaryRecalcBatchJob(created.job_id);
+                    backendInfo = await pollSummaryBatchJobStatusImpl(true);
+                }
+            } catch (_) {}
+        }
+
+        let fresh = 0, error = 0, skipped = 0;
+        for (let i = 0; i < selected.length; i++) {
+            const uid = String(selected[i] || "");
+            const row = (allRows || []).find(function(r){ return getSummaryBatchUid(r) === uid; });
+            if (!row || !row.id) { skipped += 1; continue; }
+            const idx = i + 1;
+            if (progress) progress.textContent = "Frontend full recalc: " + idx + "/" + selected.length + ", fresh: " + fresh + ", error: " + error + ", skipped: " + skipped;
+            const recalcResult = await Data.recalculateAbonentCard(row.id, { mode: "full", reason: "INDEX_BATCH_RECALC" });
+            const summary = recalcResult && recalcResult.summary;
+            const status = normalizeSummaryStatus(recalcResult && (recalcResult.summary_status || recalcResult.status));
+            const okTotals = hasValidSummaryTotals(summary);
+            if (status === "fresh" && okTotals) {
+                fresh += 1;
+                delete summaryBatchSelectedUids[uid];
+            } else {
+                error += 1;
+                summaryBatchSelectedUids[uid] = true;
+            }
+        }
+        if (backendInfo && backendInfo.status === "completed" && fresh === 0) {
+            if (progress) progress.textContent = "Backend job завершён, но full totals не сформированы. Нужен frontend full recalc.";
+        } else if (progress) {
+            progress.textContent = "Готово: " + (fresh + error + skipped) + "/" + selected.length + ", fresh: " + fresh + ", error: " + error + ", skipped: " + skipped;
+        }
+        await loadPassiveSummaryPage(currentPage);
+        summaryBatchRunning = false;
+        summaryBatchJobState.jobId = null;
+        updateSummaryBatchPanel();
     } catch (e) {
         const msg = String(e && e.message || e);
         if (msg === "TOO_MANY_UIDS") {
@@ -1350,6 +1394,9 @@ async function runSelectedSummaryBatch(){
 }
 
 async function pollSummaryBatchJobStatus(){
+    return pollSummaryBatchJobStatusImpl(false);
+}
+async function pollSummaryBatchJobStatusImpl(silentFinish){
     const progress = document.getElementById("summaryBatchProgress");
     if (!summaryBatchJobState.jobId) return;
     const maxRetries = 5;
@@ -1369,18 +1416,20 @@ async function pollSummaryBatchJobStatus(){
         const message = String((statusPayload && statusPayload.message) || job.message || "");
         if (progress) progress.textContent = "Статус: " + status + ". " + processed + "/" + total + " (" + pct + "%), fresh: " + fresh + ", error: " + errorCount + ", skipped: " + skipped + (message ? ". " + message : "");
         if (status === "completed") {
-            selectedUidsClear();
-            await loadPassiveSummaryPage(currentPage);
-            summaryBatchRunning = false;
-            summaryBatchJobState.jobId = null;
-            updateSummaryBatchPanel();
-            return;
+            if (!silentFinish) {
+                selectedUidsClear();
+                await loadPassiveSummaryPage(currentPage);
+                summaryBatchRunning = false;
+                summaryBatchJobState.jobId = null;
+                updateSummaryBatchPanel();
+            }
+            return { status: status, processed: processed, total: total, fresh: fresh, error: errorCount, skipped: skipped };
         }
         if (status === "failed" || status === "cancelled" || status === "stale") {
             summaryBatchRunning = false;
             summaryBatchJobState.jobId = null;
             updateSummaryBatchPanel();
-            return;
+            return { status: status, processed: processed, total: total, fresh: fresh, error: errorCount, skipped: skipped };
         }
         summaryBatchJobState.timer = setTimeout(pollSummaryBatchJobStatus, intervalMs);
     } catch (e) {
@@ -1390,7 +1439,7 @@ async function pollSummaryBatchJobStatus(){
             summaryBatchRunning = false;
             summaryBatchJobState.jobId = null;
             updateSummaryBatchPanel();
-            return;
+            return { status: "error" };
         }
         summaryBatchJobState.timer = setTimeout(pollSummaryBatchJobStatus, intervalMs);
     }

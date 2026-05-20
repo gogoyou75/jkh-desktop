@@ -1825,6 +1825,48 @@
     };
   }
 
+  function buildTemporaryCourtPeriodSummary(abonentOrId, from, to) {
+    var found = _findAbonentByIdOrUid(abonentOrId);
+    var abonent = found && found.abonent ? found.abonent : (abonentOrId && typeof abonentOrId === "object" ? abonentOrId : null);
+    var abonentId = String(found && found.id || (typeof abonentOrId === "object" ? abonentOrId && abonentOrId.id : abonentOrId) || "").trim();
+    if (!abonentId) throw new Error("ABONENT_ID_REQUIRED");
+    var uid = String(abonent && (abonent.uid || abonent.account_uid || abonent.accountUid) || "").trim();
+    if (!isValidUid(uid)) throw new Error("UID_REQUIRED");
+    var ledgerKey = resolvePaymentLedgerKey(abonentOrId);
+    if (ledgerKey !== ("payments_" + uid)) throw new Error("UID_LEDGER_PATH_REQUIRED");
+
+    var rows = readPaymentLedger(abonentId) || [];
+    var filteredRows = rows.filter(function (row) {
+      var d = _dateAnyToIsoLocal(row && (row.date || row.period || row.op_date || row.created_at));
+      if (!d) return false;
+      return d >= from && d <= to;
+    });
+    var periodTotals = _summaryPeriodTotals(filteredRows, from, to);
+    var penalty = 0;
+    if (window.JKHCalcEngine && typeof window.JKHCalcEngine.calcTotalsAsOfAdjusted === "function") {
+      var asOf = _dateFromIsoLocal(to);
+      if (!asOf) throw new Error("PERIOD_INVALID");
+      var totals = window.JKHCalcEngine.calcTotalsAsOfAdjusted(filteredRows, asOf, {
+        abonentId: String(abonentId),
+        applyAdvanceOffset: true,
+        allowNegativePrincipal: true
+      });
+      var p = Number(totals && totals.penaltyDebt);
+      if (Number.isFinite(p)) penalty = p;
+    }
+    return {
+      status: "temporary_court_period",
+      reason: "OK",
+      period: { from: String(from || ""), to: String(to || "") },
+      period_report_totals: {
+        total_accrued: Number(periodTotals.total_accrued || 0),
+        total_paid: Number(periodTotals.total_paid || 0),
+        total_penalty: Number(penalty || 0)
+      },
+      generated_at: new Date().toISOString()
+    };
+  }
+
   function buildAbonentSummaryErrorAfterExplicitRecalc(abonentOrId, period, reason) {
     var found = _findAbonentByIdOrUid(abonentOrId);
     var abonent = found && found.abonent ? found.abonent : (abonentOrId && typeof abonentOrId === "object" ? abonentOrId : null);
@@ -1910,6 +1952,33 @@
 
   async function recalculateAbonentCard(abonentOrId, options) {
     var opts = options || {};
+    if (opts.mode === "temporary_court_period") {
+      try {
+        var tempPeriod = await _resolveAbonentSummaryRecalcPeriod(abonentOrId, opts.period);
+        if (!tempPeriod.ok) throw new Error(tempPeriod.error || "PERIOD_INVALID");
+        var tempSummary = buildTemporaryCourtPeriodSummary(abonentOrId, tempPeriod.from, tempPeriod.to);
+        return {
+          ok: true,
+          uid: String((_findAbonentByIdOrUid(abonentOrId).abonent || {}).uid || ""),
+          summary_status: "temporary_court_period",
+          summary_reason: "OK",
+          summary: tempSummary,
+          status: "temporary_court_period",
+          reason: "OK"
+        };
+      } catch (tempErr) {
+        var tempReason = _summaryCalcErrorCode(tempErr);
+        return {
+          ok: false,
+          uid: "",
+          summary_status: "error",
+          summary_reason: tempReason,
+          summary: null,
+          status: "error",
+          reason: tempReason
+        };
+      }
+    }
     var ready = await waitForServerFirstDataReady({ timeoutMs: opts.timeoutMs || opts.timeout || 8000 });
     if (!ready || ready.ok !== true) {
       return { ok: false, uid: "", summary_status: "error", summary_reason: "SERVER_FIRST_DATA_NOT_READY", summary: null };
