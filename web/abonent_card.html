@@ -1149,7 +1149,7 @@ function __safeLoadPaymentTableOnce(reason){
         __paymentTableLoadScheduled = false;
         __paymentTableLoading = true;
         try {
-            window.__loadPaymentTable(reason || 'abonent-card');
+            window.__loadPaymentTable({ mode: 'readonly_no_recalc', reason: reason || 'abonent-card' });
             __hideExcludesFatalBox();
         } catch(e) {
             if (__isExcludesFatalError(e)) __showExcludesFatalBox(e);
@@ -2560,12 +2560,14 @@ function bindCalcButtons(){
             }
             if (!confirmCalcPeriodSaved()) return;
 
-            const result = await __saveAbonentSummaryAfterUidRecalc(currentAbonentId, from, to);
-            if (result && __normalizeSummaryStatus(result.summary_status || result.status) === "error") {
-                alert("Пересчёт не выполнен: " + String(result.summary_reason || result.reason || "SUMMARY_RECALC_FAILED"));
-                return;
+            if (typeof window.fullRecalcForCurrentAbonent === "function") {
+                const recalcResult = await window.fullRecalcForCurrentAbonent();
+                if (!recalcResult || recalcResult.ok !== true) {
+                    alert("Пересчёт не выполнен: " + String(recalcResult && recalcResult.reason || "CALC_FAILED"));
+                    return;
+                }
             }
-            __safeLoadPaymentTableOnce();
+            __safeLoadPaymentTableOnce("manual-full-recalc");
         } finally {
             runBtn.disabled = false;
             runBtn.textContent = prevText || "Пересчитать";

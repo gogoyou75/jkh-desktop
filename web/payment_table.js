@@ -70,6 +70,32 @@
     try { JKHStore.removeRaw(String(key)); } catch(e) { console.error(e); throw e; }
   }
 
+  let __paymentTableMode = "default";
+  let __runtimeCacheState = { valid: false, reason: "", dataById: {} };
+
+  function isReadonlyNoRecalcMode(){ return __paymentTableMode === "readonly_no_recalc"; }
+
+  function applyRuntimeCacheToRows(rows){
+    const out = { valid: false, reason: "", dataById: {} };
+    if (!isReadonlyNoRecalcMode()) return out;
+    const id = String(getAbonentId() || "");
+    if (!id || !window.Data) { out.reason = "no-abonent"; return out; }
+    const version = (typeof Data.computeLedgerRuntimeVersion === "function") ? String(Data.computeLedgerRuntimeVersion(id) || "") : "";
+    const cache = (typeof Data.readLedgerRuntimeCache === "function") ? Data.readLedgerRuntimeCache(id) : null;
+    const cacheVersion = cache && typeof cache === "object" ? String(cache.ledgerVersion || "") : "";
+    const map = cache && cache.rowsById && typeof cache.rowsById === "object" ? cache.rowsById : null;
+    if (!version || !cache || !map || !cacheVersion || cacheVersion !== version) { out.reason = "stale_or_missing"; return out; }
+    out.valid = true;
+    out.dataById = map;
+    rows.forEach(function(r){
+      const item = map[String(r.id)] || null;
+      if (!item) return;
+      r.pay_main = item.pay_main;
+      r.pay_penalty = item.pay_penalty;
+      r.total = item.total;
+    });
+    return out;
+  }
 
   // Read-only ledger cache: parsed rows are reused while storage raw value is unchanged.
   // Corrupted ledgers are never cached as valid. Explicit writes/reloads clear the cache.
@@ -2158,21 +2184,26 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
     row.month = pad2(d.getMonth() + 1);
   }
 
+  function formatRuntimeCell(v){
+    return (v === null || v === undefined || v === "") ? "—" : fmtMoney(v);
+  }
+
   function updateComputedCells(tr, rowObj){
   const ro = qsa("td.ro", tr);
   if (ro.length >= 3){
     const pm = toNum(rowObj.pay_main ?? 0);
     const pp = toNum(rowObj.pay_penalty ?? 0);
 
-    ro[0].textContent = fmtMoney(pm);
+    ro[0].textContent = (isReadonlyNoRecalcMode() && !__runtimeCacheState.valid && !rowObj.pay_main && rowObj.pay_main !== 0) ? "—" : fmtMoney(pm);
     ro[0].style.color = (pm < -0.0000001) ? "#8B0000" : "";
     ro[0].style.fontWeight = (pm < -0.0000001) ? "700" : "";
 
-    ro[1].textContent = (toNum(rowObj.paid ?? 0) > 0.0000001) ? "" : fmtMoney(pp);
+    if (isReadonlyNoRecalcMode() && !__runtimeCacheState.valid && !rowObj.pay_penalty && rowObj.pay_penalty !== 0) ro[1].textContent = "—";
+    else ro[1].textContent = (toNum(rowObj.paid ?? 0) > 0.0000001) ? "" : fmtMoney(pp);
 
     // ✅ CRITICAL: "Всего" в таблице = Долг + Пени (derived field, не хранится отдельно)
     const total = pm + pp;
-    ro[2].textContent = fmtMoney(total);
+    ro[2].textContent = (isReadonlyNoRecalcMode() && !__runtimeCacheState.valid && !rowObj.total && rowObj.total !== 0) ? "—" : fmtMoney(total);
   }
 }
 
@@ -2349,6 +2380,11 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
           __monthPaidSum[YM] = r2((__monthPaidSum[YM] || 0) + toNum(r?.paid ?? 0));
         }
       });
+      __runtimeCacheState = applyRuntimeCacheToRows(arr);
+      const statusBox = qs("#paymentTableStatus") || qs("#paymentStatus") || qs("#paymentsStatus");
+      if (isReadonlyNoRecalcMode() && statusBox) {
+        statusBox.textContent = __runtimeCacheState.valid ? "" : "Для актуальных сумм нажмите Пересчитать";
+      }
       view.sort((a, b) => {
         const ay = Number(a.year) || 0;
         const by = Number(b.year) || 0;
@@ -2381,7 +2417,9 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
       __paymentTableRenderedSignature = signature;
       // Тяжёлый расчёт пени/долга не блокирует открытие карточки: строки сначала
       // рисуются с уже сохранёнными значениями, затем ro-ячейки обновляются чанками.
-      scheduleRunningTotalsUpdate(view, baseRows, tbody, signature);
+      if (!isReadonlyNoRecalcMode()) {
+        scheduleRunningTotalsUpdate(view, baseRows, tbody, signature);
+      }
       clearLastAddedPaymentId();
     } finally {
       try { console.timeEnd('[payment-table] init-total'); } catch(e) {}
@@ -2391,7 +2429,10 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
 
   let __paymentTableLoadRunning = false;
   let __paymentTableLoadScheduled = false;
-  function requestLoadPaymentTable(reason){
+  function requestLoadPaymentTable(options){
+    const opts = (options && typeof options === "object") ? options : { reason: options };
+    if (opts.mode) __paymentTableMode = String(opts.mode);
+    const reason = String(opts.reason || opts.mode || "scheduled");
     if (__paymentTableLoadScheduled) {
       try { console.log("[payment-table][init-skipped-inflight]", { reason: String(reason || "scheduled"), phase: "scheduled" }); } catch(e) {}
       return;
@@ -2489,9 +2530,9 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
 
       <td>${periodCell}</td>
 
-      <td class="ro" style="${toNum(r.pay_main ?? 0) < -0.0000001 ? 'color:#8B0000; font-weight:700;' : ''}">${fmtMoney(r.pay_main ?? 0)}</td>
-      <td class="ro">${(toNum(r.paid ?? 0) > 0.0000001) ? "" : fmtMoney(r.pay_penalty ?? 0)}</td>
-      <td class="ro">${fmtMoney(toNum(r.pay_main ?? 0) + toNum(r.pay_penalty ?? 0))}</td>
+      <td class="ro" style="${toNum(r.pay_main ?? 0) < -0.0000001 ? 'color:#8B0000; font-weight:700;' : ''}">${(isReadonlyNoRecalcMode() && !__runtimeCacheState.valid && (r.pay_main === undefined || r.pay_main === null || r.pay_main === "")) ? "—" : fmtMoney(r.pay_main ?? 0)}</td>
+      <td class="ro">${(isReadonlyNoRecalcMode() && !__runtimeCacheState.valid && (r.pay_penalty === undefined || r.pay_penalty === null || r.pay_penalty === "")) ? "—" : ((toNum(r.paid ?? 0) > 0.0000001) ? "" : fmtMoney(r.pay_penalty ?? 0))}</td>
+      <td class="ro">${(isReadonlyNoRecalcMode() && !__runtimeCacheState.valid && (r.total === undefined || r.total === null || r.total === "")) ? "—" : fmtMoney(toNum(r.pay_main ?? 0) + toNum(r.pay_penalty ?? 0))}</td>
 
       <td>
         <textarea class="note-inline" placeholder="" style="width:100%; min-height:34px; resize:vertical;" ${locked ? "readonly" : ""}>${escapeHtml(r.note || "")}</textarea>
@@ -2789,6 +2830,25 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
     } catch (e) {}
   }
 
+
+
+  window.fullRecalcForCurrentAbonent = async function fullRecalcForCurrentAbonent(){
+    const id = String(getAbonentId() || "");
+    if (!id) return { ok:false, reason:"ABONENT_REQUIRED" };
+    const arr = getPayments();
+    const baseRows = runningTotalsBaseRows(arr);
+    const sig = ledgerSignatureForRows(arr);
+    const rowsById = {};
+    arr.forEach(function(r){
+      const asOf = asOfForRow(r);
+      const t = calcTotalsAsOfMemoized(baseRows, asOf, sig);
+      rowsById[String(r.id)] = { pay_main: t.principal, pay_penalty: t.penalty, total: t.total };
+    });
+    const payload = { ledgerVersion: (window.Data && Data.computeLedgerRuntimeVersion) ? Data.computeLedgerRuntimeVersion(id) : "", rowsById: rowsById, updatedAt: (new Date()).toISOString() };
+    if (window.Data && typeof Data.writeLedgerRuntimeCache === "function") Data.writeLedgerRuntimeCache(id, payload);
+    __loadPaymentTable({ mode: "readonly_no_recalc", reason: "manual-full-recalc" });
+    return { ok:true };
+  };
 
   window.__loadPaymentTable = requestLoadPaymentTable;
 

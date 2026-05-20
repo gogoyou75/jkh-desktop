@@ -529,6 +529,64 @@
     return "";
   }
 
+
+  function resolveRuntimeCacheKey(abonentOrId) {
+    var found = _findAbonentByIdOrUid(abonentOrId);
+    var abonent = found && found.abonent ? found.abonent : null;
+    var uid = String(abonent && abonent.uid || "").trim();
+    if (!isValidUid(uid)) return "";
+    return "ledger_runtime_cache_" + uid;
+  }
+
+  function getRuntimeCacheKey(abonentOrId) {
+    return resolveRuntimeCacheKey(abonentOrId);
+  }
+
+  function computeLedgerRuntimeVersion(abonentOrId) {
+    var ledgerKey = resolvePaymentLedgerKey(abonentOrId);
+    if (!ledgerKey) return "";
+    var raw = _getProjectRaw(ledgerKey);
+    return String(raw === null || raw === undefined ? "" : raw);
+  }
+
+  function computeLedgerVersion(abonentOrId) {
+    return computeLedgerRuntimeVersion(abonentOrId);
+  }
+
+  function readLedgerRuntimeCache(abonentOrId) {
+    var key = resolveRuntimeCacheKey(abonentOrId);
+    if (!key) return null;
+    var raw = _getProjectRaw(key);
+    if (raw === null || raw === undefined || raw === "") return null;
+    try { return JSON.parse(String(raw)); } catch (e) { return null; }
+  }
+
+  function getRuntimeCache(abonentOrId) {
+    return readLedgerRuntimeCache(abonentOrId);
+  }
+
+  function writeLedgerRuntimeCache(abonentOrId, payload) {
+    if (!Data.ensureWriteOrExplain()) return false;
+    var key = resolveRuntimeCacheKey(abonentOrId);
+    if (!key) return false;
+    var data = payload && typeof payload === "object" ? payload : {};
+    return _setProjectRaw(key, JSON.stringify(data));
+  }
+
+  function setRuntimeCache(abonentOrId, payload) {
+    return writeLedgerRuntimeCache(abonentOrId, payload);
+  }
+
+  function invalidateLedgerRuntimeCache(abonentOrId) {
+    var key = resolveRuntimeCacheKey(abonentOrId);
+    if (!key) return false;
+    return _removeProjectRaw(key);
+  }
+
+  function invalidateRuntimeCache(abonentOrId) {
+    return invalidateLedgerRuntimeCache(abonentOrId);
+  }
+
   function readPaymentLedger(abonentOrId) {
     var found = _findAbonentByIdOrUid(abonentOrId);
     var id = String(found && found.id || (typeof abonentOrId === "object" ? abonentOrId && abonentOrId.id : abonentOrId) || "").trim();
@@ -589,7 +647,10 @@
         date: opts.date || ""
       }, opts.event || {}));
     }
-    if (ok !== false) markAbonentSummaryDirtyLater(abonent || id, opts.summaryDirtyReason || "LEDGER_WRITE");
+    if (ok !== false) {
+      invalidateLedgerRuntimeCache(abonentOrId);
+      markAbonentSummaryDirtyLater(abonent || id, opts.summaryDirtyReason || "LEDGER_WRITE");
+    }
     return ok;
   }
 
@@ -1994,6 +2055,16 @@
     resolveCalcPeriodStorageKey: resolveCalcPeriodStorageKey,
     resolveCalcPeriodActiveStorageKey: resolveCalcPeriodActiveStorageKey,
     resolvePaymentLedgerKey: resolvePaymentLedgerKey,
+    getRuntimeCacheKey: getRuntimeCacheKey,
+    resolveRuntimeCacheKey: resolveRuntimeCacheKey,
+    computeLedgerRuntimeVersion: computeLedgerRuntimeVersion,
+    computeLedgerVersion: computeLedgerVersion,
+    readLedgerRuntimeCache: readLedgerRuntimeCache,
+    getRuntimeCache: getRuntimeCache,
+    writeLedgerRuntimeCache: writeLedgerRuntimeCache,
+    setRuntimeCache: setRuntimeCache,
+    invalidateLedgerRuntimeCache: invalidateLedgerRuntimeCache,
+    invalidateRuntimeCache: invalidateRuntimeCache,
     readPaymentLedger: readPaymentLedger,
     loadAbonentSummaryPage: loadAbonentSummaryPage,
     validateAbonentSummaryRecalcBatch: validateAbonentSummaryRecalcBatch,
