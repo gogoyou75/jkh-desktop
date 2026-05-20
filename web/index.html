@@ -235,7 +235,7 @@ Doc: docs/LOGIC_SPEC_v1.5.3.md
 
 <div id="summaryBatchPanel" class="summary-batch-panel" style="display:none;">
     <button id="summaryBatchSelectStaleBtn" type="button">Выбрать устаревшие на странице</button>
-    <button id="summaryBatchRunBtn" type="button">Пересчитать выбранные/устаревшие</button>
+    <button id="summaryBatchRunBtn" type="button">Проверить выбранные/устаревшие summary</button>
     <span id="summaryBatchCount">Нет выбранных UID</span>
     <div id="summaryBatchProgress" class="summary-batch-progress"></div>
 </div>
@@ -841,7 +841,7 @@ function formatSummaryDate(value){
 
 function summaryStatusText(status){
     if (status === "fresh") return "fresh — итог актуален";
-    if (status === "dirty") return "dirty — требуется пересчёт";
+    if (status === "dirty") return "dirty — требуется ручной пересчёт в карточке";
     if (status === "missing") return "missing — итог ещё не создан";
     if (status === "error") return "error — расчёт невозможен";
     return status || "missing";
@@ -852,7 +852,8 @@ function summaryStatusHtml(row){
         return '<span class="summary-status-badge summary-status-missing">legacy</span>';
     }
     const status = normalizeSummaryStatus(row && row.summaryStatus);
-    const reason = String((row && row.summaryReason) || "").trim();
+    let reason = String((row && row.summaryReason) || "").trim();
+    if (status === "dirty") reason = "Требуется ручной пересчёт в карточке";
     const reasonHtml = reason ? '<span class="summary-reason">' + escapeHtml(reason) + '</span>' : '';
     return '<span class="summary-status-badge summary-status-' + status + '">' + escapeHtml(summaryStatusText(status)) + '</span>' + reasonHtml;
 }
@@ -1298,11 +1299,11 @@ async function loadLatestSummaryBatchStatus(){
         if (!job) return;
         const status = String(job.status || "");
         if (status === "running" || status === "queued") {
-            if (progress) progress.textContent = "Идёт пересчёт…";
+            if (progress) progress.textContent = "Идёт validation summary…";
         } else if (status === "completed") {
-            if (progress) progress.textContent = "Последний пересчёт завершён";
+            if (progress) progress.textContent = "Последняя validation summary завершена";
         } else if (status === "failed" || status === "stale") {
-            if (progress) progress.textContent = "Последний пересчёт завершился ошибкой / был восстановлен";
+            if (progress) progress.textContent = "Последняя validation summary завершилась ошибкой / была восстановлена";
         }
     } catch(e) {}
 }
@@ -1368,7 +1369,7 @@ async function pollSummaryBatchJobStatus(){
         const status = String(job.status || "");
         const pct = total > 0 ? Math.floor((processed / total) * 100) : 0;
         const message = String((statusPayload && statusPayload.message) || job.message || "");
-        if (progress) progress.textContent = "Статус: " + status + ". " + processed + "/" + total + " (" + pct + "%), fresh: " + fresh + ", error: " + errorCount + ", skipped: " + skipped + (message ? ". " + message : "");
+        if (progress) progress.textContent = "Статус validation: " + status + ". " + processed + "/" + total + " (" + pct + "%), fresh: " + fresh + ", error: " + errorCount + ", skipped: " + skipped + (message ? ". " + message : "");
         if (status === "completed") {
             selectedUidsClear();
             await loadPassiveSummaryPage(currentPage);
@@ -1484,7 +1485,7 @@ function render() {
         const batchChecked = canBatchSelect && !!summaryBatchSelectedUids[batchUid];
 
         tr.innerHTML = `
-            <td class="summary-row-select">${canBatchSelect ? '<input type="checkbox" class="summary-batch-row-check" data-uid="' + escapeHtml(batchUid) + '" ' + (batchChecked ? 'checked' : '') + ' title="Выбрать UID для пересчёта">' : ''}</td>
+            <td class="summary-row-select">${canBatchSelect ? '<input type="checkbox" class="summary-batch-row-check" data-uid="' + escapeHtml(batchUid) + '" ' + (batchChecked ? 'checked' : '') + ' title="Выбрать UID для проверки summary">' : ''}</td>
             <td>${r.id}</td>
             <td>${r.fam}</td>
             <td>${r.name}</td>
