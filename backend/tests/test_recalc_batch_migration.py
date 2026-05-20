@@ -3,8 +3,25 @@ from pathlib import Path
 
 
 class RecalcBatchMigrationTest(unittest.TestCase):
+    def _migration_sql_path(self) -> Path:
+        tests_dir = Path(__file__).resolve().parent
+        backend_dir = tests_dir.parent
+        repo_root = backend_dir.parent
+        candidates = [
+            repo_root / "backend" / "migrations" / "005_recalc_batch_jobs.sql",
+            backend_dir / "migrations" / "005_recalc_batch_jobs.sql",
+            Path("/app/migrations/005_recalc_batch_jobs.sql"),
+        ]
+        for candidate in candidates:
+            if candidate.exists():
+                return candidate
+        self.fail(
+            "Migration SQL not found. Checked: "
+            + ", ".join(str(path) for path in candidates)
+        )
+
     def test_stage9_migration_defines_required_tables_and_indexes(self):
-        sql = Path("backend/migrations/005_recalc_batch_jobs.sql").read_text(encoding="utf-8")
+        sql = self._migration_sql_path().read_text(encoding="utf-8")
 
         required_fragments = [
             "CREATE TABLE IF NOT EXISTS recalc_batch_jobs",
