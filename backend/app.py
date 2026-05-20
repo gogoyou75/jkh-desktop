@@ -1076,6 +1076,23 @@ def _summary_status_from_payload(summary: dict | None):
     return "missing"
 
 
+def _summary_has_valid_fresh_payload(summary: dict | None):
+    if not isinstance(summary, dict):
+        return False, "SUMMARY_NOT_DICT"
+    required_totals = ("total_debt", "total_penalty", "total_accrued", "total_paid")
+    for key in required_totals:
+        if key not in summary:
+            return False, f"MISSING_{key.upper()}"
+    period = summary.get("period")
+    if not isinstance(period, dict):
+        return False, "MISSING_PERIOD"
+    period_start = _norm_text(period.get("start") or period.get("from"))
+    period_end = _norm_text(period.get("end") or period.get("to"))
+    if not period_start or not period_end:
+        return False, "MISSING_PERIOD_RANGE"
+    return True, ""
+
+
 def _summary_without_stale_totals(summary: dict | None):
     payload = summary.copy() if isinstance(summary, dict) else {}
     status = _summary_status_from_payload(payload)
@@ -1197,26 +1214,34 @@ def _recalc_batch_process_job(owner_id: str, job: RecalcBatchJob, step_limit: in
         db.session.commit()
         try:
             row = AbonentSummary.query.filter_by(owner_id=owner_id, account_uid=item.account_uid).order_by(AbonentSummary.id.asc()).first()
-            if row:
-                try:
-                    row_payload = json.loads(row.summary_json or "{}")
-                except (TypeError, ValueError):
-                    row_payload = {}
-                if not isinstance(row_payload, dict):
-                    row_payload = {}
-                row_payload["summary_status"] = "fresh"
-                row_payload["status"] = "fresh"
-                row_payload["summary_reason"] = ""
-                row_payload["reason"] = ""
-                row_payload["refreshed_at"] = datetime.utcnow().isoformat() + "Z"
-                row.summary_json = json.dumps(row_payload, ensure_ascii=False, sort_keys=True)
-                db.session.flush()
             summary = _summary_from_row_or_missing(row, {"account_uid": item.account_uid, "abonent_id": "", "account_number": "", "identity": {}})
             s_status = _summary_status_from_payload(summary)
             s_reason = _norm_text(summary.get("summary_reason") or summary.get("reason") or "")
-            if s_status == "fresh":
+            is_valid_fresh, fresh_reason = _summary_has_valid_fresh_payload(summary)
+            if s_status == "fresh" and is_valid_fresh:
+                if row:
+                    try:
+                        row_payload = json.loads(row.summary_json or "{}")
+                    except (TypeError, ValueError):
+                        row_payload = {}
+                    if not isinstance(row_payload, dict):
+                        row_payload = {}
+                    row_payload["summary_status"] = "fresh"
+                    row_payload["status"] = "fresh"
+                    row_payload["summary_reason"] = ""
+                    row_payload["reason"] = ""
+                    row_payload["refreshed_at"] = datetime.utcnow().isoformat() + "Z"
+                    row.summary_json = json.dumps(row_payload, ensure_ascii=False, sort_keys=True)
+                    db.session.flush()
                 item.status = "fresh"
                 job.fresh_count = int(job.fresh_count or 0) + 1
+            elif s_status == "fresh":
+                item.status = "error"
+                reason = fresh_reason or "SUMMARY_NOT_FRESH"
+                item.error_message = reason
+                item.summary_status = "error"
+                item.summary_reason = reason
+                job.error_count = int(job.error_count or 0) + 1
             elif s_status == "missing":
                 item.status = "skipped"
                 item.error_message = s_reason or "SUMMARY_NOT_BUILT"
@@ -1225,8 +1250,9 @@ def _recalc_batch_process_job(owner_id: str, job: RecalcBatchJob, step_limit: in
                 item.status = "error"
                 item.error_message = s_reason or s_status or "SUMMARY_NOT_FRESH"
                 job.error_count = int(job.error_count or 0) + 1
-            item.summary_status = s_status
-            item.summary_reason = s_reason
+            if item.summary_status != "error":
+                item.summary_status = s_status
+                item.summary_reason = s_reason
         except Exception as exc:
             item.status = "error"
             item.error_message = f"UID_PROCESSING_FAILED: {exc}"

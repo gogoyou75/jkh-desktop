@@ -148,6 +148,58 @@ class RecalcBatchJobsTest(unittest.TestCase):
         self.assertEqual(first["fresh"], second["fresh"])
         self.assertEqual(first["error"], second["error"])
 
+    def test_batch_does_not_accept_fresh_without_totals(self):
+        with app_module.app.app_context():
+            app_module.db.session.add(app_module.AbonentSummary(
+                id=1,
+                owner_id="owner1",
+                abonent_id="1001",
+                account_uid="u1",
+                account_number="1001",
+                summary_json=json.dumps({
+                    "summary_status": "fresh",
+                    "status": "fresh",
+                    "period": {"from": "2025-01", "to": "2025-02"},
+                }),
+            ))
+            app_module.db.session.commit()
+        self._login("owner1")
+        created = self.client.post("/api/abonent_summary/recalc_batch_job", json={"uids": ["u1"]}).get_json()
+        job_id = created["job_id"]
+        self.client.post(f"/api/abonent_summary/recalc_batch_job/{job_id}/run")
+        status = self.client.get(f"/api/abonent_summary/recalc_batch_job/{job_id}").get_json()
+        self.assertEqual(status["fresh"], 0)
+        self.assertEqual(status["error"], 1)
+        self.assertEqual(status["items"][0]["summary_status"], "error")
+        self.assertEqual(status["items"][0]["summary_reason"], "MISSING_TOTAL_DEBT")
+
+    def test_batch_accepts_fresh_with_totals_and_period(self):
+        with app_module.app.app_context():
+            app_module.db.session.add(app_module.AbonentSummary(
+                id=1,
+                owner_id="owner1",
+                abonent_id="1001",
+                account_uid="u1",
+                account_number="1001",
+                summary_json=json.dumps({
+                    "summary_status": "fresh",
+                    "status": "fresh",
+                    "total_debt": 11,
+                    "total_penalty": 2,
+                    "total_accrued": 30,
+                    "total_paid": 19,
+                    "period": {"start": "2025-01", "end": "2025-02"},
+                }),
+            ))
+            app_module.db.session.commit()
+        self._login("owner1")
+        created = self.client.post("/api/abonent_summary/recalc_batch_job", json={"uids": ["u1"]}).get_json()
+        job_id = created["job_id"]
+        self.client.post(f"/api/abonent_summary/recalc_batch_job/{job_id}/run")
+        status = self.client.get(f"/api/abonent_summary/recalc_batch_job/{job_id}").get_json()
+        self.assertEqual(status["fresh"], 1)
+        self.assertEqual(status["error"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()
