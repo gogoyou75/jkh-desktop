@@ -355,6 +355,7 @@ let indexSummaryState = {
 };
 let summaryBatchSelectedUids = {};
 let summaryBatchRunning = false;
+let summaryBatchJobState = { jobId: null, timer: null, retries: 0 };
 
 function __indexOwnerId(){
     try {
@@ -1320,6 +1321,11 @@ async function runSelectedSummaryBatch(){
     if (!selected.length) return;
 
     const progress = document.getElementById("summaryBatchProgress");
+    if (summaryBatchJobState.timer) {
+        clearTimeout(summaryBatchJobState.timer);
+        summaryBatchJobState.timer = null;
+    }
+    summaryBatchJobState.retries = 0;
     summaryBatchRunning = true;
     updateSummaryBatchPanel();
     if (progress) progress.textContent = "Проверка UID на сервере…";
@@ -1328,15 +1334,9 @@ async function runSelectedSummaryBatch(){
         const created = await Data.createAbonentSummaryRecalcBatchJob(selected, "MANUAL_RECALC");
         if (!created || !created.job_id) throw new Error("job_create_failed");
         if (progress) progress.textContent = "Создано задание #" + created.job_id + ". Принято: " + created.accepted + ", пропущено: " + created.skipped + ".";
+        summaryBatchJobState.jobId = created.job_id;
         await Data.runAbonentSummaryRecalcBatchJob(created.job_id);
-        const statusPayload = await Data.getAbonentSummaryRecalcBatchJob(created.job_id);
-        const job = statusPayload.job || {};
-        const ok = Number(job.fresh_count || 0);
-        const errors = Number(job.error_count || 0) + Number(job.skipped_count || 0);
-        if (progress) progress.textContent = "Готово. Успешно: " + ok + ", ошибок/пропущено: " + errors + ". Обновление summary…";
-        selected.forEach(function(uid){ delete summaryBatchSelectedUids[uid]; });
-        await loadPassiveSummaryPage(currentPage);
-        if (progress) progress.textContent = "Готово. Успешно: " + ok + ", ошибок/пропущено: " + errors + ".";
+        await pollSummaryBatchJobStatus();
     } catch (e) {
         const msg = String(e && e.message || e);
         if (msg === "TOO_MANY_UIDS") {
@@ -1344,10 +1344,60 @@ async function runSelectedSummaryBatch(){
         } else {
             if (progress) progress.textContent = "Ошибка batch-проверки: " + msg;
         }
-    } finally {
         summaryBatchRunning = false;
         updateSummaryBatchPanel();
     }
+}
+
+async function pollSummaryBatchJobStatus(){
+    const progress = document.getElementById("summaryBatchProgress");
+    if (!summaryBatchJobState.jobId) return;
+    const maxRetries = 5;
+    const intervalMs = 1200;
+    const jobId = summaryBatchJobState.jobId;
+    try {
+        const statusPayload = await Data.getAbonentSummaryRecalcBatchJob(jobId);
+        const job = (statusPayload && statusPayload.job) ? statusPayload.job : statusPayload;
+        summaryBatchJobState.retries = 0;
+        const total = Number(job.total_count || job.total || 0);
+        const processed = Number(job.processed_count || job.processed || 0);
+        const fresh = Number(job.fresh_count || job.fresh || 0);
+        const errorCount = Number(job.error_count || job.error || 0);
+        const skipped = Number(job.skipped_count || job.skipped || 0);
+        const status = String(job.status || "");
+        const pct = total > 0 ? Math.floor((processed / total) * 100) : 0;
+        const message = String((statusPayload && statusPayload.message) || job.message || "");
+        if (progress) progress.textContent = "Статус: " + status + ". " + processed + "/" + total + " (" + pct + "%), fresh: " + fresh + ", error: " + errorCount + ", skipped: " + skipped + (message ? ". " + message : "");
+        if (status === "completed") {
+            selectedUidsClear();
+            await loadPassiveSummaryPage(currentPage);
+            summaryBatchRunning = false;
+            summaryBatchJobState.jobId = null;
+            updateSummaryBatchPanel();
+            return;
+        }
+        if (status === "failed" || status === "cancelled" || status === "stale") {
+            summaryBatchRunning = false;
+            summaryBatchJobState.jobId = null;
+            updateSummaryBatchPanel();
+            return;
+        }
+        summaryBatchJobState.timer = setTimeout(pollSummaryBatchJobStatus, intervalMs);
+    } catch (e) {
+        summaryBatchJobState.retries += 1;
+        if (summaryBatchJobState.retries > maxRetries) {
+            if (progress) progress.textContent = "Не удалось получить статус job";
+            summaryBatchRunning = false;
+            summaryBatchJobState.jobId = null;
+            updateSummaryBatchPanel();
+            return;
+        }
+        summaryBatchJobState.timer = setTimeout(pollSummaryBatchJobStatus, intervalMs);
+    }
+}
+
+function selectedUidsClear(){
+    Object.keys(summaryBatchSelectedUids).forEach(function(uid){ delete summaryBatchSelectedUids[uid]; });
 }
 
 /* ============================================================
