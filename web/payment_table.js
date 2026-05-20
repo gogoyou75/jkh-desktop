@@ -2846,7 +2846,8 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
     });
     const payload = { ledgerVersion: (window.Data && Data.computeLedgerRuntimeVersion) ? Data.computeLedgerRuntimeVersion(id) : "", rowsById: rowsById, updatedAt: (new Date()).toISOString() };
     if (window.Data && typeof Data.writeLedgerRuntimeCache === "function") Data.writeLedgerRuntimeCache(id, payload);
-    __loadPaymentTable({ mode: "readonly_no_recalc", reason: "manual-full-recalc" });
+    __paymentTableRenderedSignature = "";
+    __loadPaymentTable({ mode: "readonly_no_recalc", reason: "full_recalc_completed" });
     return { ok:true };
   };
 

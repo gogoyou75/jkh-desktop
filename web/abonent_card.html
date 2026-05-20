@@ -2560,14 +2560,18 @@ function bindCalcButtons(){
             }
             if (!confirmCalcPeriodSaved()) return;
 
+            let recalcHandled = false;
             if (typeof window.fullRecalcForCurrentAbonent === "function") {
                 const recalcResult = await window.fullRecalcForCurrentAbonent();
                 if (!recalcResult || recalcResult.ok !== true) {
                     alert("Пересчёт не выполнен: " + String(recalcResult && recalcResult.reason || "CALC_FAILED"));
                     return;
                 }
+                recalcHandled = true;
             }
-            __safeLoadPaymentTableOnce("manual-full-recalc");
+            if (!recalcHandled) {
+                __safeLoadPaymentTableOnce("manual-full-recalc");
+            }
         } finally {
             runBtn.disabled = false;
             runBtn.textContent = prevText || "Пересчитать";
