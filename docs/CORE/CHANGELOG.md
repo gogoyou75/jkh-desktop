@@ -455,3 +455,10 @@ rg -n "splitPremise|premise-transform\]\[split|type: ['\"]split" web LOGIC_SPEC.
 - Добавлен расширенный status payload для `GET /api/abonent_summary/recalc_batch_job/<job_id>`: top-level `job_id/status/total/processed/fresh/error/skipped/message/affected_uids` + совместимый `job` блок.
 - Backend status endpoint теперь продвигает queued/running job по шагам, что даёт реальный polling progress без скрытого full-recalc.
 - Frontend index добавил runtime polling (ограниченные retry, без бесконечных таймеров), блокировку кнопки запуска во время active job, вывод прогресса и авто-refresh текущей summary-страницы после completed.
+
+## 2026-05-20 — Stage 13.1 readonly_no_recalc + ledger_runtime_cache
+
+- Добавлен режим `readonly_no_recalc` в карточке абонента: открытие таблицы без full recalc, без autoaccrual и без записи totals в ledger.
+- Добавлен runtime cache `ledger_runtime_cache_<uid>` с version/hash-проверкой на актуальность.
+- При отсутствии/устаревании cache таблица показывает прочерки и сообщение «Для актуальных сумм нажмите Пересчитать».
+- Добавлена явная команда `window.fullRecalcForCurrentAbonent()` для расчёта totals в runtime cache с последующей перерисовкой карточки.

@@ -1936,3 +1936,10 @@ Fatal-состояния включают, но не ограничиваютс�
 ## 2026-05-19 — Stage 9 Backend Batch Orchestration
 - Added backend batch-job coordinator API for abonent_summary recalculation requests.
 - Owner scope and UID allowlist are validated only on backend.
+
+## 10. Runtime cache карточки абонента (readonly_no_recalc)
+
+- `ledger_runtime_cache_<uid>` используется только как UI-ускоритель для карточки абонента.
+- Runtime cache не является source of truth и не заменяет юридический расчёт в `calc_engine.js`.
+- При отсутствии/устаревании cache карточка показывает «Требуется пересчёт» и прочерки, без автопересчёта при открытии.
+- `index.html` и судебная справка не используют runtime cache как источник итогов.

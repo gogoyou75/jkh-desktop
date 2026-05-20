@@ -379,3 +379,11 @@
 | Stage 1 PR не меняет код и не добавляет реализацию | LOGIC_SPEC 21.10 | limited backend write-path | ✅ CANON | Исторический Stage 1 был docs-only; текущий этап разрешает только explicit rebuild endpoint и тесты, не затрагивая frontend/calc engine. |
 
 | STAGE9-BATCH-JOBS | `/api/abonent_summary/recalc_batch_job*` backend orchestration with owner-scoped UID filtering and per-item status | backend/app.py, backend/tests/test_recalc_batch_jobs.py |
+
+## 🧩 Блок: Runtime cache карточки абонента
+
+| Правило | Где в ТЗ | Где в коде | Статус | Комментарий |
+|---|---|---|---|---|
+| Открытие карточки не запускает full recalc | Stage 13.1 | abonent_card.html + payment_table.js (`readonly_no_recalc`) | ✅ OK | Read-only открытие без пересчёта |
+| Runtime cache используется только для UI-ускорения | Stage 13.1 | data.js (`ledger_runtime_cache_<uid>`) | ✅ OK | Не source of truth |
+| При отсутствии cache показываются прочерки и призыв пересчитать | Stage 13.1 | payment_table.js + abonent_card.html | ✅ OK | Без fake zero |

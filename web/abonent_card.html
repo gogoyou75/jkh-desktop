@@ -1149,7 +1149,7 @@ function __safeLoadPaymentTableOnce(reason){
         __paymentTableLoadScheduled = false;
         __paymentTableLoading = true;
         try {
-            window.__loadPaymentTable(reason || 'abonent-card');
+            window.__loadPaymentTable({ reason: (reason || 'abonent-card'), mode: "readonly_no_recalc" });
             __hideExcludesFatalBox();
         } catch(e) {
             if (__isExcludesFatalError(e)) __showExcludesFatalBox(e);
@@ -2517,55 +2517,15 @@ function bindCalcButtons(){
     runBtn.addEventListener("click", async () => {
         if (runBtn.disabled) return;
         if (!canWriteOrExplainLocal()) return;
-        const currentAbonentId = getAbonentIdFromURL();
-        const from = fromEl.value;
-        const to   = toEl.value;
         const prevText = runBtn.textContent;
-
-        if (!isValidPeriod(from, to)) {
-            if (!from || !to) {
-                alert("Укажите дату начала и дату окончания периода расчёта.");
-            } else {
-                alert("Такой период невозможен: дата начала не может быть позже даты окончания.");
-            }
-            return;
-        }
-
-        if (!window.Data || typeof Data.ensureAbonentUid !== "function") {
-            alert("Период расчёта не сохранён: сервис UID недоступен.");
-            return;
-        }
-
         runBtn.disabled = true;
         runBtn.textContent = "Пересчёт…";
-
         try {
-            let uidResult = null;
-            try {
-                uidResult = await Data.ensureAbonentUid(currentAbonentId, { source: "abonent_card.calc" });
-            } catch (e) {
-                uidResult = { ok: false, reason: String(e && e.message || e) };
-            }
-
-            if (!uidResult || uidResult.ok !== true || !uidResult.uid) {
-                alert("Период расчёта не сохранён: UID абонента не сохранён.");
+            if (typeof window.fullRecalcForCurrentAbonent !== "function") {
+                alert("Пересчёт недоступен: функция не загружена.");
                 return;
             }
-
-            if (!saveCalcPeriod(from, to)) {
-                if (saveCalcPeriod.lastError !== "PERIOD_REQUIRED") {
-                    alert("Период расчёта не сохранён: не найден canonical UID key.");
-                }
-                return;
-            }
-            if (!confirmCalcPeriodSaved()) return;
-
-            const result = await __saveAbonentSummaryAfterUidRecalc(currentAbonentId, from, to);
-            if (result && __normalizeSummaryStatus(result.summary_status || result.status) === "error") {
-                alert("Пересчёт не выполнен: " + String(result.summary_reason || result.reason || "SUMMARY_RECALC_FAILED"));
-                return;
-            }
-            __safeLoadPaymentTableOnce();
+            await window.fullRecalcForCurrentAbonent();
         } finally {
             runBtn.disabled = false;
             runBtn.textContent = prevText || "Пересчитать";

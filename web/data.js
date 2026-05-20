@@ -547,6 +547,53 @@
     return [];
   }
 
+  function resolveRuntimeCacheKey(abonentOrId) {
+    var found = _findAbonentByIdOrUid(abonentOrId);
+    var uid = String(found && found.abonent && found.abonent.uid || (typeof abonentOrId === "object" ? abonentOrId && abonentOrId.uid : "") || "").trim();
+    if (!isValidUid(uid)) return "";
+    return "ledger_runtime_cache_" + uid;
+  }
+
+  function computeLedgerRuntimeVersion(rows) {
+    var arr = Array.isArray(rows) ? rows : [];
+    var raw = JSON.stringify(arr);
+    var hash = 2166136261;
+    for (var i = 0; i < raw.length; i++) {
+      hash ^= raw.charCodeAt(i);
+      hash = (hash * 16777619) >>> 0;
+    }
+    return "ledger_hash_" + hash.toString(16);
+  }
+
+  function readLedgerRuntimeCache(abonentOrId) {
+    var key = resolveRuntimeCacheKey(abonentOrId);
+    if (!key) return null;
+    var raw = _getProjectRaw(key);
+    if (raw === null || raw === undefined) return null;
+    try {
+      var parsed = JSON.parse(String(raw));
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+      return parsed;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function writeLedgerRuntimeCache(abonentOrId, cache) {
+    if (!Data.ensureWriteOrExplain()) return false;
+    var key = resolveRuntimeCacheKey(abonentOrId);
+    if (!key) return false;
+    return _setProjectRaw(key, JSON.stringify(cache && typeof cache === "object" ? cache : {}));
+  }
+
+  function invalidateLedgerRuntimeCache(abonentOrId, reason) {
+    var key = resolveRuntimeCacheKey(abonentOrId);
+    if (!key) return false;
+    _removeProjectRaw(key);
+    try { console.log("[runtime-cache][invalidate]", { key: key, reason: String(reason || "") }); } catch (e) {}
+    return true;
+  }
+
   function _logLedgerInit(payload) {
     try {
       console.log("[ledger-init]", payload || {});
@@ -589,7 +636,10 @@
         date: opts.date || ""
       }, opts.event || {}));
     }
-    if (ok !== false) markAbonentSummaryDirtyLater(abonent || id, opts.summaryDirtyReason || "LEDGER_WRITE");
+    if (ok !== false) {
+      invalidateLedgerRuntimeCache(abonent || id, "LEDGER_WRITE");
+      markAbonentSummaryDirtyLater(abonent || id, opts.summaryDirtyReason || "LEDGER_WRITE");
+    }
     return ok;
   }
 
@@ -1994,6 +2044,11 @@
     resolveCalcPeriodStorageKey: resolveCalcPeriodStorageKey,
     resolveCalcPeriodActiveStorageKey: resolveCalcPeriodActiveStorageKey,
     resolvePaymentLedgerKey: resolvePaymentLedgerKey,
+    resolveRuntimeCacheKey: resolveRuntimeCacheKey,
+    computeLedgerRuntimeVersion: computeLedgerRuntimeVersion,
+    readLedgerRuntimeCache: readLedgerRuntimeCache,
+    writeLedgerRuntimeCache: writeLedgerRuntimeCache,
+    invalidateLedgerRuntimeCache: invalidateLedgerRuntimeCache,
     readPaymentLedger: readPaymentLedger,
     loadAbonentSummaryPage: loadAbonentSummaryPage,
     validateAbonentSummaryRecalcBatch: validateAbonentSummaryRecalcBatch,
