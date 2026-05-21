@@ -434,6 +434,41 @@
     return rows.map(function (r) { return (r && typeof r === "object") ? Object.assign({}, r) : r; });
   }
 
+  function _readLedgerRowsInfo(key) {
+    if (!key) return { key: "", exists: false, rowsCount: 0, rows: [] };
+    var raw = _getProjectRaw(key);
+    if (raw === null || raw === undefined) return { key: key, exists: false, rowsCount: 0, rows: [] };
+    var rows = _parseLedgerRows(raw, key);
+    return { key: key, exists: true, rowsCount: rows.length, rows: rows };
+  }
+
+  function _accountNumberForLedger(abonentId, abonent) {
+    return String(abonent && (abonent.account_number || abonent.accountNumber || abonent.ls || abonent.personalAccount) || abonentId || "").trim();
+  }
+
+  function _legacyLedgerKeyForAbonent(abonentId, abonent) {
+    var accountNumber = _accountNumberForLedger(abonentId, abonent);
+    return accountNumber ? ("payments_" + accountNumber) : "";
+  }
+
+  function _hasLegacyLedgerRows(abonentId, abonent) {
+    var key = _legacyLedgerKeyForAbonent(abonentId, abonent);
+    if (!key) return false;
+    return _safeLedgerInfoForDiagnostic(key).rowsCount > 0;
+  }
+
+  function _logLegacyLedgerReadonlyFallback(payload) {
+    try { console.warn("[ledger][legacy-readonly-fallback]", payload || {}); } catch (e) {}
+  }
+
+  function _logFreshBlockedLegacyLedger(payload) {
+    try { console.warn("[summary][fresh-blocked-legacy-ledger]", payload || {}); } catch (e) {}
+  }
+
+  function _logUidGenerationBlockedLegacyLedger(payload) {
+    try { console.warn("[uid][generation-blocked-legacy-ledger]", payload || {}); } catch (e) {}
+  }
+
 
   function isValidUid(uid) {
     var s = String(uid === null || uid === undefined ? "" : uid).trim();
@@ -597,10 +632,21 @@
     }
 
     // Legacy read-only fallback: payments_<LS> may still exist for old localStorage data.
-    var legacyKey = id ? ("payments_" + id) : "";
+    var legacyKey = _legacyLedgerKeyForAbonent(id, found && found.abonent);
     if (legacyKey && legacyKey !== canonicalKey) {
       var legacyRaw = _getProjectRaw(legacyKey);
-      if (legacyRaw !== null && legacyRaw !== undefined) return _cloneLedgerRows(_parseLedgerRows(legacyRaw, legacyKey));
+      if (legacyRaw !== null && legacyRaw !== undefined) {
+        var legacyRows = _parseLedgerRows(legacyRaw, legacyKey);
+        _logLegacyLedgerReadonlyFallback({
+          abonentId: id,
+          uid: String(found && found.abonent && found.abonent.uid || ""),
+          legacyKey: legacyKey,
+          canonicalKey: canonicalKey || "",
+          legacyRowsCount: legacyRows.length,
+          source: "readPaymentLedger"
+        });
+        return _cloneLedgerRows(legacyRows);
+      }
     }
     return [];
   }
@@ -663,12 +709,18 @@
     var abonent = found && found.abonent ? found.abonent : null;
     var uid = String(abonent && abonent.uid || "").trim();
     var key = resolvePaymentLedgerKey(abonentOrId);
+    var legacyKey = _legacyLedgerKeyForAbonent(id, abonent);
     if (!key || !isValidUid(uid)) {
       _logLedgerInit({ abonentId: id, uid: uid, key: key || "", result: "blocked", reason: "UID_REQUIRED" });
       return false;
     }
     if (key !== "payments_" + uid || (id && id !== uid && key === "payments_" + id)) {
       _logLedgerInit({ abonentId: id, uid: uid, key: key, result: "blocked", reason: "LS_LEDGER_CREATE_FORBIDDEN" });
+      return false;
+    }
+    if (legacyKey && legacyKey !== key && _hasLegacyLedgerRows(id, abonent)) {
+      _logLedgerInit({ abonentId: id, uid: uid, key: key, legacyKey: legacyKey, result: "blocked", reason: "UID_MISSING_WITH_LEGACY_LEDGER" });
+      _logUidGenerationBlockedLegacyLedger({ abonentId: id, uid: uid, legacyKey: legacyKey, canonicalKey: key, reason: "UID_MISSING_WITH_LEGACY_LEDGER", source: "createEmptyPaymentLedger" });
       return false;
     }
 
@@ -749,6 +801,61 @@
     } catch (e) {
       return [];
     }
+  };
+
+  function _safeLedgerInfoForDiagnostic(key) {
+    try {
+      return _readLedgerRowsInfo(key);
+    } catch (e) {
+      return {
+        key: key || "",
+        exists: true,
+        rowsCount: 0,
+        rows: [],
+        error: String(e && (e.code || e.message) || e || "LEDGER_JSON_INVALID")
+      };
+    }
+  }
+
+  window.JKH_diagnoseLedger = function() {
+    var db = window.AbonentsDB || {};
+    var abonents = db && db.abonents && typeof db.abonents === "object" ? db.abonents : {};
+    var report = Object.keys(abonents).sort().map(function(id) {
+      var a = abonents[id] || {};
+      var accountNumber = _accountNumberForLedger(id, a);
+      var uid = String(a.uid || a.account_uid || a.accountUid || "").trim();
+      var uidValid = isValidUid(uid);
+      var canonicalKey = uidValid ? ("payments_" + uid) : "";
+      var legacyKey = _legacyLedgerKeyForAbonent(id, a);
+      var canonical = canonicalKey ? _safeLedgerInfoForDiagnostic(canonicalKey) : { exists: false, rowsCount: 0 };
+      var legacy = legacyKey ? _safeLedgerInfoForDiagnostic(legacyKey) : { exists: false, rowsCount: 0 };
+      var hasCanonical = !!canonical.exists;
+      var hasLegacy = !!(legacy.exists && legacyKey !== canonicalKey);
+      var state = "EMPTY";
+
+      if (uid && !uidValid) state = "INVALID_UID";
+      else if (!uid && hasLegacy && legacy.rowsCount > 0) state = "UID_MISSING_WITH_LEGACY";
+      else if (!uid) state = "UID_MISSING_EMPTY";
+      else if (hasCanonical && hasLegacy) state = "MIXED_CANONICAL_AND_LEGACY";
+      else if (hasCanonical) state = "CANONICAL_OK";
+      else if (hasLegacy) state = "LEGACY_ONLY";
+
+      return {
+        abonentId: id,
+        accountNumber: accountNumber,
+        uid: uid,
+        uidValid: uidValid,
+        canonicalKey: canonicalKey,
+        hasCanonical: hasCanonical,
+        canonicalRowsCount: Number(canonical.rowsCount || 0),
+        legacyKey: legacyKey,
+        hasLegacy: hasLegacy,
+        legacyRowsCount: Number(legacy.rowsCount || 0),
+        state: state
+      };
+    });
+    try { console.table(report); } catch (e) {}
+    return report;
   };
 
 
@@ -1063,6 +1170,18 @@
     if (currentUid) {
       _logInvalidUidCanonicalBlocked({ abonentId: id, uid: currentUid, source: String(opts.source || "data") });
       return { ok: false, uid: currentUid, changed: false, reason: "INVALID_UID" };
+    }
+    if (_hasLegacyLedgerRows(id, a)) {
+      var legacyKey = _legacyLedgerKeyForAbonent(id, a);
+      _logUidGenerationBlockedLegacyLedger({
+        abonentId: id,
+        uid: "",
+        legacyKey: legacyKey,
+        canonicalKey: "",
+        legacyRowsCount: _readLedgerRowsInfo(legacyKey).rowsCount,
+        source: String(opts.source || "data")
+      });
+      return { ok: false, uid: "", changed: false, reason: "UID_MISSING_WITH_LEGACY_LEDGER" };
     }
 
     var uid = generateUniqueAbonentUid(db);
@@ -1995,8 +2114,33 @@
       return { ok: false, uid: uid, summary_status: "error", summary_reason: "UID_LEDGER_PATH_REQUIRED", summary: null };
     }
 
+    var canonicalRaw = _getProjectRaw(ledgerKey);
+    var legacyKey = _legacyLedgerKeyForAbonent(abonentId, abonent);
+    if ((canonicalRaw === null || canonicalRaw === undefined) && legacyKey && legacyKey !== ledgerKey) {
+      var legacyInfo = _safeLedgerInfoForDiagnostic(legacyKey);
+      if (legacyInfo.rowsCount > 0) {
+        _logFreshBlockedLegacyLedger({
+          abonentId: abonentId,
+          uid: uid,
+          legacyKey: legacyKey,
+          canonicalKey: ledgerKey,
+          legacyRowsCount: legacyInfo.rowsCount,
+          reason: "LEGACY_LEDGER_MIGRATION_REQUIRED"
+        });
+        return {
+          ok: false,
+          uid: uid,
+          summary_status: "error",
+          summary_reason: "LEGACY_LEDGER_MIGRATION_REQUIRED",
+          summary: null,
+          status: "error",
+          reason: "LEGACY_LEDGER_MIGRATION_REQUIRED"
+        };
+      }
+    }
+
     try {
-      var raw = _getProjectRaw(ledgerKey);
+      var raw = canonicalRaw;
       if (raw !== null && raw !== undefined) _parseLedgerRows(raw, ledgerKey);
     } catch (e) {
       var ledgerReason = _summaryCalcErrorCode(e);

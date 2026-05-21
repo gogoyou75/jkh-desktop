@@ -462,3 +462,11 @@ rg -n "splitPremise|premise-transform\]\[split|type: ['\"]split" web LOGIC_SPEC.
 - Saving or toggling calc period no longer marks `abonent_summary` dirty with `CALC_PERIOD_CHANGED`.
 - Backend `POST /api/abonent_summary/mark_dirty` accepts `CALC_PERIOD_CHANGED` as a view-only reason and returns `status=skipped` without creating or updating financial dirty summary rows.
 - No changes to `payments_<uid>`, `ledger_runtime_cache_<uid>`, autoaccrual, FIFO, penalty formula, checkpoint/tail-recalc or `web/calc_engine.js`.
+
+## 2026-05-21 — Stage 13.2A: canonical ledger diagnostics and dirty/fresh race stabilization
+
+- Manual recalc controlled autoaccrual writes keep `summaryDirtyReason:false`, invalidate stale runtime ledger cache, and refresh `ledger_runtime_cache_<uid>` after the explicit recalc flow.
+- Added read-only `window.JKH_diagnoseLedger()` diagnostics for canonical `payments_<uid>` vs legacy `payments_<LS>` state without migration, deletion, or writes.
+- Legacy `payments_<LS>` fallback remains transitional read-only mode and now logs `[ledger][legacy-readonly-fallback]`.
+- Fresh `abonent_summary` is blocked for legacy-only ledgers with `LEGACY_LEDGER_MIGRATION_REQUIRED`; UID generation is blocked when a UID-missing abonent already has legacy ledger rows.
+- `web/calc_engine.js`, backend financial calculation, storage key migration, and server-first read-only page behavior were not changed.

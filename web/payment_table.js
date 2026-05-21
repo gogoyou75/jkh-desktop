@@ -3041,6 +3041,17 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
       return { ok:false, reason:"SUMMARY_RECALC_UNAVAILABLE", autoaccrual_changed:!!autoResult.changed, summary_status:"error", summary_reason:"SUMMARY_RECALC_UNAVAILABLE", summary:null, summary_save:{ ok:false, reason:"SUMMARY_RECALC_UNAVAILABLE" } };
     }
     const summaryResult = await Data.recalculateAbonentCard(id, { period: opts.period });
+    const freshArr = getPayments();
+    const freshBaseRows = runningTotalsBaseRows(freshArr);
+    const freshSig = ledgerSignatureForRows(freshArr);
+    const freshRowsById = {};
+    freshArr.forEach(function(r){
+      const asOf = asOfForRow(r);
+      const t = calcTotalsAsOfMemoized(freshBaseRows, asOf, freshSig);
+      freshRowsById[String(r.id)] = { pay_main: t.principal, pay_penalty: t.penalty, total: t.total };
+    });
+    const freshPayload = { ledgerVersion: (window.Data && Data.computeLedgerRuntimeVersion) ? Data.computeLedgerRuntimeVersion(id) : "", rowsById: freshRowsById, updatedAt: (new Date()).toISOString() };
+    if (window.Data && typeof Data.writeLedgerRuntimeCache === "function") Data.writeLedgerRuntimeCache(id, freshPayload);
     const summary = summaryResult && summaryResult.summary && typeof summaryResult.summary === "object" ? summaryResult.summary : null;
     return {
       ok:!!(summaryResult && summaryResult.ok === true),

@@ -817,6 +817,55 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         self.assertNotIn("CALC_PERIOD_CHANGED", body)
         self.assertNotIn("recalc_batch", body)
 
+    def test_stage_13_2a_ledger_canonical_diagnostics_and_race_guards(self):
+        data_path = self._find_repo_file("web", "data.js")
+        payment_path = self._find_repo_file("web", "payment_table.js")
+        calc_engine_path = self._find_repo_file("web", "calc_engine.js")
+        self.assertIsNotNone(data_path)
+        self.assertIsNotNone(payment_path)
+        self.assertIsNotNone(calc_engine_path)
+        data_source = data_path.read_text(encoding="utf-8")
+        payment_source = payment_path.read_text(encoding="utf-8")
+        calc_before = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
+
+        manual_body = payment_source.split("applyControlledAutoAccrualForManualRecalc", 1)[1].split("window.fullRecalcForCurrentAbonent", 1)[0]
+        self.assertIn('eventType:"AUTOACCRUAL_WRITE", summaryDirtyReason:false', manual_body)
+        self.assertIn('eventType: "PAYMENT_TABLE_WRITE", summaryDirtyReason: "PAYMENTS_CHANGED"', payment_source)
+        self.assertIn("clearPaymentLedgerReadCache(\"manual-recalc-autoaccrual\")", manual_body)
+        self.assertIn("Data.invalidateLedgerRuntimeCache(abonentId)", manual_body)
+        self.assertIn("freshPayload", payment_source)
+        self.assertIn("Data.writeLedgerRuntimeCache(id, freshPayload)", payment_source)
+
+        self.assertIn("window.JKH_diagnoseLedger = function()", data_source)
+        diagnostic_body = data_source.split("window.JKH_diagnoseLedger = function()", 1)[1].split("window.getPaymentsKeyForAbonent", 1)[0]
+        self.assertIn("console.table(report)", diagnostic_body)
+        self.assertIn("return report", diagnostic_body)
+        self.assertNotIn("_setProjectRaw", diagnostic_body)
+        self.assertNotIn("_removeProjectRaw", diagnostic_body)
+        self.assertIn("LEGACY_ONLY", diagnostic_body)
+        self.assertIn("MIXED_CANONICAL_AND_LEGACY", diagnostic_body)
+        self.assertIn("UID_MISSING_WITH_LEGACY", diagnostic_body)
+
+        read_body = data_source.split("function readPaymentLedger", 1)[1].split("function _logLedgerInit", 1)[0]
+        self.assertIn("[ledger][legacy-readonly-fallback]", data_source)
+        self.assertIn("legacyRowsCount", read_body)
+        self.assertNotIn("_setProjectRaw", read_body)
+        self.assertNotIn("_removeProjectRaw", read_body)
+
+        recalc_body = data_source.split("async function recalculateAbonentCard", 1)[1].split("// ============================================================", 1)[0]
+        self.assertIn("[summary][fresh-blocked-legacy-ledger]", data_source)
+        self.assertIn("LEGACY_LEDGER_MIGRATION_REQUIRED", recalc_body)
+        self.assertIn("canonicalRaw === null || canonicalRaw === undefined", recalc_body)
+
+        ensure_body = data_source.split("function ensureAbonentUidOnRecord", 1)[1].split("async function ensureAbonentUid", 1)[0]
+        self.assertIn("[uid][generation-blocked-legacy-ledger]", data_source)
+        self.assertIn("UID_MISSING_WITH_LEGACY_LEDGER", ensure_body)
+        self.assertIn("_hasLegacyLedgerRows(id, a)", ensure_body)
+
+        self.assertNotIn("CALC_PERIOD_CHANGED", payment_source.split("window.fullRecalcForCurrentAbonent", 1)[1].split("window.__loadPaymentTable", 1)[0])
+        calc_after = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
+        self.assertEqual(calc_before, calc_after)
+
 
 if __name__ == "__main__":
     unittest.main()
