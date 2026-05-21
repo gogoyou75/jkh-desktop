@@ -2565,6 +2565,13 @@ function bindCalcButtons(){
                     alert("Пересчёт не выполнен: " + String(recalcResult && recalcResult.reason || "CALC_FAILED"));
                     return;
                 }
+                const summary = recalcResult && recalcResult.summary && typeof recalcResult.summary === "object" ? recalcResult.summary : null;
+                const summaryStatus = recalcResult && (recalcResult.summary_status || recalcResult.status) || summary && (summary.summary_status || summary.status) || "";
+                const summaryReason = recalcResult && (recalcResult.summary_reason || recalcResult.reason) || summary && (summary.summary_reason || summary.reason) || "";
+                if (summaryStatus) renderAbonentSummaryStatus(summaryStatus, summaryReason);
+                if (__normalizeSummaryStatus(summaryStatus) === "fresh" && summary) {
+                    __renderAbonentTotalsFromFreshSummary(summary);
+                }
                 recalcHandled = true;
             }
             if (!recalcHandled) {

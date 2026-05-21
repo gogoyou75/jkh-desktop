@@ -760,6 +760,34 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         self.assertIn("calc_period_", source)
         self.assertIn("allocatePaymentsFIFO", source)
 
+    def test_manual_full_recalc_saves_canonical_abonent_summary(self):
+        path = self._find_repo_file("web", "payment_table.js")
+        self.assertIsNotNone(path)
+        source = path.read_text(encoding="utf-8")
+        self.assertIn("window.fullRecalcForCurrentAbonent", source)
+        body = source.split("window.fullRecalcForCurrentAbonent", 1)[1].split("window.__loadPaymentTable", 1)[0]
+
+        self.assertIn("Data.writeLedgerRuntimeCache", body)
+        self.assertIn('__loadPaymentTable({ mode: "readonly_no_recalc", reason: "full_recalc_completed" })', body)
+        self.assertIn("Data.recalculateAbonentCard(id)", body)
+        self.assertIn("summary_status", body)
+        self.assertIn("summary_save", body)
+        self.assertNotIn("recalc_batch", body)
+
+    def test_calc_run_button_renders_summary_returned_by_manual_recalc(self):
+        path = self._find_repo_file("web", "abonent_card.html")
+        self.assertIsNotNone(path)
+        source = path.read_text(encoding="utf-8")
+        self.assertIn("calcRunBtn", source)
+        self.assertIn("window.fullRecalcForCurrentAbonent", source)
+        body = source.split("window.fullRecalcForCurrentAbonent", 1)[1].split("if (!recalcHandled)", 1)[0]
+
+        self.assertIn("recalcResult.summary", body)
+        self.assertIn("renderAbonentSummaryStatus(summaryStatus, summaryReason)", body)
+        self.assertIn("__renderAbonentTotalsFromFreshSummary(summary)", body)
+        self.assertNotIn("CALC_PERIOD_CHANGED", body)
+        self.assertNotIn("recalc_batch", body)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -2848,7 +2848,18 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
     if (window.Data && typeof Data.writeLedgerRuntimeCache === "function") Data.writeLedgerRuntimeCache(id, payload);
     __paymentTableRenderedSignature = "";
     __loadPaymentTable({ mode: "readonly_no_recalc", reason: "full_recalc_completed" });
-    return { ok:true };
+    if (!window.Data || typeof Data.recalculateAbonentCard !== "function") {
+      return { ok:true, summary_status:"error", summary_reason:"SUMMARY_RECALC_UNAVAILABLE", summary:null, summary_save:{ ok:false, reason:"SUMMARY_RECALC_UNAVAILABLE" } };
+    }
+    const summaryResult = await Data.recalculateAbonentCard(id);
+    const summary = summaryResult && summaryResult.summary && typeof summaryResult.summary === "object" ? summaryResult.summary : null;
+    return {
+      ok:true,
+      summary_status: summaryResult && (summaryResult.summary_status || summaryResult.status) || "error",
+      summary_reason: summaryResult && (summaryResult.summary_reason || summaryResult.reason) || "",
+      summary: summary,
+      summary_save: summaryResult
+    };
   };
 
   window.__loadPaymentTable = requestLoadPaymentTable;
