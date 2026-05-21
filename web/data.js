@@ -858,6 +858,178 @@
     return report;
   };
 
+  function _summaryItemsForLedgerMigrationVerification(options) {
+    var opts = options || {};
+    var raw = Array.isArray(opts.summaryItems) ? opts.summaryItems
+      : (Array.isArray(opts.summaries) ? opts.summaries
+      : (Array.isArray(opts.abonentSummaries) ? opts.abonentSummaries : []));
+    return raw.map(function(item) {
+      var summary = item && item.summary && typeof item.summary === "object" ? item.summary : item;
+      return {
+        account_uid: String(item && (item.account_uid || item.uid) || summary && (summary.account_uid || summary.uid) || "").trim(),
+        abonent_id: String(item && (item.abonent_id || item.abonentId || item.id) || summary && (summary.abonent_id || summary.id) || "").trim(),
+        summary_status: String(item && (item.summary_status || item.status) || summary && (summary.summary_status || summary.status) || "").trim()
+      };
+    }).filter(function(item) {
+      return !!(item.account_uid || item.abonent_id);
+    });
+  }
+
+  function _runtimeCacheStateForMigrationVerification(abonentId, uid, canonicalKey, canonical) {
+    var key = isValidUid(uid) ? ("ledger_runtime_cache_" + uid) : "";
+    if (!key) return { runtimeCacheKey: "", hasRuntimeCache: false, runtimeCacheStale: false };
+    var raw = _getProjectRaw(key);
+    if (raw === null || raw === undefined || raw === "") {
+      return { runtimeCacheKey: key, hasRuntimeCache: false, runtimeCacheStale: false };
+    }
+    var parsed = null;
+    try { parsed = JSON.parse(String(raw)); } catch (e) {
+      return { runtimeCacheKey: key, hasRuntimeCache: true, runtimeCacheStale: true, runtimeCacheReason: "RUNTIME_CACHE_JSON_INVALID" };
+    }
+    var expectedVersion = canonicalKey ? String(_getProjectRaw(canonicalKey) === null || _getProjectRaw(canonicalKey) === undefined ? "" : _getProjectRaw(canonicalKey)) : "";
+    var actualVersion = String(parsed && parsed.ledgerVersion || "");
+    var stale = !!(canonical && canonical.exists && actualVersion !== expectedVersion);
+    return {
+      runtimeCacheKey: key,
+      hasRuntimeCache: true,
+      runtimeCacheStale: stale,
+      runtimeCacheReason: stale ? "LEDGER_VERSION_MISMATCH" : ""
+    };
+  }
+
+  function _migrationVerificationItem(abonentId, abonent, summaryByUid) {
+    var id = String(abonentId || "").trim();
+    var a = abonent || {};
+    var accountNumber = _accountNumberForLedger(id, a);
+    var uid = String(a.uid || a.account_uid || a.accountUid || "").trim();
+    var uidValid = isValidUid(uid);
+    var canonicalKey = uidValid ? ("payments_" + uid) : "";
+    var legacyKey = _legacyLedgerKeyForAbonent(id, a);
+    var canonical = canonicalKey ? _safeLedgerInfoForDiagnostic(canonicalKey) : { exists: false, rowsCount: 0, error: "" };
+    var legacy = legacyKey ? _safeLedgerInfoForDiagnostic(legacyKey) : { exists: false, rowsCount: 0, error: "" };
+    var runtime = _runtimeCacheStateForMigrationVerification(id, uid, canonicalKey, canonical);
+    var issues = [];
+    var canMigrate = false;
+    var state = "EMPTY_NO_LEDGER";
+
+    if (canonical.error) issues.push("CANONICAL_LEDGER_INVALID");
+    if (legacy.error) issues.push("LEGACY_LEDGER_INVALID");
+    if (runtime.runtimeCacheStale) issues.push("STALE_RUNTIME_CACHE");
+
+    if (uid && !uidValid) {
+      state = "BLOCKED_INVALID_UID";
+      issues.push("INVALID_UID");
+    } else if (!uid && legacy.rowsCount > 0) {
+      state = "BLOCKED_UID_MISSING_WITH_LEGACY";
+      issues.push("UID_MISSING_WITH_LEGACY_LEDGER");
+    } else if (!uid) {
+      state = "UID_MISSING_EMPTY";
+      issues.push("UID_MISSING");
+    } else if (canonical.rowsCount > 0 && legacy.rowsCount > 0) {
+      state = "BLOCKED_MIXED_LEDGER";
+      issues.push("MIXED_CANONICAL_AND_LEGACY");
+    } else if (legacy.rowsCount > 0 && canonical.rowsCount <= 0 && !canonical.error && !legacy.error) {
+      state = canonical.exists ? "READY_TO_MIGRATE_EMPTY_CANONICAL" : "READY_TO_MIGRATE";
+      canMigrate = true;
+    } else if (canonical.rowsCount > 0) {
+      state = "CANONICAL_OK";
+    } else if (legacy.exists) {
+      state = "LEGACY_EMPTY";
+    } else if (canonical.exists) {
+      state = "CANONICAL_EMPTY";
+    }
+
+    var summary = uid ? summaryByUid[uid] : null;
+    return {
+      abonentId: id,
+      accountNumber: accountNumber,
+      uid: uid,
+      uidValid: uidValid,
+      canonicalKey: canonicalKey,
+      hasCanonical: !!canonical.exists,
+      canonicalRowsCount: Number(canonical.rowsCount || 0),
+      legacyKey: legacyKey,
+      hasLegacy: !!(legacy.exists && legacyKey !== canonicalKey),
+      legacyRowsCount: Number(legacy.rowsCount || 0),
+      runtimeCacheKey: runtime.runtimeCacheKey || "",
+      hasRuntimeCache: !!runtime.hasRuntimeCache,
+      runtimeCacheStale: !!runtime.runtimeCacheStale,
+      summaryStatus: String(summary && summary.summary_status || ""),
+      canMigrate: canMigrate,
+      state: state,
+      issues: issues.join(",")
+    };
+  }
+
+  window.JKH_verifyLedgerMigration = function(options) {
+    var opts = options || {};
+    var db = window.AbonentsDB || {};
+    var abonents = db && db.abonents && typeof db.abonents === "object" ? db.abonents : {};
+    var summaryByUid = {};
+    var orphanSummaries = [];
+
+    Object.keys(abonents).forEach(function(id) {
+      var uid = String(abonents[id] && abonents[id].uid || "").trim();
+      if (uid) summaryByUid[uid] = null;
+    });
+
+    _summaryItemsForLedgerMigrationVerification(opts).forEach(function(item) {
+      if (item.account_uid && Object.prototype.hasOwnProperty.call(summaryByUid, item.account_uid)) {
+        summaryByUid[item.account_uid] = item;
+      } else {
+        orphanSummaries.push({
+          abonentId: item.abonent_id || "",
+          accountNumber: "",
+          uid: item.account_uid || "",
+          uidValid: item.account_uid ? isValidUid(item.account_uid) : false,
+          canonicalKey: item.account_uid ? ("payments_" + item.account_uid) : "",
+          hasCanonical: false,
+          canonicalRowsCount: 0,
+          legacyKey: "",
+          hasLegacy: false,
+          legacyRowsCount: 0,
+          runtimeCacheKey: "",
+          hasRuntimeCache: false,
+          runtimeCacheStale: false,
+          summaryStatus: item.summary_status || "",
+          canMigrate: false,
+          state: "BLOCKED_ORPHAN_SUMMARY",
+          issues: "ORPHAN_SUMMARY"
+        });
+      }
+    });
+
+    var items = Object.keys(abonents).sort().map(function(id) {
+      return _migrationVerificationItem(id, abonents[id], summaryByUid);
+    }).concat(orphanSummaries);
+
+    var counters = {
+      total: items.length,
+      readyToMigrate: 0,
+      blocked: 0,
+      canonicalOk: 0,
+      staleRuntimeCache: 0,
+      orphanSummary: orphanSummaries.length
+    };
+    items.forEach(function(item) {
+      if (item.canMigrate) counters.readyToMigrate++;
+      if (String(item.state || "").indexOf("BLOCKED_") === 0) counters.blocked++;
+      if (item.state === "CANONICAL_OK") counters.canonicalOk++;
+      if (item.runtimeCacheStale) counters.staleRuntimeCache++;
+    });
+
+    var result = {
+      ok: counters.blocked === 0,
+      readOnly: true,
+      mode: "verification-only",
+      counters: counters,
+      items: items
+    };
+    try { console.table(items); } catch (e) {}
+    try { console.log("[ledger][migration-verification]", { counters: counters, readOnly: true }); } catch (e2) {}
+    return result;
+  };
+
 
   window.getPaymentsKeyForAbonent = getPaymentsKeyForAbonent;
   window.getAbonentTechId = getAbonentTechId;

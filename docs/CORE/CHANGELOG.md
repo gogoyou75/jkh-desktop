@@ -470,3 +470,9 @@ rg -n "splitPremise|premise-transform\]\[split|type: ['\"]split" web LOGIC_SPEC.
 - Legacy `payments_<LS>` fallback remains transitional read-only mode and now logs `[ledger][legacy-readonly-fallback]`.
 - Fresh `abonent_summary` is blocked for legacy-only ledgers with `LEGACY_LEDGER_MIGRATION_REQUIRED`; UID generation is blocked when a UID-missing abonent already has legacy ledger rows.
 - `web/calc_engine.js`, backend financial calculation, storage key migration, and server-first read-only page behavior were not changed.
+
+## 2026-05-21 — Stage 13.2B: migration verification layer
+
+- Added read-only `window.JKH_verifyLedgerMigration(options)` to classify canonical/legacy ledger migration readiness without creating, overwriting, migrating, or deleting ledger keys.
+- Verification reports `READY_TO_MIGRATE`, mixed-ledger blockers, missing/invalid UID blockers, stale runtime cache, and optional orphan summary items supplied through `options.summaryItems`.
+- The layer does not run autoaccrual, does not calculate backend financial totals, does not mark `CALC_PERIOD_CHANGED` dirty, and does not touch `web/calc_engine.js`.

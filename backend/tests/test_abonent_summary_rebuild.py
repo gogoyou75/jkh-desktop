@@ -866,6 +866,38 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         calc_after = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
         self.assertEqual(calc_before, calc_after)
 
+    def test_stage_13_2b_ledger_migration_verification_is_read_only(self):
+        data_path = self._find_repo_file("web", "data.js")
+        calc_engine_path = self._find_repo_file("web", "calc_engine.js")
+        self.assertIsNotNone(data_path)
+        self.assertIsNotNone(calc_engine_path)
+        data_source = data_path.read_text(encoding="utf-8")
+        calc_before = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
+
+        self.assertIn("window.JKH_verifyLedgerMigration = function(options)", data_source)
+        body = data_source.split("window.JKH_verifyLedgerMigration = function(options)", 1)[1].split("window.getPaymentsKeyForAbonent", 1)[0]
+        self.assertIn("verification-only", body)
+        self.assertIn("readOnly: true", body)
+        self.assertIn("READY_TO_MIGRATE", data_source)
+        self.assertIn("READY_TO_MIGRATE_EMPTY_CANONICAL", data_source)
+        self.assertIn("BLOCKED_MIXED_LEDGER", data_source)
+        self.assertIn("BLOCKED_UID_MISSING_WITH_LEGACY", data_source)
+        self.assertIn("BLOCKED_INVALID_UID", data_source)
+        self.assertIn("STALE_RUNTIME_CACHE", data_source)
+        self.assertIn("BLOCKED_ORPHAN_SUMMARY", data_source)
+        self.assertIn("console.table(items)", body)
+        self.assertIn("[ledger][migration-verification]", body)
+        self.assertNotIn("_setProjectRaw", body)
+        self.assertNotIn("_removeProjectRaw", body)
+        self.assertNotIn("writePaymentLedger", body)
+        self.assertNotIn("createEmptyPaymentLedger", body)
+        self.assertNotIn("ensureAbonentUid", body)
+        self.assertNotIn("AUTOACCRUAL_WRITE", body)
+        self.assertNotIn("CALC_PERIOD_CHANGED", body)
+
+        calc_after = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
+        self.assertEqual(calc_before, calc_after)
+
 
 if __name__ == "__main__":
     unittest.main()
