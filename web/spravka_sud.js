@@ -120,9 +120,15 @@
     const activeStorageKey = (window.Data && typeof window.Data.resolveCalcPeriodActiveStorageKey === "function")
       ? String(window.Data.resolveCalcPeriodActiveStorageKey(abonent || requestedId) || '').trim()
       : '';
+    const uid = String(abonent && abonent.uid || '').trim();
+    const reportStorageKey = uid ? ('report_period_' + uid) : '';
+    const reportRaw = /^report_period_uid_/.test(reportStorageKey) ? storeGet(reportStorageKey, readOwner) : null;
+    const reportPeriod = reportRaw ? parsePeriod(reportRaw) : null;
     const activeRaw = activeStorageKey ? storeGet(activeStorageKey, readOwner) : null;
     const raw = storageKey ? storeGet(storageKey, readOwner) : null;
     const calcPeriod = raw ? parsePeriod(raw) : null;
+    const selectedPeriod = reportPeriod || calcPeriod;
+    const selectedSource = reportPeriod ? "canonical-report-period" : (calcPeriod ? "canonical-calc-period" : "");
 
     try {
       console.log("[spravka][calc-period-read]", {
@@ -130,36 +136,41 @@
         readOwner: readOwner,
         currentOwner: String(ctx && ctx.currentOwner || ''),
         forcedOwner: String(ctx && ctx.forcedOwner || ''),
+        reportKey: reportStorageKey,
+        reportRawExists: reportRaw !== null && reportRaw !== undefined && reportRaw !== "",
         key: storageKey,
         activeKey: activeStorageKey,
         rawExists: raw !== null && raw !== undefined && raw !== "",
         activeRaw: activeRaw,
-        from: calcPeriod ? calcPeriod.from : "",
-        to: calcPeriod ? calcPeriod.to : ""
+        source: selectedSource,
+        from: selectedPeriod ? selectedPeriod.from : "",
+        to: selectedPeriod ? selectedPeriod.to : ""
       });
     } catch (e) {}
 
-    if (!storageKey) {
+    if (!reportStorageKey && !storageKey) {
       console.warn("[spravka][calc-period-read][missing-canonical-key]", {
         abonentId: requestedId,
         readOwner: readOwner,
+        reportKey: reportStorageKey,
         key: storageKey,
         activeKey: activeStorageKey
       });
       return null;
     }
 
-    if (!raw || !calcPeriod) {
+    if (!selectedPeriod) {
       console.warn("[spravka][calc-period-read][missing-canonical-period]", {
         abonentId: requestedId,
         readOwner: readOwner,
+        reportKey: reportStorageKey,
         key: storageKey,
         activeKey: activeStorageKey
       });
       return null;
     }
 
-    return calcPeriod;
+    return selectedPeriod;
   }
 
 

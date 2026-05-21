@@ -2189,6 +2189,216 @@ function __isCanonicalCalcPeriodActiveKey(key){
     return /^calc_period_active_uid_/.test(String(key || ""));
 }
 
+function __isCanonicalReportPeriodKey(key){
+    return /^report_period_uid_/.test(String(key || ""));
+}
+
+function getReportPeriodStorageKey(meta){
+    const m = meta || getCalcPeriodStorageMeta();
+    const uid = String(m && m.resolvedUid || "").trim();
+    return uid ? ("report_period_" + uid) : "";
+}
+
+function __parsePeriodRaw(raw){
+    try {
+        const p = raw ? JSON.parse(raw) : null;
+        if (!p || !p.from || !p.to) return null;
+        return { from: String(p.from || ""), to: String(p.to || "") };
+    } catch (e) {
+        return null;
+    }
+}
+
+function __readPeriodKey(key, ownerId){
+    let raw = null;
+    let value = null;
+    try {
+        raw = key ? storeGet(key, ownerId) : null;
+        value = __parsePeriodRaw(raw);
+    } catch (e) {
+        raw = null;
+        value = null;
+    }
+    return { key: key || "", raw: raw, value: value };
+}
+
+function __readActiveKey(key, ownerId){
+    let raw = null;
+    try { raw = key ? storeGet(key, ownerId) : null; } catch (e) { raw = null; }
+    return { key: key || "", raw: raw };
+}
+
+function saveReportPeriodForSpravka(from, to, options){
+    const opts = options || {};
+    const meta = getCalcPeriodStorageMeta();
+    const reportKey = getReportPeriodStorageKey(meta);
+    const payload = { from: String(from || "").trim(), to: String(to || "").trim() };
+    const result = {
+        ok: false,
+        reason: "",
+        reportKey: reportKey,
+        ownerId: meta.ownerId,
+        reportReadback: null
+    };
+
+    if (!isValidPeriod(payload.from, payload.to)) {
+        result.reason = "PERIOD_REQUIRED";
+        return result;
+    }
+
+    if (!reportKey || !__isCanonicalReportPeriodKey(reportKey)) {
+        result.reason = "REPORT_PERIOD_UID_KEY_REQUIRED";
+        try {
+            console.warn("[report-period][save-blocked]", {
+                abonentId: meta.requestedId,
+                uid: meta.resolvedUid,
+                reportKey: reportKey,
+                reason: result.reason,
+                source: String(opts.source || "abonent_card")
+            });
+        } catch (e) {}
+        return result;
+    }
+
+    storeSet(reportKey, JSON.stringify(payload), meta.ownerId);
+    result.reportReadback = __readPeriodKey(reportKey, meta.ownerId);
+    const saved = result.reportReadback && result.reportReadback.value;
+    result.ok = !!(saved && saved.from === payload.from && saved.to === payload.to);
+    result.reason = result.ok ? "" : "REPORT_PERIOD_READBACK_FAILED";
+
+    try {
+        console.log("[report-period][save]", {
+            abonentId: meta.requestedId,
+            uid: meta.resolvedUid,
+            ownerId: meta.ownerId,
+            reportKey: reportKey,
+            reportReadback: result.reportReadback,
+            ok: result.ok,
+            reason: result.reason,
+            source: String(opts.source || "abonent_card")
+        });
+    } catch (e) {}
+
+    return result;
+}
+
+function __buildCardPeriodSavedLog(meta, reportResult){
+    const m = meta || getCalcPeriodStorageMeta();
+    const periodReadback = __readPeriodKey(m.storageKey, m.ownerId);
+    const activeReadback = __readActiveKey(m.activeStorageKey, m.ownerId);
+    const reportReadback = reportResult && reportResult.reportReadback
+        ? reportResult.reportReadback
+        : __readPeriodKey(getReportPeriodStorageKey(m), m.ownerId);
+    const ok = !!(
+        periodReadback.value &&
+        activeReadback.raw === "1" &&
+        (!reportReadback.key || (reportReadback.value && __isCanonicalReportPeriodKey(reportReadback.key)))
+    );
+    return {
+        periodKey: m.storageKey,
+        activeKey: m.activeStorageKey,
+        reportKey: reportReadback.key,
+        periodReadback: periodReadback,
+        activeReadback: activeReadback,
+        reportReadback: reportReadback,
+        ok: ok
+    };
+}
+
+function __logCardPeriodSaved(meta, reportResult){
+    try { console.log("[card-recalc][period-saved]", __buildCardPeriodSavedLog(meta, reportResult)); } catch (e) {}
+}
+
+function __pickCardSummaryTotals(summary){
+    const s = summary && typeof summary === "object" ? summary : null;
+    const t = s && s.totals && typeof s.totals === "object" ? s.totals : {};
+    return {
+        principal: t.principal != null ? t.principal : s && (s.principal != null ? s.principal : s.total_principal),
+        debt: t.debt != null ? t.debt : (t.total != null ? t.total : s && s.total_debt),
+        penalty: t.penalty != null ? t.penalty : s && s.total_penalty,
+        total: t.total != null ? t.total : s && s.total_debt,
+        accrued: t.accrued != null ? t.accrued : s && s.total_accrued,
+        paid: t.paid != null ? t.paid : s && s.total_paid,
+        balance: t.balance != null ? t.balance : s && s.total_debt
+    };
+}
+
+function __logCardRecalcResult(recalcResult, abonentId){
+    let rowsCount = null;
+    try {
+        const rows = (window.Data && typeof Data.readPaymentLedger === "function") ? Data.readPaymentLedger(abonentId) : null;
+        rowsCount = Array.isArray(rows) ? rows.length : null;
+    } catch (e) {
+        rowsCount = null;
+    }
+    const summary = recalcResult && recalcResult.summary && typeof recalcResult.summary === "object" ? recalcResult.summary : null;
+    try {
+        console.log("[card-recalc][result]", {
+            ok: !!(recalcResult && recalcResult.ok === true),
+            reason: String(recalcResult && (recalcResult.reason || recalcResult.summary_reason) || ""),
+            autoaccrual_changed: !!(recalcResult && recalcResult.autoaccrual_changed),
+            summary_status: String(recalcResult && (recalcResult.summary_status || recalcResult.status) || summary && (summary.summary_status || summary.status) || ""),
+            summary_reason: String(recalcResult && (recalcResult.summary_reason || recalcResult.reason) || summary && (summary.summary_reason || summary.reason) || ""),
+            rowsCount: rowsCount,
+            totals: __pickCardSummaryTotals(summary)
+        });
+    } catch (e) {}
+}
+
+window.JKH_debugCardPeriodFlow = function(abonentId) {
+    const requested = String(abonentId || getAbonentIdFromURL() || "").trim();
+    const db = getDb() || {};
+    const abonent = requested ? (db[requested] || null) : null;
+    const uid = String(abonent && abonent.uid || "").trim();
+    const meta = requested === getAbonentIdFromURL()
+        ? getCalcPeriodStorageMeta()
+        : {
+            requestedId: requested,
+            resolvedUid: uid,
+            storageKey: (window.Data && typeof Data.resolveCalcPeriodStorageKey === "function" && abonent) ? String(Data.resolveCalcPeriodStorageKey(abonent) || "") : "",
+            activeStorageKey: (window.Data && typeof Data.resolveCalcPeriodActiveStorageKey === "function" && abonent) ? String(Data.resolveCalcPeriodActiveStorageKey(abonent) || "") : "",
+            ownerId: getCalcPeriodOwnerId()
+        };
+    const reportKey = getReportPeriodStorageKey(meta);
+    const fromEl = document.getElementById("calcFrom");
+    const toEl = document.getElementById("calcTo");
+    const calcValue = __readPeriodKey(meta.storageKey, meta.ownerId);
+    const activeValue = __readActiveKey(meta.activeStorageKey, meta.ownerId);
+    const reportValue = __readPeriodKey(reportKey, meta.ownerId);
+    const warnings = [];
+    if (!uid) warnings.push("UID_MISSING");
+    if (!__isCanonicalCalcPeriodKey(meta.storageKey)) warnings.push("CALC_PERIOD_UID_KEY_MISSING");
+    if (!__isCanonicalCalcPeriodActiveKey(meta.activeStorageKey)) warnings.push("CALC_PERIOD_ACTIVE_UID_KEY_MISSING");
+    if (!__isCanonicalReportPeriodKey(reportKey)) warnings.push("REPORT_PERIOD_UID_KEY_MISSING");
+    if (!calcValue.value) warnings.push("CALC_PERIOD_MISSING");
+    if (activeValue.raw !== "1") warnings.push("CALC_PERIOD_INACTIVE");
+    if (!reportValue.value) warnings.push("REPORT_PERIOD_MISSING");
+
+    const reportCandidate = reportValue.value || calcValue.value;
+    const reportMatchesCalc = !!(reportValue.value && calcValue.value && reportValue.value.from === calcValue.value.from && reportValue.value.to === calcValue.value.to);
+    const report = {
+        abonentId: requested,
+        uid: uid,
+        calcPeriodKey: meta.storageKey,
+        calcPeriodValue: calcValue.value,
+        calcPeriodActiveKey: meta.activeStorageKey,
+        calcPeriodActiveValue: activeValue.raw,
+        reportPeriodKey: reportKey,
+        reportPeriodValue: reportValue.value,
+        currentCardInputValues: {
+            from: fromEl ? fromEl.value : "",
+            to: toEl ? toEl.value : "",
+            present: !!(fromEl || toEl)
+        },
+        spravkaCanBootstrap: !!(reportCandidate && reportCandidate.from && reportCandidate.to && uid && __isCanonicalReportPeriodKey(reportKey)),
+        reportMatchesCalc: reportMatchesCalc,
+        warnings: warnings
+    };
+    try { console.table([report]); } catch (e) {}
+    try { console.log("[card-period][debug-flow]", report); } catch (e) {}
+    return report;
+};
+
 function loadCalcPeriodUI(){
     const meta = getCalcPeriodStorageMeta();
     const fromEl = document.getElementById("calcFrom");
@@ -2563,6 +2773,17 @@ function bindCalcButtons(){
         const from = fromEl.value;
         const to   = toEl.value;
         const prevText = runBtn.textContent;
+        const clickMeta = getCalcPeriodStorageMeta();
+        try {
+            console.log("[card-recalc][click]", {
+                abonentId: String(currentAbonentId || ""),
+                uid: clickMeta.resolvedUid,
+                fromInput: from || "",
+                toInput: to || "",
+                periodBefore: __readPeriodKey(clickMeta.storageKey, clickMeta.ownerId),
+                activeBefore: __readActiveKey(clickMeta.activeStorageKey, clickMeta.ownerId)
+            });
+        } catch (e) {}
 
         if (!isValidPeriod(from, to)) {
             if (!from || !to) {
@@ -2595,9 +2816,16 @@ function bindCalcButtons(){
             }
 
             if (!saveCalcPeriod(from, to)) {
+                __logCardPeriodSaved(getCalcPeriodStorageMeta(), { ok: false, reason: saveCalcPeriod.lastError || "CALC_PERIOD_SAVE_FAILED", reportReadback: null });
                 if (saveCalcPeriod.lastError !== "PERIOD_REQUIRED") {
                     alert("Период расчёта не сохранён: не найден canonical UID key.");
                 }
+                return;
+            }
+            const reportPeriodResult = saveReportPeriodForSpravka(from, to, { source: "abonent_card.recalc" });
+            __logCardPeriodSaved(getCalcPeriodStorageMeta(), reportPeriodResult);
+            if (!reportPeriodResult.ok) {
+                alert("РџРµСЂРёРѕРґ РґР»СЏ СЃРїСЂР°РІРєРё РЅРµ СЃРѕС…СЂР°РЅС‘РЅ: " + String(reportPeriodResult.reason || "REPORT_PERIOD_READBACK_FAILED") + " (" + String(reportPeriodResult.reportKey || "report_period_uid_<uid>") + ").");
                 return;
             }
             if (!confirmCalcPeriodSaved()) return;
@@ -2605,6 +2833,7 @@ function bindCalcButtons(){
             let recalcHandled = false;
             if (typeof window.fullRecalcForCurrentAbonent === "function") {
                 const recalcResult = await window.fullRecalcForCurrentAbonent({ period: { from: from, to: to }, applyAutoAccrual: true });
+                __logCardRecalcResult(recalcResult, currentAbonentId);
                 if (!recalcResult || recalcResult.ok !== true) {
                     const reason = String(recalcResult && (recalcResult.reason || recalcResult.summary_reason) || "CALC_FAILED");
                     renderAbonentSummaryStatus("error", reason);
@@ -2643,10 +2872,18 @@ function bindCalcButtons(){
         const id = getAbonentIdFromURL();
         const from = fromEl.value;
         const to = toEl.value;
+        let reportPeriodResult = null;
         if (from || to) {
             if (isValidPeriod(from, to)) {
                 if (!saveCalcPeriod(from, to)) {
+                    __logCardPeriodSaved(getCalcPeriodStorageMeta(), { ok: false, reason: saveCalcPeriod.lastError || "CALC_PERIOD_SAVE_FAILED", reportReadback: null });
                     alert("Период расчёта не сохранён в canonical UID key. Справка не будет открыта.");
+                    return;
+                }
+                reportPeriodResult = saveReportPeriodForSpravka(from, to, { source: "abonent_card.reports" });
+                __logCardPeriodSaved(getCalcPeriodStorageMeta(), reportPeriodResult);
+                if (!reportPeriodResult.ok) {
+                    alert("РџРµСЂРёРѕРґ РґР»СЏ СЃРїСЂР°РІРєРё РЅРµ СЃРѕС…СЂР°РЅС‘РЅ: " + String(reportPeriodResult.reason || "REPORT_PERIOD_READBACK_FAILED") + " (" + String(reportPeriodResult.reportKey || "report_period_uid_<uid>") + ").");
                     return;
                 }
             } else {
@@ -2670,7 +2907,8 @@ function bindCalcButtons(){
                 abonentId: String(id || ""),
                 ownerId: meta.ownerId,
                 periodKey: meta.storageKey,
-                activeKey: meta.activeStorageKey
+                activeKey: meta.activeStorageKey,
+                reportKey: reportPeriodResult && reportPeriodResult.reportKey || getReportPeriodStorageKey(meta)
             });
         } catch (e) {}
         location.href = "reports.html?abonent=" + encodeURIComponent(id) + (dbKey ? ("&db=" + encodeURIComponent(dbKey)) : (meta.ownerId ? ("&owner=" + encodeURIComponent(meta.ownerId)) : ""));

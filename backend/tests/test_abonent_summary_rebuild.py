@@ -1134,6 +1134,56 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         calc_after = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
         self.assertEqual(calc_before, calc_after)
 
+    def test_stage_13_2d_card_report_period_flow_diagnostics(self):
+        card_path = self._find_repo_file("web", "abonent_card.html")
+        reports_path = self._find_repo_file("web", "reports.html")
+        spravka_path = self._find_repo_file("web", "spravka_sud.js")
+        data_path = self._find_repo_file("web", "data.js")
+        calc_engine_path = self._find_repo_file("web", "calc_engine.js")
+        self.assertIsNotNone(card_path)
+        self.assertIsNotNone(reports_path)
+        self.assertIsNotNone(spravka_path)
+        self.assertIsNotNone(data_path)
+        self.assertIsNotNone(calc_engine_path)
+        card_source = card_path.read_text(encoding="utf-8")
+        reports_source = reports_path.read_text(encoding="utf-8")
+        spravka_source = spravka_path.read_text(encoding="utf-8")
+        data_source = data_path.read_text(encoding="utf-8")
+        calc_before = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
+
+        self.assertIn("[card-recalc][click]", card_source)
+        self.assertIn("[card-recalc][period-saved]", card_source)
+        self.assertIn("[card-recalc][result]", card_source)
+        self.assertIn("window.JKH_debugCardPeriodFlow = function(abonentId)", card_source)
+        self.assertIn("saveReportPeriodForSpravka", card_source)
+        self.assertIn("report_period_\" + uid", card_source)
+        self.assertIn("/^report_period_uid_/", card_source)
+        self.assertIn("periodBefore", card_source)
+        self.assertIn("activeBefore", card_source)
+        self.assertIn("spravkaCanBootstrap", card_source)
+
+        helper_body = card_source.split("window.JKH_debugCardPeriodFlow = function(abonentId)", 1)[1].split("function loadCalcPeriodUI", 1)[0]
+        self.assertNotIn("storeSet(", helper_body)
+        self.assertNotIn("storeRemove(", helper_body)
+        self.assertNotIn("writePaymentLedger", helper_body)
+        self.assertNotIn("fullRecalcForCurrentAbonent", helper_body)
+        self.assertNotIn("CALC_PERIOD_CHANGED", helper_body)
+
+        self.assertIn("reportKey: uid ? (\"report_period_\" + uid) : \"\"", reports_source)
+        self.assertIn("source: \"canonical-report\"", reports_source)
+        self.assertIn("storeSetCanonical(meta.reportKey", reports_source)
+        self.assertIn("/^report_period_uid_/.test(meta.reportKey)", reports_source)
+
+        self.assertIn("reportStorageKey", spravka_source)
+        self.assertIn("canonical-report-period", spravka_source)
+        self.assertIn("const selectedPeriod = reportPeriod || calcPeriod", spravka_source)
+
+        self.assertIn("_setRawScoped(\"report_period_\" + uid", data_source)
+        self.assertNotIn("_setRawScoped(\"report_period_\" + id", data_source)
+
+        calc_after = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
+        self.assertEqual(calc_before, calc_after)
+
 
 if __name__ == "__main__":
     unittest.main()

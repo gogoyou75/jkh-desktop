@@ -518,3 +518,10 @@ rg -n "splitPremise|premise-transform\]\[split|type: ['\"]split" web LOGIC_SPEC.
 - Index totals DOM writes now target explicit `td[data-field="debt"]`, `td[data-field="penalty"]`, `td[data-field="accrued"]`, and `td[data-field="paid"]`.
 - Added `[index][totals-dom-write]` diagnostics with UID, field, value, targetFound, beforeText, and afterText.
 - No positional `cells[5]` / `cells[6]` / `cells[7]` totals mapping, ledger writes, backend totals, formula changes, or `web/calc_engine.js` changes.
+
+## 2026-05-21 - Stage 13.2D: diagnose and stabilize abonent card calc/report period flow
+
+- Added card recalc diagnostics: `[card-recalc][click]`, `[card-recalc][period-saved]`, and `[card-recalc][result]` show UID, input dates, canonical key readback, recalc result, ledger rows count, and summary totals.
+- Card and reports flows now persist/read canonical `report_period_uid_<uid>` together with `calc_period_uid_<uid>` and `calc_period_active_uid_<uid>` so `spravka_sud` can bootstrap the same selected period.
+- Added read-only `window.JKH_debugCardPeriodFlow(abonentId)` for calc/report period key diagnostics and spravka bootstrap warnings.
+- `CALC_PERIOD_CHANGED` remains view-only, no ledger writes/migration/backend totals/formula/FIFO changes were added, and `web/calc_engine.js` was not changed.

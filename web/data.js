@@ -4015,9 +4015,10 @@ window.JKHBoot?.markReady?.('data');
       const abonent = demoDb && demoDb.abonents ? demoDb.abonents[id] : null;
       const calcKey = resolveCalcPeriodStorageKey(abonent);
       const calcActiveKey = resolveCalcPeriodActiveStorageKey(abonent);
+      const uid = String(abonent && abonent.uid || "").trim();
       if (calcKey) _setRawScoped(calcKey, JSON.stringify({ from: "", to: "" }));
       if (calcActiveKey) _setRawScoped(calcActiveKey, "0");
-      _setRawScoped("report_period_" + id, JSON.stringify({ from: "", to: "" }));
+      if (isValidUid(uid)) _setRawScoped("report_period_" + uid, JSON.stringify({ from: "", to: "" }));
     });
 
     // 7) платежи — намеренно как “проверочный кейс”
