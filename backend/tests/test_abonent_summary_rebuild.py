@@ -771,6 +771,8 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         self.assertIn("window.JKHAutoAccrual.dryRunForAbonent(abonentId)", source)
         self.assertIn("Data.writePaymentLedger", source)
         self.assertIn("summaryDirtyReason:false", source)
+        self.assertIn("hasAccrualInManualRecalcPeriod", source)
+        self.assertIn("ACCRUALS_NOT_CREATED", source)
         self.assertIn("Data.flushDbToServer", source)
         self.assertIn("Data.writeLedgerRuntimeCache", body)
         self.assertIn('__paymentTableMode = "readonly_no_recalc"', body)

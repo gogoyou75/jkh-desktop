@@ -2860,6 +2860,19 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
     }
   }
 
+  function hasAccrualInManualRecalcPeriod(rows, period){
+    const fromMonth = String(period && period.from || "").slice(0, 7);
+    const toMonth = String(period && period.to || "").slice(0, 7);
+    if (!fromMonth || !toMonth) return true;
+    const list = Array.isArray(rows) ? rows : [];
+    for (let i = 0; i < list.length; i++) {
+      const row = list[i] || {};
+      const ym = ymKeyOfRow(row);
+      if (ym >= fromMonth && ym <= toMonth && toNum(row.accrued) > 0.0000001) return true;
+    }
+    return false;
+  }
+
   async function applyControlledAutoAccrualForManualRecalc(abonentId, options){
     const opts = options || {};
     if (opts.applyAutoAccrual !== true) return { ok:true, changed:false, reason:"SKIPPED" };
@@ -2889,6 +2902,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
     if (result.changed === true) {
       const proposedRows = Array.isArray(result.proposedRows) ? result.proposedRows : null;
       if (!proposedRows) return { ok:false, changed:true, reason:"AUTOACCRUAL_ROWS_MISSING", autoaccrual:result };
+      if (!hasAccrualInManualRecalcPeriod(proposedRows, opts.period)) return { ok:false, changed:true, reason:"ACCRUALS_NOT_CREATED", autoaccrual:result };
       if (!(window.Data && typeof Data.writePaymentLedger === "function")) return { ok:false, changed:true, reason:"LEDGER_WRITE_UNAVAILABLE", autoaccrual:result };
       const savedLedger = window.Data.writePaymentLedger(abonentId, proposedRows, { eventType:"AUTOACCRUAL_WRITE", summaryDirtyReason:false });
       if (savedLedger === false) return { ok:false, changed:true, reason:"PAYMENT_LEDGER_WRITE_BLOCKED", autoaccrual:result };
@@ -2901,6 +2915,10 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
       } else {
         return { ok:false, changed:true, reason:"SERVER_FLUSH_UNAVAILABLE", autoaccrual:result };
       }
+    }
+
+    if (result.changed !== true && !hasAccrualInManualRecalcPeriod(getPayments(), opts.period)) {
+      return { ok:false, changed:false, reason:"ACCRUALS_NOT_CREATED", autoaccrual:result };
     }
 
     return { ok:true, changed:!!result.changed, reason:reason || "OK", autoaccrual:result };
