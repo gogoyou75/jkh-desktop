@@ -2278,6 +2278,18 @@ function saveReportPeriodForSpravka(from, to, options){
             source: String(opts.source || "abonent_card")
         });
     } catch (e) {}
+    try {
+        console.log("[report-period][readback]", {
+            abonentId: meta.requestedId,
+            uid: meta.resolvedUid,
+            ownerId: meta.ownerId,
+            reportKey: reportKey,
+            reportReadback: result.reportReadback,
+            ok: result.ok,
+            reason: result.reason,
+            source: String(opts.source || "abonent_card")
+        });
+    } catch (e) {}
 
     return result;
 }
@@ -2911,7 +2923,12 @@ function bindCalcButtons(){
                 reportKey: reportPeriodResult && reportPeriodResult.reportKey || getReportPeriodStorageKey(meta)
             });
         } catch (e) {}
-        location.href = "reports.html?abonent=" + encodeURIComponent(id) + (dbKey ? ("&db=" + encodeURIComponent(dbKey)) : (meta.ownerId ? ("&owner=" + encodeURIComponent(meta.ownerId)) : ""));
+        let href = "reports.html?abonent=" + encodeURIComponent(id);
+        if (id) href += "&account=" + encodeURIComponent(id);
+        if (meta.resolvedUid) href += "&uid=" + encodeURIComponent(meta.resolvedUid);
+        if (from && to && isValidPeriod(from, to)) href += "&from=" + encodeURIComponent(from) + "&to=" + encodeURIComponent(to);
+        href += (dbKey ? ("&db=" + encodeURIComponent(dbKey)) : (meta.ownerId ? ("&owner=" + encodeURIComponent(meta.ownerId)) : ""));
+        location.href = href;
     });
 }
 

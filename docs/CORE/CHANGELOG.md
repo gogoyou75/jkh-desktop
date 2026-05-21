@@ -525,3 +525,10 @@ rg -n "splitPremise|premise-transform\]\[split|type: ['\"]split" web LOGIC_SPEC.
 - Card and reports flows now persist/read canonical `report_period_uid_<uid>` together with `calc_period_uid_<uid>` and `calc_period_active_uid_<uid>` so `spravka_sud` can bootstrap the same selected period.
 - Added read-only `window.JKH_debugCardPeriodFlow(abonentId)` for calc/report period key diagnostics and spravka bootstrap warnings.
 - `CALC_PERIOD_CHANGED` remains view-only, no ledger writes/migration/backend totals/formula/FIFO changes were added, and `web/calc_engine.js` was not changed.
+
+## 2026-05-21 - Stage 13.2D.a: fix card period handoff to reports/spravka
+
+- The card reports button now saves and readback-checks `calc_period_uid_<uid>`, `calc_period_active_uid_<uid>`, and `report_period_uid_<uid>` before navigation.
+- `reports.html` bootstraps its date inputs from URL period first, then `report_period_uid_<uid>`, then `calc_period_uid_<uid>`, and logs `[reports][bootstrap-period]`.
+- `spravka_sud.js` logs `[spravka][bootstrap-period]` and keeps report-period-first fallback behavior.
+- No ledger rows, autoaccrual on open, formulas/FIFO/penalty logic, financial dirty behavior, or `web/calc_engine.js` were changed.

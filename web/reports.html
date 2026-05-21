@@ -349,7 +349,9 @@ async function ensureCanonicalAbonent(id){
 
 function getCanonicalPeriodMeta(id, abonent){
     const ownerId = getReportsOwnerId();
-    const uid = String(abonent && abonent.uid || "").trim();
+    const params = getReportsUrlParams();
+    const uidFromUrl = String(params.get("uid") || "").trim();
+    const uid = String(abonent && abonent.uid || uidFromUrl || "").trim();
     const periodKey = (window.Data && typeof Data.resolveCalcPeriodStorageKey === "function")
         ? String(Data.resolveCalcPeriodStorageKey(abonent) || "").trim()
         : "";
@@ -416,6 +418,19 @@ function loadAutoPeriod(abonent) {
         fromEl.value = urlFrom;
         toEl.value = urlTo;
         if (isValidPeriod(urlFrom, urlTo)) saveCanonicalPeriod(abonent, urlFrom, urlTo, { silent: true, source: "url" });
+        try {
+            console.log("[reports][bootstrap-period]", {
+                source: "url",
+                abonentId: meta.abonentId,
+                uid: meta.uid,
+                ownerId: meta.ownerId,
+                reportKey: meta.reportKey,
+                periodKey: meta.periodKey,
+                activeKey: meta.activeKey,
+                from: fromEl.value || "",
+                to: toEl.value || ""
+            });
+        } catch(eUrlBootstrapLog) {}
         try { console.log("[reports][calc-period][restored]", { source: "url", from: fromEl.value || "", to: toEl.value || "", periodKey: meta.periodKey, activeKey: meta.activeKey }); } catch(eUrlLog) {}
         return;
     }
@@ -453,6 +468,19 @@ function loadAutoPeriod(abonent) {
     if (reportPeriod && isValidPeriod(String(reportPeriod.from || ""), String(reportPeriod.to || ""))) {
         fromEl.value = reportPeriod.from || "";
         toEl.value = reportPeriod.to || "";
+        try {
+            console.log("[reports][bootstrap-period]", {
+                source: "report_period_uid",
+                abonentId: meta.abonentId,
+                uid: meta.uid,
+                ownerId: meta.ownerId,
+                reportKey: meta.reportKey,
+                periodKey: meta.periodKey,
+                activeKey: meta.activeKey,
+                from: fromEl.value || "",
+                to: toEl.value || ""
+            });
+        } catch(eReportBootstrapLog) {}
         try { console.log("[reports][calc-period][restored]", { source: "canonical-report", from: fromEl.value || "", to: toEl.value || "", reportKey: meta.reportKey, periodKey: meta.periodKey, activeKey: meta.activeKey }); } catch(eReportRestoreLog) {}
         return;
     }
@@ -460,8 +488,34 @@ function loadAutoPeriod(abonent) {
     if (activeRaw === "1" && p && isValidPeriod(String(p.from || ""), String(p.to || ""))) {
         fromEl.value = p.from || "";
         toEl.value = p.to || "";
+        try {
+            console.log("[reports][bootstrap-period]", {
+                source: "calc_period_uid",
+                abonentId: meta.abonentId,
+                uid: meta.uid,
+                ownerId: meta.ownerId,
+                reportKey: meta.reportKey,
+                periodKey: meta.periodKey,
+                activeKey: meta.activeKey,
+                from: fromEl.value || "",
+                to: toEl.value || ""
+            });
+        } catch(eCalcBootstrapLog) {}
         try { console.log("[reports][calc-period][restored]", { source: "canonical", from: fromEl.value || "", to: toEl.value || "", periodKey: meta.periodKey, activeKey: meta.activeKey }); } catch(eRestoreLog) {}
+        return;
     }
+    try {
+        console.warn("[reports][bootstrap-period]", {
+            source: "missing",
+            abonentId: meta.abonentId,
+            uid: meta.uid,
+            ownerId: meta.ownerId,
+            reportKey: meta.reportKey,
+            periodKey: meta.periodKey,
+            activeKey: meta.activeKey,
+            reason: "PERIOD_NOT_FOUND"
+        });
+    } catch(eMissingBootstrapLog) {}
 }
 
 function isValidPeriod(from, to){
@@ -517,13 +571,35 @@ function saveCanonicalPeriod(abonent, from, to, options){
 
     try {
         console.log("[reports][calc-period][save-confirm]", {
+            abonentId: meta.abonentId,
+            uid: meta.uid,
+            ownerId: meta.ownerId,
+            periodKey: meta.periodKey,
+            activeKey: meta.activeKey,
+            reportKey: meta.reportKey,
             periodRaw: periodRaw,
             activeRaw: activeRaw,
             reportRaw: reportRaw,
             parsedPeriod: parsedPeriod,
-            parsedReportPeriod: parsedReportPeriod
+            parsedReportPeriod: parsedReportPeriod,
+            ok: !!(parsedPeriod && parsedPeriod.from === fromValue && parsedPeriod.to === toValue && parsedReportPeriod && parsedReportPeriod.from === fromValue && parsedReportPeriod.to === toValue && activeRaw === "1")
         });
     } catch(e) {}
+    try {
+        console.log("[report-period][readback]", {
+            abonentId: meta.abonentId,
+            uid: meta.uid,
+            ownerId: meta.ownerId,
+            periodKey: meta.periodKey,
+            activeKey: meta.activeKey,
+            reportKey: meta.reportKey,
+            periodReadback: parsedPeriod,
+            activeReadback: activeRaw,
+            reportReadback: parsedReportPeriod,
+            ok: !!(parsedPeriod && parsedPeriod.from === fromValue && parsedPeriod.to === toValue && parsedReportPeriod && parsedReportPeriod.from === fromValue && parsedReportPeriod.to === toValue && activeRaw === "1"),
+            source: String(opts.source || "manual")
+        });
+    } catch(eReadbackLog) {}
 
     if (!parsedPeriod || parsedPeriod.from !== fromValue || parsedPeriod.to !== toValue || !parsedReportPeriod || parsedReportPeriod.from !== fromValue || parsedReportPeriod.to !== toValue || activeRaw !== "1") {
         if (!opts.silent) alert("Период не выбран или указан неверно.");

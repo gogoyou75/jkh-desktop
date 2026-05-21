@@ -129,6 +129,20 @@
     const calcPeriod = raw ? parsePeriod(raw) : null;
     const selectedPeriod = reportPeriod || calcPeriod;
     const selectedSource = reportPeriod ? "canonical-report-period" : (calcPeriod ? "canonical-calc-period" : "");
+    try {
+      console.log("[spravka][bootstrap-period]", {
+        abonentId: requestedId,
+        uid: uid,
+        readOwner: readOwner,
+        reportKey: reportStorageKey,
+        periodKey: storageKey,
+        activeKey: activeStorageKey,
+        source: selectedSource || "missing",
+        from: selectedPeriod ? selectedPeriod.from : "",
+        to: selectedPeriod ? selectedPeriod.to : "",
+        ok: !!selectedPeriod
+      });
+    } catch (eBootstrapLog) {}
 
     try {
       console.log("[spravka][calc-period-read]", {
