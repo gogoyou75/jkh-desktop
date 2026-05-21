@@ -2181,6 +2181,14 @@ function getCalcPeriodStorageMeta(){
 function calcPeriodKey(){ return getCalcPeriodStorageMeta().storageKey; }
 function calcPeriodActiveKey(){ return getCalcPeriodStorageMeta().activeStorageKey; }
 
+function __isCanonicalCalcPeriodKey(key){
+    return /^calc_period_uid_/.test(String(key || ""));
+}
+
+function __isCanonicalCalcPeriodActiveKey(key){
+    return /^calc_period_active_uid_/.test(String(key || ""));
+}
+
 function loadCalcPeriodUI(){
     const meta = getCalcPeriodStorageMeta();
     const fromEl = document.getElementById("calcFrom");
@@ -2263,7 +2271,7 @@ function saveCalcPeriod(from, to){
         return false;
     }
 
-    if (!meta.storageKey || !meta.activeStorageKey || !meta.resolvedUid) {
+    if (!meta.storageKey || !meta.activeStorageKey || !meta.resolvedUid || !__isCanonicalCalcPeriodKey(meta.storageKey) || !__isCanonicalCalcPeriodActiveKey(meta.activeStorageKey)) {
         saveCalcPeriod.lastError = "UID_REQUIRED";
         __logCalcPeriodNoCanonicalOnce({ requestedId: meta.requestedId, abonentId: meta.requestedId, resolvedUid: meta.resolvedUid, ownerId: meta.ownerId, reason: "UID_REQUIRED", source: "abonent_card.save" });
         try {
@@ -2283,6 +2291,26 @@ function saveCalcPeriod(from, to){
 
     storeSet(meta.storageKey, JSON.stringify(payload), meta.ownerId);
     storeSet(meta.activeStorageKey, "1", meta.ownerId);
+    try {
+        const savedRaw = storeGet(meta.storageKey, meta.ownerId);
+        const savedActive = storeGet(meta.activeStorageKey, meta.ownerId);
+        const savedPeriod = savedRaw ? JSON.parse(savedRaw) : null;
+        if (!savedPeriod || String(savedPeriod.from || "") !== payloadFrom || String(savedPeriod.to || "") !== payloadTo || savedActive !== "1") {
+            saveCalcPeriod.lastError = "CANONICAL_READBACK_FAILED";
+            console.warn("[calc-period][save-readback-failed]", {
+                ownerId: meta.ownerId,
+                storageKey: meta.storageKey,
+                activeStorageKey: meta.activeStorageKey,
+                savedRaw: savedRaw,
+                savedActive: savedActive
+            });
+            return false;
+        }
+    } catch (e) {
+        saveCalcPeriod.lastError = "CANONICAL_READBACK_FAILED";
+        console.warn("[calc-period][save-readback-failed]", e);
+        return false;
+    }
     try {
         console.log("[calc-period][save]", {
             requestedId: meta.requestedId,
@@ -2600,9 +2628,16 @@ function bindCalcButtons(){
         const from = fromEl.value;
         const to = toEl.value;
         if (from || to) {
-            if (isValidPeriod(from, to)) saveCalcPeriod(from, to);
-            else console.warn("[calc-period][save-skipped-invalid-before-reports]", { abonentId: String(id || ""), from: from || "", to: to || "" });
+            if (isValidPeriod(from, to)) {
+                if (!saveCalcPeriod(from, to)) {
+                    alert("Период расчёта не сохранён в canonical UID key. Справка не будет открыта.");
+                    return;
+                }
+            } else {
+                console.warn("[calc-period][save-skipped-invalid-before-reports]", { abonentId: String(id || ""), from: from || "", to: to || "" });
+            }
         }
+        if (!confirmCalcPeriodSaved()) return;
         const meta = getCalcPeriodStorageMeta();
         // ✅ FIX: forward active db key (if present) to reports page
         // to keep correct data when multiple bases exist in localStorage.

@@ -2863,7 +2863,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
   async function applyControlledAutoAccrualForManualRecalc(abonentId, options){
     const opts = options || {};
     if (opts.applyAutoAccrual !== true) return { ok:true, changed:false, reason:"SKIPPED" };
-    if (!window.JKHAutoAccrual || typeof window.JKHAutoAccrual.recalcForAbonent !== "function") {
+    if (!window.JKHAutoAccrual || typeof window.JKHAutoAccrual.dryRunForAbonent !== "function") {
       return { ok:false, changed:false, reason:"AUTOACCRUAL_UNAVAILABLE" };
     }
     if (detectManualRecalcTariffsMissing(abonentId, opts.period)) {
@@ -2872,7 +2872,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
 
     let result = null;
     try {
-      result = window.JKHAutoAccrual.recalcForAbonent(abonentId);
+      result = window.JKHAutoAccrual.dryRunForAbonent(abonentId);
     } catch (e) {
       const reason = normalizeManualRecalcReason(e && (e.code || e.reason || e.message) || e);
       return { ok:false, changed:false, reason:reason };
@@ -2887,6 +2887,11 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
     }
 
     if (result.changed === true) {
+      const proposedRows = Array.isArray(result.proposedRows) ? result.proposedRows : null;
+      if (!proposedRows) return { ok:false, changed:true, reason:"AUTOACCRUAL_ROWS_MISSING", autoaccrual:result };
+      if (!(window.Data && typeof Data.writePaymentLedger === "function")) return { ok:false, changed:true, reason:"LEDGER_WRITE_UNAVAILABLE", autoaccrual:result };
+      const savedLedger = window.Data.writePaymentLedger(abonentId, proposedRows, { eventType:"AUTOACCRUAL_WRITE", summaryDirtyReason:false });
+      if (savedLedger === false) return { ok:false, changed:true, reason:"PAYMENT_LEDGER_WRITE_BLOCKED", autoaccrual:result };
       clearPaymentLedgerReadCache("manual-recalc-autoaccrual");
       try {
         if (window.Data && typeof Data.invalidateLedgerRuntimeCache === "function") Data.invalidateLedgerRuntimeCache(abonentId);
@@ -2921,7 +2926,8 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
     const payload = { ledgerVersion: (window.Data && Data.computeLedgerRuntimeVersion) ? Data.computeLedgerRuntimeVersion(id) : "", rowsById: rowsById, updatedAt: (new Date()).toISOString() };
     if (window.Data && typeof Data.writeLedgerRuntimeCache === "function") Data.writeLedgerRuntimeCache(id, payload);
     __paymentTableRenderedSignature = "";
-    __loadPaymentTable({ mode: "readonly_no_recalc", reason: "full_recalc_completed" });
+    __paymentTableMode = "readonly_no_recalc";
+    await loadPaymentTable("full_recalc_completed");
     if (!window.Data || typeof Data.recalculateAbonentCard !== "function") {
       return { ok:false, reason:"SUMMARY_RECALC_UNAVAILABLE", autoaccrual_changed:!!autoResult.changed, summary_status:"error", summary_reason:"SUMMARY_RECALC_UNAVAILABLE", summary:null, summary_save:{ ok:false, reason:"SUMMARY_RECALC_UNAVAILABLE" } };
     }

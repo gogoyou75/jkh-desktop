@@ -768,15 +768,23 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         body = source.split("window.fullRecalcForCurrentAbonent", 1)[1].split("window.__loadPaymentTable", 1)[0]
 
         self.assertIn("applyControlledAutoAccrualForManualRecalc", source)
-        self.assertIn("window.JKHAutoAccrual.recalcForAbonent(abonentId)", source)
+        self.assertIn("window.JKHAutoAccrual.dryRunForAbonent(abonentId)", source)
+        self.assertIn("Data.writePaymentLedger", source)
+        self.assertIn("summaryDirtyReason:false", source)
         self.assertIn("Data.flushDbToServer", source)
         self.assertIn("Data.writeLedgerRuntimeCache", body)
-        self.assertIn('__loadPaymentTable({ mode: "readonly_no_recalc", reason: "full_recalc_completed" })', body)
+        self.assertIn('__paymentTableMode = "readonly_no_recalc"', body)
+        self.assertIn('await loadPaymentTable("full_recalc_completed")', body)
         self.assertIn("Data.recalculateAbonentCard(id, { period: opts.period })", body)
         self.assertIn("autoaccrual_changed", body)
         self.assertIn("summary_status", body)
         self.assertIn("summary_save", body)
         self.assertNotIn("recalc_batch", body)
+
+        data_path = self._find_repo_file("web", "data.js")
+        self.assertIsNotNone(data_path)
+        data_source = data_path.read_text(encoding="utf-8")
+        self.assertIn("opts.summaryDirtyReason !== false", data_source)
 
     def test_calc_run_button_renders_summary_returned_by_manual_recalc(self):
         path = self._find_repo_file("web", "abonent_card.html")
@@ -784,6 +792,10 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         source = path.read_text(encoding="utf-8")
         self.assertIn("calcRunBtn", source)
         self.assertIn("window.fullRecalcForCurrentAbonent", source)
+        self.assertIn("__isCanonicalCalcPeriodKey", source)
+        self.assertIn("__isCanonicalCalcPeriodActiveKey", source)
+        self.assertIn("CANONICAL_READBACK_FAILED", source)
+        self.assertIn("confirmCalcPeriodSaved()) return", source)
         body = source.split("window.fullRecalcForCurrentAbonent", 1)[1].split("if (!recalcHandled)", 1)[0]
 
         self.assertIn("applyAutoAccrual: true", body)

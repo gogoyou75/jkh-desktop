@@ -649,7 +649,9 @@
     }
     if (ok !== false) {
       invalidateLedgerRuntimeCache(abonentOrId);
-      markAbonentSummaryDirtyLater(abonent || id, opts.summaryDirtyReason || "LEDGER_WRITE");
+      if (opts.summaryDirtyReason !== false) {
+        markAbonentSummaryDirtyLater(abonent || id, opts.summaryDirtyReason || "LEDGER_WRITE");
+      }
     }
     return ok;
   }
