@@ -476,3 +476,9 @@ rg -n "splitPremise|premise-transform\]\[split|type: ['\"]split" web LOGIC_SPEC.
 - Added read-only `window.JKH_verifyLedgerMigration(options)` to classify canonical/legacy ledger migration readiness without creating, overwriting, migrating, or deleting ledger keys.
 - Verification reports `READY_TO_MIGRATE`, mixed-ledger blockers, missing/invalid UID blockers, stale runtime cache, and optional orphan summary items supplied through `options.summaryItems`.
 - The layer does not run autoaccrual, does not calculate backend financial totals, does not mark `CALC_PERIOD_CHANGED` dirty, and does not touch `web/calc_engine.js`.
+
+## 2026-05-21 — Stage 13.2B.a: per-abonent ledger migration diagnostics
+
+- Added read-only `window.JKH_verifyLedgerMigrationForAbonent(abonentId)` and `window.JKH_debugAbonentLedger(abonentId)` for one-account diagnostics.
+- Debug output explains UID/canonical/legacy state, migration blockers, mixed-ledger comparison, and why index totals/summary may be empty.
+- No ledger writes, migration, autoaccrual, backend financial calculation, formula changes, or `web/calc_engine.js` changes.

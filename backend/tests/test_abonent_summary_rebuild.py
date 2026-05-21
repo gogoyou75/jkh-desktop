@@ -898,6 +898,42 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         calc_after = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
         self.assertEqual(calc_before, calc_after)
 
+    def test_stage_13_2ba_per_abonent_ledger_diagnostics_are_read_only(self):
+        data_path = self._find_repo_file("web", "data.js")
+        calc_engine_path = self._find_repo_file("web", "calc_engine.js")
+        self.assertIsNotNone(data_path)
+        self.assertIsNotNone(calc_engine_path)
+        data_source = data_path.read_text(encoding="utf-8")
+        calc_before = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
+
+        self.assertIn("window.JKH_verifyLedgerMigrationForAbonent = function(abonentId)", data_source)
+        self.assertIn("window.JKH_debugAbonentLedger = function(abonentId)", data_source)
+        helper_body = data_source.split("function _debugAbonentLedgerReport", 1)[1].split("window.getPaymentsKeyForAbonent", 1)[0]
+        self.assertIn("[ledger-migration][abonent-verification]", helper_body)
+        self.assertIn("[ledger-migration][abonent-debug]", helper_body)
+        self.assertIn("whySummaryFreshBlocked", helper_body)
+        self.assertIn("whyIndexTotalsEmpty", helper_body)
+        self.assertIn("LEGACY_LEDGER_MIGRATION_REQUIRED", helper_body)
+        self.assertIn("UID_MISSING_WITH_LEGACY_LEDGER", helper_body)
+        self.assertIn("MIXED_LEDGER_DIFFERENCE", helper_body)
+        self.assertIn("RESPONSIBILITY_PERIOD_MISSING", helper_body)
+        self.assertIn("CANONICAL_LEDGER_EMPTY", helper_body)
+        self.assertIn("TOTALS_EMPTY", helper_body)
+        self.assertIn("mixedComparison", helper_body)
+        self.assertIn("checksumEqual", data_source)
+        self.assertIn("totalsEqual", data_source)
+        self.assertNotIn("_setProjectRaw", helper_body)
+        self.assertNotIn("_removeProjectRaw", helper_body)
+        self.assertNotIn("writePaymentLedger", helper_body)
+        self.assertNotIn("createEmptyPaymentLedger", helper_body)
+        self.assertNotIn("ensureAbonentUid", helper_body)
+        self.assertNotIn("AUTOACCRUAL_WRITE", helper_body)
+        self.assertNotIn("CALC_PERIOD_CHANGED", helper_body)
+        self.assertIn("window.JKH_verifyLedgerMigration = function(options)", data_source)
+
+        calc_after = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
+        self.assertEqual(calc_before, calc_after)
+
 
 if __name__ == "__main__":
     unittest.main()

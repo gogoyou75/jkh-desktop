@@ -897,6 +897,46 @@
     };
   }
 
+  function _ledgerRowsChecksum(rows) {
+    try {
+      var normalized = (Array.isArray(rows) ? rows : []).map(function(row) {
+        if (!row || typeof row !== "object") return row;
+        var out = {};
+        Object.keys(row).sort().forEach(function(k) { out[k] = row[k]; });
+        return out;
+      });
+      return JSON.stringify(normalized);
+    } catch (e) {
+      return "";
+    }
+  }
+
+  function _ledgerSimpleTotals(rows) {
+    var totalAccrued = 0;
+    var totalPaid = 0;
+    (Array.isArray(rows) ? rows : []).forEach(function(row) {
+      totalAccrued += _summaryNumber(row && row.accrued);
+      totalPaid += _summaryNumber(row && row.paid);
+    });
+    return {
+      totalAccrued: Math.round(totalAccrued * 100) / 100,
+      totalPaid: Math.round(totalPaid * 100) / 100
+    };
+  }
+
+  function _mixedLedgerComparison(canonical, legacy) {
+    var canonicalRows = Array.isArray(canonical && canonical.rows) ? canonical.rows : [];
+    var legacyRows = Array.isArray(legacy && legacy.rows) ? legacy.rows : [];
+    var canonicalTotals = _ledgerSimpleTotals(canonicalRows);
+    var legacyTotals = _ledgerSimpleTotals(legacyRows);
+    return {
+      legacyRowsCount: legacyRows.length,
+      canonicalRowsCount: canonicalRows.length,
+      checksumEqual: _ledgerRowsChecksum(canonicalRows) === _ledgerRowsChecksum(legacyRows),
+      totalsEqual: canonicalTotals.totalAccrued === legacyTotals.totalAccrued && canonicalTotals.totalPaid === legacyTotals.totalPaid
+    };
+  }
+
   function _migrationVerificationItem(abonentId, abonent, summaryByUid) {
     var id = String(abonentId || "").trim();
     var a = abonent || {};
@@ -955,9 +995,75 @@
       hasRuntimeCache: !!runtime.hasRuntimeCache,
       runtimeCacheStale: !!runtime.runtimeCacheStale,
       summaryStatus: String(summary && summary.summary_status || ""),
+      mixedComparison: canonical.rowsCount > 0 && legacy.rowsCount > 0 ? _mixedLedgerComparison(canonical, legacy) : null,
       canMigrate: canMigrate,
       state: state,
       issues: issues.join(",")
+    };
+  }
+
+  function _findMigrationVerificationAbonent(abonentId) {
+    var db = window.AbonentsDB || {};
+    var abonents = db && db.abonents && typeof db.abonents === "object" ? db.abonents : {};
+    var found = _findAbonentByIdOrUid(abonentId);
+    var id = String(found && found.id || abonentId || "").trim();
+    var abonent = found && found.abonent ? found.abonent : (id && abonents[id] ? abonents[id] : null);
+    return { id: id, abonent: abonent };
+  }
+
+  function _whySummaryFreshBlocked(item) {
+    if (!item) return "UNKNOWN";
+    if (item.state === "READY_TO_MIGRATE" || item.state === "READY_TO_MIGRATE_EMPTY_CANONICAL") return "LEGACY_LEDGER_MIGRATION_REQUIRED";
+    if (item.state === "BLOCKED_UID_MISSING_WITH_LEGACY") return "UID_MISSING_WITH_LEGACY_LEDGER";
+    if (item.state === "BLOCKED_MIXED_LEDGER") return "MIXED_LEDGER_DIFFERENCE";
+    if (item.state === "BLOCKED_INVALID_UID") return "INVALID_UID";
+    if (item.state === "CANONICAL_EMPTY") return "CANONICAL_LEDGER_EMPTY";
+    if (item.summaryStatus && item.summaryStatus !== "fresh") return "SUMMARY_NOT_FRESH";
+    return "";
+  }
+
+  function _whyIndexTotalsEmpty(item, abonent) {
+    if (!item) return "UNKNOWN";
+    var blocked = _whySummaryFreshBlocked(item);
+    if (blocked) return blocked;
+    if (item.summaryStatus && item.summaryStatus !== "fresh") return "SUMMARY_NOT_FRESH";
+    if (item.state === "CANONICAL_EMPTY" || (item.hasCanonical && item.canonicalRowsCount <= 0)) return "CANONICAL_LEDGER_EMPTY";
+    if (item.state === "BLOCKED_MIXED_LEDGER") return "MIXED_LEDGER_DIFFERENCE";
+    var hasResponsibilityStart = !!String(abonent && (
+      abonent.calcStartDate || abonent.calc_start_date || abonent.dateFrom || abonent.date_from ||
+      abonent.responsibilityFrom || abonent.respFrom || abonent.startCalc || abonent.start_calc
+    ) || "").trim();
+    if (!hasResponsibilityStart) return "RESPONSIBILITY_PERIOD_MISSING";
+    if (item.summaryStatus === "fresh") return "TOTALS_EMPTY";
+    return "UNKNOWN";
+  }
+
+  function _debugAbonentLedgerReport(abonentId) {
+    var found = _findMigrationVerificationAbonent(abonentId);
+    var abonent = found.abonent || {};
+    var item = found.abonent ? _migrationVerificationItem(found.id, found.abonent, {}) : null;
+    var blockers = item && item.issues ? String(item.issues).split(",").filter(Boolean) : [];
+    var warnings = [];
+    if (item && item.runtimeCacheStale) warnings.push("STALE_RUNTIME_CACHE");
+    if (item && item.state === "LEGACY_EMPTY") warnings.push("LEGACY_LEDGER_EMPTY");
+    return {
+      abonentId: found.id,
+      fio: String(abonent && (abonent.fio || abonent.full_name || abonent.fullName || abonent.display_name) || "").trim(),
+      uid: item ? item.uid : "",
+      uidStatus: item ? (item.uidValid ? "valid" : (item.uid ? "invalid" : "missing")) : "missing",
+      canonicalKey: item ? item.canonicalKey : "",
+      hasCanonical: !!(item && item.hasCanonical),
+      canonicalRowsCount: item ? item.canonicalRowsCount : 0,
+      legacyKey: item ? item.legacyKey : "",
+      hasLegacy: !!(item && item.hasLegacy),
+      legacyRowsCount: item ? item.legacyRowsCount : 0,
+      state: item ? item.state : "ABONENT_NOT_FOUND",
+      safeToMigrate: !!(item && item.canMigrate),
+      blockers: blockers,
+      warnings: warnings,
+      whySummaryFreshBlocked: item ? (_whySummaryFreshBlocked(item) || "") : "UNKNOWN",
+      whyIndexTotalsEmpty: item ? _whyIndexTotalsEmpty(item, abonent) : "UNKNOWN",
+      mixedComparison: item && item.mixedComparison ? item.mixedComparison : null
     };
   }
 
@@ -1028,6 +1134,42 @@
     try { console.table(items); } catch (e) {}
     try { console.log("[ledger][migration-verification]", { counters: counters, readOnly: true }); } catch (e2) {}
     return result;
+  };
+
+  window.JKH_verifyLedgerMigrationForAbonent = function(abonentId) {
+    var found = _findMigrationVerificationAbonent(abonentId);
+    var report = found.abonent
+      ? _migrationVerificationItem(found.id, found.abonent, {})
+      : {
+        abonentId: String(abonentId || "").trim(),
+        accountNumber: "",
+        uid: "",
+        uidValid: false,
+        canonicalKey: "",
+        hasCanonical: false,
+        canonicalRowsCount: 0,
+        legacyKey: "",
+        hasLegacy: false,
+        legacyRowsCount: 0,
+        runtimeCacheKey: "",
+        hasRuntimeCache: false,
+        runtimeCacheStale: false,
+        summaryStatus: "",
+        mixedComparison: null,
+        canMigrate: false,
+        state: "ABONENT_NOT_FOUND",
+        issues: "ABONENT_NOT_FOUND"
+      };
+    try { console.table([report]); } catch (e) {}
+    try { console.log("[ledger-migration][abonent-verification]", report); } catch (e2) {}
+    return report;
+  };
+
+  window.JKH_debugAbonentLedger = function(abonentId) {
+    var report = _debugAbonentLedgerReport(abonentId);
+    try { console.table([report]); } catch (e) {}
+    try { console.log("[ledger-migration][abonent-debug]", report); } catch (e2) {}
+    return report;
   };
 
 
