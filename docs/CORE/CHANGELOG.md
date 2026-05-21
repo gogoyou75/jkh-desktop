@@ -506,3 +506,9 @@ rg -n "splitPremise|premise-transform\]\[split|type: ['\"]split" web LOGIC_SPEC.
 - Fresh summary payload now includes canonical nested `summary.totals` fields: `principal`, `debt`, `penalty`, `total`, `accrued`, `paid`, and `balance`, while keeping legacy flat aliases.
 - `index.html` reads nested `summary.totals.*` first and falls back to legacy flat fields.
 - No ledger writes, migration, autoaccrual, formula changes, FIFO changes, backend totals, or `web/calc_engine.js` changes.
+
+## 2026-05-21 — Stage 13.2C.d: index totals DOM mapping
+
+- `index.html` now carries resolved rendered totals through explicit `renderedValues` and writes debt, penalty, accrued, and paid into identifiable table cells.
+- Added `[index][totals-render]` diagnostics with UID, summary status, totals source, totals object, and rendered values for passive summary rows.
+- No ledger writes, migration, autoaccrual, formula changes, FIFO changes, backend totals, or `web/calc_engine.js` changes.

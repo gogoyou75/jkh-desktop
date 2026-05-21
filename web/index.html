@@ -834,6 +834,18 @@ function pickSummaryValue(summary, keys){
     return "";
 }
 
+function pickSummaryValueWithSource(summary, keys){
+    for (let i = 0; i < keys.length; i++) {
+        const key = String(keys[i] || "");
+        let v = summary ? summary[key] : undefined;
+        if ((v === null || v === undefined || v === "") && key.indexOf("totals.") === 0 && summary && summary.totals && typeof summary.totals === "object") {
+            v = summary.totals[key.slice(7)];
+        }
+        if (v !== null && v !== undefined && v !== "") return { value: v, source: key };
+    }
+    return { value: "", source: "" };
+}
+
 function formatSummaryDate(value){
     const d = parseDateAnyToDate(value);
     return d ? formatDMY(d) : String(value || "");
@@ -872,6 +884,16 @@ function buildIndexRowFromSummaryItem(item){
     const otch = summary.otch || summary.middle_name || abonent.otch || abonent.middle_name || fio.slice(2).join(" ") || "";
 
     const period = (summary.period && typeof summary.period === "object") ? summary.period : {};
+    const debtValue = isFresh ? pickSummaryValueWithSource(summary, ["totals.debt", "totals.total", "totals.total_debt", "total_debt", "totalDebt", "debt_total", "total"]) : { value: "", source: "" };
+    const penaltyValue = isFresh ? pickSummaryValueWithSource(summary, ["totals.penalty", "totals.total_penalty", "total_penalty", "penalty", "pay_penalty", "penalty_debt", "penaltyDebt"]) : { value: "", source: "" };
+    const accruedValue = isFresh ? pickSummaryValueWithSource(summary, ["totals.accrued", "totals.total_accrued", "total_accrued", "nachisleno", "accrued", "accrued_total", "accruedTotal"]) : { value: "", source: "" };
+    const paidValue = isFresh ? pickSummaryValueWithSource(summary, ["totals.paid", "totals.total_paid", "total_paid", "oplacheno", "paid", "paid_total", "paidTotal"]) : { value: "", source: "" };
+    const renderedValues = {
+        debt: summaryNumberToDisplay(debtValue.value),
+        penalty: summaryNumberToDisplay(penaltyValue.value),
+        accrued: summaryNumberToDisplay(accruedValue.value),
+        paid: summaryNumberToDisplay(paidValue.value)
+    };
 
     return {
         id: String(item && (item.abonent_id || item.account_number || item.account_uid || item.id) || abonent.id || abonent.abonent_id || abonent.account_number || abonent.account_uid || ""),
@@ -879,17 +901,29 @@ function buildIndexRowFromSummaryItem(item){
         fam: String(fam || ""),
         name: String(name || ""),
         otch: String(otch || ""),
-        totalDebt: isFresh ? summaryNumberToDisplay(pickSummaryValue(summary, ["totals.debt", "totals.total", "totals.total_debt", "total_debt", "totalDebt", "debt_total", "total"])) : "",
-        penalty: isFresh ? summaryNumberToDisplay(pickSummaryValue(summary, ["totals.penalty", "totals.total_penalty", "total_penalty", "penalty", "pay_penalty", "penalty_debt", "penaltyDebt"])) : "",
-        nachisleno: isFresh ? summaryNumberToDisplay(pickSummaryValue(summary, ["totals.accrued", "totals.total_accrued", "total_accrued", "nachisleno", "accrued", "accrued_total", "accruedTotal"])) : "",
-        oplacheno: isFresh ? summaryNumberToDisplay(pickSummaryValue(summary, ["totals.paid", "totals.total_paid", "total_paid", "oplacheno", "paid", "paid_total", "paidTotal"])) : "",
+        totalDebt: renderedValues.debt,
+        penalty: renderedValues.penalty,
+        nachisleno: renderedValues.accrued,
+        oplacheno: renderedValues.paid,
         startDate: isFresh ? formatSummaryDate(pickSummaryValue(summary, ["start_date", "startDate", "period_start", "date_from", "period_from", "period.from"]) || period.from || period.period_from || period.date_from || period.start_date) : "",
         endDate: isFresh ? formatSummaryDate(pickSummaryValue(summary, ["end_date", "endDate", "period_end", "date_to", "period_to", "as_of", "period.to"]) || period.to || period.period_to || period.date_to || period.end_date || period.as_of) : "",
         note: String(summary.note || summary.defaultNote || ""),
         flatReg: String(summary.flat_reg || summary.regnum || summary.premise_regnum || summary.premiseRegnum || abonent.flat_reg || abonent.regnum || abonent.premise_regnum || abonent.premiseRegnum || ""),
         rowStatusMark: "",
         summaryStatus: status,
-        summaryReason: reason
+        summaryReason: reason,
+        __totalsRenderDebug: {
+            uid: String(item && item.account_uid || summary.account_uid || summary.accountUid || abonent.account_uid || abonent.accountUid || ""),
+            summaryStatus: status,
+            totalsSource: {
+                debt: debtValue.source,
+                penalty: penaltyValue.source,
+                accrued: accruedValue.source,
+                paid: paidValue.source
+            },
+            totalsObject: summary && summary.totals && typeof summary.totals === "object" ? summary.totals : null,
+            renderedValues: renderedValues
+        }
     };
 }
 
@@ -1480,16 +1514,19 @@ function render() {
             <td>${r.fam}</td>
             <td>${r.name}</td>
             <td>${r.otch}</td>
-            <td>${r.totalDebt}</td>
-            <td>${r.penalty}</td>
-            <td>${r.nachisleno}</td>
-            <td>${r.oplacheno}</td>
+            <td data-field="totalDebt">${r.totalDebt}</td>
+            <td data-field="penalty">${r.penalty}</td>
+            <td data-field="nachisleno">${r.nachisleno}</td>
+            <td data-field="oplacheno">${r.oplacheno}</td>
             <td>${r.startDate}</td>
             <td>${r.endDate}</td>
             <td><textarea class="note-inline note-abonent" data-id="${r.id}" placeholder="" ${summaryMode ? 'readonly title="Passive summary mode: read-only"' : ''}>${escapeHtml(String(r.note||""))}</textarea></td>
             <td>${r.flatReg}${r.rowStatusMark ? (' <span class="row-status-badge">' + r.rowStatusMark + '</span>') : ''}</td>
             <td>${summaryStatusHtml(r)}</td>
         `;
+        if (summaryMode && r.__totalsRenderDebug) {
+            try { console.log("[index][totals-render]", r.__totalsRenderDebug); } catch(e) {}
+        }
         tbody.appendChild(tr);
     });
 

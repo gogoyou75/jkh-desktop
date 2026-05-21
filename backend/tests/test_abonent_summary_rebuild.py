@@ -1078,6 +1078,34 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         calc_after = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
         self.assertEqual(calc_before, calc_after)
 
+    def test_stage_13_2cd_index_totals_dom_mapping_uses_rendered_values(self):
+        index_path = self._find_repo_file("web", "index.html")
+        calc_engine_path = self._find_repo_file("web", "calc_engine.js")
+        self.assertIsNotNone(index_path)
+        self.assertIsNotNone(calc_engine_path)
+        source = index_path.read_text(encoding="utf-8")
+        calc_before = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
+
+        build_body = source.split("function buildIndexRowFromSummaryItem", 1)[1].split("function renderIndexSummaryLoading", 1)[0]
+        render_body = source.split("function render() {", 1)[1].split("tbody.onclick", 1)[0]
+        self.assertIn("function pickSummaryValueWithSource", source)
+        self.assertIn("__totalsRenderDebug", build_body)
+        self.assertIn("renderedValues", build_body)
+        self.assertIn("totalsSource", build_body)
+        self.assertIn("totalsObject", build_body)
+        self.assertIn("[index][totals-render]", render_body)
+        self.assertIn('data-field="totalDebt"', render_body)
+        self.assertIn('data-field="penalty"', render_body)
+        self.assertIn('data-field="nachisleno"', render_body)
+        self.assertIn('data-field="oplacheno"', render_body)
+        self.assertIn("totals.debt", build_body)
+        self.assertIn("totals.penalty", build_body)
+        self.assertIn("totals.accrued", build_body)
+        self.assertIn("totals.paid", build_body)
+
+        calc_after = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
+        self.assertEqual(calc_before, calc_after)
+
 
 if __name__ == "__main__":
     unittest.main()
