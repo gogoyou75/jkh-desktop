@@ -512,3 +512,9 @@ rg -n "splitPremise|premise-transform\]\[split|type: ['\"]split" web LOGIC_SPEC.
 - `index.html` now carries resolved rendered totals through explicit `renderedValues` and writes debt, penalty, accrued, and paid into identifiable table cells.
 - Added `[index][totals-render]` diagnostics with UID, summary status, totals source, totals object, and rendered values for passive summary rows.
 - No ledger writes, migration, autoaccrual, formula changes, FIFO changes, backend totals, or `web/calc_engine.js` changes.
+
+## 2026-05-21 — Stage 13.2C.e: index totals cell targeting
+
+- Index totals DOM writes now target explicit `td[data-field="debt"]`, `td[data-field="penalty"]`, `td[data-field="accrued"]`, and `td[data-field="paid"]`.
+- Added `[index][totals-dom-write]` diagnostics with UID, field, value, targetFound, beforeText, and afterText.
+- No positional `cells[5]` / `cells[6]` / `cells[7]` totals mapping, ledger writes, backend totals, formula changes, or `web/calc_engine.js` changes.

@@ -927,6 +927,23 @@ function buildIndexRowFromSummaryItem(item){
     };
 }
 
+function writeIndexTotalsCell(tr, uid, field, value){
+    const target = tr ? tr.querySelector('td[data-field="' + field + '"]') : null;
+    const beforeText = target ? String(target.textContent || "") : "";
+    if (target) target.textContent = String(value || "");
+    const afterText = target ? String(target.textContent || "") : "";
+    try {
+        console.log("[index][totals-dom-write]", {
+            uid: String(uid || ""),
+            field: field,
+            value: String(value || ""),
+            targetFound: !!target,
+            beforeText: beforeText,
+            afterText: afterText
+        });
+    } catch(e) {}
+}
+
 function renderIndexSummaryLoading(){
     const tbody = document.querySelector("#abonentsTable tbody");
     if (tbody) tbody.innerHTML = '<tr><td colspan="14">Загрузка summary-layer…</td></tr>';
@@ -1514,10 +1531,10 @@ function render() {
             <td>${r.fam}</td>
             <td>${r.name}</td>
             <td>${r.otch}</td>
-            <td data-field="totalDebt">${r.totalDebt}</td>
+            <td data-field="debt"></td>
             <td data-field="penalty">${r.penalty}</td>
-            <td data-field="nachisleno">${r.nachisleno}</td>
-            <td data-field="oplacheno">${r.oplacheno}</td>
+            <td data-field="accrued"></td>
+            <td data-field="paid"></td>
             <td>${r.startDate}</td>
             <td>${r.endDate}</td>
             <td><textarea class="note-inline note-abonent" data-id="${r.id}" placeholder="" ${summaryMode ? 'readonly title="Passive summary mode: read-only"' : ''}>${escapeHtml(String(r.note||""))}</textarea></td>
@@ -1527,6 +1544,10 @@ function render() {
         if (summaryMode && r.__totalsRenderDebug) {
             try { console.log("[index][totals-render]", r.__totalsRenderDebug); } catch(e) {}
         }
+        writeIndexTotalsCell(tr, r.accountUid, "debt", r.totalDebt);
+        writeIndexTotalsCell(tr, r.accountUid, "penalty", r.penalty);
+        writeIndexTotalsCell(tr, r.accountUid, "accrued", r.nachisleno);
+        writeIndexTotalsCell(tr, r.accountUid, "paid", r.oplacheno);
         tbody.appendChild(tr);
     });
 
