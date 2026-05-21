@@ -2832,9 +2832,83 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
 
 
 
-  window.fullRecalcForCurrentAbonent = async function fullRecalcForCurrentAbonent(){
+  function normalizeManualRecalcReason(reason){
+    const r = String(reason || "").trim();
+    if (r === "NO_RANGE" || r === "NO_MONTHS") return "RESPONSIBILITY_PERIOD_MISSING";
+    if (r === "EMPTY_ID" || r === "EMPTY_OWNER") return "UID_REQUIRED";
+    return r || "CALC_FAILED";
+  }
+
+  function firstPeriodMonthForAutoAccrual(period){
+    const from = String(period && period.from || "").trim();
+    const m = from.match(/^(\d{4})-(\d{2})/);
+    if (!m) return null;
+    return { year: m[1], month: m[2] };
+  }
+
+  function detectManualRecalcTariffsMissing(abonentId, period){
+    try {
+      if (!window.JKHAutoAccrual || typeof window.JKHAutoAccrual.debugMonth !== "function") return false;
+      const firstMonth = firstPeriodMonthForAutoAccrual(period);
+      if (!firstMonth) return false;
+      const dbg = window.JKHAutoAccrual.debugMonth(abonentId, firstMonth.year, firstMonth.month);
+      const tariffs = Array.isArray(dbg && dbg.tariffs) ? dbg.tariffs : [];
+      if (!tariffs.length) return true;
+      return Number(dbg && dbg.totalAccrued) <= 0 && Number(dbg && dbg.perM2Part) <= 0 && Number(dbg && dbg.fixedPart) <= 0;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  async function applyControlledAutoAccrualForManualRecalc(abonentId, options){
+    const opts = options || {};
+    if (opts.applyAutoAccrual !== true) return { ok:true, changed:false, reason:"SKIPPED" };
+    if (!window.JKHAutoAccrual || typeof window.JKHAutoAccrual.recalcForAbonent !== "function") {
+      return { ok:false, changed:false, reason:"AUTOACCRUAL_UNAVAILABLE" };
+    }
+    if (detectManualRecalcTariffsMissing(abonentId, opts.period)) {
+      return { ok:false, changed:false, reason:"TARIFFS_NOT_FOUND" };
+    }
+
+    let result = null;
+    try {
+      result = window.JKHAutoAccrual.recalcForAbonent(abonentId);
+    } catch (e) {
+      const reason = normalizeManualRecalcReason(e && (e.code || e.reason || e.message) || e);
+      return { ok:false, changed:false, reason:reason };
+    }
+
+    const reason = normalizeManualRecalcReason(result && result.reason);
+    if (!result || result.ok !== true) {
+      return { ok:false, changed:false, reason:reason };
+    }
+    if (reason === "RESPONSIBILITY_PERIOD_MISSING" || reason === "TARIFFS_NOT_FOUND" || reason === "LEDGER_JSON_INVALID") {
+      return { ok:false, changed:false, reason:reason };
+    }
+
+    if (result.changed === true) {
+      clearPaymentLedgerReadCache("manual-recalc-autoaccrual");
+      try {
+        if (window.Data && typeof Data.invalidateLedgerRuntimeCache === "function") Data.invalidateLedgerRuntimeCache(abonentId);
+      } catch (e0) {}
+      if (window.Data && typeof Data.flushDbToServer === "function") {
+        await Data.flushDbToServer();
+      } else {
+        return { ok:false, changed:true, reason:"SERVER_FLUSH_UNAVAILABLE", autoaccrual:result };
+      }
+    }
+
+    return { ok:true, changed:!!result.changed, reason:reason || "OK", autoaccrual:result };
+  }
+
+  window.fullRecalcForCurrentAbonent = async function fullRecalcForCurrentAbonent(options){
+    const opts = options && typeof options === "object" ? options : {};
     const id = String(getAbonentId() || "");
     if (!id) return { ok:false, reason:"ABONENT_REQUIRED" };
+    const autoResult = await applyControlledAutoAccrualForManualRecalc(id, opts);
+    if (!autoResult || autoResult.ok !== true) {
+      return { ok:false, reason:normalizeManualRecalcReason(autoResult && autoResult.reason), autoaccrual:autoResult, autoaccrual_changed:!!(autoResult && autoResult.changed) };
+    }
     const arr = getPayments();
     const baseRows = runningTotalsBaseRows(arr);
     const sig = ledgerSignatureForRows(arr);
@@ -2849,12 +2923,15 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
     __paymentTableRenderedSignature = "";
     __loadPaymentTable({ mode: "readonly_no_recalc", reason: "full_recalc_completed" });
     if (!window.Data || typeof Data.recalculateAbonentCard !== "function") {
-      return { ok:true, summary_status:"error", summary_reason:"SUMMARY_RECALC_UNAVAILABLE", summary:null, summary_save:{ ok:false, reason:"SUMMARY_RECALC_UNAVAILABLE" } };
+      return { ok:false, reason:"SUMMARY_RECALC_UNAVAILABLE", autoaccrual_changed:!!autoResult.changed, summary_status:"error", summary_reason:"SUMMARY_RECALC_UNAVAILABLE", summary:null, summary_save:{ ok:false, reason:"SUMMARY_RECALC_UNAVAILABLE" } };
     }
-    const summaryResult = await Data.recalculateAbonentCard(id);
+    const summaryResult = await Data.recalculateAbonentCard(id, { period: opts.period });
     const summary = summaryResult && summaryResult.summary && typeof summaryResult.summary === "object" ? summaryResult.summary : null;
     return {
-      ok:true,
+      ok:!!(summaryResult && summaryResult.ok === true),
+      reason: summaryResult && (summaryResult.summary_reason || summaryResult.reason) || "",
+      autoaccrual_changed:!!autoResult.changed,
+      autoaccrual:autoResult,
       summary_status: summaryResult && (summaryResult.summary_status || summaryResult.status) || "error",
       summary_reason: summaryResult && (summaryResult.summary_reason || summaryResult.reason) || "",
       summary: summary,

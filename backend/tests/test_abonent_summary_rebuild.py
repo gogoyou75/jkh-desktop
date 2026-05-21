@@ -767,9 +767,13 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         self.assertIn("window.fullRecalcForCurrentAbonent", source)
         body = source.split("window.fullRecalcForCurrentAbonent", 1)[1].split("window.__loadPaymentTable", 1)[0]
 
+        self.assertIn("applyControlledAutoAccrualForManualRecalc", source)
+        self.assertIn("window.JKHAutoAccrual.recalcForAbonent(abonentId)", source)
+        self.assertIn("Data.flushDbToServer", source)
         self.assertIn("Data.writeLedgerRuntimeCache", body)
         self.assertIn('__loadPaymentTable({ mode: "readonly_no_recalc", reason: "full_recalc_completed" })', body)
-        self.assertIn("Data.recalculateAbonentCard(id)", body)
+        self.assertIn("Data.recalculateAbonentCard(id, { period: opts.period })", body)
+        self.assertIn("autoaccrual_changed", body)
         self.assertIn("summary_status", body)
         self.assertIn("summary_save", body)
         self.assertNotIn("recalc_batch", body)
@@ -782,6 +786,8 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         self.assertIn("window.fullRecalcForCurrentAbonent", source)
         body = source.split("window.fullRecalcForCurrentAbonent", 1)[1].split("if (!recalcHandled)", 1)[0]
 
+        self.assertIn("applyAutoAccrual: true", body)
+        self.assertIn("period: { from: from, to: to }", body)
         self.assertIn("recalcResult.summary", body)
         self.assertIn("renderAbonentSummaryStatus(summaryStatus, summaryReason)", body)
         self.assertIn("__renderAbonentTotalsFromFreshSummary(summary)", body)

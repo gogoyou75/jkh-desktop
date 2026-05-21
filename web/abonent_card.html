@@ -2560,9 +2560,11 @@ function bindCalcButtons(){
 
             let recalcHandled = false;
             if (typeof window.fullRecalcForCurrentAbonent === "function") {
-                const recalcResult = await window.fullRecalcForCurrentAbonent();
+                const recalcResult = await window.fullRecalcForCurrentAbonent({ period: { from: from, to: to }, applyAutoAccrual: true });
                 if (!recalcResult || recalcResult.ok !== true) {
-                    alert("Пересчёт не выполнен: " + String(recalcResult && recalcResult.reason || "CALC_FAILED"));
+                    const reason = String(recalcResult && (recalcResult.reason || recalcResult.summary_reason) || "CALC_FAILED");
+                    renderAbonentSummaryStatus("error", reason);
+                    alert("Пересчёт не выполнен: " + reason);
                     return;
                 }
                 const summary = recalcResult && recalcResult.summary && typeof recalcResult.summary === "object" ? recalcResult.summary : null;
