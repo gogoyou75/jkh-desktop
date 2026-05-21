@@ -494,3 +494,9 @@ rg -n "splitPremise|premise-transform\]\[split|type: ['\"]split" web LOGIC_SPEC.
 - Added read-only `window.JKH_debugTotalsValidation(abonentId)` for field-level totals validation diagnostics.
 - The helper reports raw `calcTotalsAsOfAdjusted`, type/finite/missing/NaN status for principal/debt/penalty/total/accrued/paid/balance, validation blocker, payload before validation, and invalid field lists.
 - No summary writes, ledger writes, migration, autoaccrual, formula changes, or `web/calc_engine.js` changes.
+
+## 2026-05-21 — Stage 13.2C.b: summary status and render guard diagnostics
+
+- Added read-only `window.JKH_debugSummaryRenderState(abonentId)` to show summary status before/after validation, invalid fields, freshness/runtime flags, index render guard ALLOW/DENY states, and the guard hiding totals.
+- Added read-only `window.JKH_getIndexRenderDebugState(...)` on `index.html` so diagnostics can inspect passive summary mode, pagination, row mapping, and render signature state without changing render behavior.
+- No summary writes, ledger writes, migration, autoaccrual, formula changes, or `web/calc_engine.js` changes.

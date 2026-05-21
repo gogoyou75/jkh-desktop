@@ -2636,6 +2636,95 @@
     return report;
   };
 
+  function _debugRenderGuard(name, allow, detail) {
+    return {
+      guard: name,
+      result: allow ? "ALLOW" : "DENY",
+      allow: !!allow,
+      detail: detail || ""
+    };
+  }
+
+  function _debugSummaryRenderGuards(summaryReport, totalsReport, indexState) {
+    var payloadSummary = summaryReport && summaryReport.preparedSummaryPayload && summaryReport.preparedSummaryPayload.summary;
+    var apiSummary = summaryReport && summaryReport.apiSummary && summaryReport.apiSummary.summary;
+    var summary = apiSummary || payloadSummary || null;
+    var statusBefore = payloadSummary && (payloadSummary.summary_status || payloadSummary.status) || "";
+    var statusAfter = apiSummary && (apiSummary.summary_status || apiSummary.status) || "";
+    var totalsObj = summary && summary.totals && typeof summary.totals === "object" ? summary.totals : null;
+    var fields = totalsReport && totalsReport.totalsFields || {};
+    var finiteTotals = !!(fields.principal && fields.principal.finite && fields.penalty && fields.penalty.finite && fields.total && fields.total.finite);
+    var runtimeStale = false;
+    try {
+      var item = summaryReport && summaryReport.abonentId ? _migrationVerificationItem(summaryReport.abonentId, _findMigrationVerificationAbonent(summaryReport.abonentId).abonent, {}) : null;
+      runtimeStale = !!(item && item.runtimeCacheStale);
+    } catch (e) {}
+    return [
+      _debugRenderGuard("hasSummary", !!summary, summary ? "summary object present" : "summary missing"),
+      _debugRenderGuard("summary_status === fresh", statusAfter === "fresh" || (!statusAfter && statusBefore === "fresh"), "before=" + statusBefore + "; after=" + statusAfter),
+      _debugRenderGuard("totals object exists", !!totalsObj, totalsObj ? "summary.totals present" : "summary.totals missing"),
+      _debugRenderGuard("totals finite", finiteTotals, "principal/penalty/total finite=" + finiteTotals),
+      _debugRenderGuard("stale flag", !runtimeStale, runtimeStale ? "runtime cache stale" : "no stale runtime flag"),
+      _debugRenderGuard("runtime cache flag", !(summaryReport && summaryReport.runtimeCacheStale), "summary debug runtime flag=" + !!(summaryReport && summaryReport.runtimeCacheStale)),
+      _debugRenderGuard("readonly_no_recalc flag", true, "not an index render guard; unavailable from data.js"),
+      _debugRenderGuard("passive summary mode", !!(indexState && indexState.passiveSummaryMode), "passiveSummaryMode=" + !!(indexState && indexState.passiveSummaryMode)),
+      _debugRenderGuard("pagination state", !!(indexState && !indexState.loading && !indexState.error), "loading=" + !!(indexState && indexState.loading) + "; error=" + String(indexState && indexState.error || "")),
+      _debugRenderGuard("render signature skip", !(indexState && indexState.renderSignatureSkip), "renderSignatureSkip=" + !!(indexState && indexState.renderSignatureSkip))
+    ];
+  }
+
+  function _debugRenderDenyReason(guards, summaryReport, totalsReport, indexState) {
+    var denied = (guards || []).filter(function(g) { return g && g.result === "DENY"; });
+    if (denied.length) return denied[0].guard;
+    if (summaryReport && summaryReport.whyIndexTotalsEmpty === "TOTALS_EMPTY") return "TOTALS_EMPTY_GUARD";
+    if (totalsReport && totalsReport.validationResultAfterValidation && totalsReport.validationResultAfterValidation.ok !== true) return "TOTALS_VALIDATION_GUARD";
+    if (!indexState || !indexState.rowFound) return "INDEX_ROW_NOT_FOUND";
+    return "";
+  }
+
+  window.JKH_debugSummaryRenderState = async function(abonentId) {
+    var totalsReport = await window.JKH_debugTotalsValidation(abonentId);
+    var summaryReport = await window.JKH_debugSummaryBuild(abonentId);
+    var indexState = null;
+    try {
+      if (typeof window.JKH_getIndexRenderDebugState === "function") {
+        indexState = window.JKH_getIndexRenderDebugState(summaryReport.uid || summaryReport.abonentId || abonentId);
+      }
+    } catch (eIndex) {
+      indexState = { error: String(eIndex && eIndex.message || eIndex) };
+    }
+    var payloadSummary = summaryReport && summaryReport.preparedSummaryPayload && summaryReport.preparedSummaryPayload.summary;
+    var apiSummary = summaryReport && summaryReport.apiSummary && summaryReport.apiSummary.summary;
+    var guards = _debugSummaryRenderGuards(summaryReport, totalsReport, indexState);
+    var exactGuard = _debugRenderDenyReason(guards, summaryReport, totalsReport, indexState);
+    var report = {
+      abonentId: summaryReport && summaryReport.abonentId || String(abonentId || "").trim(),
+      uid: summaryReport && summaryReport.uid || "",
+      preparedSummaryPayload: summaryReport && summaryReport.preparedSummaryPayload || null,
+      summaryStatusBeforeValidation: payloadSummary && (payloadSummary.summary_status || payloadSummary.status) || "",
+      summaryStatusAfterValidation: apiSummary && (apiSummary.summary_status || apiSummary.status) || "",
+      exactValidationResult: totalsReport && totalsReport.validationResultAfterValidation || null,
+      exactInvalidFieldList: totalsReport && totalsReport.missingOrInvalidFields || null,
+      freshnessRuntimeFlags: {
+        staleFlag: guards.some(function(g){ return g.guard === "stale flag" && g.result === "DENY"; }),
+        runtimeCacheFlag: guards.some(function(g){ return g.guard === "runtime cache flag" && g.result === "DENY"; }),
+        readonlyNoRecalcFlag: "not_index_guard",
+        passiveSummaryMode: !!(indexState && indexState.passiveSummaryMode),
+        pagination: indexState && indexState.pagination || null,
+        renderSignatureSkip: !!(indexState && indexState.renderSignatureSkip)
+      },
+      indexRenderState: indexState,
+      renderGatingConditions: guards,
+      indexRenderAllowDenyReasons: guards.map(function(g){ return { guard: g.guard, result: g.result, detail: g.detail }; }),
+      whyTotalsHiddenDespiteFiniteTotals: exactGuard || summaryReport.whyIndexTotalsEmpty || "UNKNOWN",
+      exactGuardThatReturnsTotalsEmpty: summaryReport.whyIndexTotalsEmpty === "TOTALS_EMPTY" ? (exactGuard || "TOTALS_EMPTY_GUARD") : "",
+      whyIndexTotalsEmpty: summaryReport.whyIndexTotalsEmpty || "UNKNOWN"
+    };
+    try { console.table(report.renderGatingConditions); } catch (eTable) {}
+    try { console.log("[summary-render][debug]", report); } catch (eLog) {}
+    return report;
+  };
+
   async function recalcAbonentSummaryExplicit(abonentOrId, options) {
     var opts = options || {};
     var period = await _resolveAbonentSummaryRecalcPeriod(abonentOrId, opts.period);

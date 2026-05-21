@@ -1008,6 +1008,44 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         calc_after = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
         self.assertEqual(calc_before, calc_after)
 
+    def test_stage_13_2cb_summary_render_guard_debug_is_read_only(self):
+        data_path = self._find_repo_file("web", "data.js")
+        index_path = self._find_repo_file("web", "index.html")
+        calc_engine_path = self._find_repo_file("web", "calc_engine.js")
+        self.assertIsNotNone(data_path)
+        self.assertIsNotNone(index_path)
+        self.assertIsNotNone(calc_engine_path)
+        data_source = data_path.read_text(encoding="utf-8")
+        index_source = index_path.read_text(encoding="utf-8")
+        calc_before = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
+
+        self.assertIn("window.JKH_debugSummaryRenderState = async function(abonentId)", data_source)
+        self.assertIn("window.JKH_getIndexRenderDebugState = function(abonentIdOrUid)", index_source)
+        body = data_source.split("window.JKH_debugSummaryRenderState = async function(abonentId)", 1)[1].split("async function recalcAbonentSummaryExplicit", 1)[0]
+        index_body = index_source.split("window.JKH_getIndexRenderDebugState = function(abonentIdOrUid)", 1)[1].split("</script>", 1)[0]
+        self.assertIn("preparedSummaryPayload", body)
+        self.assertIn("summaryStatusBeforeValidation", body)
+        self.assertIn("summaryStatusAfterValidation", body)
+        self.assertIn("exactValidationResult", body)
+        self.assertIn("exactInvalidFieldList", body)
+        self.assertIn("freshnessRuntimeFlags", body)
+        self.assertIn("indexRenderAllowDenyReasons", body)
+        self.assertIn("whyTotalsHiddenDespiteFiniteTotals", body)
+        self.assertIn("exactGuardThatReturnsTotalsEmpty", body)
+        self.assertIn("hasSummary", data_source)
+        self.assertIn("summary_status === fresh", data_source)
+        self.assertIn("totals object exists", data_source)
+        self.assertIn("totals finite", data_source)
+        self.assertIn("passiveSummaryMode", index_body)
+        self.assertIn("pagination", index_body)
+        self.assertIn("renderSignatureSkip", index_body)
+        for forbidden in ("_setProjectRaw", "_removeProjectRaw", "writePaymentLedger", "createEmptyPaymentLedger", "AUTOACCRUAL_WRITE", "markAbonentSummaryDirty", "CALC_PERIOD_CHANGED"):
+            self.assertNotIn(forbidden, body)
+            self.assertNotIn(forbidden, index_body)
+
+        calc_after = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
+        self.assertEqual(calc_before, calc_after)
+
 
 if __name__ == "__main__":
     unittest.main()

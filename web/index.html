@@ -1614,6 +1614,27 @@ function renderPagination(total, from, to) {
     btn("▶", currentPage + 1, currentPage === totalPages);
     btn("⏭", totalPages, currentPage === totalPages);
 }
+
+window.JKH_getIndexRenderDebugState = function(abonentIdOrUid) {
+    const needle = String(abonentIdOrUid || "").trim();
+    const summaryMode = indexPassiveSummaryMode && indexSummaryState.mode === "summary";
+    const rows = Array.isArray(allRows) ? allRows : [];
+    const row = rows.find(function(r){
+        return String(r && (r.id || "")) === needle || String(r && (r.accountUid || "")) === needle;
+    }) || null;
+    return {
+        passiveSummaryMode: !!summaryMode,
+        currentPage: currentPage,
+        pageSize: pageSize,
+        pagination: Object.assign({}, indexSummaryState && indexSummaryState.pagination || {}),
+        loading: !!(indexSummaryState && indexSummaryState.loading),
+        error: String(indexSummaryState && indexSummaryState.error || ""),
+        rowsCount: rows.length,
+        rowFound: !!row,
+        row: row,
+        renderSignatureSkip: false
+    };
+};
 </script>
 
 <script>closeLayout();</script>
