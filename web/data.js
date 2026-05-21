@@ -2309,8 +2309,12 @@
       penalty: penalty,
       totals: {
         principal: principal,
+        debt: total,
         penalty: penalty,
         total: total,
+        accrued: periodTotals.total_accrued,
+        paid: periodTotals.total_paid,
+        balance: total,
         total_debt: total,
         total_penalty: penalty,
         total_accrued: periodTotals.total_accrued,

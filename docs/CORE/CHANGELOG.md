@@ -500,3 +500,9 @@ rg -n "splitPremise|premise-transform\]\[split|type: ['\"]split" web LOGIC_SPEC.
 - Added read-only `window.JKH_debugSummaryRenderState(abonentId)` to show summary status before/after validation, invalid fields, freshness/runtime flags, index render guard ALLOW/DENY states, and the guard hiding totals.
 - Added read-only `window.JKH_getIndexRenderDebugState(...)` on `index.html` so diagnostics can inspect passive summary mode, pagination, row mapping, and render signature state without changing render behavior.
 - No summary writes, ledger writes, migration, autoaccrual, formula changes, or `web/calc_engine.js` changes.
+
+## 2026-05-21 — Stage 13.2C.c: summary totals object mapping
+
+- Fresh summary payload now includes canonical nested `summary.totals` fields: `principal`, `debt`, `penalty`, `total`, `accrued`, `paid`, and `balance`, while keeping legacy flat aliases.
+- `index.html` reads nested `summary.totals.*` first and falls back to legacy flat fields.
+- No ledger writes, migration, autoaccrual, formula changes, FIFO changes, backend totals, or `web/calc_engine.js` changes.

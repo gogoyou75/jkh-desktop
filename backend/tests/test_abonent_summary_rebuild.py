@@ -1046,6 +1046,38 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         calc_after = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
         self.assertEqual(calc_before, calc_after)
 
+    def test_stage_13_2cc_summary_totals_mapping_uses_nested_canonical_totals(self):
+        data_path = self._find_repo_file("web", "data.js")
+        index_path = self._find_repo_file("web", "index.html")
+        calc_engine_path = self._find_repo_file("web", "calc_engine.js")
+        self.assertIsNotNone(data_path)
+        self.assertIsNotNone(index_path)
+        self.assertIsNotNone(calc_engine_path)
+        data_source = data_path.read_text(encoding="utf-8")
+        index_source = index_path.read_text(encoding="utf-8")
+        calc_before = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
+
+        summary_body = data_source.split("function buildAbonentSummaryAfterExplicitRecalc", 1)[1].split("function buildAbonentSummaryErrorAfterExplicitRecalc", 1)[0]
+        self.assertIn("totals: {", summary_body)
+        self.assertIn("principal: principal", summary_body)
+        self.assertIn("debt: total", summary_body)
+        self.assertIn("penalty: penalty", summary_body)
+        self.assertIn("total: total", summary_body)
+        self.assertIn("accrued: periodTotals.total_accrued", summary_body)
+        self.assertIn("paid: periodTotals.total_paid", summary_body)
+        self.assertIn("balance: total", summary_body)
+        self.assertIn("total_debt: total", summary_body)
+        self.assertIn("total_penalty: penalty", summary_body)
+
+        index_body = index_source.split("function buildIndexRowFromSummaryItem", 1)[1].split("function renderIndexSummaryLoading", 1)[0]
+        self.assertIn('"totals.debt", "totals.total", "totals.total_debt", "total_debt"', index_body)
+        self.assertIn('"totals.penalty", "totals.total_penalty", "total_penalty"', index_body)
+        self.assertIn('"totals.accrued", "totals.total_accrued", "total_accrued"', index_body)
+        self.assertIn('"totals.paid", "totals.total_paid", "total_paid"', index_body)
+
+        calc_after = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
+        self.assertEqual(calc_before, calc_after)
+
 
 if __name__ == "__main__":
     unittest.main()
