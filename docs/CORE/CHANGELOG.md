@@ -482,3 +482,9 @@ rg -n "splitPremise|premise-transform\]\[split|type: ['\"]split" web LOGIC_SPEC.
 - Added read-only `window.JKH_verifyLedgerMigrationForAbonent(abonentId)` and `window.JKH_debugAbonentLedger(abonentId)` for one-account diagnostics.
 - Debug output explains UID/canonical/legacy state, migration blockers, mixed-ledger comparison, and why index totals/summary may be empty.
 - No ledger writes, migration, autoaccrual, backend financial calculation, formula changes, or `web/calc_engine.js` changes.
+
+## 2026-05-21 — Stage 13.2C: summary build diagnostics for canonical ledger
+
+- Added read-only `window.JKH_debugSummaryBuild(abonentId)` to trace canonical ledger rows, frontend calc totals, prepared summary payload, current `/api/abonent_summary`, current `/api/abonents` mapping, and `whyIndexTotalsEmpty`.
+- The helper does not call the summary save/recalc write path; it reports `READ_ONLY_DIAGNOSTIC_NOT_EXECUTED` for `Data.recalculateAbonentCard` and builds the comparable payload locally.
+- No changes to ledger data, autoaccrual, backend totals, financial formulas, FIFO, or `web/calc_engine.js`.

@@ -2376,6 +2376,180 @@
     };
   }
 
+  function _debugSummaryNumberSum(rows, field) {
+    var sum = 0;
+    (Array.isArray(rows) ? rows : []).forEach(function(row) {
+      sum += _summaryNumber(row && row[field]);
+    });
+    return Math.round(sum * 100) / 100;
+  }
+
+  function _debugSummaryPickValue(summary, keys) {
+    for (var i = 0; i < keys.length; i++) {
+      var key = String(keys[i] || "");
+      var v = summary ? summary[key] : undefined;
+      if ((v === null || v === undefined || v === "") && key.indexOf("totals.") === 0 && summary && summary.totals && typeof summary.totals === "object") {
+        v = summary.totals[key.slice(7)];
+      }
+      if (v !== null && v !== undefined && v !== "") return v;
+    }
+    return "";
+  }
+
+  function _debugSummaryHasTotals(summary) {
+    if (!summary || typeof summary !== "object") return false;
+    var debt = _debugSummaryPickValue(summary, ["total_debt", "totals.total_debt", "totalDebt", "debt_total", "total", "totals.total"]);
+    var penalty = _debugSummaryPickValue(summary, ["total_penalty", "totals.total_penalty", "penalty", "pay_penalty", "penalty_debt", "penaltyDebt", "totals.penalty"]);
+    return debt !== "" || penalty !== "";
+  }
+
+  function _debugSummaryIndexRowHasTotals(row) {
+    if (!row || typeof row !== "object") return false;
+    return _debugSummaryHasTotals(row.summary && typeof row.summary === "object" ? row.summary : row) ||
+      row.totalDebt !== undefined || row.total_debt !== undefined || row.total_penalty !== undefined || row.penalty !== undefined;
+  }
+
+  async function _debugFetchJson(url) {
+    var res = await fetch(url, { method: "GET", credentials: "include" });
+    var text = await res.text();
+    var data = null;
+    try { data = text ? JSON.parse(text) : null; } catch (e) { data = null; }
+    return { ok: !!(res.ok && data && data.ok !== false), status: res.status, data: data, error: res.ok ? "" : ("HTTP_" + res.status) };
+  }
+
+  function _debugFindAbonentApiRow(payload, abonentId, uid) {
+    var items = Array.isArray(payload && payload.items) ? payload.items : [];
+    for (var i = 0; i < items.length; i++) {
+      var item = items[i] || {};
+      if (String(item.account_uid || item.uid || "") === String(uid || "")) return item;
+      if (String(item.abonent_id || item.abonentId || item.id || item.account_number || "") === String(abonentId || "")) return item;
+    }
+    return null;
+  }
+
+  function _debugSummaryWhyIndexTotalsEmpty(ctx) {
+    var buildReason = String(ctx && ctx.buildReason || "");
+    var payloadSummary = ctx && ctx.summaryPayload && ctx.summaryPayload.summary;
+    var apiSummary = ctx && ctx.apiSummary;
+    var abonentRow = ctx && ctx.abonentApiRow;
+    if (buildReason) return buildReason;
+    if (!payloadSummary || typeof payloadSummary !== "object") return "SUMMARY_PAYLOAD_INVALID";
+    if (!ctx || !ctx.calcTotals) return "TOTALS_BUILD_FAILED";
+    if (payloadSummary.summary_status !== "fresh" && payloadSummary.status !== "fresh") return "SUMMARY_NOT_FRESH";
+    if (!ctx || ctx.apiSummaryReturned !== true) return "API_SUMMARY_NOT_RETURNED";
+    if (!apiSummary || (apiSummary.summary_status !== "fresh" && apiSummary.status !== "fresh")) return "SUMMARY_SAVE_FAILED";
+    if (!_debugSummaryHasTotals(apiSummary)) return "TOTALS_EMPTY";
+    if (!abonentRow) return "INDEX_MAPPING_MISMATCH";
+    if (!_debugSummaryIndexRowHasTotals(abonentRow)) return "INDEX_MAPPING_MISMATCH";
+    return "";
+  }
+
+  window.JKH_debugSummaryBuild = async function(abonentId) {
+    var found = _findMigrationVerificationAbonent(abonentId);
+    var abonent = found && found.abonent ? found.abonent : null;
+    var id = String(found && found.id || abonentId || "").trim();
+    var uid = String(abonent && abonent.uid || "").trim();
+    var canonicalKey = isValidUid(uid) ? ("payments_" + uid) : "";
+    var ledgerInfo = canonicalKey ? _safeLedgerInfoForDiagnostic(canonicalKey) : { exists: false, rowsCount: 0, rows: [], error: "UID_REQUIRED" };
+    var rows = Array.isArray(ledgerInfo.rows) ? ledgerInfo.rows : [];
+    var period = null;
+    var responsibility = null;
+    var calcTotals = null;
+    var summaryPayload = null;
+    var buildReason = "";
+    var summaryApiPayload = null;
+    var summaryApiItem = null;
+    var summaryFromApi = null;
+    var abonentsApiPayload = null;
+    var abonentApiRow = null;
+
+    try { period = await _resolveAbonentSummaryRecalcPeriod(abonent || id, null); } catch (ePeriod) { period = { ok: false, error: String(ePeriod && ePeriod.message || ePeriod) }; }
+    try { responsibility = _readActiveResponsibilityPeriod(abonent || id); } catch (eResp) { responsibility = { ok: false, error: String(eResp && eResp.message || eResp) }; }
+
+    try {
+      if (!abonent || !id) throw new Error("ABONENT_NOT_FOUND");
+      if (!isValidUid(uid)) throw new Error("UID_REQUIRED");
+      if (!canonicalKey || !ledgerInfo.exists) throw new Error("CANONICAL_LEDGER_EMPTY");
+      if (!period || period.ok !== true) throw new Error(period && period.error || "RESPONSIBILITY_PERIOD_MISSING");
+      if (!window.JKHCalcEngine || typeof window.JKHCalcEngine.calcTotalsAsOfAdjusted !== "function") throw new Error("CALC_ENGINE_UNAVAILABLE");
+      var asOf = _dateFromIsoLocal(period.to);
+      if (!asOf) throw new Error("PERIOD_INVALID");
+      calcTotals = window.JKHCalcEngine.calcTotalsAsOfAdjusted(rows, asOf, {
+        abonentId: id,
+        applyAdvanceOffset: true,
+        allowNegativePrincipal: true
+      });
+      summaryPayload = {
+        account_uid: uid,
+        abonent_id: id,
+        account_number: _accountNumberForLedger(id, abonent),
+        summary: buildAbonentSummaryAfterExplicitRecalc(abonent || id, period.from, period.to)
+      };
+    } catch (eBuild) {
+      buildReason = _summaryCalcErrorCode(eBuild);
+      if (buildReason === "START_DATE_MISSING") buildReason = "RESPONSIBILITY_PERIOD_MISSING";
+      if (!calcTotals && buildReason !== "RESPONSIBILITY_PERIOD_MISSING" && buildReason !== "CANONICAL_LEDGER_EMPTY") buildReason = buildReason || "TOTALS_BUILD_FAILED";
+    }
+
+    try {
+      if (isValidUid(uid)) {
+        summaryApiPayload = await loadAbonentSummaryPage({ page: 1, per_page: 1, account_uid: uid });
+        summaryApiItem = Array.isArray(summaryApiPayload && summaryApiPayload.items) ? (summaryApiPayload.items[0] || null) : null;
+        summaryFromApi = summaryApiItem && summaryApiItem.summary && typeof summaryApiItem.summary === "object" ? summaryApiItem.summary : null;
+      }
+    } catch (eSummaryApi) {
+      summaryApiPayload = { ok: false, error: String(eSummaryApi && eSummaryApi.message || eSummaryApi) };
+    }
+
+    try {
+      var params = new URLSearchParams();
+      params.set("page", "1");
+      params.set("limit", "20");
+      params.set("query", id || uid);
+      var api = await _debugFetchJson("/api/abonents?" + params.toString());
+      abonentsApiPayload = api.data || { ok: false, error: api.error || ("HTTP_" + api.status) };
+      abonentApiRow = _debugFindAbonentApiRow(abonentsApiPayload, id, uid);
+    } catch (eAbonentsApi) {
+      abonentsApiPayload = { ok: false, error: String(eAbonentsApi && eAbonentsApi.message || eAbonentsApi) };
+    }
+
+    var recalculateResult = {
+      ok: false,
+      skipped: true,
+      reason: "READ_ONLY_DIAGNOSTIC_NOT_EXECUTED",
+      note: "Data.recalculateAbonentCard saves abonent_summary, so this helper builds the same payload without calling the write path."
+    };
+    var why = _debugSummaryWhyIndexTotalsEmpty({
+      buildReason: buildReason,
+      summaryPayload: summaryPayload,
+      calcTotals: calcTotals,
+      apiSummaryReturned: !!summaryFromApi,
+      apiSummary: summaryFromApi,
+      abonentApiRow: abonentApiRow
+    }) || "UNKNOWN";
+
+    var report = {
+      abonentId: id,
+      uid: uid,
+      canonicalKey: canonicalKey,
+      rowsCount: Number(ledgerInfo.rowsCount || 0),
+      accruedSum: _debugSummaryNumberSum(rows, "accrued"),
+      paidSum: _debugSummaryNumberSum(rows, "paid"),
+      calcPeriod: { from: String(period && period.from || ""), to: String(period && period.to || ""), ok: !!(period && period.ok), reason: String(period && (period.error || period.reason || period.source) || "") },
+      responsibilityRange: { from: String(responsibility && responsibility.from || ""), to: String(responsibility && responsibility.to || ""), source: String(responsibility && responsibility.source || "") },
+      calcTotalsAsOfAdjusted: calcTotals,
+      preparedSummaryPayload: summaryPayload,
+      recalculateAbonentCardResult: recalculateResult,
+      apiSummary: { payload: summaryApiPayload, item: summaryApiItem, summary: summaryFromApi },
+      apiAbonents: { payload: abonentsApiPayload, row: abonentApiRow },
+      whyIndexTotalsEmpty: why,
+      clearReason: why
+    };
+    try { console.table([{ abonentId: report.abonentId, uid: report.uid, rowsCount: report.rowsCount, accruedSum: report.accruedSum, paidSum: report.paidSum, whyIndexTotalsEmpty: report.whyIndexTotalsEmpty }]); } catch (eTable) {}
+    try { console.log("[summary-build][debug]", report); } catch (eLog) {}
+    return report;
+  };
+
   async function recalcAbonentSummaryExplicit(abonentOrId, options) {
     var opts = options || {};
     var period = await _resolveAbonentSummaryRecalcPeriod(abonentOrId, opts.period);
