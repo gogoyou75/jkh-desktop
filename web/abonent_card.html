@@ -2540,6 +2540,22 @@ function bindCalcButtons(){
     const toEl   = document.getElementById("calcTo");
     if (!runBtn || !repBtn || !resetBtn || !fromEl || !toEl) return;
 
+    function manualRecalcErrorMessage(recalcResult, reason){
+        if (String(reason || "") === "RESPONSIBILITY_PERIOD_MISSING") {
+            const suggestion =
+                recalcResult &&
+                (recalcResult.suggestion ||
+                 (recalcResult.autoaccrual && recalcResult.autoaccrual.suggestion) ||
+                 (recalcResult.autoaccrual && recalcResult.autoaccrual.responsibility && recalcResult.autoaccrual.responsibility.suggestion));
+            let msg = "Не задан период ответственности/дата начала расчёта. Начисления не могут быть созданы. Укажите дату начала расчёта или создайте активную связь с квартирой.";
+            if (suggestion && suggestion.suggestedStartDate) {
+                msg += "\nВозможная дата по платежам: " + suggestion.suggestedStartDate + ". Подтвердите вручную.";
+            }
+            return msg;
+        }
+        return "Пересчёт не выполнен: " + String(reason || "CALC_FAILED");
+    }
+
     runBtn.addEventListener("click", async () => {
         if (runBtn.disabled) return;
         if (!canWriteOrExplainLocal()) return;
@@ -2592,7 +2608,7 @@ function bindCalcButtons(){
                 if (!recalcResult || recalcResult.ok !== true) {
                     const reason = String(recalcResult && (recalcResult.reason || recalcResult.summary_reason) || "CALC_FAILED");
                     renderAbonentSummaryStatus("error", reason);
-                    alert("Пересчёт не выполнен: " + reason);
+                    alert(manualRecalcErrorMessage(recalcResult, reason));
                     return;
                 }
                 const summary = recalcResult && recalcResult.summary && typeof recalcResult.summary === "object" ? recalcResult.summary : null;

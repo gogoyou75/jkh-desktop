@@ -768,6 +768,11 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         body = source.split("window.fullRecalcForCurrentAbonent", 1)[1].split("window.__loadPaymentTable", 1)[0]
 
         self.assertIn("applyControlledAutoAccrualForManualRecalc", source)
+        self.assertIn("validateResponsibilityRangeForManualRecalc", source)
+        self.assertIn("suggestResponsibilityStartFromPayments", source)
+        self.assertIn("allowResponsibilityStartRepair === true", source)
+        self.assertIn("[responsibility][repair-from-payments]", source)
+        self.assertIn("RESPONSIBILITY_PERIOD_MISSING", source)
         self.assertIn("window.JKHAutoAccrual.dryRunForAbonent(abonentId)", source)
         self.assertIn("Data.writePaymentLedger", source)
         self.assertIn("summaryDirtyReason:false", source)
@@ -781,6 +786,8 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         self.assertIn("autoaccrual_changed", body)
         self.assertIn("summary_status", body)
         self.assertIn("summary_save", body)
+        self.assertNotIn("calcStartDate = fromISO2", source)
+        self.assertNotIn("return clamp({ from: fromISO2", source)
         self.assertNotIn("recalc_batch", body)
 
         data_path = self._find_repo_file("web", "data.js")
@@ -803,6 +810,8 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         self.assertIn("applyAutoAccrual: true", body)
         self.assertIn("period: { from: from, to: to }", body)
         self.assertIn("recalcResult.summary", body)
+        self.assertIn("manualRecalcErrorMessage", source)
+        self.assertIn("Не задан период ответственности/дата начала расчёта", source)
         self.assertIn("renderAbonentSummaryStatus(summaryStatus, summaryReason)", body)
         self.assertIn("__renderAbonentTotalsFromFreshSummary(summary)", body)
         self.assertNotIn("CALC_PERIOD_CHANGED", body)

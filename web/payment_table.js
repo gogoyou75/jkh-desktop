@@ -659,6 +659,39 @@ function prorateAccrualByRange(accr, year, month, range) {
   
   // ---- период ответственности / расчёта начислений ----
   // Ищем максимально "живуче", потому что структура AbonentsDB могла меняться.
+  function suggestResponsibilityStartFromPayments(abonentId){
+    const id = String(abonentId || getAbonentId() || "");
+    if (!id) return null;
+    try {
+      const pKey = (window.Data && typeof window.Data.resolvePaymentLedgerKey === "function")
+        ? window.Data.resolvePaymentLedgerKey(id)
+        : ((typeof window.getPaymentsKeyForAbonent === "function") ? window.getPaymentsKeyForAbonent(id) : "");
+      if (!pKey) {
+        logPaymentKeyReadOnce({ abonentId: id, reason: "ABONENT_NOT_READY_OR_UID_MISSING" });
+        return null;
+      }
+      logPaymentKeyReadOnce({ abonentId: id, key: pKey });
+      const arr = readPaymentLedgerRowsCached(pKey, id);
+      if (!Array.isArray(arr) || !arr.length) return null;
+      let minY = null;
+      let minM = null;
+      for (const r of arr) {
+        const y = parseInt(String(r && r.year || ""), 10);
+        const m = parseInt(String(r && r.month || ""), 10);
+        if (!y || !m || m < 1 || m > 12) continue;
+        if (minY == null || y < minY || (y === minY && m < minM)) {
+          minY = y;
+          minM = m;
+        }
+      }
+      if (minY == null || minM == null) return null;
+      return { suggestedStartDate: `${minY}-${pad2(minM)}-01`, source: "payments_min_month" };
+    } catch (e) {
+      return null;
+    }
+  }
+  window.suggestResponsibilityStartFromPayments = suggestResponsibilityStartFromPayments;
+
   function getActiveResponsibilityRangeISO(){
     const id = String(getAbonentId());
 
@@ -734,59 +767,29 @@ function prorateAccrualByRange(accr, year, month, range) {
     // fallback: если нет links — берём из самого абонента (дата начала расчёта)
     const a = (db.abonents && db.abonents[id]) ? db.abonents[id] : {};
     const fromISO = parseAnyDateToISO(
-      a.dateFrom ?? a.date_from ?? a.calcFrom ?? a.calc_from ?? a.startCalc ?? a.start_calc ??
+      a.dateFrom ?? a.date_from ?? a.calcFrom ?? a.calc_from ??
+      a.calcStartDate ?? a.calc_start_date ?? a.calcStart ?? a.calc_start ??
+      a.startCalc ?? a.start_calc ??
       a.dateStartCalc ?? a.date_start_calc ?? a.responsibilityFrom ?? a.respFrom
     );
     const toISO = parseAnyDateToISO(
-      a.dateTo ?? a.date_to ?? a.calcTo ?? a.calc_to ?? a.endCalc ?? a.end_calc ??
+      a.dateTo ?? a.date_to ?? a.calcTo ?? a.calc_to ??
+      a.calcEndDate ?? a.calc_end_date ?? a.calcEnd ?? a.calc_end ??
+      a.endCalc ?? a.end_calc ??
       a.dateEndCalc ?? a.date_end_calc ?? a.responsibilityTo ?? a.respTo
     );
 
     if (fromISO) return clamp({ from: fromISO, to: toISO || "" });
 
-    // fallback #2: если у абонента ещё нет привязки/периода (частый кейс после импорта
-    // и создания нового абонента), но уже есть строки в payments_<uid>
-    // (или в legacy payments_<LS>), берём самый ранний
-    // (год, месяц) из таблицы оплат и считаем это датой начала расчёта.
-    // Это даёт автоперерасчёт начислений сразу после импорта.
-    try {
-      const pKey = (window.Data && typeof window.Data.resolvePaymentLedgerKey === "function") ? window.Data.resolvePaymentLedgerKey(id) : ((typeof window.getPaymentsKeyForAbonent === "function") ? window.getPaymentsKeyForAbonent(id) : "");
-      if (!pKey) {
-        logPaymentKeyReadOnce({ abonentId: id, reason: "ABONENT_NOT_READY_OR_UID_MISSING" });
-        return null;
-      }
-      logPaymentKeyReadOnce({ abonentId: id, key: pKey });
-      const arr = readPaymentLedgerRowsCached(pKey, id);
-      if (Array.isArray(arr) && arr.length) {
-          let minY = null, minM = null;
-          for (const r of arr) {
-            const y = parseInt(String(r?.year || ""), 10);
-            const m = parseInt(String(r?.month || ""), 10);
-            if (!y || !m) continue;
-            if (minY == null || y < minY || (y === minY && m < minM)) {
-              minY = y; minM = m;
-            }
-          }
-
-          if (minY != null && minM != null) {
-            const fromISO2 = `${minY}-${pad2(minM)}-01`;
-
-            // Если у абонента ещё не выставлен calcStartDate — зафиксируем,
-            // чтобы следующие страницы тоже понимали период начислений.
-            if (aStrict && !strictFrom) {
-              aStrict.calcStartDate = fromISO2;
-              try {
-                if (typeof window.saveAbonentsDB === "function") window.saveAbonentsDB();
-                else if (window.JKHStore && JKHStore.setRaw) JKHStore.setRaw("abonents_db_v1", JSON.stringify(window.AbonentsDB));
-              } catch (e) {}
-            }
-
-            return clamp({ from: fromISO2, to: "" });
-          }
-        }
-    } catch (e) {}
-
-    console.warn("[autoaccrual] не найден период ответственности/расчёта (AbonentsDB.links или abonent.startCalc)");
+    const suggested = suggestResponsibilityStartFromPayments(id);
+    if (suggested && suggested.suggestedStartDate) {
+      console.warn("[responsibility][missing-period-suggestion]", {
+        abonentId: id,
+        suggestedStartDate: suggested.suggestedStartDate,
+        source: suggested.source
+      });
+    }
+    console.warn("[autoaccrual] responsibility period is missing; payment history is diagnostic only");
     return null;
   }
 function getOwnershipHistoryForPremise() {
@@ -2834,9 +2837,87 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
 
   function normalizeManualRecalcReason(reason){
     const r = String(reason || "").trim();
-    if (r === "NO_RANGE" || r === "NO_MONTHS") return "RESPONSIBILITY_PERIOD_MISSING";
+    if (r === "NO_RANGE" || r === "NO_MONTHS" || r === "RESPONSIBILITY_DATE_MISSING" || r === "START_DATE_MISSING") return "RESPONSIBILITY_PERIOD_MISSING";
     if (r === "EMPTY_ID" || r === "EMPTY_OWNER") return "UID_REQUIRED";
     return r || "CALC_FAILED";
+  }
+
+  function getManualRecalcAbonentRecord(abonentId){
+    const db = window.AbonentsDB || {};
+    const id = String(abonentId || "");
+    return (db.abonents && db.abonents[id] && typeof db.abonents[id] === "object") ? db.abonents[id] : null;
+  }
+
+  function getManualRecalcCalcStartISO(abonentId){
+    const a = getManualRecalcAbonentRecord(abonentId);
+    if (!a) return "";
+    return parseAnyDateToISO(
+      a.calcStartDate ??
+      a.calc_start_date ??
+      a.calcStart ??
+      a.calc_start ??
+      a.startCalc ??
+      a.start_calc ??
+      a.dateStartCalc ??
+      a.date_start_calc ??
+      a.calcDateStart ??
+      a.calc_date_start ??
+      a.calcDate ??
+      a.calc_date
+    );
+  }
+
+  function hasManualRecalcActiveLink(abonentId){
+    const db = window.AbonentsDB || {};
+    const linksRaw = Array.isArray(db.links) ? db.links : (Array.isArray(db.abonentPremiseLinks) ? db.abonentPremiseLinks : []);
+    const id = String(abonentId || "");
+    return (linksRaw || []).some(function(l){
+      const aId = l && (l.abonentId ?? l.abonent_id ?? l.abonent ?? l.accountId ?? l.ls ?? l.personalAccount);
+      if (String(aId ?? "") !== id) return false;
+      return !!parseAnyDateToISO(l.dateFrom ?? l.from ?? l.start ?? l.startDate ?? l.date_start ?? l.respFrom) && !parseAnyDateToISO(l.dateTo ?? l.to ?? l.end ?? l.endDate ?? l.date_end ?? l.respTo);
+    });
+  }
+
+  function repairResponsibilityStartFromPaymentsForManualRecalc(abonentId){
+    const id = String(abonentId || "");
+    const a = getManualRecalcAbonentRecord(id);
+    if (!id || !a) return { ok:false, reason:"UID_REQUIRED" };
+    if (hasManualRecalcActiveLink(id) || getManualRecalcCalcStartISO(id)) return { ok:false, reason:"RESPONSIBILITY_REPAIR_NOT_ALLOWED" };
+    const suggestion = suggestResponsibilityStartFromPayments(id);
+    if (!suggestion || !suggestion.suggestedStartDate) return { ok:false, reason:"RESPONSIBILITY_PERIOD_MISSING", suggestion:suggestion || null };
+    a.calcStartDate = suggestion.suggestedStartDate;
+    if (a.calcEndDate == null) a.calcEndDate = "";
+    if (typeof window.saveAbonentsDB === "function") {
+      window.saveAbonentsDB();
+    } else if (window.JKHStore && typeof JKHStore.setRaw === "function") {
+      JKHStore.setRaw("abonents_db_v1", JSON.stringify(window.AbonentsDB || {}));
+    } else {
+      return { ok:false, reason:"RESPONSIBILITY_REPAIR_SAVE_UNAVAILABLE", suggestion:suggestion };
+    }
+    console.warn("[responsibility][repair-from-payments]", {
+      abonentId: id,
+      calcStartDate: suggestion.suggestedStartDate,
+      source: suggestion.source
+    });
+    return {
+      ok:true,
+      repaired:true,
+      reason:"RESPONSIBILITY_REPAIRED_FROM_PAYMENTS",
+      range:{ from:suggestion.suggestedStartDate, to:"" },
+      suggestion:suggestion
+    };
+  }
+
+  function validateResponsibilityRangeForManualRecalc(abonentId, options){
+    const range = getActiveResponsibilityRangeISO();
+    if (range && range.from) return { ok:true, range:range, repaired:false };
+    const suggestion = suggestResponsibilityStartFromPayments(abonentId);
+    if (options && options.allowResponsibilityStartRepair === true) {
+      const repaired = repairResponsibilityStartFromPaymentsForManualRecalc(abonentId);
+      if (repaired && repaired.ok === true) return repaired;
+      return { ok:false, reason:normalizeManualRecalcReason(repaired && repaired.reason || "RESPONSIBILITY_PERIOD_MISSING"), suggestion:(repaired && repaired.suggestion) || suggestion || null };
+    }
+    return { ok:false, reason:"RESPONSIBILITY_PERIOD_MISSING", suggestion:suggestion || null };
   }
 
   function firstPeriodMonthForAutoAccrual(period){
@@ -2879,8 +2960,18 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
     if (!window.JKHAutoAccrual || typeof window.JKHAutoAccrual.dryRunForAbonent !== "function") {
       return { ok:false, changed:false, reason:"AUTOACCRUAL_UNAVAILABLE" };
     }
+    const responsibility = validateResponsibilityRangeForManualRecalc(abonentId, opts);
+    if (!responsibility || responsibility.ok !== true) {
+      return {
+        ok:false,
+        changed:false,
+        reason:normalizeManualRecalcReason(responsibility && responsibility.reason || "RESPONSIBILITY_PERIOD_MISSING"),
+        responsibility:responsibility || null,
+        suggestion:responsibility && responsibility.suggestion || null
+      };
+    }
     if (detectManualRecalcTariffsMissing(abonentId, opts.period)) {
-      return { ok:false, changed:false, reason:"TARIFFS_NOT_FOUND" };
+      return { ok:false, changed:false, reason:"TARIFFS_NOT_FOUND", responsibility:responsibility };
     }
 
     let result = null;
@@ -2888,15 +2979,15 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
       result = window.JKHAutoAccrual.dryRunForAbonent(abonentId);
     } catch (e) {
       const reason = normalizeManualRecalcReason(e && (e.code || e.reason || e.message) || e);
-      return { ok:false, changed:false, reason:reason };
+      return { ok:false, changed:false, reason:reason, responsibility:responsibility };
     }
 
     const reason = normalizeManualRecalcReason(result && result.reason);
     if (!result || result.ok !== true) {
-      return { ok:false, changed:false, reason:reason };
+      return { ok:false, changed:false, reason:reason, responsibility:responsibility };
     }
     if (reason === "RESPONSIBILITY_PERIOD_MISSING" || reason === "TARIFFS_NOT_FOUND" || reason === "LEDGER_JSON_INVALID") {
-      return { ok:false, changed:false, reason:reason };
+      return { ok:false, changed:false, reason:reason, responsibility:responsibility };
     }
 
     if (result.changed === true) {
@@ -2921,7 +3012,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
       return { ok:false, changed:false, reason:"ACCRUALS_NOT_CREATED", autoaccrual:result };
     }
 
-    return { ok:true, changed:!!result.changed, reason:reason || "OK", autoaccrual:result };
+    return { ok:true, changed:!!result.changed, reason:(responsibility.repaired ? "RESPONSIBILITY_REPAIRED_FROM_PAYMENTS" : (reason || "OK")), responsibility:responsibility, autoaccrual:result };
   }
 
   window.fullRecalcForCurrentAbonent = async function fullRecalcForCurrentAbonent(options){
