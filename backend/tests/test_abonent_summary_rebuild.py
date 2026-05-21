@@ -968,6 +968,46 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         calc_after = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
         self.assertEqual(calc_before, calc_after)
 
+    def test_stage_13_2ca_totals_validation_debug_helper_is_read_only(self):
+        data_path = self._find_repo_file("web", "data.js")
+        calc_engine_path = self._find_repo_file("web", "calc_engine.js")
+        self.assertIsNotNone(data_path)
+        self.assertIsNotNone(calc_engine_path)
+        data_source = data_path.read_text(encoding="utf-8")
+        calc_before = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
+
+        self.assertIn("window.JKH_debugTotalsValidation = async function(abonentId)", data_source)
+        body = data_source.split("window.JKH_debugTotalsValidation = async function(abonentId)", 1)[1].split("async function recalcAbonentSummaryExplicit", 1)[0]
+        self.assertIn("rawCalcTotalsAsOfAdjusted", body)
+        self.assertIn("totalsFields", body)
+        self.assertIn("exactValidationBlocker", body)
+        self.assertIn("exactReasonSummaryBecameInvalid", body)
+        self.assertIn("preparedSummaryPayloadBeforeValidation", body)
+        self.assertIn("validationResultAfterValidation", body)
+        self.assertIn("missingOrInvalidFields", body)
+        self.assertIn("principal", data_source)
+        self.assertIn("debt", data_source)
+        self.assertIn("penalty", data_source)
+        self.assertIn("total", data_source)
+        self.assertIn("accrued", data_source)
+        self.assertIn("paid", data_source)
+        self.assertIn("balance", data_source)
+        self.assertIn("TOTALS_NAN", data_source)
+        self.assertIn("TOTALS_UNDEFINED", data_source)
+        self.assertIn("TOTALS_MISSING_FIELDS", data_source)
+        self.assertIn("TOTALS_VALIDATION_FAILED", data_source)
+        self.assertIn("PAYLOAD_SCHEMA_MISMATCH", data_source)
+        self.assertNotIn("_setProjectRaw", body)
+        self.assertNotIn("_removeProjectRaw", body)
+        self.assertNotIn("writePaymentLedger", body)
+        self.assertNotIn("createEmptyPaymentLedger", body)
+        self.assertNotIn("AUTOACCRUAL_WRITE", body)
+        self.assertNotIn("markAbonentSummaryDirty", body)
+        self.assertNotIn("CALC_PERIOD_CHANGED", body)
+
+        calc_after = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
+        self.assertEqual(calc_before, calc_after)
+
 
 if __name__ == "__main__":
     unittest.main()

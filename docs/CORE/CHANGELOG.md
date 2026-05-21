@@ -488,3 +488,9 @@ rg -n "splitPremise|premise-transform\]\[split|type: ['\"]split" web LOGIC_SPEC.
 - Added read-only `window.JKH_debugSummaryBuild(abonentId)` to trace canonical ledger rows, frontend calc totals, prepared summary payload, current `/api/abonent_summary`, current `/api/abonents` mapping, and `whyIndexTotalsEmpty`.
 - The helper does not call the summary save/recalc write path; it reports `READ_ONLY_DIAGNOSTIC_NOT_EXECUTED` for `Data.recalculateAbonentCard` and builds the comparable payload locally.
 - No changes to ledger data, autoaccrual, backend totals, financial formulas, FIFO, or `web/calc_engine.js`.
+
+## 2026-05-21 — Stage 13.2C.a: totals validation diagnostics
+
+- Added read-only `window.JKH_debugTotalsValidation(abonentId)` for field-level totals validation diagnostics.
+- The helper reports raw `calcTotalsAsOfAdjusted`, type/finite/missing/NaN status for principal/debt/penalty/total/accrued/paid/balance, validation blocker, payload before validation, and invalid field lists.
+- No summary writes, ledger writes, migration, autoaccrual, formula changes, or `web/calc_engine.js` changes.

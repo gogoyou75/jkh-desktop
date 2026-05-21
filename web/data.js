@@ -2550,6 +2550,92 @@
     return report;
   };
 
+  function _debugTotalsField(value) {
+    return {
+      value: value,
+      type: typeof value,
+      finite: Number.isFinite(Number(value)),
+      missing: value === undefined || value === null || value === "",
+      nan: Number.isNaN(Number(value))
+    };
+  }
+
+  function _debugTotalsValidationMap(calcTotals, summaryPayload) {
+    var summary = summaryPayload && summaryPayload.summary && typeof summaryPayload.summary === "object" ? summaryPayload.summary : {};
+    return {
+      principal: _debugTotalsField(calcTotals && calcTotals.principal),
+      debt: _debugTotalsField(summary.total_debt !== undefined ? summary.total_debt : (calcTotals && (calcTotals.debt !== undefined ? calcTotals.debt : calcTotals.principal))),
+      penalty: _debugTotalsField(calcTotals && (calcTotals.penaltyDebt !== undefined ? calcTotals.penaltyDebt : calcTotals.penalty)),
+      total: _debugTotalsField(calcTotals && calcTotals.total),
+      accrued: _debugTotalsField(summary.total_accrued),
+      paid: _debugTotalsField(summary.total_paid),
+      balance: _debugTotalsField(calcTotals && (calcTotals.balance !== undefined ? calcTotals.balance : calcTotals.total))
+    };
+  }
+
+  function _debugTotalsValidationResult(fields, summaryPayload) {
+    var missing = [];
+    var nan = [];
+    var nonFinite = [];
+    Object.keys(fields || {}).forEach(function(name) {
+      var f = fields[name] || {};
+      if (f.missing) missing.push(name);
+      if (f.nan) nan.push(name);
+      if (!f.finite) nonFinite.push(name);
+    });
+    var payloadSummary = summaryPayload && summaryPayload.summary;
+    var payloadInvalid = !summaryPayload || !payloadSummary || typeof payloadSummary !== "object" || Array.isArray(payloadSummary);
+    var reason = "";
+    if (nan.length) reason = "TOTALS_NAN";
+    else if (missing.length) reason = "TOTALS_UNDEFINED";
+    else if (nonFinite.length) reason = "TOTALS_VALIDATION_FAILED";
+    else if (payloadInvalid) reason = "PAYLOAD_SCHEMA_MISMATCH";
+    else if (["principal", "penalty", "total", "accrued", "paid"].some(function(name) { return !fields[name]; })) reason = "TOTALS_MISSING_FIELDS";
+    else reason = "";
+    return {
+      ok: !reason,
+      blocker: reason || "",
+      whySummaryInvalid: reason || "",
+      missingFields: missing,
+      nanFields: nan,
+      nonFiniteFields: nonFinite,
+      payloadSchemaOk: !payloadInvalid
+    };
+  }
+
+  window.JKH_debugTotalsValidation = async function(abonentId) {
+    var summaryReport = await window.JKH_debugSummaryBuild(abonentId);
+    var calcTotals = summaryReport && summaryReport.calcTotalsAsOfAdjusted;
+    var summaryPayload = summaryReport && summaryReport.preparedSummaryPayload;
+    var fields = _debugTotalsValidationMap(calcTotals, summaryPayload);
+    var validation = _debugTotalsValidationResult(fields, summaryPayload);
+    var exactReason = validation.whySummaryInvalid || summaryReport.clearReason || "UNKNOWN";
+    var report = {
+      abonentId: summaryReport && summaryReport.abonentId || String(abonentId || "").trim(),
+      uid: summaryReport && summaryReport.uid || "",
+      rawCalcTotalsAsOfAdjusted: calcTotals,
+      totalsFields: fields,
+      exactValidationBlocker: validation.blocker || "",
+      exactReasonSummaryBecameInvalid: exactReason,
+      whySummaryInvalid: exactReason || "UNKNOWN",
+      preparedSummaryPayloadBeforeValidation: summaryPayload,
+      validationResultAfterValidation: validation,
+      missingOrInvalidFields: {
+        missing: validation.missingFields,
+        nan: validation.nanFields,
+        nonFinite: validation.nonFiniteFields
+      }
+    };
+    try {
+      console.table(Object.keys(fields).map(function(name) {
+        var f = fields[name] || {};
+        return { field: name, value: f.value, type: f.type, finite: f.finite, missing: f.missing, nan: f.nan };
+      }));
+    } catch (eTable) {}
+    try { console.log("[summary-build][totals-validation]", report); } catch (eLog) {}
+    return report;
+  };
+
   async function recalcAbonentSummaryExplicit(abonentOrId, options) {
     var opts = options || {};
     var period = await _resolveAbonentSummaryRecalcPeriod(abonentOrId, opts.period);
