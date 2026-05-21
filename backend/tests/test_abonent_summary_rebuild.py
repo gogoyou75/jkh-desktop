@@ -587,7 +587,7 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         response = self.client.post("/api/abonent_summary/mark_dirty?owner=owner-dirty-spoof-b", json={
             "owner": "owner-dirty-spoof-b",
             "account_uid": "uid_dirty_spoof_a_1001",
-            "reason": "CALC_PERIOD_CHANGED",
+            "reason": "PAYMENTS_CHANGED",
         })
 
         self.assertEqual(response.status_code, 200)
@@ -595,6 +595,55 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
             row = app_module.AbonentSummary.query.one()
             self.assertEqual(row.owner_id, "owner-dirty-spoof-a")
             self.assertEqual(row.account_uid, "uid_dirty_spoof_a_1001")
+
+    def test_mark_dirty_skips_calc_period_changed_without_creating_summary(self):
+        with app_module.app.app_context():
+            self._add_user("owner-period-skip-create")
+            self._put_abonents("owner-period-skip-create", {
+                "1001": {"uid": "uid_period_skip_create_1001", "id": "1001"},
+            })
+            app_module.db.session.commit()
+        self._login("owner-period-skip-create")
+
+        response = self.client.post("/api/abonent_summary/mark_dirty", json={
+            "account_uid": "uid_period_skip_create_1001",
+            "reason": "CALC_PERIOD_CHANGED",
+        })
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["status"], "skipped")
+        self.assertEqual(response.get_json()["view_only_reason"], "CALC_PERIOD_CHANGED")
+        self.assertEqual(response.get_json()["counters"], {"created": 0, "updated": 0, "skipped": 1, "errors": 0})
+        with app_module.app.app_context():
+            self.assertEqual(app_module.AbonentSummary.query.count(), 0)
+
+    def test_mark_dirty_skips_calc_period_changed_without_dirtying_existing_summary(self):
+        original_summary = self._fresh_summary(50, 7, 57)
+        with app_module.app.app_context():
+            self._add_user("owner-period-skip-existing")
+            self._put_abonents("owner-period-skip-existing", {
+                "1001": {"uid": "uid_period_skip_existing_1001", "id": "1001"},
+            })
+            app_module.db.session.add(app_module.AbonentSummary(
+                owner_id="owner-period-skip-existing",
+                abonent_id="1001",
+                account_uid="uid_period_skip_existing_1001",
+                account_number="1001",
+                summary_json=json.dumps(original_summary, sort_keys=True),
+            ))
+            app_module.db.session.commit()
+        self._login("owner-period-skip-existing")
+
+        response = self.client.post("/api/abonent_summary/mark_dirty", json={
+            "account_uid": "uid_period_skip_existing_1001",
+            "reason": "CALC_PERIOD_CHANGED",
+        })
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["status"], "skipped")
+        with app_module.app.app_context():
+            row = app_module.AbonentSummary.query.one()
+            self.assertEqual(json.loads(row.summary_json), original_summary)
 
     def test_mark_dirty_does_not_touch_other_owner(self):
         with app_module.app.app_context():
@@ -673,6 +722,43 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         self.assertEqual(response.get_json()["items"], [])
         with app_module.app.app_context():
             self.assertEqual(app_module.AbonentSummary.query.count(), 0)
+
+    def test_calc_period_frontend_save_is_view_state_only(self):
+        path = self._find_repo_file("web", "abonent_card.html")
+        self.assertIsNotNone(path)
+        source = path.read_text(encoding="utf-8")
+        self.assertIn("function saveCalcPeriod(from, to){", source)
+        self.assertIn("function setCalcPeriodActive(active){", source)
+        save_body = source.split("function saveCalcPeriod(from, to){", 1)[1].split("function setCalcPeriodActive(active){", 1)[0]
+        active_body = source.split("function setCalcPeriodActive(active){", 1)[1].split("function confirmCalcPeriodSaved(){", 1)[0]
+
+        combined = save_body + active_body
+        self.assertIn("storeSet(meta.storageKey", save_body)
+        self.assertIn("storeSet(meta.activeStorageKey", combined)
+        self.assertNotIn("markCurrentAbonentSummaryDirty", combined)
+        self.assertNotIn("markAbonentSummaryDirty", combined)
+        self.assertNotIn("payments_", combined)
+        self.assertNotIn("ledger_runtime_cache_", combined)
+        self.assertNotIn("recalc", combined.lower())
+        self.assertNotIn("autoaccrual", combined.lower())
+
+    def test_calc_period_changed_is_not_used_by_index_or_batch_recalc(self):
+        for parts in (("web", "index.html"), ("web", "data.js")):
+            path = self._find_repo_file(*parts)
+            self.assertIsNotNone(path)
+            source = path.read_text(encoding="utf-8")
+            if parts[-1] == "index.html":
+                self.assertNotIn("CALC_PERIOD_CHANGED", source)
+            if parts[-1] == "data.js":
+                pattern = re.compile(r"recalc_batch[^\\n]+CALC_PERIOD_CHANGED|CALC_PERIOD_CHANGED[^\\n]+recalc_batch", re.I)
+                self.assertIsNone(pattern.search(source))
+
+    def test_calc_engine_source_remains_unmodified_for_stage_13_1(self):
+        path = self._find_repo_file("web", "calc_engine.js")
+        self.assertIsNotNone(path)
+        source = path.read_text(encoding="utf-8")
+        self.assertIn("calc_period_", source)
+        self.assertIn("allocatePaymentsFIFO", source)
 
 
 if __name__ == "__main__":

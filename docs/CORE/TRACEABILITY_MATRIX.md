@@ -69,6 +69,7 @@
 | payments_<uid>      | LOGIC_SPEC | calc_engine.js | ⚫      |             |
 | server-first        | LOGIC_SPEC | storage.js     | ⚫      |             |
 | owner-scoped данные | LOGIC_SPEC | storage.js     | ⚫      |             |
+| Period keys are view/report state, not financial dirty | LOGIC_SPEC 2.0.1 | abonent_card.html / app.py / data.js / index.html | ✅ OK | Stage 13.1: `CALC_PERIOD_CHANGED` is skipped by backend mark_dirty; card period save/toggle does not call summary dirty, ledger cache invalidation, autoaccrual or recalc. |
 
 ---
 

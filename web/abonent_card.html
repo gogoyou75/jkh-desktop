@@ -2283,7 +2283,6 @@ function saveCalcPeriod(from, to){
 
     storeSet(meta.storageKey, JSON.stringify(payload), meta.ownerId);
     storeSet(meta.activeStorageKey, "1", meta.ownerId);
-    markCurrentAbonentSummaryDirty("CALC_PERIOD_CHANGED");
     try {
         console.log("[calc-period][save]", {
             requestedId: meta.requestedId,
@@ -2328,7 +2327,6 @@ function setCalcPeriodActive(active){
     }
 
     storeSet(meta.activeStorageKey, active ? "1" : "0", meta.ownerId);
-    markCurrentAbonentSummaryDirty("CALC_PERIOD_CHANGED");
     return true;
 }
 

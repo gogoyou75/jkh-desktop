@@ -1604,6 +1604,17 @@ def abonent_summary_mark_dirty():
         if not target:
             return jsonify(ok=False, error="uid_not_found"), 404
 
+        if reason == "CALC_PERIOD_CHANGED":
+            counters["skipped"] += 1
+            return jsonify(
+                ok=True,
+                account_uid=account_uid,
+                status="skipped",
+                reason=reason,
+                view_only_reason=reason,
+                counters=counters,
+            )
+
         row = AbonentSummary.query.filter_by(owner_id=owner, account_uid=account_uid).order_by(AbonentSummary.id.asc()).first()
         if row:
             try:
