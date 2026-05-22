@@ -2759,7 +2759,8 @@
     var opts = options || {};
     var period = await _resolveAbonentSummaryRecalcPeriod(abonentOrId, opts.period);
     var summary = null;
-    var periodActive = opts.saveSummary === false || String(opts.summaryScope || opts.summary_scope || "").toLowerCase() === "period";
+    var scopeOpt = String(opts.summaryScope || opts.summary_scope || "").toLowerCase();
+    var periodActive = opts.saveSummary === false || scopeOpt === "period" || (!!opts.period && opts.saveSummary !== true && scopeOpt !== "full");
 
     try {
       if (!period.ok) throw new Error(period.error || "PERIOD_INVALID");
@@ -2873,7 +2874,8 @@
       var ledgerReason = _summaryCalcErrorCode(e);
       var periodForError = await _resolveAbonentSummaryRecalcPeriod(abonentOrId, opts.period);
       var errorSummary = buildAbonentSummaryErrorAfterExplicitRecalc(abonentOrId, periodForError, ledgerReason);
-      var periodErrorScope = opts.saveSummary === false || String(opts.summaryScope || opts.summary_scope || "").toLowerCase() === "period";
+      var errorScopeOpt = String(opts.summaryScope || opts.summary_scope || "").toLowerCase();
+      var periodErrorScope = opts.saveSummary === false || errorScopeOpt === "period" || (!!opts.period && opts.saveSummary !== true && errorScopeOpt !== "full");
       if (periodErrorScope) {
         errorSummary.summary_scope = "period";
         errorSummary.report_scope = "period";

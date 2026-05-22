@@ -2950,7 +2950,7 @@ async function __saveAbonentSummaryAfterUidRecalc(abonentId, from, to){
         renderAbonentSummaryStatus("error", "SUMMARY_RECALC_UNAVAILABLE");
         return { ok: false, summary_status: "error", summary_reason: "SUMMARY_RECALC_UNAVAILABLE" };
     }
-    const result = await Data.recalculateAbonentCard(abonentId, { period: { from: from, to: to } });
+    const result = await Data.recalculateAbonentCard(abonentId, { period: { from: from, to: to }, saveSummary: false, summaryScope: "period", periodActive: true });
     const summary = result && result.summary && typeof result.summary === "object" ? result.summary : null;
     const status = result && (result.summary_status || result.status) || summary && (summary.summary_status || summary.status) || "error";
     const reason = result && (result.summary_reason || result.reason) || summary && (summary.summary_reason || summary.reason) || "SUMMARY_SAVE_FAILED";

@@ -1037,6 +1037,8 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
 
         self.assertIn("applyAutoAccrual: true", body)
         self.assertIn("period: { from: from, to: to }", body)
+        self.assertIn("saveSummary: false", source)
+        self.assertIn('summaryScope: "period"', source)
         self.assertIn("recalcResult.summary", body)
         self.assertIn("manualRecalcErrorMessage", source)
         self.assertIn("Не задан период ответственности/дата начала расчёта", source)
@@ -1361,6 +1363,7 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         self.assertIn("[summary][save-full-summary]", recalc_body)
         self.assertIn('summary.summary_scope = "period"', recalc_body)
         self.assertIn('summary.summary_scope = "full"', recalc_body)
+        self.assertIn("!!opts.period && opts.saveSummary !== true", recalc_body)
         self.assertIn("saveSummary: !(periodActive && selectedPeriod)", full_recalc_body)
         self.assertIn('summaryScope: (periodActive && selectedPeriod) ? "period" : "full"', full_recalc_body)
         self.assertIn("periodActive: !!(periodActive && selectedPeriod)", full_recalc_body)
