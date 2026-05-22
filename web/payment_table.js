@@ -1219,20 +1219,18 @@ if (parts.length) {
     }
 
     const abonent = (typeof window.Data.getAbonent === "function") ? window.Data.getAbonent(id) : null;
-    if (!abonent) {
-      logCalcPeriodOnce("[calc-period][save-skipped-no-canonical-key]", { abonentId: id, reason: "ABONENT_NOT_READY", source: "payment_table" });
-      return { cacheKey: cacheKey, storageKey: "", activeStorageKey: "", abonentId: id };
-    }
-
-    const storageKey = String(window.Data.resolveCalcPeriodStorageKey(abonent) || "");
-    const activeStorageKey = String(window.Data.resolveCalcPeriodActiveStorageKey(abonent) || "");
+    const resolverInput = abonent || id;
+    const storageKey = String(window.Data.resolveCalcPeriodStorageKey(resolverInput) || "");
+    const activeStorageKey = String(window.Data.resolveCalcPeriodActiveStorageKey(resolverInput) || "");
+    let resolvedUid = String(abonent && abonent.uid || "");
+    if (!resolvedUid && /^calc_period_uid_/.test(storageKey)) resolvedUid = storageKey.replace(/^calc_period_/, "");
     if (!storageKey || !activeStorageKey) {
-      logCalcPeriodOnce("[calc-period][save-skipped-no-canonical-key]", { abonentId: id, reason: "CANONICAL_KEY_NOT_READY", source: "payment_table" });
+      logCalcPeriodOnce("[calc-period][save-skipped-no-canonical-key]", { requestedId: id, resolvedUid: resolvedUid, ownerId: owner, reason: "CANONICAL_KEY_NOT_READY", source: "payment_table" });
       return { cacheKey: cacheKey, storageKey: "", activeStorageKey: "", abonentId: id };
     }
 
-    __calcPeriodMetaCache = { cacheKey: cacheKey, storageKey: storageKey, activeStorageKey: activeStorageKey, abonentId: id };
-    logCalcPeriodOnce("[calc-period][canonical-key-used]", { abonentId: id, storageKey: storageKey, activeKey: activeStorageKey, source: "payment_table" });
+    __calcPeriodMetaCache = { cacheKey: cacheKey, storageKey: storageKey, activeStorageKey: activeStorageKey, abonentId: id, resolvedUid: resolvedUid };
+    logCalcPeriodOnce("[calc-period][canonical-key-used]", { requestedId: id, resolvedUid: resolvedUid, storageKey: storageKey, activeStorageKey: activeStorageKey, ownerId: owner, source: "payment_table" });
     return __calcPeriodMetaCache;
   }
   function calcPeriodKey() { return calcPeriodStorageMeta().storageKey || ""; }

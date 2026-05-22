@@ -901,6 +901,44 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         self.assertNotIn("recalc", combined.lower())
         self.assertNotIn("autoaccrual", combined.lower())
 
+    def test_stage_13_4b_calc_period_uses_uid_resolvers_not_legacy_account_keys(self):
+        card_path = self._find_repo_file("web", "abonent_card.html")
+        payment_path = self._find_repo_file("web", "payment_table.js")
+        calc_engine_path = self._find_repo_file("web", "calc_engine.js")
+        self.assertIsNotNone(card_path)
+        self.assertIsNotNone(payment_path)
+        self.assertIsNotNone(calc_engine_path)
+        card_source = card_path.read_text(encoding="utf-8")
+        payment_source = payment_path.read_text(encoding="utf-8")
+        calc_before = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
+
+        card_meta_body = card_source.split("function getCalcPeriodStorageMeta()", 1)[1].split("function calcPeriodKey()", 1)[0]
+        payment_meta_body = payment_source.split("function calcPeriodStorageMeta()", 1)[1].split("function calcPeriodKey()", 1)[0]
+        card_save_body = card_source.split("function saveCalcPeriod(from, to){", 1)[1].split("function setCalcPeriodActive", 1)[0]
+        full_recalc_body = payment_source.split("window.fullRecalcForCurrentAbonent", 1)[1].split("window.__loadPaymentTable", 1)[0]
+
+        self.assertIn("Data.resolveCalcPeriodStorageKey(resolverInput)", card_meta_body)
+        self.assertIn("Data.resolveCalcPeriodActiveStorageKey(resolverInput)", card_meta_body)
+        self.assertIn("Data.resolveCalcPeriodStorageKey(resolverInput)", payment_meta_body)
+        self.assertIn("Data.resolveCalcPeriodActiveStorageKey(resolverInput)", payment_meta_body)
+        self.assertIn("[calc-period][canonical-key-used]", card_meta_body)
+        self.assertIn("[calc-period][canonical-key-used]", payment_meta_body)
+        self.assertIn("requestedId", card_meta_body)
+        self.assertIn("resolvedUid", card_meta_body)
+        self.assertIn("storageKey", card_meta_body)
+        self.assertIn("activeStorageKey", card_meta_body)
+        self.assertIn("ownerId", card_meta_body)
+        self.assertIn("storeSet(meta.storageKey", card_save_body)
+        self.assertIn("storeSet(meta.activeStorageKey", card_save_body)
+        self.assertNotIn("calc_period_\" +", card_save_body)
+        self.assertNotIn("calc_period_active_\" +", card_save_body)
+        self.assertNotIn("CALC_PERIOD_CHANGED", card_save_body)
+        self.assertNotIn("markAbonentSummaryDirty", card_save_body)
+        self.assertNotIn("CALC_PERIOD_CHANGED", full_recalc_body)
+
+        calc_after = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
+        self.assertEqual(calc_before, calc_after)
+
     def test_calc_period_changed_is_not_used_by_index_or_batch_recalc(self):
         for parts in (("web", "index.html"), ("web", "data.js")):
             path = self._find_repo_file(*parts)

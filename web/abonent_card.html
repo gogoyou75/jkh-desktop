@@ -2161,11 +2161,15 @@ function getCalcPeriodOwnerId(){
 function getCalcPeriodStorageMeta(){
     const requestedId = getAbonentIdFromURL();
     const db = getDb() || {};
-    const abonent = db[requestedId] || null;
-    const resolvedUid = String(abonent?.uid || '').trim();
+    const abonent = db[requestedId] || ((window.Data && typeof Data.getAbonent === "function") ? Data.getAbonent(requestedId) : null);
     const hasResolvers = !!(window.Data && typeof Data.resolveCalcPeriodStorageKey === "function" && typeof Data.resolveCalcPeriodActiveStorageKey === "function");
-    const storageKey = (hasResolvers && abonent) ? String(Data.resolveCalcPeriodStorageKey(abonent) || '') : '';
-    const activeStorageKey = (hasResolvers && abonent) ? String(Data.resolveCalcPeriodActiveStorageKey(abonent) || '') : '';
+    const resolverInput = abonent || requestedId;
+    const storageKey = (hasResolvers && resolverInput) ? String(Data.resolveCalcPeriodStorageKey(resolverInput) || '') : '';
+    const activeStorageKey = (hasResolvers && resolverInput) ? String(Data.resolveCalcPeriodActiveStorageKey(resolverInput) || '') : '';
+    let resolvedUid = String(abonent?.uid || '').trim();
+    if (!resolvedUid && /^calc_period_uid_/.test(storageKey)) {
+        resolvedUid = storageKey.replace(/^calc_period_/, "");
+    }
     const ownerId = getCalcPeriodOwnerId();
     if (storageKey && activeStorageKey) {
         __logCalcPeriodCanonicalUsed({ requestedId: String(requestedId || ''), resolvedUid: resolvedUid, ownerId: ownerId, storageKey: storageKey, activeStorageKey: activeStorageKey, source: "abonent_card" });

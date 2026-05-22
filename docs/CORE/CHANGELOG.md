@@ -626,3 +626,9 @@ rg -n "splitPremise|premise-transform\]\[split|type: ['\"]split" web LOGIC_SPEC.
 - Frontend save path логирует `[summary][build-payload]`, `[summary][save-ok]`, `[summary][save-failed]` с UID, status, reason и `summary.totals` keys.
 - Добавлена regression-проверка, что rebuild без body не исправляет invalid fresh финансовыми totals и не подставляет fake totals.
 - Index по-прежнему не читает `payments_<uid>` и batch остаётся validator, не пересчётом карточек.
+
+## 2026-05-22 — Stage 13.4B — abonent card calc-period canonical key resolution
+
+- `abonent_card.html` и `payment_table.js` теперь резолвят calc period keys через `Data.resolveCalcPeriodStorageKey(...)` / `Data.resolveCalcPeriodActiveStorageKey(...)` даже когда локальный объект абонента ещё не готов, используя requested id как вход в canonical resolver.
+- Добавлена диагностика `[calc-period][canonical-key-used]` с `requestedId`, `resolvedUid`, `storageKey`, `activeStorageKey`, `ownerId`.
+- Сохранение периода остаётся view-only: без `CALC_PERIOD_CHANGED` dirty, без legacy `calc_period_<ЛС>` writes, без hidden rebuild и без изменений `web/calc_engine.js`.
