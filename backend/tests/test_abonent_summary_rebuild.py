@@ -681,6 +681,53 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         self.assertEqual(dirty_response.get_json()["items"], [])
         self.assertEqual(len(missing_response.get_json()["items"]), 1)
 
+    def test_invalid_fresh_without_totals_is_error_for_index_and_batch_job(self):
+        with app_module.app.app_context():
+            self._add_user("owner-invalid-fresh-batch")
+            self._put_abonents("owner-invalid-fresh-batch", {
+                "1001": {"uid": "uid_invalid_fresh_batch_1001", "id": "1001"},
+            })
+            app_module.db.session.add(app_module.AbonentSummary(
+                owner_id="owner-invalid-fresh-batch",
+                abonent_id="1001",
+                account_uid="uid_invalid_fresh_batch_1001",
+                account_number="1001",
+                summary_json=json.dumps({
+                    "summary_status": "fresh",
+                    "summary_reason": "OK",
+                    "status": "fresh",
+                    "reason": "OK",
+                }, sort_keys=True),
+            ))
+            app_module.db.session.commit()
+        self._login("owner-invalid-fresh-batch")
+
+        index_response = self.client.get("/api/abonents?limit=10")
+
+        self.assertEqual(index_response.status_code, 200)
+        index_item = index_response.get_json()["items"][0]
+        self.assertEqual(index_item["summary_status"], "error")
+        self.assertEqual(index_item["summary"]["summary_status"], "error")
+        self.assertEqual(index_item["summary"]["summary_reason"], "FRESH_TOTALS_MISSING")
+        self.assertNotIn("totals", index_item["summary"])
+
+        create_response = self.client.post("/api/abonent_summary/recalc_batch_job", json={
+            "uids": ["uid_invalid_fresh_batch_1001"],
+            "reason": "MANUAL_RECALC",
+        })
+        self.assertEqual(create_response.status_code, 200)
+        job_id = create_response.get_json()["job_id"]
+
+        run_response = self.client.post(f"/api/abonent_summary/recalc_batch_job/{job_id}/run")
+
+        self.assertEqual(run_response.status_code, 200)
+        payload = run_response.get_json()
+        self.assertEqual(payload["processed"], 1)
+        self.assertEqual(payload["fresh"], 0)
+        self.assertEqual(payload["error"], 1)
+        self.assertEqual(payload["items"][0]["summary_status"], "error")
+        self.assertEqual(payload["items"][0]["summary_reason"], "FRESH_TOTALS_MISSING")
+
     def test_mark_dirty_does_not_touch_other_owner(self):
         with app_module.app.app_context():
             self._add_user("owner-dirty-a")

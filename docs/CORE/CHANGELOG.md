@@ -606,3 +606,9 @@ rg -n "splitPremise|premise-transform\]\[split|type: ['\"]split" web LOGIC_SPEC.
 - Добавлен read-only diagnostic helper `window.JKH_debugIndexSummaryRows()` и console diagnostics `[index][summary-row-empty]` / `[index][summary-row-invalid-fresh]` для точной причины пустых расчетных колонок.
 - Legacy `CALC_PERIOD_CHANGED` больше не трактуется как financial dirty: backend index payload нормализует старый dirty reason в `missing`, frontend показывает view-only legacy reason и клиентский dirty helper не отправляет этот reason на сервер.
 - `web/calc_engine.js`, формулы, FIFO, пени, чтение `payments_<uid>` на index, autoaccrual и hidden rebuild не изменялись.
+
+## 2026-05-22 — Stage 13.3E — batch invalid fresh totals guard
+
+- Backend summary transport теперь валидирует `fresh` totals перед index payload и batch job accounting: fresh без `summary.totals` или без finite debt/penalty/accrued/paid превращается в `error` с `FRESH_TOTALS_MISSING` / `FRESH_TOTALS_INVALID`.
+- Batch job больше не считает invalid fresh как fresh: такие UID идут в `error_count`, item получает `summary_status=error` и точный `summary_reason`.
+- Не добавлялись hidden rebuild, fake zero totals, чтение `payments_<uid>` на index, autoaccrual или изменения `web/calc_engine.js`.

@@ -1079,8 +1079,75 @@ def _summary_status_from_payload(summary: dict | None):
     return "missing"
 
 
-def _summary_without_stale_totals(summary: dict | None):
+def _summary_finite_number(value):
+    if value is None:
+        return False
+    if isinstance(value, str) and not value.strip():
+        return False
+    try:
+        n = Decimal(str(value).replace(",", "."))
+    except (InvalidOperation, ValueError, TypeError):
+        return False
+    return n.is_finite()
+
+
+def _pick_summary_total(summary: dict, totals: dict, keys: tuple[str, ...]):
+    for key in keys:
+        if key.startswith("totals."):
+            value = totals.get(key.split(".", 1)[1])
+        else:
+            value = summary.get(key)
+        if value is not None and not (isinstance(value, str) and not value.strip()):
+            return value
+    return None
+
+
+def _fresh_totals_validation_reason(summary: dict | None):
+    if _summary_status_from_payload(summary) != "fresh":
+        return ""
+    if not isinstance(summary, dict):
+        return "FRESH_TOTALS_MISSING"
+
+    totals = summary.get("totals")
+    if not isinstance(totals, dict):
+        return "FRESH_TOTALS_MISSING"
+
+    required = {
+        "debt": ("totals.debt", "totals.total", "totals.total_debt"),
+        "penalty": ("totals.penalty", "totals.total_penalty"),
+        "accrued": ("totals.accrued", "totals.total_accrued"),
+        "paid": ("totals.paid", "totals.total_paid"),
+    }
+    missing = False
+    invalid = False
+    for keys in required.values():
+        value = _pick_summary_total(summary, totals, keys)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            missing = True
+            continue
+        if not _summary_finite_number(value):
+            invalid = True
+
+    if missing:
+        return "FRESH_TOTALS_MISSING"
+    if invalid:
+        return "FRESH_TOTALS_INVALID"
+    return ""
+
+
+def _summary_with_validated_fresh_totals(summary: dict | None):
     payload = summary.copy() if isinstance(summary, dict) else {}
+    reason = _fresh_totals_validation_reason(payload)
+    if reason:
+        payload["summary_status"] = "error"
+        payload["summary_reason"] = reason
+        payload["status"] = "error"
+        payload["reason"] = reason
+    return payload
+
+
+def _summary_without_stale_totals(summary: dict | None):
+    payload = _summary_with_validated_fresh_totals(summary)
     status = _summary_status_from_payload(payload)
     payload["summary_status"] = status
     payload["status"] = status
@@ -1201,6 +1268,7 @@ def _recalc_batch_process_job(owner_id: str, job: RecalcBatchJob, step_limit: in
         try:
             row = AbonentSummary.query.filter_by(owner_id=owner_id, account_uid=item.account_uid).order_by(AbonentSummary.id.asc()).first()
             summary = _summary_from_row_or_missing(row, {"account_uid": item.account_uid, "abonent_id": "", "account_number": "", "identity": {}})
+            summary = _summary_with_validated_fresh_totals(summary)
             s_status = _summary_status_from_payload(summary)
             s_reason = _norm_text(summary.get("summary_reason") or summary.get("reason") or "")
             if s_status == "fresh":
