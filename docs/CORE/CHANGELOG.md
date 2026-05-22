@@ -646,3 +646,9 @@ rg -n "splitPremise|premise-transform\]\[split|type: ['\"]split" web LOGIC_SPEC.
 - Backend `POST /api/abonent_summary/rebuild` rejects period/report summaries with `period_summary_not_allowed`.
 - Reports-period save path ensures canonical UID before writing calc-period keys, preserving UID-only `calc_period_uid_*` / `calc_period_active_uid_*`.
 - No calc engine, FIFO, penalty, index ledger read, hidden rebuild, or fake summary changes were added.
+
+## 2026-05-22 - Stage 13.4C - period summary guard and canonical calc-period keys
+
+- Fixed `Data.saveAbonentSummaryAfterRecalc(...)` period/report guard so it runs only after the real summary payload object is defined and returns `PERIOD_SUMMARY_NOT_SAVED` without a JS exception.
+- Fixed calc-period legacy-key detection: `calc_period_uid_...` and `calc_period_active_uid_...` are canonical and no longer blocked as legacy writes; account-number keys remain blocked.
+- Kept server-first/index constraints unchanged: no hidden rebuild, no index ledger read, no fake totals, no `calc_engine.js` changes.

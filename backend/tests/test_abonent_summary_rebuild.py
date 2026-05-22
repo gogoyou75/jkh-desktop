@@ -1386,7 +1386,11 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
 
         self.assertIn("[summary][skip-save-period-summary]", recalc_body)
         self.assertIn("[summary][save-full-summary]", recalc_body)
-        self.assertIn("[summary][skip-save-period-summary]", data_source.split("async function saveAbonentSummaryAfterRecalc", 1)[1].split("async function validateAbonentSummaryRecalcBatch", 1)[0])
+        save_body = data_source.split("async function saveAbonentSummaryAfterRecalc", 1)[1].split("async function validateAbonentSummaryRecalcBatch", 1)[0]
+        self.assertIn("[summary][skip-save-period-summary]", save_body)
+        self.assertIn("var summaryPayload =", save_body)
+        self.assertIn("summaryPayload.summary_scope || summaryPayload.report_scope || summaryPayload.scope", save_body)
+        self.assertIn("summary: summaryPayload", save_body)
         self.assertIn('summary.summary_scope = "period"', recalc_body)
         self.assertIn('summary.summary_scope = "full"', recalc_body)
         self.assertIn("!!opts.period && opts.saveSummary !== true", recalc_body)
@@ -1394,6 +1398,26 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         self.assertIn('summaryScope: (periodActive && selectedPeriod) ? "period" : "full"', full_recalc_body)
         self.assertIn("periodActive: !!(periodActive && selectedPeriod)", full_recalc_body)
         self.assertIn("FRESH_TOTALS_MISSING", index_source)
+
+        calc_after = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
+        self.assertEqual(calc_before, calc_after)
+
+    def test_stage_13_4c_canonical_active_calc_period_key_is_not_legacy(self):
+        card_path = self._find_repo_file("web", "abonent_card.html")
+        payment_path = self._find_repo_file("web", "payment_table.js")
+        calc_engine_path = self._find_repo_file("web", "calc_engine.js")
+        self.assertIsNotNone(card_path)
+        self.assertIsNotNone(payment_path)
+        self.assertIsNotNone(calc_engine_path)
+        card_source = card_path.read_text(encoding="utf-8")
+        payment_source = payment_path.read_text(encoding="utf-8")
+        calc_before = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
+
+        self.assertNotIn("calc_period_(active_)?(?!uid_)", card_source)
+        self.assertNotIn("calc_period_(active_)?(?!uid_)", payment_source)
+        for source in (card_source, payment_source):
+            self.assertIn("calc_period_active_(?!uid_)", source)
+            self.assertIn("calc_period_(?!uid_|active_uid_)", source)
 
         calc_after = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
         self.assertEqual(calc_before, calc_after)

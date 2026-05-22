@@ -1396,7 +1396,8 @@ function storeGet(key, ownerId){
   try { return (window.JKHStore && JKHStore.getRaw) ? JKHStore.getRaw(key, ownerId) : null; } catch(e){ return null; }
 }
 function __isLegacyCalcPeriodWriteKey(key){
-  return /^calc_period_(active_)?(?!uid_)/.test(String(key || ""));
+  const k = String(key || "");
+  return /^calc_period_active_(?!uid_)/.test(k) || /^calc_period_(?!uid_|active_uid_)/.test(k);
 }
 function storeSet(key, value, ownerId){
   try {

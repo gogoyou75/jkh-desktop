@@ -55,7 +55,7 @@
   }
   function isLegacyCalcPeriodKey(key){
     const k = String(key || "");
-    return /^calc_period_(active_)?(?!uid_)/.test(k);
+    return /^calc_period_active_(?!uid_)/.test(k) || /^calc_period_(?!uid_|active_uid_)/.test(k);
   }
   function storeSetRaw(key, value){
     if (!(window.JKHStore && typeof window.JKHStore.setRaw === "function")) return;

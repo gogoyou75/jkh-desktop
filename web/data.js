@@ -1865,10 +1865,11 @@
       var abonent = found && found.abonent ? found.abonent : null;
       var abonentId = String(found && found.id || (abonent && abonent.id) || (typeof abonentOrId === "object" ? abonentOrId && abonentOrId.id : abonentOrId) || "").trim();
       var uid = String(abonent && abonent.uid || (typeof abonentOrId === "object" ? abonentOrId && abonentOrId.uid : "") || "").trim();
-      var summaryStatus = summary && (summary.summary_status || summary.status) || "";
-      var summaryReason = summary && (summary.summary_reason || summary.reason) || "";
-      var summaryScope = String(summary && (summary.summary_scope || summary.report_scope) || "").trim().toLowerCase();
-      var summaryTotals = summary && summary.totals && typeof summary.totals === "object" ? summary.totals : {};
+      var summaryPayload = (summary && typeof summary === "object" && !Array.isArray(summary)) ? summary : null;
+      var summaryStatus = summaryPayload && (summaryPayload.summary_status || summaryPayload.status) || "";
+      var summaryReason = summaryPayload && (summaryPayload.summary_reason || summaryPayload.reason) || "";
+      var summaryScope = String(summaryPayload && (summaryPayload.summary_scope || summaryPayload.report_scope || summaryPayload.scope) || "").trim().toLowerCase();
+      var summaryTotals = summaryPayload && summaryPayload.totals && typeof summaryPayload.totals === "object" ? summaryPayload.totals : {};
       var summaryTotalsKeys = Object.keys(summaryTotals);
       saveLogCtx = { uid: uid, status: String(summaryStatus || ""), reason: String(summaryReason || ""), totalsKeys: summaryTotalsKeys };
 
@@ -1876,7 +1877,7 @@
         try { console.warn("[summary][save-failed]", { uid: uid, status: summaryStatus, reason: "INVALID_UID", totalsKeys: summaryTotalsKeys, abonentId: abonentId }); } catch (eWarn) {}
         return { ok: false, skipped: true, reason: "INVALID_UID" };
       }
-      if (!summary || typeof summary !== "object" || Array.isArray(summary)) {
+      if (!summaryPayload) {
         try { console.warn("[summary][save-failed]", { uid: uid, status: summaryStatus, reason: "SUMMARY_INVALID", totalsKeys: summaryTotalsKeys, abonentId: abonentId }); } catch (eSummary) {}
         return { ok: false, skipped: true, reason: "SUMMARY_INVALID" };
       }
@@ -1895,7 +1896,7 @@
         account_uid: uid,
         abonent_id: String(abonentId || abonent && abonent.id || ""),
         account_number: String(abonent && (abonent.account_number || abonent.accountNumber || abonent.ls || abonent.id) || abonentId || ""),
-        summary: summary
+        summary: summaryPayload
       };
       try {
         console.log("[summary][build-payload]", {
