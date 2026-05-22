@@ -402,6 +402,32 @@ function fillAbonentCardHeader(id, a) {
     return true;
 }
 
+function autoAcceptReportsPeriod(abonent, from, to, source) {
+    const fromValue = String(from || "").trim();
+    const toValue = String(to || "").trim();
+    const ok = isValidPeriod(fromValue, toValue) && saveCanonicalPeriod(abonent, fromValue, toValue, { silent: true, source: "auto-accept:" + String(source || "unknown") });
+    const openBtn = document.getElementById("openReport01");
+    const chooseBtn = document.getElementById("repChooseBtn");
+    if (openBtn) openBtn.disabled = !ok;
+    if (chooseBtn) chooseBtn.disabled = false;
+    try {
+        const meta = getCanonicalPeriodMeta(getAbonentIdFromURL(), abonent);
+        console.log("[reports][period-auto-accepted]", {
+            ok: !!ok,
+            source: String(source || "unknown"),
+            abonentId: meta.abonentId,
+            uid: meta.uid,
+            ownerId: meta.ownerId,
+            reportKey: meta.reportKey,
+            periodKey: meta.periodKey,
+            activeKey: meta.activeKey,
+            from: fromValue,
+            to: toValue
+        });
+    } catch(eAutoAcceptLog) {}
+    return !!ok;
+}
+
 function loadAutoPeriod(abonent) {
     const id = getAbonentIdFromURL();
     if (!id) return;
@@ -417,7 +443,7 @@ function loadAutoPeriod(abonent) {
     if (urlFrom || urlTo) {
         fromEl.value = urlFrom;
         toEl.value = urlTo;
-        if (isValidPeriod(urlFrom, urlTo)) saveCanonicalPeriod(abonent, urlFrom, urlTo, { silent: true, source: "url" });
+        const accepted = autoAcceptReportsPeriod(abonent, urlFrom, urlTo, "url");
         try {
             console.log("[reports][bootstrap-period]", {
                 source: "url",
@@ -428,7 +454,8 @@ function loadAutoPeriod(abonent) {
                 periodKey: meta.periodKey,
                 activeKey: meta.activeKey,
                 from: fromEl.value || "",
-                to: toEl.value || ""
+                to: toEl.value || "",
+                autoAccepted: accepted
             });
         } catch(eUrlBootstrapLog) {}
         try { console.log("[reports][calc-period][restored]", { source: "url", from: fromEl.value || "", to: toEl.value || "", periodKey: meta.periodKey, activeKey: meta.activeKey }); } catch(eUrlLog) {}
@@ -468,6 +495,7 @@ function loadAutoPeriod(abonent) {
     if (reportPeriod && isValidPeriod(String(reportPeriod.from || ""), String(reportPeriod.to || ""))) {
         fromEl.value = reportPeriod.from || "";
         toEl.value = reportPeriod.to || "";
+        const accepted = autoAcceptReportsPeriod(abonent, fromEl.value, toEl.value, "report_period_uid");
         try {
             console.log("[reports][bootstrap-period]", {
                 source: "report_period_uid",
@@ -478,7 +506,8 @@ function loadAutoPeriod(abonent) {
                 periodKey: meta.periodKey,
                 activeKey: meta.activeKey,
                 from: fromEl.value || "",
-                to: toEl.value || ""
+                to: toEl.value || "",
+                autoAccepted: accepted
             });
         } catch(eReportBootstrapLog) {}
         try { console.log("[reports][calc-period][restored]", { source: "canonical-report", from: fromEl.value || "", to: toEl.value || "", reportKey: meta.reportKey, periodKey: meta.periodKey, activeKey: meta.activeKey }); } catch(eReportRestoreLog) {}
@@ -488,6 +517,7 @@ function loadAutoPeriod(abonent) {
     if (activeRaw === "1" && p && isValidPeriod(String(p.from || ""), String(p.to || ""))) {
         fromEl.value = p.from || "";
         toEl.value = p.to || "";
+        const accepted = autoAcceptReportsPeriod(abonent, fromEl.value, toEl.value, "calc_period_uid");
         try {
             console.log("[reports][bootstrap-period]", {
                 source: "calc_period_uid",
@@ -498,7 +528,8 @@ function loadAutoPeriod(abonent) {
                 periodKey: meta.periodKey,
                 activeKey: meta.activeKey,
                 from: fromEl.value || "",
-                to: toEl.value || ""
+                to: toEl.value || "",
+                autoAccepted: accepted
             });
         } catch(eCalcBootstrapLog) {}
         try { console.log("[reports][calc-period][restored]", { source: "canonical", from: fromEl.value || "", to: toEl.value || "", periodKey: meta.periodKey, activeKey: meta.activeKey }); } catch(eRestoreLog) {}

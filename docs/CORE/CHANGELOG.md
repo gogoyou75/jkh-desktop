@@ -532,3 +532,9 @@ rg -n "splitPremise|premise-transform\]\[split|type: ['\"]split" web LOGIC_SPEC.
 - `reports.html` bootstraps its date inputs from URL period first, then `report_period_uid_<uid>`, then `calc_period_uid_<uid>`, and logs `[reports][bootstrap-period]`.
 - `spravka_sud.js` logs `[spravka][bootstrap-period]` and keeps report-period-first fallback behavior.
 - No ledger rows, autoaccrual on open, formulas/FIFO/penalty logic, financial dirty behavior, or `web/calc_engine.js` were changed.
+
+## 2026-05-22 - Stage 13.2D.b: auto-accept report period from card handoff
+
+- `reports.html` now auto-accepts periods bootstrapped from URL, `report_period_uid_<uid>`, or `calc_period_uid_<uid>` by saving canonical period keys and confirming readback.
+- Added `[reports][period-auto-accepted]` diagnostics and enabled opening the court report after successful auto-accept without requiring the manual "Выбрать" click.
+- No formula/FIFO/penalty changes, no `CALC_PERIOD_CHANGED` financial dirty behavior, and no `web/calc_engine.js` changes.
