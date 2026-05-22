@@ -544,3 +544,9 @@ rg -n "splitPremise|premise-transform\]\[split|type: ['\"]split" web LOGIC_SPEC.
 - `abonent_card.html` now bootstraps `calcFrom` / `calcTo` from `report_period_uid_<uid>` first, then `calc_period_uid_<uid>`, and logs `[card-period][bootstrap-inputs]`.
 - Returning from reports/spravka to the card preserves the selected period without triggering automatic recalculation.
 - No formula/FIFO/penalty changes, no financial dirty behavior, no ledger row changes, and no `web/calc_engine.js` changes.
+
+## 2026-05-22 - Stage 13.2D.d: default report period when card period is empty
+
+- The card reports button now creates a default report period when `calcFrom` / `calcTo` are empty, using responsibility start, `calcStartDate`, compatible abonent start fields, premise creation date, or earliest ledger month fallback.
+- The generated period is saved into `report_period_uid_<uid>`, `calc_period_uid_<uid>`, and active calc-period state before opening reports, with `[report-period][default-created]` diagnostics.
+- No autoaccrual on open, no formula/FIFO/penalty changes, no `CALC_PERIOD_CHANGED` financial dirty behavior, no ledger row changes, and no `web/calc_engine.js` changes.

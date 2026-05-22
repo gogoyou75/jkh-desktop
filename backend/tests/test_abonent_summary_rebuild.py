@@ -1156,6 +1156,12 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         self.assertIn("[card-recalc][result]", card_source)
         self.assertIn("[report-period][readback]", card_source)
         self.assertIn("[card-period][bootstrap-inputs]", card_source)
+        self.assertIn("[report-period][default-created]", card_source)
+        self.assertIn("function buildDefaultReportPeriodForCard", card_source)
+        self.assertIn("responsibility.dateFrom", card_source)
+        self.assertIn("abonent.calcStartDate", card_source)
+        self.assertIn("premise.createdAt", card_source)
+        self.assertIn("ledger.earliestMonth", card_source)
         self.assertIn("window.JKH_debugCardPeriodFlow = function(abonentId)", card_source)
         self.assertIn("saveReportPeriodForSpravka", card_source)
         self.assertIn("report_period_\" + uid", card_source)
@@ -1173,6 +1179,11 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         self.assertNotIn("fullRecalcForCurrentAbonent", load_body)
         self.assertNotIn("saveCalcPeriod(", load_body)
         self.assertNotIn("markCurrentAbonentSummaryDirty", load_body)
+        default_body = card_source.split("function buildDefaultReportPeriodForCard", 1)[1].split("function saveReportPeriodForSpravka", 1)[0]
+        self.assertIn("__todayISOForCardPeriod", default_body)
+        self.assertIn("__earliestLedgerMonthISO", default_body)
+        self.assertNotIn("fullRecalcForCurrentAbonent", default_body)
+        self.assertNotIn("markCurrentAbonentSummaryDirty", default_body)
 
         helper_body = card_source.split("window.JKH_debugCardPeriodFlow = function(abonentId)", 1)[1].split("function loadCalcPeriodUI", 1)[0]
         self.assertNotIn("storeSet(", helper_body)

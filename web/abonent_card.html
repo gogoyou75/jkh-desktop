@@ -2228,6 +2228,96 @@ function __readActiveKey(key, ownerId){
     return { key: key || "", raw: raw };
 }
 
+function __toISODateForCardPeriod(value){
+    const raw = String(value || "").trim();
+    if (!raw) return "";
+    try {
+        const eng = window.JKHCalcEngine || null;
+        if (eng && typeof eng.parseDateAnyToDate === "function") {
+            const d = eng.parseDateAnyToDate(raw);
+            if (d && typeof eng.toISODateString === "function") return eng.toISODateString(d);
+        }
+    } catch (e) {}
+    const mIso = raw.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (mIso) return raw;
+    const mRu = raw.match(/^(\d{1,2})\.(\d{1,2})\.(\d{4})$/);
+    if (mRu) return mRu[3] + "-" + String(mRu[2]).padStart(2, "0") + "-" + String(mRu[1]).padStart(2, "0");
+    try {
+        const d = new Date(raw);
+        if (d.toString() !== "Invalid Date") {
+            const y = d.getFullYear();
+            const m = String(d.getMonth() + 1).padStart(2, "0");
+            const day = String(d.getDate()).padStart(2, "0");
+            return y + "-" + m + "-" + day;
+        }
+    } catch (eDate) {}
+    return "";
+}
+
+function __todayISOForCardPeriod(){
+    const d = new Date();
+    return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
+}
+
+function __earliestLedgerMonthISO(abonentId){
+    try {
+        const rows = (window.Data && typeof Data.readPaymentLedger === "function") ? Data.readPaymentLedger(abonentId) : [];
+        if (!Array.isArray(rows) || !rows.length) return "";
+        let best = "";
+        rows.forEach(function(row){
+            if (!row || typeof row !== "object") return;
+            const y = String(row.year || row.y || "").trim();
+            const m = String(row.month || row.m || "").trim();
+            if (/^\d{4}$/.test(y) && /^\d{1,2}$/.test(m)) {
+                const iso = y + "-" + String(m).padStart(2, "0") + "-01";
+                if (!best || iso < best) best = iso;
+            }
+        });
+        return best;
+    } catch (e) {
+        return "";
+    }
+}
+
+function buildDefaultReportPeriodForCard(abonentId){
+    const id = String(abonentId || getAbonentIdFromURL() || "").trim();
+    const db = getDb() || {};
+    const abonent = id ? (db[id] || null) : null;
+    const premiseInfo = getPremiseForAbonent(id, abonent);
+    const regnum = String(premiseInfo && premiseInfo.regnum || abonent && abonent.regnum || "").trim();
+    const activeLink = regnum ? getActiveLinkForAbonent(id, regnum) : null;
+    const candidates = [
+        { source: "responsibility.dateFrom", value: activeLink && activeLink.dateFrom },
+        { source: "abonent.calcStartDate", value: abonent && abonent.calcStartDate },
+        { source: "abonent.calc_start_date", value: abonent && abonent.calc_start_date },
+        { source: "abonent.dateFrom", value: abonent && (abonent.dateFrom || abonent.date_from) },
+        { source: "premise.createdAt", value: premiseInfo && premiseInfo.p && premiseInfo.p.createdAt },
+        { source: "ledger.earliestMonth", value: __earliestLedgerMonthISO(id) }
+    ];
+    let from = "";
+    let source = "";
+    for (let i = 0; i < candidates.length; i++) {
+        from = __toISODateForCardPeriod(candidates[i].value);
+        if (from) {
+            source = candidates[i].source;
+            break;
+        }
+    }
+    const to = __todayISOForCardPeriod();
+    const result = {
+        ok: !!(from && to && isValidPeriod(from, to)),
+        abonentId: id,
+        uid: String(abonent && abonent.uid || "").trim(),
+        from: from,
+        to: to,
+        source: source || "missing",
+        reason: ""
+    };
+    if (!result.ok) result.reason = from ? "DEFAULT_PERIOD_INVALID" : "DEFAULT_PERIOD_FROM_MISSING";
+    try { console.log("[report-period][default-created]", result); } catch (eLog) {}
+    return result;
+}
+
 function saveReportPeriodForSpravka(from, to, options){
     const opts = options || {};
     const meta = getCalcPeriodStorageMeta();
@@ -2912,9 +3002,20 @@ function bindCalcButtons(){
 
     repBtn.addEventListener("click", () => {
         const id = getAbonentIdFromURL();
-        const from = fromEl.value;
-        const to = toEl.value;
+        let from = fromEl.value;
+        let to = toEl.value;
         let reportPeriodResult = null;
+        if (!from && !to) {
+            const defaultPeriod = buildDefaultReportPeriodForCard(id);
+            if (!defaultPeriod.ok) {
+                alert("РџРµСЂРёРѕРґ РґР»СЏ СЃРїСЂР°РІРєРё РЅРµ СЃРѕР·РґР°РЅ: " + String(defaultPeriod.reason || "DEFAULT_PERIOD_FROM_MISSING"));
+                return;
+            }
+            from = defaultPeriod.from;
+            to = defaultPeriod.to;
+            fromEl.value = from;
+            toEl.value = to;
+        }
         if (from || to) {
             if (isValidPeriod(from, to)) {
                 if (!saveCalcPeriod(from, to)) {
