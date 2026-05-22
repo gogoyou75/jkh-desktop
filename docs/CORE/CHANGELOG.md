@@ -647,6 +647,13 @@ rg -n "splitPremise|premise-transform\]\[split|type: ['\"]split" web LOGIC_SPEC.
 - Reports-period save path ensures canonical UID before writing calc-period keys, preserving UID-only `calc_period_uid_*` / `calc_period_active_uid_*`.
 - No calc engine, FIFO, penalty, index ledger read, hidden rebuild, or fake summary changes were added.
 
+## 2026-05-22 - Stage 13.4E - reports button without card recalculation
+
+- Reports button in abonent card is kept as a navigation/report-period action only: UID ensure, calc/report period save, and transition to reports page.
+- Added `[reports][open-with-period]` diagnostics and a `[reports][blocked-card-recalc]` guard marker for accidental card recalculation attempts from the reports path.
+- Added source-level regression that the reports button handler does not call card recalculation, summary save/rebuild, or autoaccrual heavy path.
+- No `calc_engine.js`, FIFO, penalty, index ledger read, hidden rebuild, or period-summary-as-main-summary changes were added.
+
 ## 2026-05-22 - Stage 13.4C - period summary guard and canonical calc-period keys
 
 - Fixed `Data.saveAbonentSummaryAfterRecalc(...)` period/report guard so it runs only after the real summary payload object is defined and returns `PERIOD_SUMMARY_NOT_SAVED` without a JS exception.

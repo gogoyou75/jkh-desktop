@@ -1422,6 +1422,30 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         calc_after = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
         self.assertEqual(calc_before, calc_after)
 
+    def test_stage_13_4e_reports_button_does_not_run_card_recalc(self):
+        card_path = self._find_repo_file("web", "abonent_card.html")
+        calc_engine_path = self._find_repo_file("web", "calc_engine.js")
+        self.assertIsNotNone(card_path)
+        self.assertIsNotNone(calc_engine_path)
+        card_source = card_path.read_text(encoding="utf-8")
+        calc_before = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
+
+        reports_body = card_source.split('repBtn.addEventListener("click"', 1)[1].split("});\n}", 1)[0]
+        self.assertIn("[reports][open-with-period]", reports_body)
+        self.assertIn("ensureCurrentAbonentUidForCalcPeriod", reports_body)
+        self.assertIn("saveCalcPeriod(from, to)", reports_body)
+        self.assertIn("saveReportPeriodForSpravka", reports_body)
+        self.assertIn("location.href = href", reports_body)
+        self.assertIn("[reports][blocked-card-recalc]", card_source)
+        self.assertNotIn("fullRecalcForCurrentAbonent", reports_body)
+        self.assertNotIn("Data.recalculateAbonentCard", reports_body)
+        self.assertNotIn("saveAbonentSummaryAfterRecalc", reports_body)
+        self.assertNotIn("/api/abonent_summary/rebuild", reports_body)
+        self.assertNotIn("applyAutoAccrual", reports_body)
+
+        calc_after = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
+        self.assertEqual(calc_before, calc_after)
+
     def test_stage_13_2cd_index_totals_dom_mapping_uses_rendered_values(self):
         index_path = self._find_repo_file("web", "index.html")
         calc_engine_path = self._find_repo_file("web", "calc_engine.js")

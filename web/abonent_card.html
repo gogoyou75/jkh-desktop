@@ -2974,6 +2974,15 @@ async function ensureCurrentAbonentUidForCalcPeriod(source){
     }
 }
 
+function __blockReportsCardRecalc(source, details){
+    try {
+        console.warn("[reports][blocked-card-recalc]", Object.assign({
+            source: String(source || "abonent_card.reports")
+        }, details || {}));
+    } catch (e) {}
+    return { ok: false, blocked: true, reason: "REPORTS_CARD_RECALC_BLOCKED" };
+}
+
 function bindCalcButtons(){
     const runBtn = document.getElementById("calcRunBtn");
     const repBtn = document.getElementById("calcReportsBtn");
@@ -3188,6 +3197,14 @@ function bindCalcButtons(){
                 periodKey: meta.storageKey,
                 activeKey: meta.activeStorageKey,
                 reportKey: reportPeriodResult && reportPeriodResult.reportKey || getReportPeriodStorageKey(meta)
+            });
+        } catch (e) {}
+        try {
+            console.log("[reports][open-with-period]", {
+                abonentId: String(id || ""),
+                uid: meta.resolvedUid,
+                from: from || "",
+                to: to || ""
             });
         } catch (e) {}
         let href = "reports.html?abonent=" + encodeURIComponent(id);
