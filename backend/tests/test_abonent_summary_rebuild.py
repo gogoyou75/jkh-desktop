@@ -645,6 +645,42 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
             row = app_module.AbonentSummary.query.one()
             self.assertEqual(json.loads(row.summary_json), original_summary)
 
+    def test_index_api_maps_legacy_calc_period_changed_dirty_to_missing(self):
+        with app_module.app.app_context():
+            self._add_user("owner-period-legacy-index")
+            self._put_abonents("owner-period-legacy-index", {
+                "1001": {"uid": "uid_period_legacy_index_1001", "id": "1001"},
+            })
+            app_module.db.session.add(app_module.AbonentSummary(
+                owner_id="owner-period-legacy-index",
+                abonent_id="1001",
+                account_uid="uid_period_legacy_index_1001",
+                account_number="1001",
+                summary_json=json.dumps({
+                    "summary_status": "dirty",
+                    "summary_reason": "CALC_PERIOD_CHANGED",
+                    "status": "dirty",
+                    "reason": "CALC_PERIOD_CHANGED",
+                }, sort_keys=True),
+            ))
+            app_module.db.session.commit()
+        self._login("owner-period-legacy-index")
+
+        response = self.client.get("/api/abonents?limit=10")
+
+        self.assertEqual(response.status_code, 200)
+        item = response.get_json()["items"][0]
+        self.assertEqual(item["summary_status"], "missing")
+        self.assertEqual(item["summary"]["summary_status"], "missing")
+        self.assertEqual(item["summary"]["summary_reason"], "CALC_PERIOD_CHANGED")
+
+        dirty_response = self.client.get("/api/abonents?limit=10&summary_status=dirty")
+        missing_response = self.client.get("/api/abonents?limit=10&summary_status=missing")
+        self.assertEqual(dirty_response.status_code, 200)
+        self.assertEqual(missing_response.status_code, 200)
+        self.assertEqual(dirty_response.get_json()["items"], [])
+        self.assertEqual(len(missing_response.get_json()["items"]), 1)
+
     def test_mark_dirty_does_not_touch_other_owner(self):
         with app_module.app.app_context():
             self._add_user("owner-dirty-a")
@@ -748,7 +784,8 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
             self.assertIsNotNone(path)
             source = path.read_text(encoding="utf-8")
             if parts[-1] == "index.html":
-                self.assertNotIn("CALC_PERIOD_CHANGED", source)
+                self.assertIn("CALC_PERIOD_CHANGED_VIEW_ONLY_LEGACY", source)
+                self.assertNotIn('summaryStatus: "dirty", summaryReason: "CALC_PERIOD_CHANGED"', source)
             if parts[-1] == "data.js":
                 pattern = re.compile(r"recalc_batch[^\\n]+CALC_PERIOD_CHANGED|CALC_PERIOD_CHANGED[^\\n]+recalc_batch", re.I)
                 self.assertIsNone(pattern.search(source))
@@ -1130,6 +1167,44 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         self.assertNotIn("cells[5]", source)
         self.assertNotIn("cells[6]", source)
         self.assertNotIn("cells[7]", source)
+
+        calc_after = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
+        self.assertEqual(calc_before, calc_after)
+
+    def test_stage_13_3_index_invalid_fresh_totals_are_not_rendered_as_fresh(self):
+        index_path = self._find_repo_file("web", "index.html")
+        data_path = self._find_repo_file("web", "data.js")
+        calc_engine_path = self._find_repo_file("web", "calc_engine.js")
+        self.assertIsNotNone(index_path)
+        self.assertIsNotNone(data_path)
+        self.assertIsNotNone(calc_engine_path)
+        index_source = index_path.read_text(encoding="utf-8")
+        data_source = data_path.read_text(encoding="utf-8")
+        calc_before = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
+
+        build_body = index_source.split("function buildIndexRowFromSummaryItem", 1)[1].split("function writeIndexTotalsCell", 1)[0]
+        debug_body = index_source.split("window.JKH_debugIndexSummaryRows = function()", 1)[1].split("window.JKH_getIndexRenderDebugState", 1)[0]
+        render_body = index_source.split("function render() {", 1)[1].split("tbody.onclick", 1)[0]
+        self.assertIn("function validateIndexSummaryTotals", index_source)
+        self.assertIn("INDEX_SUMMARY_TOTAL_KEYS", index_source)
+        self.assertIn("FRESH_TOTALS_MISSING", index_source)
+        self.assertIn("FRESH_TOTALS_INVALID", index_source)
+        self.assertIn('const isFresh = status === "fresh" && totalsValidation.validFreshTotals', build_body)
+        self.assertIn("displayStatus", build_body)
+        self.assertIn("rawSummaryStatus", build_body)
+        self.assertIn("hasTotalsObject", build_body)
+        self.assertIn("totalsFinite", build_body)
+        self.assertIn("whyEmptyTotals", build_body)
+        self.assertIn("exactGuard", build_body)
+        self.assertIn("[index][summary-row-empty]", render_body)
+        self.assertIn("[index][summary-row-invalid-fresh]", render_body)
+        self.assertIn("window.JKH_debugIndexSummaryRows = function()", index_source)
+        for required in ("account", "uid", "summary_status", "summary_reason", "hasTotalsObject", "totalsFinite", "renderedValues", "whyEmptyTotals", "exactGuard"):
+            self.assertIn(required, debug_body)
+
+        dirty_body = data_source.split("async function markAbonentSummaryDirty", 1)[1].split("function markAbonentSummaryDirtyLater", 1)[0]
+        self.assertIn('reasonCode === "CALC_PERIOD_CHANGED"', dirty_body)
+        self.assertIn("view_only_reason", dirty_body)
 
         calc_after = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
         self.assertEqual(calc_before, calc_after)

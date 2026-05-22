@@ -1071,6 +1071,9 @@ def _summary_status_from_payload(summary: dict | None):
     if not isinstance(summary, dict):
         return "missing"
     status = _norm_text(summary.get("summary_status") or summary.get("status")).lower()
+    reason = _norm_text(summary.get("summary_reason") or summary.get("reason"))
+    if status == "dirty" and reason == "CALC_PERIOD_CHANGED":
+        return "missing"
     if status in {"fresh", "dirty", "missing", "error"}:
         return status
     return "missing"

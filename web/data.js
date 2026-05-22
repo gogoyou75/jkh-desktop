@@ -1746,6 +1746,10 @@
 
   async function markAbonentSummaryDirty(abonentOrId, reason) {
     try {
+      var reasonCode = String(reason || "UNKNOWN_CHANGE").trim() || "UNKNOWN_CHANGE";
+      if (reasonCode === "CALC_PERIOD_CHANGED") {
+        return { ok: true, skipped: true, status: "skipped", reason: reasonCode, view_only_reason: reasonCode };
+      }
       var found = _findAbonentByIdOrUid(abonentOrId);
       var abonent = found && found.abonent ? found.abonent : null;
       var abonentId = String(found && found.id || (abonent && abonent.id) || (typeof abonentOrId === "object" ? abonentOrId && abonentOrId.id : abonentOrId) || "").trim();
@@ -1758,7 +1762,7 @@
 
       var payload = {
         account_uid: uid,
-        reason: String(reason || "UNKNOWN_CHANGE").trim() || "UNKNOWN_CHANGE"
+        reason: reasonCode
       };
 
       var res = await fetch("/api/abonent_summary/mark_dirty", {

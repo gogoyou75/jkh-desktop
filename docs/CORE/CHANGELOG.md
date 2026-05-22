@@ -599,3 +599,10 @@ rg -n "splitPremise|premise-transform\]\[split|type: ['\"]split" web LOGIC_SPEC.
 - Added `window.JKH_resetPaymentTablePeriodRuntime(reason)` to clear period-derived render signature and memoized totals without touching ledger rows.
 - Full readonly table reload after reset logs `[payment-table][period-runtime-reset]` and `[payment-table][full-view-after-period-reset]`.
 - No formula/FIFO/penalty changes, no ledger writes, no autoaccrual, no `CALC_PERIOD_CHANGED` financial dirty behavior, and no `web/calc_engine.js` changes.
+
+## 2026-05-22 — Stage 13.3 — index empty totals and summary status consistency
+
+- `index.html` теперь валидирует fresh summary перед отображением totals: fresh без `summary.totals`, без обязательных debt/penalty/accrued/paid или с non-finite значениями отображается как `error` с reason `FRESH_TOTALS_MISSING` / `FRESH_TOTALS_INVALID`.
+- Добавлен read-only diagnostic helper `window.JKH_debugIndexSummaryRows()` и console diagnostics `[index][summary-row-empty]` / `[index][summary-row-invalid-fresh]` для точной причины пустых расчетных колонок.
+- Legacy `CALC_PERIOD_CHANGED` больше не трактуется как financial dirty: backend index payload нормализует старый dirty reason в `missing`, frontend показывает view-only legacy reason и клиентский dirty helper не отправляет этот reason на сервер.
+- `web/calc_engine.js`, формулы, FIFO, пени, чтение `payments_<uid>` на index, autoaccrual и hidden rebuild не изменялись.
