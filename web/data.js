@@ -1893,6 +1893,14 @@
       if (!res.ok || !data || data.ok === false) {
         throw new Error((data && data.error) || ("HTTP_" + res.status));
       }
+      try {
+        var totals = summary && summary.totals && typeof summary.totals === "object" ? summary.totals : {};
+        console.log("[summary][save-ok]", {
+          uid: uid,
+          status: String(data.summary_status || summary.summary_status || summary.status || ""),
+          totalsKeys: Object.keys(totals)
+        });
+      } catch (eOkLog) {}
       return data;
     } catch (e) {
       try { console.warn("[summary][save-failed]", { reason: String(e && e.message || e) }); } catch (eLog) {}
@@ -2747,8 +2755,8 @@
     }
 
     var saveResult = await saveAbonentSummaryAfterRecalc(abonentOrId, summary);
-    var status = summary.summary_status || summary.status || "error";
-    var reasonOut = summary.summary_reason || summary.reason || "";
+    var status = saveResult && (saveResult.summary_status || saveResult.status) || summary.summary_status || summary.status || "error";
+    var reasonOut = saveResult && (saveResult.summary_reason || saveResult.reason) || summary.summary_reason || summary.reason || "";
     return {
       ok: !!(saveResult && saveResult.ok === true && status === "fresh"),
       uid: String(summary.account_uid || summary.uid || ""),

@@ -95,7 +95,7 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
             "summary_status": "fresh",
             "summary_reason": "OK",
             "period": {"from": "2026-01-01", "to": "2026-01-31"},
-            "totals": {"principal": principal, "penalty": penalty, "total": total},
+            "totals": {"principal": principal, "debt": total, "penalty": penalty, "total": total, "accrued": principal, "paid": 0},
             "calc_engine_version": "test",
             "generated_at": "2026-02-01T00:00:00Z",
         }
@@ -142,7 +142,12 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
             payload = json.loads(row.summary_json)
             self.assertEqual(payload["summary_status"], "fresh")
             self.assertEqual(payload["summary_reason"], "OK")
-            self.assertEqual(payload["totals"], {"principal": 10, "penalty": 2, "total": 12})
+            self.assertEqual(payload["totals"]["principal"], 10)
+            self.assertEqual(payload["totals"]["debt"], 12)
+            self.assertEqual(payload["totals"]["penalty"], 2)
+            self.assertEqual(payload["totals"]["total"], 12)
+            self.assertEqual(payload["totals"]["accrued"], 10)
+            self.assertEqual(payload["totals"]["paid"], 0)
 
     def test_single_upsert_preserves_fresh_summary_metadata_fields(self):
         with app_module.app.app_context():
@@ -728,6 +733,49 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         self.assertEqual(payload["items"][0]["summary_status"], "error")
         self.assertEqual(payload["items"][0]["summary_reason"], "FRESH_TOTALS_MISSING")
 
+    def test_fresh_with_required_totals_stays_fresh_for_index_and_batch_job(self):
+        with app_module.app.app_context():
+            self._add_user("owner-valid-fresh-batch")
+            self._put_abonents("owner-valid-fresh-batch", {
+                "1001": {"uid": "uid_valid_fresh_batch_1001", "id": "1001"},
+            })
+            app_module.db.session.add(app_module.AbonentSummary(
+                owner_id="owner-valid-fresh-batch",
+                abonent_id="1001",
+                account_uid="uid_valid_fresh_batch_1001",
+                account_number="1001",
+                summary_json=json.dumps(self._fresh_summary(100, 5, 105), sort_keys=True),
+            ))
+            app_module.db.session.commit()
+        self._login("owner-valid-fresh-batch")
+
+        index_response = self.client.get("/api/abonents?limit=10")
+
+        self.assertEqual(index_response.status_code, 200)
+        index_item = index_response.get_json()["items"][0]
+        self.assertEqual(index_item["summary_status"], "fresh")
+        self.assertEqual(index_item["summary"]["summary_status"], "fresh")
+        self.assertEqual(index_item["summary"]["totals"]["debt"], 105)
+        self.assertEqual(index_item["summary"]["totals"]["penalty"], 5)
+        self.assertEqual(index_item["summary"]["totals"]["accrued"], 100)
+        self.assertEqual(index_item["summary"]["totals"]["paid"], 0)
+
+        create_response = self.client.post("/api/abonent_summary/recalc_batch_job", json={
+            "uids": ["uid_valid_fresh_batch_1001"],
+            "reason": "MANUAL_RECALC",
+        })
+        self.assertEqual(create_response.status_code, 200)
+        job_id = create_response.get_json()["job_id"]
+
+        run_response = self.client.post(f"/api/abonent_summary/recalc_batch_job/{job_id}/run")
+
+        self.assertEqual(run_response.status_code, 200)
+        payload = run_response.get_json()
+        self.assertEqual(payload["processed"], 1)
+        self.assertEqual(payload["fresh"], 1)
+        self.assertEqual(payload["error"], 0)
+        self.assertEqual(payload["items"][0]["summary_status"], "fresh")
+
     def test_mark_dirty_does_not_touch_other_owner(self):
         with app_module.app.app_context():
             self._add_user("owner-dirty-a")
@@ -1158,6 +1206,38 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         self.assertIn('"totals.penalty", "totals.total_penalty", "total_penalty"', index_body)
         self.assertIn('"totals.accrued", "totals.total_accrued", "total_accrued"', index_body)
         self.assertIn('"totals.paid", "totals.total_paid", "total_paid"', index_body)
+
+        calc_after = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
+        self.assertEqual(calc_before, calc_after)
+
+    def test_stage_13_4_card_summary_pipeline_contract(self):
+        data_path = self._find_repo_file("web", "data.js")
+        card_path = self._find_repo_file("web", "abonent_card.html")
+        index_path = self._find_repo_file("web", "index.html")
+        calc_engine_path = self._find_repo_file("web", "calc_engine.js")
+        self.assertIsNotNone(data_path)
+        self.assertIsNotNone(card_path)
+        self.assertIsNotNone(index_path)
+        self.assertIsNotNone(calc_engine_path)
+        data_source = data_path.read_text(encoding="utf-8")
+        card_source = card_path.read_text(encoding="utf-8")
+        index_source = index_path.read_text(encoding="utf-8")
+        calc_before = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
+
+        summary_body = data_source.split("function buildAbonentSummaryAfterExplicitRecalc", 1)[1].split("function buildAbonentSummaryErrorAfterExplicitRecalc", 1)[0]
+        save_body = data_source.split("async function saveAbonentSummaryAfterRecalc", 1)[1].split("async function validateAbonentSummaryRecalcBatch", 1)[0]
+        card_recalc_body = card_source.split("function bindCalcButtons", 1)[1].split("resetBtn.addEventListener", 1)[0]
+
+        self.assertIn("totals: {", summary_body)
+        self.assertIn("debt: total", summary_body)
+        self.assertIn("penalty: penalty", summary_body)
+        self.assertIn("accrued: periodTotals.total_accrued", summary_body)
+        self.assertIn("paid: periodTotals.total_paid", summary_body)
+        self.assertIn("[summary][save-ok]", save_body)
+        self.assertIn("totalsKeys", save_body)
+        self.assertIn("Расчёт выполнен, но итоговый summary для главной страницы не сохранён", card_recalc_body)
+        self.assertIn("Проверить выбранные summary", index_source)
+        self.assertIn("Проверяет summary, не пересчитывает карточки", index_source)
 
         calc_after = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
         self.assertEqual(calc_before, calc_after)

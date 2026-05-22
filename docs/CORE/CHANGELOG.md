@@ -612,3 +612,10 @@ rg -n "splitPremise|premise-transform\]\[split|type: ['\"]split" web LOGIC_SPEC.
 - Backend summary transport теперь валидирует `fresh` totals перед index payload и batch job accounting: fresh без `summary.totals` или без finite debt/penalty/accrued/paid превращается в `error` с `FRESH_TOTALS_MISSING` / `FRESH_TOTALS_INVALID`.
 - Batch job больше не считает invalid fresh как fresh: такие UID идут в `error_count`, item получает `summary_status=error` и точный `summary_reason`.
 - Не добавлялись hidden rebuild, fake zero totals, чтение `payments_<uid>` на index, autoaccrual или изменения `web/calc_engine.js`.
+
+## 2026-05-22 — Stage 13.4 — abonent card summary pipeline
+
+- Single `POST /api/abonent_summary/rebuild` теперь сохраняет нормализованный summary: invalid `fresh` без обязательных nested `totals.debt/penalty/accrued/paid` превращается в `error` без fake totals.
+- Frontend save path после ручного пересчёта логирует `[summary][save-ok]` с UID, status и ключами `summary.totals`; карточка показывает понятное сообщение, если расчёт выполнен, но summary для главной страницы не сохранён.
+- Кнопка index batch переименована в проверку summary, чтобы не маскировать validator как пересчёт карточек.
+- Не менялись `web/calc_engine.js`, формулы/FIFO/пени, backend financial logic, чтение `payments_<uid>` на index, hidden rebuild и storage keys.

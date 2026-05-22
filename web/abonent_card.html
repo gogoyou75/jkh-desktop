@@ -2966,6 +2966,9 @@ function bindCalcButtons(){
     if (!runBtn || !repBtn || !resetBtn || !fromEl || !toEl) return;
 
     function manualRecalcErrorMessage(recalcResult, reason){
+        if (recalcResult && recalcResult.summary_status === "fresh" && recalcResult.summary_save && recalcResult.summary_save.ok !== true) {
+            return "Расчёт выполнен, но итоговый summary для главной страницы не сохранён";
+        }
         if (String(reason || "") === "RESPONSIBILITY_PERIOD_MISSING") {
             const suggestion =
                 recalcResult &&

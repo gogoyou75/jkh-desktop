@@ -1850,6 +1850,7 @@ def abonent_summary_rebuild():
             summary = body.get("summary")
             if not isinstance(summary, dict):
                 return jsonify(ok=False, error="summary_invalid", counters=counters), 400
+            summary = _summary_without_stale_totals(summary)
 
             targets = _owner_abonent_summary_targets(owner)
             target = next((t for t in targets if _norm_text(t.get("account_uid")) == account_uid), None)
@@ -1876,7 +1877,12 @@ def abonent_summary_rebuild():
                 counters["created"] += 1
 
             db.session.commit()
-            return jsonify(ok=True, counters=counters)
+            return jsonify(
+                ok=True,
+                counters=counters,
+                summary_status=_summary_status_from_payload(summary),
+                summary_reason=_norm_text(summary.get("summary_reason") or summary.get("reason")),
+            )
 
         targets = _owner_abonent_summary_targets(owner)
         for target in targets:
