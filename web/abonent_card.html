@@ -2234,6 +2234,48 @@ function __readActiveKey(key, ownerId){
     return { key: key || "", raw: raw };
 }
 
+function resetCalcPeriodCanonicalState(meta, source){
+    const m = meta || getCalcPeriodStorageMeta();
+    const reportKey = getReportPeriodStorageKey(m);
+    const result = {
+        ok: false,
+        source: String(source || "abonent_card.reset"),
+        requestedId: m.requestedId,
+        uid: m.resolvedUid,
+        ownerId: m.ownerId,
+        periodKey: m.storageKey,
+        activeKey: m.activeStorageKey,
+        reportKey: reportKey,
+        periodReadback: null,
+        activeReadback: null,
+        reportReadback: null,
+        reason: ""
+    };
+    try { console.log("[calc-period][reset-start]", result); } catch (eStartLog) {}
+
+    if (!__isCanonicalCalcPeriodKey(m.storageKey) || !__isCanonicalCalcPeriodActiveKey(m.activeStorageKey)) {
+        result.reason = "CANONICAL_CALC_PERIOD_KEY_REQUIRED";
+        try { console.warn("[calc-period][reset-readback-failed]", result); } catch (eKeyLog) {}
+        return result;
+    }
+
+    storeRemove(m.storageKey, m.ownerId);
+    storeSet(m.activeStorageKey, "0", m.ownerId);
+    if (__isCanonicalReportPeriodKey(reportKey)) storeRemove(reportKey, m.ownerId);
+    try { console.log("[calc-period][reset-saved]", result); } catch (eSavedLog) {}
+
+    result.periodReadback = __readPeriodKey(m.storageKey, m.ownerId);
+    result.activeReadback = __readActiveKey(m.activeStorageKey, m.ownerId);
+    result.reportReadback = __isCanonicalReportPeriodKey(reportKey) ? __readPeriodKey(reportKey, m.ownerId) : { key: reportKey, raw: null, value: null };
+    result.ok = !result.periodReadback.value && result.activeReadback.raw !== "1" && !result.reportReadback.value;
+    result.reason = result.ok ? "" : "CALC_PERIOD_RESET_READBACK_FAILED";
+    try {
+        if (result.ok) console.log("[calc-period][reset-readback-ok]", result);
+        else console.warn("[calc-period][reset-readback-failed]", result);
+    } catch (eReadbackLog) {}
+    return result;
+}
+
 function bootstrapActiveCalcPeriod(meta, from, to, source){
     const m = meta || getCalcPeriodStorageMeta();
     const payload = { from: String(from || "").trim(), to: String(to || "").trim() };
@@ -3106,13 +3148,12 @@ function bindCalcButtons(){
         if (!canWriteOrExplainLocal()) return;
         const id = getAbonentIdFromURL();
         const meta = getCalcPeriodStorageMeta();
-        const reportKey = getReportPeriodStorageKey(meta);
         const urlBefore = String(window.location.href || "");
-        setCalcPeriodActive(false);
-        const periodKey = meta.storageKey || calcPeriodKey();
-        if (periodKey) storeRemove(periodKey, meta.ownerId || getCalcPeriodOwnerId());
-        if (meta.activeStorageKey) storeSet(meta.activeStorageKey, "0", meta.ownerId);
-        if (__isCanonicalReportPeriodKey(reportKey)) storeRemove(reportKey, meta.ownerId);
+        const resetResult = resetCalcPeriodCanonicalState(meta, "abonent_card.reset-button");
+        if (!resetResult.ok) {
+            alert("Период не сброшен на сервере");
+            return;
+        }
         fromEl.value = "";
         toEl.value = "";
         let urlAfter = urlBefore;
@@ -3127,11 +3168,12 @@ function bindCalcButtons(){
             console.log("[card-period][reset]", {
                 abonentId: String(id || ""),
                 uid: meta.resolvedUid,
-                periodKey: periodKey,
+                periodKey: meta.storageKey,
                 activeKey: meta.activeStorageKey,
-                reportKey: reportKey,
+                reportKey: resetResult.reportKey,
                 urlBefore: urlBefore,
-                urlAfter: urlAfter
+                urlAfter: urlAfter,
+                readback: resetResult
             });
         } catch(eLog) {}
         try {

@@ -1540,6 +1540,39 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         calc_after = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
         self.assertEqual(calc_before, calc_after)
 
+    def test_stage_13_4g_calc_period_reset_persists_canonical_empty_state(self):
+        card_path = self._find_repo_file("web", "abonent_card.html")
+        calc_engine_path = self._find_repo_file("web", "calc_engine.js")
+        self.assertIsNotNone(card_path)
+        self.assertIsNotNone(calc_engine_path)
+        card_source = card_path.read_text(encoding="utf-8")
+        calc_before = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
+
+        meta_body = card_source.split("function getCalcPeriodStorageMeta()", 1)[1].split("function calcPeriodKey()", 1)[0]
+        reset_helper = card_source.split("function resetCalcPeriodCanonicalState", 1)[1].split("function bootstrapActiveCalcPeriod", 1)[0]
+        reset_handler = card_source.split('resetBtn.addEventListener("click"', 1)[1].split('repBtn.addEventListener("click"', 1)[0]
+        self.assertIn("Data.resolveCalcPeriodStorageKey(resolverInput)", meta_body)
+        self.assertIn("Data.resolveCalcPeriodActiveStorageKey(resolverInput)", meta_body)
+        self.assertIn("[calc-period][reset-start]", reset_helper)
+        self.assertIn("[calc-period][reset-saved]", reset_helper)
+        self.assertIn("[calc-period][reset-readback-ok]", reset_helper)
+        self.assertIn("[calc-period][reset-readback-failed]", reset_helper)
+        self.assertIn("storeRemove(m.storageKey", reset_helper)
+        self.assertIn('storeSet(m.activeStorageKey, "0"', reset_helper)
+        self.assertIn("storeRemove(reportKey", reset_helper)
+        self.assertIn("result.activeReadback.raw !== \"1\"", reset_helper)
+        self.assertIn("resetCalcPeriodCanonicalState(meta", reset_handler)
+        self.assertIn("Период не сброшен на сервере", reset_handler)
+        self.assertNotIn("markCurrentAbonentSummaryDirty", reset_handler)
+        self.assertNotIn("CALC_PERIOD_CHANGED", reset_handler)
+        self.assertNotIn("saveAbonentSummaryAfterRecalc", reset_handler)
+        self.assertNotIn("fullRecalcForCurrentAbonent", reset_handler)
+        self.assertNotIn("calc_period_\" +", reset_handler)
+        self.assertNotIn("calc_period_active_\" +", reset_handler)
+
+        calc_after = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
+        self.assertEqual(calc_before, calc_after)
+
     def test_stage_13_2cd_index_totals_dom_mapping_uses_rendered_values(self):
         index_path = self._find_repo_file("web", "index.html")
         calc_engine_path = self._find_repo_file("web", "calc_engine.js")

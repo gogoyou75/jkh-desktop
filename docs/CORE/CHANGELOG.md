@@ -647,6 +647,13 @@ rg -n "splitPremise|premise-transform\]\[split|type: ['\"]split" web LOGIC_SPEC.
 - Reports-period save path ensures canonical UID before writing calc-period keys, preserving UID-only `calc_period_uid_*` / `calc_period_active_uid_*`.
 - No calc engine, FIFO, penalty, index ledger read, hidden rebuild, or fake summary changes were added.
 
+## 2026-05-22 - Stage 13.4G - calc period reset persistence
+
+- Reset in abonent card now clears canonical `calc_period_uid_*`, sets `calc_period_active_uid_*` to inactive, removes canonical report period, and verifies readback before updating the UI.
+- Added reset diagnostics: `[calc-period][reset-start]`, `[calc-period][reset-saved]`, `[calc-period][reset-readback-ok]`, and `[calc-period][reset-readback-failed]`.
+- If canonical reset readback fails, the card shows `Период не сброшен на сервере` and does not silently present a successful reset.
+- No financial dirty, summary save, hidden rebuild, index ledger read, `calc_engine.js`, FIFO, penalty, or formula changes were added.
+
 ## 2026-05-22 - Stage 13.4F - legacy period summary read masking
 
 - Added read-only backend masking for legacy fresh summaries without `summary_scope` whose stored `period.from/to` conflicts with known canonical abonent boundaries.
