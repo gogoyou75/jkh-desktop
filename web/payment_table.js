@@ -1834,6 +1834,19 @@ function perfLog(stage, startedAt){
   return ms;
 }
 
+window.JKH_resetPaymentTablePeriodRuntime = function(reason) {
+  try { __paymentTotalsMemo.clear(); } catch(eMemo) {}
+  __paymentTableRenderedSignature = "";
+  __paymentTableCalcToken++;
+  __runtimeCacheState = { valid: false, reason: "period-reset", dataById: {}, periodMatches: false };
+  try {
+    console.log("[payment-table][period-runtime-reset]", {
+      abonentId: String(getAbonentId() || ""),
+      reason: String(reason || "period-reset")
+    });
+  } catch(eLog) {}
+};
+
 function ledgerSignatureForRows(rows){
   const abonentId = String(getAbonentId() || "");
   const periodActive = isCalcPeriodActive();
@@ -2524,6 +2537,16 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
           effectiveSignature: effectiveSignature
         });
       } catch(eRuntimeSourceLog) {}
+      if (!periodActive || !selectedPeriod) {
+        try {
+          console.log("[payment-table][full-view-after-period-reset]", {
+            abonentId: String(getAbonentId() || ""),
+            periodActive: !!periodActive,
+            rowsFull: Array.isArray(arr) ? arr.length : 0,
+            rowsView: Array.isArray(view) ? view.length : 0
+          });
+        } catch(eFullViewLog) {}
+      }
       const statusBox = qs("#paymentTableStatus") || qs("#paymentStatus") || qs("#paymentsStatus");
       if (isReadonlyNoRecalcMode() && statusBox) {
         statusBox.textContent = __runtimeCacheState.valid ? "" : "Для актуальных сумм нажмите Пересчитать";

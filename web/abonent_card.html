@@ -3075,12 +3075,40 @@ function bindCalcButtons(){
 
     resetBtn.addEventListener("click", () => {
         if (!canWriteOrExplainLocal()) return;
+        const id = getAbonentIdFromURL();
+        const meta = getCalcPeriodStorageMeta();
+        const reportKey = getReportPeriodStorageKey(meta);
+        const urlBefore = String(window.location.href || "");
         setCalcPeriodActive(false);
-        const periodKey = calcPeriodKey();
-        if (periodKey) storeRemove(periodKey, getCalcPeriodOwnerId());
+        const periodKey = meta.storageKey || calcPeriodKey();
+        if (periodKey) storeRemove(periodKey, meta.ownerId || getCalcPeriodOwnerId());
+        if (meta.activeStorageKey) storeSet(meta.activeStorageKey, "0", meta.ownerId);
+        if (__isCanonicalReportPeriodKey(reportKey)) storeRemove(reportKey, meta.ownerId);
         fromEl.value = "";
         toEl.value = "";
-        __safeLoadPaymentTableOnce();
+        let urlAfter = urlBefore;
+        try {
+            const u = new URL(window.location.href);
+            u.searchParams.delete("from");
+            u.searchParams.delete("to");
+            urlAfter = u.toString();
+            window.history.replaceState({}, "", urlAfter);
+        } catch(eUrl) {}
+        try {
+            console.log("[card-period][reset]", {
+                abonentId: String(id || ""),
+                uid: meta.resolvedUid,
+                periodKey: periodKey,
+                activeKey: meta.activeStorageKey,
+                reportKey: reportKey,
+                urlBefore: urlBefore,
+                urlAfter: urlAfter
+            });
+        } catch(eLog) {}
+        try {
+            if (window.JKH_resetPaymentTablePeriodRuntime) window.JKH_resetPaymentTablePeriodRuntime("card-period-reset");
+        } catch(eReset) {}
+        __safeLoadPaymentTableOnce("card-period-reset", { force: true });
     });
 
     repBtn.addEventListener("click", () => {

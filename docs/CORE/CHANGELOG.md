@@ -592,3 +592,10 @@ rg -n "splitPremise|premise-transform\]\[split|type: ['\"]split" web LOGIC_SPEC.
 - `isCalcPeriodActive()` treats a valid URL period as active only when canonical active key is not set, logging `[payment-table][period-url-fallback]`.
 - Period-aware signatures and filtered runtime calculations now also work when the card was restored from URL period before canonical keys are readable.
 - No formula/FIFO/penalty changes, no ledger writes, no autoaccrual on return, no `CALC_PERIOD_CHANGED` financial dirty behavior, and no `web/calc_engine.js` changes.
+
+## 2026-05-22 - Stage 13.2D.k: reset card period restores full payment table view
+
+- Card period reset now clears calc/report period keys, deactivates `calc_period_active_uid_<uid>`, removes URL `from/to` with `history.replaceState`, and logs `[card-period][reset]`.
+- Added `window.JKH_resetPaymentTablePeriodRuntime(reason)` to clear period-derived render signature and memoized totals without touching ledger rows.
+- Full readonly table reload after reset logs `[payment-table][period-runtime-reset]` and `[payment-table][full-view-after-period-reset]`.
+- No formula/FIFO/penalty changes, no ledger writes, no autoaccrual, no `CALC_PERIOD_CHANGED` financial dirty behavior, and no `web/calc_engine.js` changes.
