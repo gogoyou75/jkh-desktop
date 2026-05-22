@@ -571,3 +571,10 @@ rg -n "splitPremise|premise-transform\]\[split|type: ['\"]split" web LOGIC_SPEC.
 - Runtime cache created for the full ledger is not applied to an active period view; readonly period loads rebuild row runtime values from the filtered view and may refresh only `ledger_runtime_cache_<uid>`.
 - Added `[payment-table][period-runtime-source]` diagnostics with full/view row counts, cache usage, period match, and base rows source.
 - No formula/FIFO/penalty changes, no `CALC_PERIOD_CHANGED` financial dirty behavior, no ledger row changes, no autoaccrual on return, and no `web/calc_engine.js` changes.
+
+## 2026-05-22 - Stage 13.2D.h: force readonly period-view totals recalculation after spravka return
+
+- Active period readonly loads now force row runtime values from `applyResponsibilityRangeToView(applyCalcFilter(...))` and `runningTotalsBaseRows(filteredRows)`.
+- Period view signatures are built from filtered base rows plus period state, and `[payment-table][period-runtime-source]` reports `runtimeCacheUsed:false`, `baseRowsSource:"filtered"`, and the active signature.
+- The active period path does not use full-ledger runtime cache, does not write ledger rows, and does not trigger autoaccrual/recalc on return.
+- No formula/FIFO/penalty changes, no `CALC_PERIOD_CHANGED` financial dirty behavior, and no `web/calc_engine.js` changes.

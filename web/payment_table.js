@@ -146,6 +146,17 @@
     return out;
   }
 
+  function inspectRuntimeCachePeriodMatch(periodActive, selectedPeriod){
+    const id = String(getAbonentId() || "");
+    if (!id || !window.Data) return false;
+    const version = (typeof Data.computeLedgerRuntimeVersion === "function") ? String(Data.computeLedgerRuntimeVersion(id) || "") : "";
+    const cache = (typeof Data.readLedgerRuntimeCache === "function") ? Data.readLedgerRuntimeCache(id) : null;
+    const cacheVersion = cache && typeof cache === "object" ? String(cache.ledgerVersion || "") : "";
+    const map = cache && cache.rowsById && typeof cache.rowsById === "object" ? cache.rowsById : null;
+    if (!version || !cache || !map || !cacheVersion || cacheVersion !== version) return false;
+    return runtimeCachePeriodMatches(cache, version, periodActive, selectedPeriod);
+  }
+
   // Read-only ledger cache: parsed rows are reused while storage raw value is unchanged.
   // Corrupted ledgers are never cached as valid. Explicit writes/reloads clear the cache.
   const __ledgerReadCache = new Map();
@@ -2390,13 +2401,6 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
 
       const periodActive = isCalcPeriodActive();
       const selectedPeriod = periodActive ? getCalcPeriod() : null;
-      const ledgerSignature = ledgerSignatureForRows(arr);
-      const runtimeLedgerVersion = (window.Data && Data.computeLedgerRuntimeVersion) ? String(Data.computeLedgerRuntimeVersion(getAbonentId()) || "") : "";
-      const signature = ledgerSignature + "::" + runtimeCacheSignature(runtimeLedgerVersion, periodActive, selectedPeriod);
-      if (__paymentTableRenderedSignature && __paymentTableRenderedSignature === signature) {
-        try { console.log("[payment-table][init-skipped-same-signature]", { abonentId: String(getAbonentId() || "") }); } catch(e) {}
-        return;
-      }
 
       // Read-only load path: autoaccrual is not applied during page opening.
 
@@ -2429,6 +2433,13 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
         } catch(ePeriodLog) {}
       }
       const baseRows = runningTotalsBaseRows(view);
+      const runtimeLedgerVersion = (window.Data && Data.computeLedgerRuntimeVersion) ? String(Data.computeLedgerRuntimeVersion(getAbonentId()) || "") : "";
+      const baseSignature = periodActive && selectedPeriod ? ledgerSignatureForRows(baseRows) : ledgerSignatureForRows(arr);
+      const signature = baseSignature + "::" + runtimeCacheSignature(runtimeLedgerVersion, periodActive, selectedPeriod);
+      if (__paymentTableRenderedSignature && __paymentTableRenderedSignature === signature) {
+        try { console.log("[payment-table][init-skipped-same-signature]", { abonentId: String(getAbonentId() || ""), periodActive: !!periodActive, selectedPeriod: selectedPeriod || null }); } catch(e) {}
+        return;
+      }
 
       // сортировка отображения — год/месяц (новые сверху),
       // внутри месяца: сначала строка начисления, ниже — оплаты (Excel и ручные)
@@ -2446,30 +2457,19 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
           __monthPaidSum[YM] = r2((__monthPaidSum[YM] || 0) + toNum(r?.paid ?? 0));
         }
       });
-      __runtimeCacheState = applyRuntimeCacheToRows(view, periodActive, selectedPeriod);
-      let runtimeCacheUsed = !!__runtimeCacheState.valid;
-      let runtimeCachePeriodMatches = !!__runtimeCacheState.periodMatches;
-      let baseRowsSource = runtimeCacheUsed ? "runtime_cache" : "filtered_view_runtime_build";
-      if (periodActive && selectedPeriod && !runtimeCacheUsed) {
+      let runtimeCacheUsed = false;
+      let runtimeCachePeriodMatches = false;
+      let baseRowsSource = periodActive && selectedPeriod ? "filtered" : "runtime_cache";
+      if (periodActive && selectedPeriod) {
+        runtimeCachePeriodMatches = inspectRuntimeCachePeriodMatch(true, selectedPeriod);
         const periodRowsById = runtimeRowsByIdFromRows(view, baseRows, signature);
         applyRuntimeRowsById(view, periodRowsById);
-        __runtimeCacheState = { valid: true, reason: "", dataById: periodRowsById, periodMatches: true, builtForPeriod: true };
-        runtimeCachePeriodMatches = true;
-        try {
-          if (window.Data && typeof Data.writeLedgerRuntimeCache === "function") {
-            const ledgerVersion = (window.Data && Data.computeLedgerRuntimeVersion) ? String(Data.computeLedgerRuntimeVersion(getAbonentId()) || "") : "";
-            Data.writeLedgerRuntimeCache(getAbonentId(), {
-              ledgerVersion: ledgerVersion,
-              runtimeSignature: runtimeCacheSignature(ledgerVersion, true, selectedPeriod),
-              periodActive: true,
-              period: { from: selectedPeriod.from || "", to: selectedPeriod.to || "" },
-              rowsById: periodRowsById,
-              updatedAt: (new Date()).toISOString()
-            });
-          }
-        } catch(eWritePeriodRuntime) {
-          try { console.warn("[payment-table][period-runtime-cache-write-failed]", eWritePeriodRuntime); } catch(_) {}
-        }
+        __runtimeCacheState = { valid: true, reason: "", dataById: periodRowsById, periodMatches: runtimeCachePeriodMatches, builtForPeriod: true };
+      } else {
+        __runtimeCacheState = applyRuntimeCacheToRows(view, periodActive, selectedPeriod);
+        runtimeCacheUsed = !!__runtimeCacheState.valid;
+        runtimeCachePeriodMatches = !!__runtimeCacheState.periodMatches;
+        baseRowsSource = runtimeCacheUsed ? "runtime_cache" : "full_view";
       }
       try {
         console.log("[payment-table][period-runtime-source]", {
@@ -2480,7 +2480,8 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
           rowsView: Array.isArray(view) ? view.length : 0,
           runtimeCacheUsed: runtimeCacheUsed,
           runtimeCachePeriodMatches: runtimeCachePeriodMatches,
-          baseRowsSource: baseRowsSource
+          baseRowsSource: baseRowsSource,
+          signature: signature
         });
       } catch(eRuntimeSourceLog) {}
       const statusBox = qs("#paymentTableStatus") || qs("#paymentStatus") || qs("#paymentsStatus");
