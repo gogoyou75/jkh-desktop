@@ -434,6 +434,41 @@
     return rows.map(function (r) { return (r && typeof r === "object") ? Object.assign({}, r) : r; });
   }
 
+  function _readLedgerRowsInfo(key) {
+    if (!key) return { key: "", exists: false, rowsCount: 0, rows: [] };
+    var raw = _getProjectRaw(key);
+    if (raw === null || raw === undefined) return { key: key, exists: false, rowsCount: 0, rows: [] };
+    var rows = _parseLedgerRows(raw, key);
+    return { key: key, exists: true, rowsCount: rows.length, rows: rows };
+  }
+
+  function _accountNumberForLedger(abonentId, abonent) {
+    return String(abonent && (abonent.account_number || abonent.accountNumber || abonent.ls || abonent.personalAccount) || abonentId || "").trim();
+  }
+
+  function _legacyLedgerKeyForAbonent(abonentId, abonent) {
+    var accountNumber = _accountNumberForLedger(abonentId, abonent);
+    return accountNumber ? ("payments_" + accountNumber) : "";
+  }
+
+  function _hasLegacyLedgerRows(abonentId, abonent) {
+    var key = _legacyLedgerKeyForAbonent(abonentId, abonent);
+    if (!key) return false;
+    return _safeLedgerInfoForDiagnostic(key).rowsCount > 0;
+  }
+
+  function _logLegacyLedgerReadonlyFallback(payload) {
+    try { console.warn("[ledger][legacy-readonly-fallback]", payload || {}); } catch (e) {}
+  }
+
+  function _logFreshBlockedLegacyLedger(payload) {
+    try { console.warn("[summary][fresh-blocked-legacy-ledger]", payload || {}); } catch (e) {}
+  }
+
+  function _logUidGenerationBlockedLegacyLedger(payload) {
+    try { console.warn("[uid][generation-blocked-legacy-ledger]", payload || {}); } catch (e) {}
+  }
+
 
   function isValidUid(uid) {
     var s = String(uid === null || uid === undefined ? "" : uid).trim();
@@ -529,6 +564,64 @@
     return "";
   }
 
+
+  function resolveRuntimeCacheKey(abonentOrId) {
+    var found = _findAbonentByIdOrUid(abonentOrId);
+    var abonent = found && found.abonent ? found.abonent : null;
+    var uid = String(abonent && abonent.uid || "").trim();
+    if (!isValidUid(uid)) return "";
+    return "ledger_runtime_cache_" + uid;
+  }
+
+  function getRuntimeCacheKey(abonentOrId) {
+    return resolveRuntimeCacheKey(abonentOrId);
+  }
+
+  function computeLedgerRuntimeVersion(abonentOrId) {
+    var ledgerKey = resolvePaymentLedgerKey(abonentOrId);
+    if (!ledgerKey) return "";
+    var raw = _getProjectRaw(ledgerKey);
+    return String(raw === null || raw === undefined ? "" : raw);
+  }
+
+  function computeLedgerVersion(abonentOrId) {
+    return computeLedgerRuntimeVersion(abonentOrId);
+  }
+
+  function readLedgerRuntimeCache(abonentOrId) {
+    var key = resolveRuntimeCacheKey(abonentOrId);
+    if (!key) return null;
+    var raw = _getProjectRaw(key);
+    if (raw === null || raw === undefined || raw === "") return null;
+    try { return JSON.parse(String(raw)); } catch (e) { return null; }
+  }
+
+  function getRuntimeCache(abonentOrId) {
+    return readLedgerRuntimeCache(abonentOrId);
+  }
+
+  function writeLedgerRuntimeCache(abonentOrId, payload) {
+    if (!Data.ensureWriteOrExplain()) return false;
+    var key = resolveRuntimeCacheKey(abonentOrId);
+    if (!key) return false;
+    var data = payload && typeof payload === "object" ? payload : {};
+    return _setProjectRaw(key, JSON.stringify(data));
+  }
+
+  function setRuntimeCache(abonentOrId, payload) {
+    return writeLedgerRuntimeCache(abonentOrId, payload);
+  }
+
+  function invalidateLedgerRuntimeCache(abonentOrId) {
+    var key = resolveRuntimeCacheKey(abonentOrId);
+    if (!key) return false;
+    return _removeProjectRaw(key);
+  }
+
+  function invalidateRuntimeCache(abonentOrId) {
+    return invalidateLedgerRuntimeCache(abonentOrId);
+  }
+
   function readPaymentLedger(abonentOrId) {
     var found = _findAbonentByIdOrUid(abonentOrId);
     var id = String(found && found.id || (typeof abonentOrId === "object" ? abonentOrId && abonentOrId.id : abonentOrId) || "").trim();
@@ -539,10 +632,21 @@
     }
 
     // Legacy read-only fallback: payments_<LS> may still exist for old localStorage data.
-    var legacyKey = id ? ("payments_" + id) : "";
+    var legacyKey = _legacyLedgerKeyForAbonent(id, found && found.abonent);
     if (legacyKey && legacyKey !== canonicalKey) {
       var legacyRaw = _getProjectRaw(legacyKey);
-      if (legacyRaw !== null && legacyRaw !== undefined) return _cloneLedgerRows(_parseLedgerRows(legacyRaw, legacyKey));
+      if (legacyRaw !== null && legacyRaw !== undefined) {
+        var legacyRows = _parseLedgerRows(legacyRaw, legacyKey);
+        _logLegacyLedgerReadonlyFallback({
+          abonentId: id,
+          uid: String(found && found.abonent && found.abonent.uid || ""),
+          legacyKey: legacyKey,
+          canonicalKey: canonicalKey || "",
+          legacyRowsCount: legacyRows.length,
+          source: "readPaymentLedger"
+        });
+        return _cloneLedgerRows(legacyRows);
+      }
     }
     return [];
   }
@@ -589,7 +693,12 @@
         date: opts.date || ""
       }, opts.event || {}));
     }
-    if (ok !== false) markAbonentSummaryDirtyLater(abonent || id, opts.summaryDirtyReason || "LEDGER_WRITE");
+    if (ok !== false) {
+      invalidateLedgerRuntimeCache(abonentOrId);
+      if (opts.summaryDirtyReason !== false) {
+        markAbonentSummaryDirtyLater(abonent || id, opts.summaryDirtyReason || "LEDGER_WRITE");
+      }
+    }
     return ok;
   }
 
@@ -600,12 +709,18 @@
     var abonent = found && found.abonent ? found.abonent : null;
     var uid = String(abonent && abonent.uid || "").trim();
     var key = resolvePaymentLedgerKey(abonentOrId);
+    var legacyKey = _legacyLedgerKeyForAbonent(id, abonent);
     if (!key || !isValidUid(uid)) {
       _logLedgerInit({ abonentId: id, uid: uid, key: key || "", result: "blocked", reason: "UID_REQUIRED" });
       return false;
     }
     if (key !== "payments_" + uid || (id && id !== uid && key === "payments_" + id)) {
       _logLedgerInit({ abonentId: id, uid: uid, key: key, result: "blocked", reason: "LS_LEDGER_CREATE_FORBIDDEN" });
+      return false;
+    }
+    if (legacyKey && legacyKey !== key && _hasLegacyLedgerRows(id, abonent)) {
+      _logLedgerInit({ abonentId: id, uid: uid, key: key, legacyKey: legacyKey, result: "blocked", reason: "UID_MISSING_WITH_LEGACY_LEDGER" });
+      _logUidGenerationBlockedLegacyLedger({ abonentId: id, uid: uid, legacyKey: legacyKey, canonicalKey: key, reason: "UID_MISSING_WITH_LEGACY_LEDGER", source: "createEmptyPaymentLedger" });
       return false;
     }
 
@@ -686,6 +801,375 @@
     } catch (e) {
       return [];
     }
+  };
+
+  function _safeLedgerInfoForDiagnostic(key) {
+    try {
+      return _readLedgerRowsInfo(key);
+    } catch (e) {
+      return {
+        key: key || "",
+        exists: true,
+        rowsCount: 0,
+        rows: [],
+        error: String(e && (e.code || e.message) || e || "LEDGER_JSON_INVALID")
+      };
+    }
+  }
+
+  window.JKH_diagnoseLedger = function() {
+    var db = window.AbonentsDB || {};
+    var abonents = db && db.abonents && typeof db.abonents === "object" ? db.abonents : {};
+    var report = Object.keys(abonents).sort().map(function(id) {
+      var a = abonents[id] || {};
+      var accountNumber = _accountNumberForLedger(id, a);
+      var uid = String(a.uid || a.account_uid || a.accountUid || "").trim();
+      var uidValid = isValidUid(uid);
+      var canonicalKey = uidValid ? ("payments_" + uid) : "";
+      var legacyKey = _legacyLedgerKeyForAbonent(id, a);
+      var canonical = canonicalKey ? _safeLedgerInfoForDiagnostic(canonicalKey) : { exists: false, rowsCount: 0 };
+      var legacy = legacyKey ? _safeLedgerInfoForDiagnostic(legacyKey) : { exists: false, rowsCount: 0 };
+      var hasCanonical = !!canonical.exists;
+      var hasLegacy = !!(legacy.exists && legacyKey !== canonicalKey);
+      var state = "EMPTY";
+
+      if (uid && !uidValid) state = "INVALID_UID";
+      else if (!uid && hasLegacy && legacy.rowsCount > 0) state = "UID_MISSING_WITH_LEGACY";
+      else if (!uid) state = "UID_MISSING_EMPTY";
+      else if (hasCanonical && hasLegacy) state = "MIXED_CANONICAL_AND_LEGACY";
+      else if (hasCanonical) state = "CANONICAL_OK";
+      else if (hasLegacy) state = "LEGACY_ONLY";
+
+      return {
+        abonentId: id,
+        accountNumber: accountNumber,
+        uid: uid,
+        uidValid: uidValid,
+        canonicalKey: canonicalKey,
+        hasCanonical: hasCanonical,
+        canonicalRowsCount: Number(canonical.rowsCount || 0),
+        legacyKey: legacyKey,
+        hasLegacy: hasLegacy,
+        legacyRowsCount: Number(legacy.rowsCount || 0),
+        state: state
+      };
+    });
+    try { console.table(report); } catch (e) {}
+    return report;
+  };
+
+  function _summaryItemsForLedgerMigrationVerification(options) {
+    var opts = options || {};
+    var raw = Array.isArray(opts.summaryItems) ? opts.summaryItems
+      : (Array.isArray(opts.summaries) ? opts.summaries
+      : (Array.isArray(opts.abonentSummaries) ? opts.abonentSummaries : []));
+    return raw.map(function(item) {
+      var summary = item && item.summary && typeof item.summary === "object" ? item.summary : item;
+      return {
+        account_uid: String(item && (item.account_uid || item.uid) || summary && (summary.account_uid || summary.uid) || "").trim(),
+        abonent_id: String(item && (item.abonent_id || item.abonentId || item.id) || summary && (summary.abonent_id || summary.id) || "").trim(),
+        summary_status: String(item && (item.summary_status || item.status) || summary && (summary.summary_status || summary.status) || "").trim()
+      };
+    }).filter(function(item) {
+      return !!(item.account_uid || item.abonent_id);
+    });
+  }
+
+  function _runtimeCacheStateForMigrationVerification(abonentId, uid, canonicalKey, canonical) {
+    var key = isValidUid(uid) ? ("ledger_runtime_cache_" + uid) : "";
+    if (!key) return { runtimeCacheKey: "", hasRuntimeCache: false, runtimeCacheStale: false };
+    var raw = _getProjectRaw(key);
+    if (raw === null || raw === undefined || raw === "") {
+      return { runtimeCacheKey: key, hasRuntimeCache: false, runtimeCacheStale: false };
+    }
+    var parsed = null;
+    try { parsed = JSON.parse(String(raw)); } catch (e) {
+      return { runtimeCacheKey: key, hasRuntimeCache: true, runtimeCacheStale: true, runtimeCacheReason: "RUNTIME_CACHE_JSON_INVALID" };
+    }
+    var expectedVersion = canonicalKey ? String(_getProjectRaw(canonicalKey) === null || _getProjectRaw(canonicalKey) === undefined ? "" : _getProjectRaw(canonicalKey)) : "";
+    var actualVersion = String(parsed && parsed.ledgerVersion || "");
+    var stale = !!(canonical && canonical.exists && actualVersion !== expectedVersion);
+    return {
+      runtimeCacheKey: key,
+      hasRuntimeCache: true,
+      runtimeCacheStale: stale,
+      runtimeCacheReason: stale ? "LEDGER_VERSION_MISMATCH" : ""
+    };
+  }
+
+  function _ledgerRowsChecksum(rows) {
+    try {
+      var normalized = (Array.isArray(rows) ? rows : []).map(function(row) {
+        if (!row || typeof row !== "object") return row;
+        var out = {};
+        Object.keys(row).sort().forEach(function(k) { out[k] = row[k]; });
+        return out;
+      });
+      return JSON.stringify(normalized);
+    } catch (e) {
+      return "";
+    }
+  }
+
+  function _ledgerSimpleTotals(rows) {
+    var totalAccrued = 0;
+    var totalPaid = 0;
+    (Array.isArray(rows) ? rows : []).forEach(function(row) {
+      totalAccrued += _summaryNumber(row && row.accrued);
+      totalPaid += _summaryNumber(row && row.paid);
+    });
+    return {
+      totalAccrued: Math.round(totalAccrued * 100) / 100,
+      totalPaid: Math.round(totalPaid * 100) / 100
+    };
+  }
+
+  function _mixedLedgerComparison(canonical, legacy) {
+    var canonicalRows = Array.isArray(canonical && canonical.rows) ? canonical.rows : [];
+    var legacyRows = Array.isArray(legacy && legacy.rows) ? legacy.rows : [];
+    var canonicalTotals = _ledgerSimpleTotals(canonicalRows);
+    var legacyTotals = _ledgerSimpleTotals(legacyRows);
+    return {
+      legacyRowsCount: legacyRows.length,
+      canonicalRowsCount: canonicalRows.length,
+      checksumEqual: _ledgerRowsChecksum(canonicalRows) === _ledgerRowsChecksum(legacyRows),
+      totalsEqual: canonicalTotals.totalAccrued === legacyTotals.totalAccrued && canonicalTotals.totalPaid === legacyTotals.totalPaid
+    };
+  }
+
+  function _migrationVerificationItem(abonentId, abonent, summaryByUid) {
+    var id = String(abonentId || "").trim();
+    var a = abonent || {};
+    var accountNumber = _accountNumberForLedger(id, a);
+    var uid = String(a.uid || a.account_uid || a.accountUid || "").trim();
+    var uidValid = isValidUid(uid);
+    var canonicalKey = uidValid ? ("payments_" + uid) : "";
+    var legacyKey = _legacyLedgerKeyForAbonent(id, a);
+    var canonical = canonicalKey ? _safeLedgerInfoForDiagnostic(canonicalKey) : { exists: false, rowsCount: 0, error: "" };
+    var legacy = legacyKey ? _safeLedgerInfoForDiagnostic(legacyKey) : { exists: false, rowsCount: 0, error: "" };
+    var runtime = _runtimeCacheStateForMigrationVerification(id, uid, canonicalKey, canonical);
+    var issues = [];
+    var canMigrate = false;
+    var state = "EMPTY_NO_LEDGER";
+
+    if (canonical.error) issues.push("CANONICAL_LEDGER_INVALID");
+    if (legacy.error) issues.push("LEGACY_LEDGER_INVALID");
+    if (runtime.runtimeCacheStale) issues.push("STALE_RUNTIME_CACHE");
+
+    if (uid && !uidValid) {
+      state = "BLOCKED_INVALID_UID";
+      issues.push("INVALID_UID");
+    } else if (!uid && legacy.rowsCount > 0) {
+      state = "BLOCKED_UID_MISSING_WITH_LEGACY";
+      issues.push("UID_MISSING_WITH_LEGACY_LEDGER");
+    } else if (!uid) {
+      state = "UID_MISSING_EMPTY";
+      issues.push("UID_MISSING");
+    } else if (canonical.rowsCount > 0 && legacy.rowsCount > 0) {
+      state = "BLOCKED_MIXED_LEDGER";
+      issues.push("MIXED_CANONICAL_AND_LEGACY");
+    } else if (legacy.rowsCount > 0 && canonical.rowsCount <= 0 && !canonical.error && !legacy.error) {
+      state = canonical.exists ? "READY_TO_MIGRATE_EMPTY_CANONICAL" : "READY_TO_MIGRATE";
+      canMigrate = true;
+    } else if (canonical.rowsCount > 0) {
+      state = "CANONICAL_OK";
+    } else if (legacy.exists) {
+      state = "LEGACY_EMPTY";
+    } else if (canonical.exists) {
+      state = "CANONICAL_EMPTY";
+    }
+
+    var summary = uid ? summaryByUid[uid] : null;
+    return {
+      abonentId: id,
+      accountNumber: accountNumber,
+      uid: uid,
+      uidValid: uidValid,
+      canonicalKey: canonicalKey,
+      hasCanonical: !!canonical.exists,
+      canonicalRowsCount: Number(canonical.rowsCount || 0),
+      legacyKey: legacyKey,
+      hasLegacy: !!(legacy.exists && legacyKey !== canonicalKey),
+      legacyRowsCount: Number(legacy.rowsCount || 0),
+      runtimeCacheKey: runtime.runtimeCacheKey || "",
+      hasRuntimeCache: !!runtime.hasRuntimeCache,
+      runtimeCacheStale: !!runtime.runtimeCacheStale,
+      summaryStatus: String(summary && summary.summary_status || ""),
+      mixedComparison: canonical.rowsCount > 0 && legacy.rowsCount > 0 ? _mixedLedgerComparison(canonical, legacy) : null,
+      canMigrate: canMigrate,
+      state: state,
+      issues: issues.join(",")
+    };
+  }
+
+  function _findMigrationVerificationAbonent(abonentId) {
+    var db = window.AbonentsDB || {};
+    var abonents = db && db.abonents && typeof db.abonents === "object" ? db.abonents : {};
+    var found = _findAbonentByIdOrUid(abonentId);
+    var id = String(found && found.id || abonentId || "").trim();
+    var abonent = found && found.abonent ? found.abonent : (id && abonents[id] ? abonents[id] : null);
+    return { id: id, abonent: abonent };
+  }
+
+  function _whySummaryFreshBlocked(item) {
+    if (!item) return "UNKNOWN";
+    if (item.state === "READY_TO_MIGRATE" || item.state === "READY_TO_MIGRATE_EMPTY_CANONICAL") return "LEGACY_LEDGER_MIGRATION_REQUIRED";
+    if (item.state === "BLOCKED_UID_MISSING_WITH_LEGACY") return "UID_MISSING_WITH_LEGACY_LEDGER";
+    if (item.state === "BLOCKED_MIXED_LEDGER") return "MIXED_LEDGER_DIFFERENCE";
+    if (item.state === "BLOCKED_INVALID_UID") return "INVALID_UID";
+    if (item.state === "CANONICAL_EMPTY") return "CANONICAL_LEDGER_EMPTY";
+    if (item.summaryStatus && item.summaryStatus !== "fresh") return "SUMMARY_NOT_FRESH";
+    return "";
+  }
+
+  function _whyIndexTotalsEmpty(item, abonent) {
+    if (!item) return "UNKNOWN";
+    var blocked = _whySummaryFreshBlocked(item);
+    if (blocked) return blocked;
+    if (item.summaryStatus && item.summaryStatus !== "fresh") return "SUMMARY_NOT_FRESH";
+    if (item.state === "CANONICAL_EMPTY" || (item.hasCanonical && item.canonicalRowsCount <= 0)) return "CANONICAL_LEDGER_EMPTY";
+    if (item.state === "BLOCKED_MIXED_LEDGER") return "MIXED_LEDGER_DIFFERENCE";
+    var hasResponsibilityStart = !!String(abonent && (
+      abonent.calcStartDate || abonent.calc_start_date || abonent.dateFrom || abonent.date_from ||
+      abonent.responsibilityFrom || abonent.respFrom || abonent.startCalc || abonent.start_calc
+    ) || "").trim();
+    if (!hasResponsibilityStart) return "RESPONSIBILITY_PERIOD_MISSING";
+    if (item.summaryStatus === "fresh") return "TOTALS_EMPTY";
+    return "UNKNOWN";
+  }
+
+  function _debugAbonentLedgerReport(abonentId) {
+    var found = _findMigrationVerificationAbonent(abonentId);
+    var abonent = found.abonent || {};
+    var item = found.abonent ? _migrationVerificationItem(found.id, found.abonent, {}) : null;
+    var blockers = item && item.issues ? String(item.issues).split(",").filter(Boolean) : [];
+    var warnings = [];
+    if (item && item.runtimeCacheStale) warnings.push("STALE_RUNTIME_CACHE");
+    if (item && item.state === "LEGACY_EMPTY") warnings.push("LEGACY_LEDGER_EMPTY");
+    return {
+      abonentId: found.id,
+      fio: String(abonent && (abonent.fio || abonent.full_name || abonent.fullName || abonent.display_name) || "").trim(),
+      uid: item ? item.uid : "",
+      uidStatus: item ? (item.uidValid ? "valid" : (item.uid ? "invalid" : "missing")) : "missing",
+      canonicalKey: item ? item.canonicalKey : "",
+      hasCanonical: !!(item && item.hasCanonical),
+      canonicalRowsCount: item ? item.canonicalRowsCount : 0,
+      legacyKey: item ? item.legacyKey : "",
+      hasLegacy: !!(item && item.hasLegacy),
+      legacyRowsCount: item ? item.legacyRowsCount : 0,
+      state: item ? item.state : "ABONENT_NOT_FOUND",
+      safeToMigrate: !!(item && item.canMigrate),
+      blockers: blockers,
+      warnings: warnings,
+      whySummaryFreshBlocked: item ? (_whySummaryFreshBlocked(item) || "") : "UNKNOWN",
+      whyIndexTotalsEmpty: item ? _whyIndexTotalsEmpty(item, abonent) : "UNKNOWN",
+      mixedComparison: item && item.mixedComparison ? item.mixedComparison : null
+    };
+  }
+
+  window.JKH_verifyLedgerMigration = function(options) {
+    var opts = options || {};
+    var db = window.AbonentsDB || {};
+    var abonents = db && db.abonents && typeof db.abonents === "object" ? db.abonents : {};
+    var summaryByUid = {};
+    var orphanSummaries = [];
+
+    Object.keys(abonents).forEach(function(id) {
+      var uid = String(abonents[id] && abonents[id].uid || "").trim();
+      if (uid) summaryByUid[uid] = null;
+    });
+
+    _summaryItemsForLedgerMigrationVerification(opts).forEach(function(item) {
+      if (item.account_uid && Object.prototype.hasOwnProperty.call(summaryByUid, item.account_uid)) {
+        summaryByUid[item.account_uid] = item;
+      } else {
+        orphanSummaries.push({
+          abonentId: item.abonent_id || "",
+          accountNumber: "",
+          uid: item.account_uid || "",
+          uidValid: item.account_uid ? isValidUid(item.account_uid) : false,
+          canonicalKey: item.account_uid ? ("payments_" + item.account_uid) : "",
+          hasCanonical: false,
+          canonicalRowsCount: 0,
+          legacyKey: "",
+          hasLegacy: false,
+          legacyRowsCount: 0,
+          runtimeCacheKey: "",
+          hasRuntimeCache: false,
+          runtimeCacheStale: false,
+          summaryStatus: item.summary_status || "",
+          canMigrate: false,
+          state: "BLOCKED_ORPHAN_SUMMARY",
+          issues: "ORPHAN_SUMMARY"
+        });
+      }
+    });
+
+    var items = Object.keys(abonents).sort().map(function(id) {
+      return _migrationVerificationItem(id, abonents[id], summaryByUid);
+    }).concat(orphanSummaries);
+
+    var counters = {
+      total: items.length,
+      readyToMigrate: 0,
+      blocked: 0,
+      canonicalOk: 0,
+      staleRuntimeCache: 0,
+      orphanSummary: orphanSummaries.length
+    };
+    items.forEach(function(item) {
+      if (item.canMigrate) counters.readyToMigrate++;
+      if (String(item.state || "").indexOf("BLOCKED_") === 0) counters.blocked++;
+      if (item.state === "CANONICAL_OK") counters.canonicalOk++;
+      if (item.runtimeCacheStale) counters.staleRuntimeCache++;
+    });
+
+    var result = {
+      ok: counters.blocked === 0,
+      readOnly: true,
+      mode: "verification-only",
+      counters: counters,
+      items: items
+    };
+    try { console.table(items); } catch (e) {}
+    try { console.log("[ledger][migration-verification]", { counters: counters, readOnly: true }); } catch (e2) {}
+    return result;
+  };
+
+  window.JKH_verifyLedgerMigrationForAbonent = function(abonentId) {
+    var found = _findMigrationVerificationAbonent(abonentId);
+    var report = found.abonent
+      ? _migrationVerificationItem(found.id, found.abonent, {})
+      : {
+        abonentId: String(abonentId || "").trim(),
+        accountNumber: "",
+        uid: "",
+        uidValid: false,
+        canonicalKey: "",
+        hasCanonical: false,
+        canonicalRowsCount: 0,
+        legacyKey: "",
+        hasLegacy: false,
+        legacyRowsCount: 0,
+        runtimeCacheKey: "",
+        hasRuntimeCache: false,
+        runtimeCacheStale: false,
+        summaryStatus: "",
+        mixedComparison: null,
+        canMigrate: false,
+        state: "ABONENT_NOT_FOUND",
+        issues: "ABONENT_NOT_FOUND"
+      };
+    try { console.table([report]); } catch (e) {}
+    try { console.log("[ledger-migration][abonent-verification]", report); } catch (e2) {}
+    return report;
+  };
+
+  window.JKH_debugAbonentLedger = function(abonentId) {
+    var report = _debugAbonentLedgerReport(abonentId);
+    try { console.table([report]); } catch (e) {}
+    try { console.log("[ledger-migration][abonent-debug]", report); } catch (e2) {}
+    return report;
   };
 
 
@@ -1000,6 +1484,18 @@
     if (currentUid) {
       _logInvalidUidCanonicalBlocked({ abonentId: id, uid: currentUid, source: String(opts.source || "data") });
       return { ok: false, uid: currentUid, changed: false, reason: "INVALID_UID" };
+    }
+    if (_hasLegacyLedgerRows(id, a)) {
+      var legacyKey = _legacyLedgerKeyForAbonent(id, a);
+      _logUidGenerationBlockedLegacyLedger({
+        abonentId: id,
+        uid: "",
+        legacyKey: legacyKey,
+        canonicalKey: "",
+        legacyRowsCount: _readLedgerRowsInfo(legacyKey).rowsCount,
+        source: String(opts.source || "data")
+      });
+      return { ok: false, uid: "", changed: false, reason: "UID_MISSING_WITH_LEGACY_LEDGER" };
     }
 
     var uid = generateUniqueAbonentUid(db);
@@ -1813,8 +2309,12 @@
       penalty: penalty,
       totals: {
         principal: principal,
+        debt: total,
         penalty: penalty,
         total: total,
+        accrued: periodTotals.total_accrued,
+        paid: periodTotals.total_paid,
+        balance: total,
         total_debt: total,
         total_penalty: penalty,
         total_accrued: periodTotals.total_accrued,
@@ -1880,6 +2380,355 @@
     };
   }
 
+  function _debugSummaryNumberSum(rows, field) {
+    var sum = 0;
+    (Array.isArray(rows) ? rows : []).forEach(function(row) {
+      sum += _summaryNumber(row && row[field]);
+    });
+    return Math.round(sum * 100) / 100;
+  }
+
+  function _debugSummaryPickValue(summary, keys) {
+    for (var i = 0; i < keys.length; i++) {
+      var key = String(keys[i] || "");
+      var v = summary ? summary[key] : undefined;
+      if ((v === null || v === undefined || v === "") && key.indexOf("totals.") === 0 && summary && summary.totals && typeof summary.totals === "object") {
+        v = summary.totals[key.slice(7)];
+      }
+      if (v !== null && v !== undefined && v !== "") return v;
+    }
+    return "";
+  }
+
+  function _debugSummaryHasTotals(summary) {
+    if (!summary || typeof summary !== "object") return false;
+    var debt = _debugSummaryPickValue(summary, ["total_debt", "totals.total_debt", "totalDebt", "debt_total", "total", "totals.total"]);
+    var penalty = _debugSummaryPickValue(summary, ["total_penalty", "totals.total_penalty", "penalty", "pay_penalty", "penalty_debt", "penaltyDebt", "totals.penalty"]);
+    return debt !== "" || penalty !== "";
+  }
+
+  function _debugSummaryIndexRowHasTotals(row) {
+    if (!row || typeof row !== "object") return false;
+    return _debugSummaryHasTotals(row.summary && typeof row.summary === "object" ? row.summary : row) ||
+      row.totalDebt !== undefined || row.total_debt !== undefined || row.total_penalty !== undefined || row.penalty !== undefined;
+  }
+
+  async function _debugFetchJson(url) {
+    var res = await fetch(url, { method: "GET", credentials: "include" });
+    var text = await res.text();
+    var data = null;
+    try { data = text ? JSON.parse(text) : null; } catch (e) { data = null; }
+    return { ok: !!(res.ok && data && data.ok !== false), status: res.status, data: data, error: res.ok ? "" : ("HTTP_" + res.status) };
+  }
+
+  function _debugFindAbonentApiRow(payload, abonentId, uid) {
+    var items = Array.isArray(payload && payload.items) ? payload.items : [];
+    for (var i = 0; i < items.length; i++) {
+      var item = items[i] || {};
+      if (String(item.account_uid || item.uid || "") === String(uid || "")) return item;
+      if (String(item.abonent_id || item.abonentId || item.id || item.account_number || "") === String(abonentId || "")) return item;
+    }
+    return null;
+  }
+
+  function _debugSummaryWhyIndexTotalsEmpty(ctx) {
+    var buildReason = String(ctx && ctx.buildReason || "");
+    var payloadSummary = ctx && ctx.summaryPayload && ctx.summaryPayload.summary;
+    var apiSummary = ctx && ctx.apiSummary;
+    var abonentRow = ctx && ctx.abonentApiRow;
+    if (buildReason) return buildReason;
+    if (!payloadSummary || typeof payloadSummary !== "object") return "SUMMARY_PAYLOAD_INVALID";
+    if (!ctx || !ctx.calcTotals) return "TOTALS_BUILD_FAILED";
+    if (payloadSummary.summary_status !== "fresh" && payloadSummary.status !== "fresh") return "SUMMARY_NOT_FRESH";
+    if (!ctx || ctx.apiSummaryReturned !== true) return "API_SUMMARY_NOT_RETURNED";
+    if (!apiSummary || (apiSummary.summary_status !== "fresh" && apiSummary.status !== "fresh")) return "SUMMARY_SAVE_FAILED";
+    if (!_debugSummaryHasTotals(apiSummary)) return "TOTALS_EMPTY";
+    if (!abonentRow) return "INDEX_MAPPING_MISMATCH";
+    if (!_debugSummaryIndexRowHasTotals(abonentRow)) return "INDEX_MAPPING_MISMATCH";
+    return "";
+  }
+
+  window.JKH_debugSummaryBuild = async function(abonentId) {
+    var found = _findMigrationVerificationAbonent(abonentId);
+    var abonent = found && found.abonent ? found.abonent : null;
+    var id = String(found && found.id || abonentId || "").trim();
+    var uid = String(abonent && abonent.uid || "").trim();
+    var canonicalKey = isValidUid(uid) ? ("payments_" + uid) : "";
+    var ledgerInfo = canonicalKey ? _safeLedgerInfoForDiagnostic(canonicalKey) : { exists: false, rowsCount: 0, rows: [], error: "UID_REQUIRED" };
+    var rows = Array.isArray(ledgerInfo.rows) ? ledgerInfo.rows : [];
+    var period = null;
+    var responsibility = null;
+    var calcTotals = null;
+    var summaryPayload = null;
+    var buildReason = "";
+    var summaryApiPayload = null;
+    var summaryApiItem = null;
+    var summaryFromApi = null;
+    var abonentsApiPayload = null;
+    var abonentApiRow = null;
+
+    try { period = await _resolveAbonentSummaryRecalcPeriod(abonent || id, null); } catch (ePeriod) { period = { ok: false, error: String(ePeriod && ePeriod.message || ePeriod) }; }
+    try { responsibility = _readActiveResponsibilityPeriod(abonent || id); } catch (eResp) { responsibility = { ok: false, error: String(eResp && eResp.message || eResp) }; }
+
+    try {
+      if (!abonent || !id) throw new Error("ABONENT_NOT_FOUND");
+      if (!isValidUid(uid)) throw new Error("UID_REQUIRED");
+      if (!canonicalKey || !ledgerInfo.exists) throw new Error("CANONICAL_LEDGER_EMPTY");
+      if (!period || period.ok !== true) throw new Error(period && period.error || "RESPONSIBILITY_PERIOD_MISSING");
+      if (!window.JKHCalcEngine || typeof window.JKHCalcEngine.calcTotalsAsOfAdjusted !== "function") throw new Error("CALC_ENGINE_UNAVAILABLE");
+      var asOf = _dateFromIsoLocal(period.to);
+      if (!asOf) throw new Error("PERIOD_INVALID");
+      calcTotals = window.JKHCalcEngine.calcTotalsAsOfAdjusted(rows, asOf, {
+        abonentId: id,
+        applyAdvanceOffset: true,
+        allowNegativePrincipal: true
+      });
+      summaryPayload = {
+        account_uid: uid,
+        abonent_id: id,
+        account_number: _accountNumberForLedger(id, abonent),
+        summary: buildAbonentSummaryAfterExplicitRecalc(abonent || id, period.from, period.to)
+      };
+    } catch (eBuild) {
+      buildReason = _summaryCalcErrorCode(eBuild);
+      if (buildReason === "START_DATE_MISSING") buildReason = "RESPONSIBILITY_PERIOD_MISSING";
+      if (!calcTotals && buildReason !== "RESPONSIBILITY_PERIOD_MISSING" && buildReason !== "CANONICAL_LEDGER_EMPTY") buildReason = buildReason || "TOTALS_BUILD_FAILED";
+    }
+
+    try {
+      if (isValidUid(uid)) {
+        summaryApiPayload = await loadAbonentSummaryPage({ page: 1, per_page: 1, account_uid: uid });
+        summaryApiItem = Array.isArray(summaryApiPayload && summaryApiPayload.items) ? (summaryApiPayload.items[0] || null) : null;
+        summaryFromApi = summaryApiItem && summaryApiItem.summary && typeof summaryApiItem.summary === "object" ? summaryApiItem.summary : null;
+      }
+    } catch (eSummaryApi) {
+      summaryApiPayload = { ok: false, error: String(eSummaryApi && eSummaryApi.message || eSummaryApi) };
+    }
+
+    try {
+      var params = new URLSearchParams();
+      params.set("page", "1");
+      params.set("limit", "20");
+      params.set("query", id || uid);
+      var api = await _debugFetchJson("/api/abonents?" + params.toString());
+      abonentsApiPayload = api.data || { ok: false, error: api.error || ("HTTP_" + api.status) };
+      abonentApiRow = _debugFindAbonentApiRow(abonentsApiPayload, id, uid);
+    } catch (eAbonentsApi) {
+      abonentsApiPayload = { ok: false, error: String(eAbonentsApi && eAbonentsApi.message || eAbonentsApi) };
+    }
+
+    var recalculateResult = {
+      ok: false,
+      skipped: true,
+      reason: "READ_ONLY_DIAGNOSTIC_NOT_EXECUTED",
+      note: "Data.recalculateAbonentCard saves abonent_summary, so this helper builds the same payload without calling the write path."
+    };
+    var why = _debugSummaryWhyIndexTotalsEmpty({
+      buildReason: buildReason,
+      summaryPayload: summaryPayload,
+      calcTotals: calcTotals,
+      apiSummaryReturned: !!summaryFromApi,
+      apiSummary: summaryFromApi,
+      abonentApiRow: abonentApiRow
+    }) || "UNKNOWN";
+
+    var report = {
+      abonentId: id,
+      uid: uid,
+      canonicalKey: canonicalKey,
+      rowsCount: Number(ledgerInfo.rowsCount || 0),
+      accruedSum: _debugSummaryNumberSum(rows, "accrued"),
+      paidSum: _debugSummaryNumberSum(rows, "paid"),
+      calcPeriod: { from: String(period && period.from || ""), to: String(period && period.to || ""), ok: !!(period && period.ok), reason: String(period && (period.error || period.reason || period.source) || "") },
+      responsibilityRange: { from: String(responsibility && responsibility.from || ""), to: String(responsibility && responsibility.to || ""), source: String(responsibility && responsibility.source || "") },
+      calcTotalsAsOfAdjusted: calcTotals,
+      preparedSummaryPayload: summaryPayload,
+      recalculateAbonentCardResult: recalculateResult,
+      apiSummary: { payload: summaryApiPayload, item: summaryApiItem, summary: summaryFromApi },
+      apiAbonents: { payload: abonentsApiPayload, row: abonentApiRow },
+      whyIndexTotalsEmpty: why,
+      clearReason: why
+    };
+    try { console.table([{ abonentId: report.abonentId, uid: report.uid, rowsCount: report.rowsCount, accruedSum: report.accruedSum, paidSum: report.paidSum, whyIndexTotalsEmpty: report.whyIndexTotalsEmpty }]); } catch (eTable) {}
+    try { console.log("[summary-build][debug]", report); } catch (eLog) {}
+    return report;
+  };
+
+  function _debugTotalsField(value) {
+    return {
+      value: value,
+      type: typeof value,
+      finite: Number.isFinite(Number(value)),
+      missing: value === undefined || value === null || value === "",
+      nan: Number.isNaN(Number(value))
+    };
+  }
+
+  function _debugTotalsValidationMap(calcTotals, summaryPayload) {
+    var summary = summaryPayload && summaryPayload.summary && typeof summaryPayload.summary === "object" ? summaryPayload.summary : {};
+    return {
+      principal: _debugTotalsField(calcTotals && calcTotals.principal),
+      debt: _debugTotalsField(summary.total_debt !== undefined ? summary.total_debt : (calcTotals && (calcTotals.debt !== undefined ? calcTotals.debt : calcTotals.principal))),
+      penalty: _debugTotalsField(calcTotals && (calcTotals.penaltyDebt !== undefined ? calcTotals.penaltyDebt : calcTotals.penalty)),
+      total: _debugTotalsField(calcTotals && calcTotals.total),
+      accrued: _debugTotalsField(summary.total_accrued),
+      paid: _debugTotalsField(summary.total_paid),
+      balance: _debugTotalsField(calcTotals && (calcTotals.balance !== undefined ? calcTotals.balance : calcTotals.total))
+    };
+  }
+
+  function _debugTotalsValidationResult(fields, summaryPayload) {
+    var missing = [];
+    var nan = [];
+    var nonFinite = [];
+    Object.keys(fields || {}).forEach(function(name) {
+      var f = fields[name] || {};
+      if (f.missing) missing.push(name);
+      if (f.nan) nan.push(name);
+      if (!f.finite) nonFinite.push(name);
+    });
+    var payloadSummary = summaryPayload && summaryPayload.summary;
+    var payloadInvalid = !summaryPayload || !payloadSummary || typeof payloadSummary !== "object" || Array.isArray(payloadSummary);
+    var reason = "";
+    if (nan.length) reason = "TOTALS_NAN";
+    else if (missing.length) reason = "TOTALS_UNDEFINED";
+    else if (nonFinite.length) reason = "TOTALS_VALIDATION_FAILED";
+    else if (payloadInvalid) reason = "PAYLOAD_SCHEMA_MISMATCH";
+    else if (["principal", "penalty", "total", "accrued", "paid"].some(function(name) { return !fields[name]; })) reason = "TOTALS_MISSING_FIELDS";
+    else reason = "";
+    return {
+      ok: !reason,
+      blocker: reason || "",
+      whySummaryInvalid: reason || "",
+      missingFields: missing,
+      nanFields: nan,
+      nonFiniteFields: nonFinite,
+      payloadSchemaOk: !payloadInvalid
+    };
+  }
+
+  window.JKH_debugTotalsValidation = async function(abonentId) {
+    var summaryReport = await window.JKH_debugSummaryBuild(abonentId);
+    var calcTotals = summaryReport && summaryReport.calcTotalsAsOfAdjusted;
+    var summaryPayload = summaryReport && summaryReport.preparedSummaryPayload;
+    var fields = _debugTotalsValidationMap(calcTotals, summaryPayload);
+    var validation = _debugTotalsValidationResult(fields, summaryPayload);
+    var exactReason = validation.whySummaryInvalid || summaryReport.clearReason || "UNKNOWN";
+    var report = {
+      abonentId: summaryReport && summaryReport.abonentId || String(abonentId || "").trim(),
+      uid: summaryReport && summaryReport.uid || "",
+      rawCalcTotalsAsOfAdjusted: calcTotals,
+      totalsFields: fields,
+      exactValidationBlocker: validation.blocker || "",
+      exactReasonSummaryBecameInvalid: exactReason,
+      whySummaryInvalid: exactReason || "UNKNOWN",
+      preparedSummaryPayloadBeforeValidation: summaryPayload,
+      validationResultAfterValidation: validation,
+      missingOrInvalidFields: {
+        missing: validation.missingFields,
+        nan: validation.nanFields,
+        nonFinite: validation.nonFiniteFields
+      }
+    };
+    try {
+      console.table(Object.keys(fields).map(function(name) {
+        var f = fields[name] || {};
+        return { field: name, value: f.value, type: f.type, finite: f.finite, missing: f.missing, nan: f.nan };
+      }));
+    } catch (eTable) {}
+    try { console.log("[summary-build][totals-validation]", report); } catch (eLog) {}
+    return report;
+  };
+
+  function _debugRenderGuard(name, allow, detail) {
+    return {
+      guard: name,
+      result: allow ? "ALLOW" : "DENY",
+      allow: !!allow,
+      detail: detail || ""
+    };
+  }
+
+  function _debugSummaryRenderGuards(summaryReport, totalsReport, indexState) {
+    var payloadSummary = summaryReport && summaryReport.preparedSummaryPayload && summaryReport.preparedSummaryPayload.summary;
+    var apiSummary = summaryReport && summaryReport.apiSummary && summaryReport.apiSummary.summary;
+    var summary = apiSummary || payloadSummary || null;
+    var statusBefore = payloadSummary && (payloadSummary.summary_status || payloadSummary.status) || "";
+    var statusAfter = apiSummary && (apiSummary.summary_status || apiSummary.status) || "";
+    var totalsObj = summary && summary.totals && typeof summary.totals === "object" ? summary.totals : null;
+    var fields = totalsReport && totalsReport.totalsFields || {};
+    var finiteTotals = !!(fields.principal && fields.principal.finite && fields.penalty && fields.penalty.finite && fields.total && fields.total.finite);
+    var runtimeStale = false;
+    try {
+      var item = summaryReport && summaryReport.abonentId ? _migrationVerificationItem(summaryReport.abonentId, _findMigrationVerificationAbonent(summaryReport.abonentId).abonent, {}) : null;
+      runtimeStale = !!(item && item.runtimeCacheStale);
+    } catch (e) {}
+    return [
+      _debugRenderGuard("hasSummary", !!summary, summary ? "summary object present" : "summary missing"),
+      _debugRenderGuard("summary_status === fresh", statusAfter === "fresh" || (!statusAfter && statusBefore === "fresh"), "before=" + statusBefore + "; after=" + statusAfter),
+      _debugRenderGuard("totals object exists", !!totalsObj, totalsObj ? "summary.totals present" : "summary.totals missing"),
+      _debugRenderGuard("totals finite", finiteTotals, "principal/penalty/total finite=" + finiteTotals),
+      _debugRenderGuard("stale flag", !runtimeStale, runtimeStale ? "runtime cache stale" : "no stale runtime flag"),
+      _debugRenderGuard("runtime cache flag", !(summaryReport && summaryReport.runtimeCacheStale), "summary debug runtime flag=" + !!(summaryReport && summaryReport.runtimeCacheStale)),
+      _debugRenderGuard("readonly_no_recalc flag", true, "not an index render guard; unavailable from data.js"),
+      _debugRenderGuard("passive summary mode", !!(indexState && indexState.passiveSummaryMode), "passiveSummaryMode=" + !!(indexState && indexState.passiveSummaryMode)),
+      _debugRenderGuard("pagination state", !!(indexState && !indexState.loading && !indexState.error), "loading=" + !!(indexState && indexState.loading) + "; error=" + String(indexState && indexState.error || "")),
+      _debugRenderGuard("render signature skip", !(indexState && indexState.renderSignatureSkip), "renderSignatureSkip=" + !!(indexState && indexState.renderSignatureSkip))
+    ];
+  }
+
+  function _debugRenderDenyReason(guards, summaryReport, totalsReport, indexState) {
+    var denied = (guards || []).filter(function(g) { return g && g.result === "DENY"; });
+    if (denied.length) return denied[0].guard;
+    if (summaryReport && summaryReport.whyIndexTotalsEmpty === "TOTALS_EMPTY") return "TOTALS_EMPTY_GUARD";
+    if (totalsReport && totalsReport.validationResultAfterValidation && totalsReport.validationResultAfterValidation.ok !== true) return "TOTALS_VALIDATION_GUARD";
+    if (!indexState || !indexState.rowFound) return "INDEX_ROW_NOT_FOUND";
+    return "";
+  }
+
+  window.JKH_debugSummaryRenderState = async function(abonentId) {
+    var totalsReport = await window.JKH_debugTotalsValidation(abonentId);
+    var summaryReport = await window.JKH_debugSummaryBuild(abonentId);
+    var indexState = null;
+    try {
+      if (typeof window.JKH_getIndexRenderDebugState === "function") {
+        indexState = window.JKH_getIndexRenderDebugState(summaryReport.uid || summaryReport.abonentId || abonentId);
+      }
+    } catch (eIndex) {
+      indexState = { error: String(eIndex && eIndex.message || eIndex) };
+    }
+    var payloadSummary = summaryReport && summaryReport.preparedSummaryPayload && summaryReport.preparedSummaryPayload.summary;
+    var apiSummary = summaryReport && summaryReport.apiSummary && summaryReport.apiSummary.summary;
+    var guards = _debugSummaryRenderGuards(summaryReport, totalsReport, indexState);
+    var exactGuard = _debugRenderDenyReason(guards, summaryReport, totalsReport, indexState);
+    var report = {
+      abonentId: summaryReport && summaryReport.abonentId || String(abonentId || "").trim(),
+      uid: summaryReport && summaryReport.uid || "",
+      preparedSummaryPayload: summaryReport && summaryReport.preparedSummaryPayload || null,
+      summaryStatusBeforeValidation: payloadSummary && (payloadSummary.summary_status || payloadSummary.status) || "",
+      summaryStatusAfterValidation: apiSummary && (apiSummary.summary_status || apiSummary.status) || "",
+      exactValidationResult: totalsReport && totalsReport.validationResultAfterValidation || null,
+      exactInvalidFieldList: totalsReport && totalsReport.missingOrInvalidFields || null,
+      freshnessRuntimeFlags: {
+        staleFlag: guards.some(function(g){ return g.guard === "stale flag" && g.result === "DENY"; }),
+        runtimeCacheFlag: guards.some(function(g){ return g.guard === "runtime cache flag" && g.result === "DENY"; }),
+        readonlyNoRecalcFlag: "not_index_guard",
+        passiveSummaryMode: !!(indexState && indexState.passiveSummaryMode),
+        pagination: indexState && indexState.pagination || null,
+        renderSignatureSkip: !!(indexState && indexState.renderSignatureSkip)
+      },
+      indexRenderState: indexState,
+      renderGatingConditions: guards,
+      indexRenderAllowDenyReasons: guards.map(function(g){ return { guard: g.guard, result: g.result, detail: g.detail }; }),
+      whyTotalsHiddenDespiteFiniteTotals: exactGuard || summaryReport.whyIndexTotalsEmpty || "UNKNOWN",
+      exactGuardThatReturnsTotalsEmpty: summaryReport.whyIndexTotalsEmpty === "TOTALS_EMPTY" ? (exactGuard || "TOTALS_EMPTY_GUARD") : "",
+      whyIndexTotalsEmpty: summaryReport.whyIndexTotalsEmpty || "UNKNOWN"
+    };
+    try { console.table(report.renderGatingConditions); } catch (eTable) {}
+    try { console.log("[summary-render][debug]", report); } catch (eLog) {}
+    return report;
+  };
+
   async function recalcAbonentSummaryExplicit(abonentOrId, options) {
     var opts = options || {};
     var period = await _resolveAbonentSummaryRecalcPeriod(abonentOrId, opts.period);
@@ -1932,8 +2781,33 @@
       return { ok: false, uid: uid, summary_status: "error", summary_reason: "UID_LEDGER_PATH_REQUIRED", summary: null };
     }
 
+    var canonicalRaw = _getProjectRaw(ledgerKey);
+    var legacyKey = _legacyLedgerKeyForAbonent(abonentId, abonent);
+    if ((canonicalRaw === null || canonicalRaw === undefined) && legacyKey && legacyKey !== ledgerKey) {
+      var legacyInfo = _safeLedgerInfoForDiagnostic(legacyKey);
+      if (legacyInfo.rowsCount > 0) {
+        _logFreshBlockedLegacyLedger({
+          abonentId: abonentId,
+          uid: uid,
+          legacyKey: legacyKey,
+          canonicalKey: ledgerKey,
+          legacyRowsCount: legacyInfo.rowsCount,
+          reason: "LEGACY_LEDGER_MIGRATION_REQUIRED"
+        });
+        return {
+          ok: false,
+          uid: uid,
+          summary_status: "error",
+          summary_reason: "LEGACY_LEDGER_MIGRATION_REQUIRED",
+          summary: null,
+          status: "error",
+          reason: "LEGACY_LEDGER_MIGRATION_REQUIRED"
+        };
+      }
+    }
+
     try {
-      var raw = _getProjectRaw(ledgerKey);
+      var raw = canonicalRaw;
       if (raw !== null && raw !== undefined) _parseLedgerRows(raw, ledgerKey);
     } catch (e) {
       var ledgerReason = _summaryCalcErrorCode(e);
@@ -1994,6 +2868,16 @@
     resolveCalcPeriodStorageKey: resolveCalcPeriodStorageKey,
     resolveCalcPeriodActiveStorageKey: resolveCalcPeriodActiveStorageKey,
     resolvePaymentLedgerKey: resolvePaymentLedgerKey,
+    getRuntimeCacheKey: getRuntimeCacheKey,
+    resolveRuntimeCacheKey: resolveRuntimeCacheKey,
+    computeLedgerRuntimeVersion: computeLedgerRuntimeVersion,
+    computeLedgerVersion: computeLedgerVersion,
+    readLedgerRuntimeCache: readLedgerRuntimeCache,
+    getRuntimeCache: getRuntimeCache,
+    writeLedgerRuntimeCache: writeLedgerRuntimeCache,
+    setRuntimeCache: setRuntimeCache,
+    invalidateLedgerRuntimeCache: invalidateLedgerRuntimeCache,
+    invalidateRuntimeCache: invalidateRuntimeCache,
     readPaymentLedger: readPaymentLedger,
     loadAbonentSummaryPage: loadAbonentSummaryPage,
     validateAbonentSummaryRecalcBatch: validateAbonentSummaryRecalcBatch,
@@ -3131,9 +4015,10 @@ window.JKHBoot?.markReady?.('data');
       const abonent = demoDb && demoDb.abonents ? demoDb.abonents[id] : null;
       const calcKey = resolveCalcPeriodStorageKey(abonent);
       const calcActiveKey = resolveCalcPeriodActiveStorageKey(abonent);
+      const uid = String(abonent && abonent.uid || "").trim();
       if (calcKey) _setRawScoped(calcKey, JSON.stringify({ from: "", to: "" }));
       if (calcActiveKey) _setRawScoped(calcActiveKey, "0");
-      _setRawScoped("report_period_" + id, JSON.stringify({ from: "", to: "" }));
+      if (isValidUid(uid)) _setRawScoped("report_period_" + uid, JSON.stringify({ from: "", to: "" }));
     });
 
     // 7) платежи — намеренно как “проверочный кейс”

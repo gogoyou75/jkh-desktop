@@ -27,6 +27,7 @@
 (function () {
   if (window.__SPRAVKA_SUD_JS_LOADED__) return;
   window.__SPRAVKA_SUD_JS_LOADED__ = true;
+  let __spravkaReturnCardPeriodContext = null;
 
   function $(id){ return document.getElementById(id); }
 
@@ -41,6 +42,15 @@
       }
     } catch (e) {}
     return null;
+  }
+
+  function storeSet(key, value, ownerId){
+    try {
+      if (window.JKHStore && typeof window.JKHStore.setRaw === "function") {
+        return JKHStore.setRaw(key, value, ownerId);
+      }
+    } catch (e) {}
+    return false;
   }
 
   const __spravkaLedgerReadCache = new Map();
@@ -120,9 +130,29 @@
     const activeStorageKey = (window.Data && typeof window.Data.resolveCalcPeriodActiveStorageKey === "function")
       ? String(window.Data.resolveCalcPeriodActiveStorageKey(abonent || requestedId) || '').trim()
       : '';
+    const uid = String(abonent && abonent.uid || '').trim();
+    const reportStorageKey = uid ? ('report_period_' + uid) : '';
+    const reportRaw = /^report_period_uid_/.test(reportStorageKey) ? storeGet(reportStorageKey, readOwner) : null;
+    const reportPeriod = reportRaw ? parsePeriod(reportRaw) : null;
     const activeRaw = activeStorageKey ? storeGet(activeStorageKey, readOwner) : null;
     const raw = storageKey ? storeGet(storageKey, readOwner) : null;
     const calcPeriod = raw ? parsePeriod(raw) : null;
+    const selectedPeriod = reportPeriod || calcPeriod;
+    const selectedSource = reportPeriod ? "canonical-report-period" : (calcPeriod ? "canonical-calc-period" : "");
+    try {
+      console.log("[spravka][bootstrap-period]", {
+        abonentId: requestedId,
+        uid: uid,
+        readOwner: readOwner,
+        reportKey: reportStorageKey,
+        periodKey: storageKey,
+        activeKey: activeStorageKey,
+        source: selectedSource || "missing",
+        from: selectedPeriod ? selectedPeriod.from : "",
+        to: selectedPeriod ? selectedPeriod.to : "",
+        ok: !!selectedPeriod
+      });
+    } catch (eBootstrapLog) {}
 
     try {
       console.log("[spravka][calc-period-read]", {
@@ -130,36 +160,41 @@
         readOwner: readOwner,
         currentOwner: String(ctx && ctx.currentOwner || ''),
         forcedOwner: String(ctx && ctx.forcedOwner || ''),
+        reportKey: reportStorageKey,
+        reportRawExists: reportRaw !== null && reportRaw !== undefined && reportRaw !== "",
         key: storageKey,
         activeKey: activeStorageKey,
         rawExists: raw !== null && raw !== undefined && raw !== "",
         activeRaw: activeRaw,
-        from: calcPeriod ? calcPeriod.from : "",
-        to: calcPeriod ? calcPeriod.to : ""
+        source: selectedSource,
+        from: selectedPeriod ? selectedPeriod.from : "",
+        to: selectedPeriod ? selectedPeriod.to : ""
       });
     } catch (e) {}
 
-    if (!storageKey) {
+    if (!reportStorageKey && !storageKey) {
       console.warn("[spravka][calc-period-read][missing-canonical-key]", {
         abonentId: requestedId,
         readOwner: readOwner,
+        reportKey: reportStorageKey,
         key: storageKey,
         activeKey: activeStorageKey
       });
       return null;
     }
 
-    if (!raw || !calcPeriod) {
+    if (!selectedPeriod) {
       console.warn("[spravka][calc-period-read][missing-canonical-period]", {
         abonentId: requestedId,
         readOwner: readOwner,
+        reportKey: reportStorageKey,
         key: storageKey,
         activeKey: activeStorageKey
       });
       return null;
     }
 
-    return calcPeriod;
+    return selectedPeriod;
   }
 
 
@@ -460,12 +495,108 @@
     return id ? ("abonent_card.html?abonent=" + encodeURIComponent(id)) : "#";
   }
 
+  function buildCardReturnUrl(ctx, abonent, period){
+    const id = String(ctx && ctx.abonentId || "").trim();
+    if (!id) return "#";
+    const uid = String(abonent && abonent.uid || "").trim();
+    let href = "abonent_card.html?abonent=" + encodeURIComponent(id) + "&account=" + encodeURIComponent(id);
+    if (uid) href += "&uid=" + encodeURIComponent(uid);
+    if (period && period.from && period.to) href += "&from=" + encodeURIComponent(period.from) + "&to=" + encodeURIComponent(period.to);
+    if (ctx && ctx.dbKey) href += "&db=" + encodeURIComponent(ctx.dbKey);
+    else if (ctx && ctx.ownerParam) href += "&owner=" + encodeURIComponent(ctx.ownerParam);
+    return href;
+  }
+
+  function saveReturnCardPeriod(ctx, abonent, period){
+    const id = String(ctx && ctx.abonentId || "").trim();
+    const uid = String(abonent && abonent.uid || "").trim();
+    const ownerId = String(ctx && ctx.readOwner || "").trim();
+    const payload = { from: String(period && period.from || "").trim(), to: String(period && period.to || "").trim() };
+    const reportKey = uid ? ("report_period_" + uid) : "";
+    const periodKey = (window.Data && typeof window.Data.resolveCalcPeriodStorageKey === "function")
+      ? String(window.Data.resolveCalcPeriodStorageKey(abonent || id) || "").trim()
+      : "";
+    const activeKey = (window.Data && typeof window.Data.resolveCalcPeriodActiveStorageKey === "function")
+      ? String(window.Data.resolveCalcPeriodActiveStorageKey(abonent || id) || "").trim()
+      : "";
+    const result = {
+      ok: false,
+      abonentId: id,
+      uid: uid,
+      ownerId: ownerId,
+      reportKey: reportKey,
+      periodKey: periodKey,
+      activeKey: activeKey,
+      period: payload,
+      reason: ""
+    };
+    if (!uid || !/^report_period_uid_/.test(reportKey) || !periodKey || !activeKey || !payload.from || !payload.to) {
+      result.reason = "RETURN_CARD_PERIOD_CONTEXT_MISSING";
+      try { console.warn("[spravka][return-card-period-save]", result); } catch(eWarn) {}
+      return result;
+    }
+
+    const raw = JSON.stringify(payload);
+    storeSet(reportKey, raw, ownerId);
+    storeSet(periodKey, raw, ownerId);
+    storeSet(activeKey, "1", ownerId);
+    let reportReadback = null;
+    let periodReadback = null;
+    let activeReadback = null;
+    try { reportReadback = storeGet(reportKey, ownerId); } catch(eReport) {}
+    try { periodReadback = storeGet(periodKey, ownerId); } catch(ePeriod) {}
+    try { activeReadback = storeGet(activeKey, ownerId); } catch(eActive) {}
+    result.reportReadback = reportReadback;
+    result.periodReadback = periodReadback;
+    result.activeReadback = activeReadback;
+    result.ok = reportReadback === raw && periodReadback === raw && activeReadback === "1";
+    result.reason = result.ok ? "" : "RETURN_CARD_PERIOD_READBACK_FAILED";
+    try { console.log("[spravka][return-card-period-save]", result); } catch(eLog) {}
+    return result;
+  }
+
+  function configureBackToCardPeriod(ctx, abonent, period){
+    const back = $("backToCard");
+    const href = buildCardReturnUrl(ctx, abonent, period);
+    const saveResult = saveReturnCardPeriod(ctx, abonent, period);
+    __spravkaReturnCardPeriodContext = { ctx: ctx, abonent: abonent, period: period };
+    if (back) back.href = href;
+    try {
+      console.log("[spravka][return-card-url]", {
+        href: href,
+        abonentId: String(ctx && ctx.abonentId || ""),
+        uid: String(abonent && abonent.uid || ""),
+        from: period && period.from || "",
+        to: period && period.to || "",
+        saveOk: !!(saveResult && saveResult.ok)
+      });
+    } catch(eLog) {}
+    return href;
+  }
+
   function setupBackToCard(ctx){
     const back = $("backToCard");
     if (!back) return;
     const id = String(ctx && ctx.abonentId || "").trim();
     back.href = cardUrlForAbonent(id);
     back.addEventListener("click", function(ev){
+      if (__spravkaReturnCardPeriodContext) {
+        const c = __spravkaReturnCardPeriodContext;
+        const saveResult = saveReturnCardPeriod(c.ctx, c.abonent, c.period);
+        const href = buildCardReturnUrl(c.ctx, c.abonent, c.period);
+        back.href = href;
+        try {
+          console.log("[spravka][return-card-url]", {
+            href: href,
+            abonentId: String(c.ctx && c.ctx.abonentId || ""),
+            uid: String(c.abonent && c.abonent.uid || ""),
+            from: c.period && c.period.from || "",
+            to: c.period && c.period.to || "",
+            saveOk: !!(saveResult && saveResult.ok),
+            source: "click"
+          });
+        } catch(eClickLog) {}
+      }
       if (!id) {
         ev.preventDefault();
         showFatal("Не передан параметр abonent в URL. Возврат к карточке невозможен.");
@@ -600,6 +731,7 @@
         return;
       }
 
+      configureBackToCardPeriod(ctx, abonent, period);
       setText("period_from", fmtDateRuAny(period.from));
       setText("period_to", fmtDateRuAny(period.to));
 

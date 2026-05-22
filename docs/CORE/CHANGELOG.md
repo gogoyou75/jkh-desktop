@@ -455,3 +455,140 @@ rg -n "splitPremise|premise-transform\]\[split|type: ['\"]split" web LOGIC_SPEC.
 - Добавлен расширенный status payload для `GET /api/abonent_summary/recalc_batch_job/<job_id>`: top-level `job_id/status/total/processed/fresh/error/skipped/message/affected_uids` + совместимый `job` блок.
 - Backend status endpoint теперь продвигает queued/running job по шагам, что даёт реальный polling progress без скрытого full-recalc.
 - Frontend index добавил runtime polling (ограниченные retry, без бесконечных таймеров), блокировку кнопки запуска во время active job, вывод прогресса и авто-refresh текущей summary-страницы после completed.
+
+## 2026-05-21 - Stage 13.1: Period keys are view-state, not financial dirty
+
+- `calc_period_<uid>`, `calc_period_active_<uid>` and `report_period_<uid>` are fixed as view/report state, not financial ledger mutations.
+- Saving or toggling calc period no longer marks `abonent_summary` dirty with `CALC_PERIOD_CHANGED`.
+- Backend `POST /api/abonent_summary/mark_dirty` accepts `CALC_PERIOD_CHANGED` as a view-only reason and returns `status=skipped` without creating or updating financial dirty summary rows.
+- No changes to `payments_<uid>`, `ledger_runtime_cache_<uid>`, autoaccrual, FIFO, penalty formula, checkpoint/tail-recalc or `web/calc_engine.js`.
+
+## 2026-05-21 — Stage 13.2A: canonical ledger diagnostics and dirty/fresh race stabilization
+
+- Manual recalc controlled autoaccrual writes keep `summaryDirtyReason:false`, invalidate stale runtime ledger cache, and refresh `ledger_runtime_cache_<uid>` after the explicit recalc flow.
+- Added read-only `window.JKH_diagnoseLedger()` diagnostics for canonical `payments_<uid>` vs legacy `payments_<LS>` state without migration, deletion, or writes.
+- Legacy `payments_<LS>` fallback remains transitional read-only mode and now logs `[ledger][legacy-readonly-fallback]`.
+- Fresh `abonent_summary` is blocked for legacy-only ledgers with `LEGACY_LEDGER_MIGRATION_REQUIRED`; UID generation is blocked when a UID-missing abonent already has legacy ledger rows.
+- `web/calc_engine.js`, backend financial calculation, storage key migration, and server-first read-only page behavior were not changed.
+
+## 2026-05-21 — Stage 13.2B: migration verification layer
+
+- Added read-only `window.JKH_verifyLedgerMigration(options)` to classify canonical/legacy ledger migration readiness without creating, overwriting, migrating, or deleting ledger keys.
+- Verification reports `READY_TO_MIGRATE`, mixed-ledger blockers, missing/invalid UID blockers, stale runtime cache, and optional orphan summary items supplied through `options.summaryItems`.
+- The layer does not run autoaccrual, does not calculate backend financial totals, does not mark `CALC_PERIOD_CHANGED` dirty, and does not touch `web/calc_engine.js`.
+
+## 2026-05-21 — Stage 13.2B.a: per-abonent ledger migration diagnostics
+
+- Added read-only `window.JKH_verifyLedgerMigrationForAbonent(abonentId)` and `window.JKH_debugAbonentLedger(abonentId)` for one-account diagnostics.
+- Debug output explains UID/canonical/legacy state, migration blockers, mixed-ledger comparison, and why index totals/summary may be empty.
+- No ledger writes, migration, autoaccrual, backend financial calculation, formula changes, or `web/calc_engine.js` changes.
+
+## 2026-05-21 — Stage 13.2C: summary build diagnostics for canonical ledger
+
+- Added read-only `window.JKH_debugSummaryBuild(abonentId)` to trace canonical ledger rows, frontend calc totals, prepared summary payload, current `/api/abonent_summary`, current `/api/abonents` mapping, and `whyIndexTotalsEmpty`.
+- The helper does not call the summary save/recalc write path; it reports `READ_ONLY_DIAGNOSTIC_NOT_EXECUTED` for `Data.recalculateAbonentCard` and builds the comparable payload locally.
+- No changes to ledger data, autoaccrual, backend totals, financial formulas, FIFO, or `web/calc_engine.js`.
+
+## 2026-05-21 — Stage 13.2C.a: totals validation diagnostics
+
+- Added read-only `window.JKH_debugTotalsValidation(abonentId)` for field-level totals validation diagnostics.
+- The helper reports raw `calcTotalsAsOfAdjusted`, type/finite/missing/NaN status for principal/debt/penalty/total/accrued/paid/balance, validation blocker, payload before validation, and invalid field lists.
+- No summary writes, ledger writes, migration, autoaccrual, formula changes, or `web/calc_engine.js` changes.
+
+## 2026-05-21 — Stage 13.2C.b: summary status and render guard diagnostics
+
+- Added read-only `window.JKH_debugSummaryRenderState(abonentId)` to show summary status before/after validation, invalid fields, freshness/runtime flags, index render guard ALLOW/DENY states, and the guard hiding totals.
+- Added read-only `window.JKH_getIndexRenderDebugState(...)` on `index.html` so diagnostics can inspect passive summary mode, pagination, row mapping, and render signature state without changing render behavior.
+- No summary writes, ledger writes, migration, autoaccrual, formula changes, or `web/calc_engine.js` changes.
+
+## 2026-05-21 — Stage 13.2C.c: summary totals object mapping
+
+- Fresh summary payload now includes canonical nested `summary.totals` fields: `principal`, `debt`, `penalty`, `total`, `accrued`, `paid`, and `balance`, while keeping legacy flat aliases.
+- `index.html` reads nested `summary.totals.*` first and falls back to legacy flat fields.
+- No ledger writes, migration, autoaccrual, formula changes, FIFO changes, backend totals, or `web/calc_engine.js` changes.
+
+## 2026-05-21 — Stage 13.2C.d: index totals DOM mapping
+
+- `index.html` now carries resolved rendered totals through explicit `renderedValues` and writes debt, penalty, accrued, and paid into identifiable table cells.
+- Added `[index][totals-render]` diagnostics with UID, summary status, totals source, totals object, and rendered values for passive summary rows.
+- No ledger writes, migration, autoaccrual, formula changes, FIFO changes, backend totals, or `web/calc_engine.js` changes.
+
+## 2026-05-21 — Stage 13.2C.e: index totals cell targeting
+
+- Index totals DOM writes now target explicit `td[data-field="debt"]`, `td[data-field="penalty"]`, `td[data-field="accrued"]`, and `td[data-field="paid"]`.
+- Added `[index][totals-dom-write]` diagnostics with UID, field, value, targetFound, beforeText, and afterText.
+- No positional `cells[5]` / `cells[6]` / `cells[7]` totals mapping, ledger writes, backend totals, formula changes, or `web/calc_engine.js` changes.
+
+## 2026-05-21 - Stage 13.2D: diagnose and stabilize abonent card calc/report period flow
+
+- Added card recalc diagnostics: `[card-recalc][click]`, `[card-recalc][period-saved]`, and `[card-recalc][result]` show UID, input dates, canonical key readback, recalc result, ledger rows count, and summary totals.
+- Card and reports flows now persist/read canonical `report_period_uid_<uid>` together with `calc_period_uid_<uid>` and `calc_period_active_uid_<uid>` so `spravka_sud` can bootstrap the same selected period.
+- Added read-only `window.JKH_debugCardPeriodFlow(abonentId)` for calc/report period key diagnostics and spravka bootstrap warnings.
+- `CALC_PERIOD_CHANGED` remains view-only, no ledger writes/migration/backend totals/formula/FIFO changes were added, and `web/calc_engine.js` was not changed.
+
+## 2026-05-21 - Stage 13.2D.a: fix card period handoff to reports/spravka
+
+- The card reports button now saves and readback-checks `calc_period_uid_<uid>`, `calc_period_active_uid_<uid>`, and `report_period_uid_<uid>` before navigation.
+- `reports.html` bootstraps its date inputs from URL period first, then `report_period_uid_<uid>`, then `calc_period_uid_<uid>`, and logs `[reports][bootstrap-period]`.
+- `spravka_sud.js` logs `[spravka][bootstrap-period]` and keeps report-period-first fallback behavior.
+- No ledger rows, autoaccrual on open, formulas/FIFO/penalty logic, financial dirty behavior, or `web/calc_engine.js` were changed.
+
+## 2026-05-22 - Stage 13.2D.b: auto-accept report period from card handoff
+
+- `reports.html` now auto-accepts periods bootstrapped from URL, `report_period_uid_<uid>`, or `calc_period_uid_<uid>` by saving canonical period keys and confirming readback.
+- Added `[reports][period-auto-accepted]` diagnostics and enabled opening the court report after successful auto-accept without requiring the manual "Выбрать" click.
+- No formula/FIFO/penalty changes, no `CALC_PERIOD_CHANGED` financial dirty behavior, and no `web/calc_engine.js` changes.
+
+## 2026-05-22 - Stage 13.2D.c: restore calc period inputs on card return
+
+- `abonent_card.html` now bootstraps `calcFrom` / `calcTo` from `report_period_uid_<uid>` first, then `calc_period_uid_<uid>`, and logs `[card-period][bootstrap-inputs]`.
+- Returning from reports/spravka to the card preserves the selected period without triggering automatic recalculation.
+- No formula/FIFO/penalty changes, no financial dirty behavior, no ledger row changes, and no `web/calc_engine.js` changes.
+
+## 2026-05-22 - Stage 13.2D.d: default report period when card period is empty
+
+- The card reports button now creates a default report period when `calcFrom` / `calcTo` are empty, using responsibility start, `calcStartDate`, compatible abonent start fields, premise creation date, or earliest ledger month fallback.
+- The generated period is saved into `report_period_uid_<uid>`, `calc_period_uid_<uid>`, and active calc-period state before opening reports, with `[report-period][default-created]` diagnostics.
+- No autoaccrual on open, no formula/FIFO/penalty changes, no `CALC_PERIOD_CHANGED` financial dirty behavior, no ledger row changes, and no `web/calc_engine.js` changes.
+
+## 2026-05-22 - Stage 13.2D.e: preserve report period when returning from spravka to abonent card
+
+- `spravka_sud.js` now saves and readback-checks `report_period_uid_<uid>`, `calc_period_uid_<uid>`, and `calc_period_active_uid_<uid>` before returning to the abonent card.
+- The back-to-card URL now includes `abonent`, `account`, `uid`, `from`, and `to`, with `[spravka][return-card-period-save]` and `[spravka][return-card-url]` diagnostics.
+- `abonent_card.html` now restores `calcFrom` / `calcTo` from URL `from/to` before falling back to canonical report/calc period keys, with `[card-period][bootstrap-inputs-from-url]`.
+- No autoaccrual on return, no formula/FIFO/penalty changes, no `CALC_PERIOD_CHANGED` financial dirty behavior, no ledger row changes, and no `web/calc_engine.js` changes.
+
+## 2026-05-22 - Stage 13.2D.f: restore filtered payment table after return from spravka
+
+- Card period bootstrap now writes and readback-checks active canonical calc/report period keys before the payment table load, logging `[card-period][bootstrap-active]`.
+- `payment_table.js` includes active period state in the render signature, supports forced readonly reloads, and logs `[payment-table][period-filter-applied-on-load]` when the period filter is applied on page load.
+- Returning from spravka restores both `calcFrom` / `calcTo` and the filtered table view without autoaccrual/recalc.
+- No formula/FIFO/penalty changes, no `CALC_PERIOD_CHANGED` financial dirty behavior, no ledger row changes, and no `web/calc_engine.js` changes.
+
+## 2026-05-22 - Stage 13.2D.g: restore period-aware payment table runtime values after returning from spravka
+
+- `payment_table.js` now uses a period-aware runtime signature that includes ledger version, `periodActive`, and selected `from/to`.
+- Runtime cache created for the full ledger is not applied to an active period view; readonly period loads rebuild row runtime values from the filtered view and may refresh only `ledger_runtime_cache_<uid>`.
+- Added `[payment-table][period-runtime-source]` diagnostics with full/view row counts, cache usage, period match, and base rows source.
+- No formula/FIFO/penalty changes, no `CALC_PERIOD_CHANGED` financial dirty behavior, no ledger row changes, no autoaccrual on return, and no `web/calc_engine.js` changes.
+
+## 2026-05-22 - Stage 13.2D.h: force readonly period-view totals recalculation after spravka return
+
+- Active period readonly loads now force row runtime values from `applyResponsibilityRangeToView(applyCalcFilter(...))` and `runningTotalsBaseRows(filteredRows)`.
+- Period view signatures are built from filtered base rows plus period state, and `[payment-table][period-runtime-source]` reports `runtimeCacheUsed:false`, `baseRowsSource:"filtered"`, and the active signature.
+- The active period path does not use full-ledger runtime cache, does not write ledger rows, and does not trigger autoaccrual/recalc on return.
+- No formula/FIFO/penalty changes, no `CALC_PERIOD_CHANGED` financial dirty behavior, and no `web/calc_engine.js` changes.
+
+## 2026-05-22 - Stage 13.2D.i: force period-aware running totals signature in payment_table
+
+- Active period loads now use `effectiveSignature = ledgerSignatureForRows(baseRows) + "|period:<from>:<to>"` for memoized totals and running-total updates.
+- `scheduleRunningTotalsUpdate` runs in readonly mode when an active period is present, using filtered `view/baseRows` rather than the full ledger.
+- `[payment-table][period-runtime-source]` now reports `effectiveSignature`, `runtimeCacheUsed:false`, and `baseRowsSource:"filtered"` for period views.
+- No formula/FIFO/penalty changes, no ledger writes, no autoaccrual on return, no `CALC_PERIOD_CHANGED` financial dirty behavior, and no `web/calc_engine.js` changes.
+
+## 2026-05-22 - Stage 13.2D.j: URL period fallback for payment table after spravka return
+
+- `payment_table.js` now reads URL `from/to` as a fallback period when canonical calc-period data is missing or not active yet.
+- `isCalcPeriodActive()` treats a valid URL period as active only when canonical active key is not set, logging `[payment-table][period-url-fallback]`.
+- Period-aware signatures and filtered runtime calculations now also work when the card was restored from URL period before canonical keys are readable.
+- No formula/FIFO/penalty changes, no ledger writes, no autoaccrual on return, no `CALC_PERIOD_CHANGED` financial dirty behavior, and no `web/calc_engine.js` changes.

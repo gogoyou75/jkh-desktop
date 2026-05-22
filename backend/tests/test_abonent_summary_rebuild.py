@@ -587,7 +587,7 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         response = self.client.post("/api/abonent_summary/mark_dirty?owner=owner-dirty-spoof-b", json={
             "owner": "owner-dirty-spoof-b",
             "account_uid": "uid_dirty_spoof_a_1001",
-            "reason": "CALC_PERIOD_CHANGED",
+            "reason": "PAYMENTS_CHANGED",
         })
 
         self.assertEqual(response.status_code, 200)
@@ -595,6 +595,55 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
             row = app_module.AbonentSummary.query.one()
             self.assertEqual(row.owner_id, "owner-dirty-spoof-a")
             self.assertEqual(row.account_uid, "uid_dirty_spoof_a_1001")
+
+    def test_mark_dirty_skips_calc_period_changed_without_creating_summary(self):
+        with app_module.app.app_context():
+            self._add_user("owner-period-skip-create")
+            self._put_abonents("owner-period-skip-create", {
+                "1001": {"uid": "uid_period_skip_create_1001", "id": "1001"},
+            })
+            app_module.db.session.commit()
+        self._login("owner-period-skip-create")
+
+        response = self.client.post("/api/abonent_summary/mark_dirty", json={
+            "account_uid": "uid_period_skip_create_1001",
+            "reason": "CALC_PERIOD_CHANGED",
+        })
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["status"], "skipped")
+        self.assertEqual(response.get_json()["view_only_reason"], "CALC_PERIOD_CHANGED")
+        self.assertEqual(response.get_json()["counters"], {"created": 0, "updated": 0, "skipped": 1, "errors": 0})
+        with app_module.app.app_context():
+            self.assertEqual(app_module.AbonentSummary.query.count(), 0)
+
+    def test_mark_dirty_skips_calc_period_changed_without_dirtying_existing_summary(self):
+        original_summary = self._fresh_summary(50, 7, 57)
+        with app_module.app.app_context():
+            self._add_user("owner-period-skip-existing")
+            self._put_abonents("owner-period-skip-existing", {
+                "1001": {"uid": "uid_period_skip_existing_1001", "id": "1001"},
+            })
+            app_module.db.session.add(app_module.AbonentSummary(
+                owner_id="owner-period-skip-existing",
+                abonent_id="1001",
+                account_uid="uid_period_skip_existing_1001",
+                account_number="1001",
+                summary_json=json.dumps(original_summary, sort_keys=True),
+            ))
+            app_module.db.session.commit()
+        self._login("owner-period-skip-existing")
+
+        response = self.client.post("/api/abonent_summary/mark_dirty", json={
+            "account_uid": "uid_period_skip_existing_1001",
+            "reason": "CALC_PERIOD_CHANGED",
+        })
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["status"], "skipped")
+        with app_module.app.app_context():
+            row = app_module.AbonentSummary.query.one()
+            self.assertEqual(json.loads(row.summary_json), original_summary)
 
     def test_mark_dirty_does_not_touch_other_owner(self):
         with app_module.app.app_context():
@@ -673,6 +722,535 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         self.assertEqual(response.get_json()["items"], [])
         with app_module.app.app_context():
             self.assertEqual(app_module.AbonentSummary.query.count(), 0)
+
+    def test_calc_period_frontend_save_is_view_state_only(self):
+        path = self._find_repo_file("web", "abonent_card.html")
+        self.assertIsNotNone(path)
+        source = path.read_text(encoding="utf-8")
+        self.assertIn("function saveCalcPeriod(from, to){", source)
+        self.assertIn("function setCalcPeriodActive(active){", source)
+        save_body = source.split("function saveCalcPeriod(from, to){", 1)[1].split("function setCalcPeriodActive(active){", 1)[0]
+        active_body = source.split("function setCalcPeriodActive(active){", 1)[1].split("function confirmCalcPeriodSaved(){", 1)[0]
+
+        combined = save_body + active_body
+        self.assertIn("storeSet(meta.storageKey", save_body)
+        self.assertIn("storeSet(meta.activeStorageKey", combined)
+        self.assertNotIn("markCurrentAbonentSummaryDirty", combined)
+        self.assertNotIn("markAbonentSummaryDirty", combined)
+        self.assertNotIn("payments_", combined)
+        self.assertNotIn("ledger_runtime_cache_", combined)
+        self.assertNotIn("recalc", combined.lower())
+        self.assertNotIn("autoaccrual", combined.lower())
+
+    def test_calc_period_changed_is_not_used_by_index_or_batch_recalc(self):
+        for parts in (("web", "index.html"), ("web", "data.js")):
+            path = self._find_repo_file(*parts)
+            self.assertIsNotNone(path)
+            source = path.read_text(encoding="utf-8")
+            if parts[-1] == "index.html":
+                self.assertNotIn("CALC_PERIOD_CHANGED", source)
+            if parts[-1] == "data.js":
+                pattern = re.compile(r"recalc_batch[^\\n]+CALC_PERIOD_CHANGED|CALC_PERIOD_CHANGED[^\\n]+recalc_batch", re.I)
+                self.assertIsNone(pattern.search(source))
+
+    def test_calc_engine_source_remains_unmodified_for_stage_13_1(self):
+        path = self._find_repo_file("web", "calc_engine.js")
+        self.assertIsNotNone(path)
+        source = path.read_text(encoding="utf-8")
+        self.assertIn("calc_period_", source)
+        self.assertIn("allocatePaymentsFIFO", source)
+
+    def test_manual_full_recalc_saves_canonical_abonent_summary(self):
+        path = self._find_repo_file("web", "payment_table.js")
+        self.assertIsNotNone(path)
+        source = path.read_text(encoding="utf-8")
+        self.assertIn("window.fullRecalcForCurrentAbonent", source)
+        body = source.split("window.fullRecalcForCurrentAbonent", 1)[1].split("window.__loadPaymentTable", 1)[0]
+
+        self.assertIn("applyControlledAutoAccrualForManualRecalc", source)
+        self.assertIn("validateResponsibilityRangeForManualRecalc", source)
+        self.assertIn("suggestResponsibilityStartFromPayments", source)
+        self.assertIn("allowResponsibilityStartRepair === true", source)
+        self.assertIn("[responsibility][repair-from-payments]", source)
+        self.assertIn("RESPONSIBILITY_PERIOD_MISSING", source)
+        self.assertIn("window.JKHAutoAccrual.dryRunForAbonent(abonentId)", source)
+        self.assertIn("Data.writePaymentLedger", source)
+        self.assertIn("summaryDirtyReason:false", source)
+        self.assertIn("hasAccrualInManualRecalcPeriod", source)
+        self.assertIn("ACCRUALS_NOT_CREATED", source)
+        self.assertIn("Data.flushDbToServer", source)
+        self.assertIn("Data.writeLedgerRuntimeCache", body)
+        self.assertIn('__paymentTableMode = "readonly_no_recalc"', body)
+        self.assertIn('await loadPaymentTable("full_recalc_completed")', body)
+        self.assertIn("Data.recalculateAbonentCard(id, { period: opts.period })", body)
+        self.assertIn("autoaccrual_changed", body)
+        self.assertIn("summary_status", body)
+        self.assertIn("summary_save", body)
+        self.assertNotIn("calcStartDate = fromISO2", source)
+        self.assertNotIn("return clamp({ from: fromISO2", source)
+        self.assertNotIn("recalc_batch", body)
+
+        data_path = self._find_repo_file("web", "data.js")
+        self.assertIsNotNone(data_path)
+        data_source = data_path.read_text(encoding="utf-8")
+        self.assertIn("opts.summaryDirtyReason !== false", data_source)
+
+    def test_calc_run_button_renders_summary_returned_by_manual_recalc(self):
+        path = self._find_repo_file("web", "abonent_card.html")
+        self.assertIsNotNone(path)
+        source = path.read_text(encoding="utf-8")
+        self.assertIn("calcRunBtn", source)
+        self.assertIn("window.fullRecalcForCurrentAbonent", source)
+        self.assertIn("__isCanonicalCalcPeriodKey", source)
+        self.assertIn("__isCanonicalCalcPeriodActiveKey", source)
+        self.assertIn("CANONICAL_READBACK_FAILED", source)
+        self.assertIn("confirmCalcPeriodSaved()) return", source)
+        body = source.split("window.fullRecalcForCurrentAbonent", 1)[1].split("if (!recalcHandled)", 1)[0]
+
+        self.assertIn("applyAutoAccrual: true", body)
+        self.assertIn("period: { from: from, to: to }", body)
+        self.assertIn("recalcResult.summary", body)
+        self.assertIn("manualRecalcErrorMessage", source)
+        self.assertIn("Не задан период ответственности/дата начала расчёта", source)
+        self.assertIn("renderAbonentSummaryStatus(summaryStatus, summaryReason)", body)
+        self.assertIn("__renderAbonentTotalsFromFreshSummary(summary)", body)
+        self.assertNotIn("CALC_PERIOD_CHANGED", body)
+        self.assertNotIn("recalc_batch", body)
+
+    def test_stage_13_2a_ledger_canonical_diagnostics_and_race_guards(self):
+        data_path = self._find_repo_file("web", "data.js")
+        payment_path = self._find_repo_file("web", "payment_table.js")
+        calc_engine_path = self._find_repo_file("web", "calc_engine.js")
+        self.assertIsNotNone(data_path)
+        self.assertIsNotNone(payment_path)
+        self.assertIsNotNone(calc_engine_path)
+        data_source = data_path.read_text(encoding="utf-8")
+        payment_source = payment_path.read_text(encoding="utf-8")
+        calc_before = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
+
+        manual_body = payment_source.split("applyControlledAutoAccrualForManualRecalc", 1)[1].split("window.fullRecalcForCurrentAbonent", 1)[0]
+        self.assertIn('eventType:"AUTOACCRUAL_WRITE", summaryDirtyReason:false', manual_body)
+        self.assertIn('eventType: "PAYMENT_TABLE_WRITE", summaryDirtyReason: "PAYMENTS_CHANGED"', payment_source)
+        self.assertIn("clearPaymentLedgerReadCache(\"manual-recalc-autoaccrual\")", manual_body)
+        self.assertIn("Data.invalidateLedgerRuntimeCache(abonentId)", manual_body)
+        self.assertIn("freshPayload", payment_source)
+        self.assertIn("Data.writeLedgerRuntimeCache(id, freshPayload)", payment_source)
+
+        self.assertIn("window.JKH_diagnoseLedger = function()", data_source)
+        diagnostic_body = data_source.split("window.JKH_diagnoseLedger = function()", 1)[1].split("window.getPaymentsKeyForAbonent", 1)[0]
+        self.assertIn("console.table(report)", diagnostic_body)
+        self.assertIn("return report", diagnostic_body)
+        self.assertNotIn("_setProjectRaw", diagnostic_body)
+        self.assertNotIn("_removeProjectRaw", diagnostic_body)
+        self.assertIn("LEGACY_ONLY", diagnostic_body)
+        self.assertIn("MIXED_CANONICAL_AND_LEGACY", diagnostic_body)
+        self.assertIn("UID_MISSING_WITH_LEGACY", diagnostic_body)
+
+        read_body = data_source.split("function readPaymentLedger", 1)[1].split("function _logLedgerInit", 1)[0]
+        self.assertIn("[ledger][legacy-readonly-fallback]", data_source)
+        self.assertIn("legacyRowsCount", read_body)
+        self.assertNotIn("_setProjectRaw", read_body)
+        self.assertNotIn("_removeProjectRaw", read_body)
+
+        recalc_body = data_source.split("async function recalculateAbonentCard", 1)[1].split("// ============================================================", 1)[0]
+        self.assertIn("[summary][fresh-blocked-legacy-ledger]", data_source)
+        self.assertIn("LEGACY_LEDGER_MIGRATION_REQUIRED", recalc_body)
+        self.assertIn("canonicalRaw === null || canonicalRaw === undefined", recalc_body)
+
+        ensure_body = data_source.split("function ensureAbonentUidOnRecord", 1)[1].split("async function ensureAbonentUid", 1)[0]
+        self.assertIn("[uid][generation-blocked-legacy-ledger]", data_source)
+        self.assertIn("UID_MISSING_WITH_LEGACY_LEDGER", ensure_body)
+        self.assertIn("_hasLegacyLedgerRows(id, a)", ensure_body)
+
+        self.assertNotIn("CALC_PERIOD_CHANGED", payment_source.split("window.fullRecalcForCurrentAbonent", 1)[1].split("window.__loadPaymentTable", 1)[0])
+        calc_after = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
+        self.assertEqual(calc_before, calc_after)
+
+    def test_stage_13_2b_ledger_migration_verification_is_read_only(self):
+        data_path = self._find_repo_file("web", "data.js")
+        calc_engine_path = self._find_repo_file("web", "calc_engine.js")
+        self.assertIsNotNone(data_path)
+        self.assertIsNotNone(calc_engine_path)
+        data_source = data_path.read_text(encoding="utf-8")
+        calc_before = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
+
+        self.assertIn("window.JKH_verifyLedgerMigration = function(options)", data_source)
+        body = data_source.split("window.JKH_verifyLedgerMigration = function(options)", 1)[1].split("window.getPaymentsKeyForAbonent", 1)[0]
+        self.assertIn("verification-only", body)
+        self.assertIn("readOnly: true", body)
+        self.assertIn("READY_TO_MIGRATE", data_source)
+        self.assertIn("READY_TO_MIGRATE_EMPTY_CANONICAL", data_source)
+        self.assertIn("BLOCKED_MIXED_LEDGER", data_source)
+        self.assertIn("BLOCKED_UID_MISSING_WITH_LEGACY", data_source)
+        self.assertIn("BLOCKED_INVALID_UID", data_source)
+        self.assertIn("STALE_RUNTIME_CACHE", data_source)
+        self.assertIn("BLOCKED_ORPHAN_SUMMARY", data_source)
+        self.assertIn("console.table(items)", body)
+        self.assertIn("[ledger][migration-verification]", body)
+        self.assertNotIn("_setProjectRaw", body)
+        self.assertNotIn("_removeProjectRaw", body)
+        self.assertNotIn("writePaymentLedger", body)
+        self.assertNotIn("createEmptyPaymentLedger", body)
+        self.assertNotIn("ensureAbonentUid", body)
+        self.assertNotIn("AUTOACCRUAL_WRITE", body)
+        self.assertNotIn("CALC_PERIOD_CHANGED", body)
+
+        calc_after = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
+        self.assertEqual(calc_before, calc_after)
+
+    def test_stage_13_2ba_per_abonent_ledger_diagnostics_are_read_only(self):
+        data_path = self._find_repo_file("web", "data.js")
+        calc_engine_path = self._find_repo_file("web", "calc_engine.js")
+        self.assertIsNotNone(data_path)
+        self.assertIsNotNone(calc_engine_path)
+        data_source = data_path.read_text(encoding="utf-8")
+        calc_before = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
+
+        self.assertIn("window.JKH_verifyLedgerMigrationForAbonent = function(abonentId)", data_source)
+        self.assertIn("window.JKH_debugAbonentLedger = function(abonentId)", data_source)
+        helper_body = data_source.split("function _debugAbonentLedgerReport", 1)[1].split("window.getPaymentsKeyForAbonent", 1)[0]
+        self.assertIn("[ledger-migration][abonent-verification]", helper_body)
+        self.assertIn("[ledger-migration][abonent-debug]", helper_body)
+        self.assertIn("whySummaryFreshBlocked", helper_body)
+        self.assertIn("whyIndexTotalsEmpty", helper_body)
+        self.assertIn("LEGACY_LEDGER_MIGRATION_REQUIRED", helper_body)
+        self.assertIn("UID_MISSING_WITH_LEGACY_LEDGER", helper_body)
+        self.assertIn("MIXED_LEDGER_DIFFERENCE", helper_body)
+        self.assertIn("RESPONSIBILITY_PERIOD_MISSING", helper_body)
+        self.assertIn("CANONICAL_LEDGER_EMPTY", helper_body)
+        self.assertIn("TOTALS_EMPTY", helper_body)
+        self.assertIn("mixedComparison", helper_body)
+        self.assertIn("checksumEqual", data_source)
+        self.assertIn("totalsEqual", data_source)
+        self.assertNotIn("_setProjectRaw", helper_body)
+        self.assertNotIn("_removeProjectRaw", helper_body)
+        self.assertNotIn("writePaymentLedger", helper_body)
+        self.assertNotIn("createEmptyPaymentLedger", helper_body)
+        self.assertNotIn("ensureAbonentUid", helper_body)
+        self.assertNotIn("AUTOACCRUAL_WRITE", helper_body)
+        self.assertNotIn("CALC_PERIOD_CHANGED", helper_body)
+        self.assertIn("window.JKH_verifyLedgerMigration = function(options)", data_source)
+
+        calc_after = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
+        self.assertEqual(calc_before, calc_after)
+
+    def test_stage_13_2c_summary_build_debug_helper_is_read_only(self):
+        data_path = self._find_repo_file("web", "data.js")
+        calc_engine_path = self._find_repo_file("web", "calc_engine.js")
+        self.assertIsNotNone(data_path)
+        self.assertIsNotNone(calc_engine_path)
+        data_source = data_path.read_text(encoding="utf-8")
+        calc_before = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
+
+        self.assertIn("window.JKH_debugSummaryBuild = async function(abonentId)", data_source)
+        body = data_source.split("window.JKH_debugSummaryBuild = async function(abonentId)", 1)[1].split("async function recalcAbonentSummaryExplicit", 1)[0]
+        self.assertIn("calcTotalsAsOfAdjusted", body)
+        self.assertIn("preparedSummaryPayload", body)
+        self.assertIn("recalculateAbonentCardResult", body)
+        self.assertIn("READ_ONLY_DIAGNOSTIC_NOT_EXECUTED", body)
+        self.assertIn("apiSummary", body)
+        self.assertIn("apiAbonents", body)
+        self.assertIn("whyIndexTotalsEmpty", body)
+        self.assertIn("SUMMARY_SAVE_FAILED", data_source)
+        self.assertIn("SUMMARY_PAYLOAD_INVALID", data_source)
+        self.assertIn("TOTALS_BUILD_FAILED", data_source)
+        self.assertIn("API_SUMMARY_NOT_RETURNED", data_source)
+        self.assertIn("INDEX_MAPPING_MISMATCH", data_source)
+        self.assertNotIn("_setProjectRaw", body)
+        self.assertNotIn("_removeProjectRaw", body)
+        self.assertNotIn("writePaymentLedger", body)
+        self.assertNotIn("createEmptyPaymentLedger", body)
+        self.assertNotIn("AUTOACCRUAL_WRITE", body)
+        self.assertNotIn("markAbonentSummaryDirty", body)
+        self.assertNotIn("CALC_PERIOD_CHANGED", body)
+        self.assertIn("window.JKH_verifyLedgerMigration = function(options)", data_source)
+
+        calc_after = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
+        self.assertEqual(calc_before, calc_after)
+
+    def test_stage_13_2ca_totals_validation_debug_helper_is_read_only(self):
+        data_path = self._find_repo_file("web", "data.js")
+        calc_engine_path = self._find_repo_file("web", "calc_engine.js")
+        self.assertIsNotNone(data_path)
+        self.assertIsNotNone(calc_engine_path)
+        data_source = data_path.read_text(encoding="utf-8")
+        calc_before = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
+
+        self.assertIn("window.JKH_debugTotalsValidation = async function(abonentId)", data_source)
+        body = data_source.split("window.JKH_debugTotalsValidation = async function(abonentId)", 1)[1].split("async function recalcAbonentSummaryExplicit", 1)[0]
+        self.assertIn("rawCalcTotalsAsOfAdjusted", body)
+        self.assertIn("totalsFields", body)
+        self.assertIn("exactValidationBlocker", body)
+        self.assertIn("exactReasonSummaryBecameInvalid", body)
+        self.assertIn("preparedSummaryPayloadBeforeValidation", body)
+        self.assertIn("validationResultAfterValidation", body)
+        self.assertIn("missingOrInvalidFields", body)
+        self.assertIn("principal", data_source)
+        self.assertIn("debt", data_source)
+        self.assertIn("penalty", data_source)
+        self.assertIn("total", data_source)
+        self.assertIn("accrued", data_source)
+        self.assertIn("paid", data_source)
+        self.assertIn("balance", data_source)
+        self.assertIn("TOTALS_NAN", data_source)
+        self.assertIn("TOTALS_UNDEFINED", data_source)
+        self.assertIn("TOTALS_MISSING_FIELDS", data_source)
+        self.assertIn("TOTALS_VALIDATION_FAILED", data_source)
+        self.assertIn("PAYLOAD_SCHEMA_MISMATCH", data_source)
+        self.assertNotIn("_setProjectRaw", body)
+        self.assertNotIn("_removeProjectRaw", body)
+        self.assertNotIn("writePaymentLedger", body)
+        self.assertNotIn("createEmptyPaymentLedger", body)
+        self.assertNotIn("AUTOACCRUAL_WRITE", body)
+        self.assertNotIn("markAbonentSummaryDirty", body)
+        self.assertNotIn("CALC_PERIOD_CHANGED", body)
+
+        calc_after = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
+        self.assertEqual(calc_before, calc_after)
+
+    def test_stage_13_2cb_summary_render_guard_debug_is_read_only(self):
+        data_path = self._find_repo_file("web", "data.js")
+        index_path = self._find_repo_file("web", "index.html")
+        calc_engine_path = self._find_repo_file("web", "calc_engine.js")
+        self.assertIsNotNone(data_path)
+        self.assertIsNotNone(index_path)
+        self.assertIsNotNone(calc_engine_path)
+        data_source = data_path.read_text(encoding="utf-8")
+        index_source = index_path.read_text(encoding="utf-8")
+        calc_before = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
+
+        self.assertIn("window.JKH_debugSummaryRenderState = async function(abonentId)", data_source)
+        self.assertIn("window.JKH_getIndexRenderDebugState = function(abonentIdOrUid)", index_source)
+        body = data_source.split("window.JKH_debugSummaryRenderState = async function(abonentId)", 1)[1].split("async function recalcAbonentSummaryExplicit", 1)[0]
+        index_body = index_source.split("window.JKH_getIndexRenderDebugState = function(abonentIdOrUid)", 1)[1].split("</script>", 1)[0]
+        self.assertIn("preparedSummaryPayload", body)
+        self.assertIn("summaryStatusBeforeValidation", body)
+        self.assertIn("summaryStatusAfterValidation", body)
+        self.assertIn("exactValidationResult", body)
+        self.assertIn("exactInvalidFieldList", body)
+        self.assertIn("freshnessRuntimeFlags", body)
+        self.assertIn("indexRenderAllowDenyReasons", body)
+        self.assertIn("whyTotalsHiddenDespiteFiniteTotals", body)
+        self.assertIn("exactGuardThatReturnsTotalsEmpty", body)
+        self.assertIn("hasSummary", data_source)
+        self.assertIn("summary_status === fresh", data_source)
+        self.assertIn("totals object exists", data_source)
+        self.assertIn("totals finite", data_source)
+        self.assertIn("passiveSummaryMode", index_body)
+        self.assertIn("pagination", index_body)
+        self.assertIn("renderSignatureSkip", index_body)
+        for forbidden in ("_setProjectRaw", "_removeProjectRaw", "writePaymentLedger", "createEmptyPaymentLedger", "AUTOACCRUAL_WRITE", "markAbonentSummaryDirty", "CALC_PERIOD_CHANGED"):
+            self.assertNotIn(forbidden, body)
+            self.assertNotIn(forbidden, index_body)
+
+        calc_after = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
+        self.assertEqual(calc_before, calc_after)
+
+    def test_stage_13_2cc_summary_totals_mapping_uses_nested_canonical_totals(self):
+        data_path = self._find_repo_file("web", "data.js")
+        index_path = self._find_repo_file("web", "index.html")
+        calc_engine_path = self._find_repo_file("web", "calc_engine.js")
+        self.assertIsNotNone(data_path)
+        self.assertIsNotNone(index_path)
+        self.assertIsNotNone(calc_engine_path)
+        data_source = data_path.read_text(encoding="utf-8")
+        index_source = index_path.read_text(encoding="utf-8")
+        calc_before = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
+
+        summary_body = data_source.split("function buildAbonentSummaryAfterExplicitRecalc", 1)[1].split("function buildAbonentSummaryErrorAfterExplicitRecalc", 1)[0]
+        self.assertIn("totals: {", summary_body)
+        self.assertIn("principal: principal", summary_body)
+        self.assertIn("debt: total", summary_body)
+        self.assertIn("penalty: penalty", summary_body)
+        self.assertIn("total: total", summary_body)
+        self.assertIn("accrued: periodTotals.total_accrued", summary_body)
+        self.assertIn("paid: periodTotals.total_paid", summary_body)
+        self.assertIn("balance: total", summary_body)
+        self.assertIn("total_debt: total", summary_body)
+        self.assertIn("total_penalty: penalty", summary_body)
+
+        index_body = index_source.split("function buildIndexRowFromSummaryItem", 1)[1].split("function renderIndexSummaryLoading", 1)[0]
+        self.assertIn('"totals.debt", "totals.total", "totals.total_debt", "total_debt"', index_body)
+        self.assertIn('"totals.penalty", "totals.total_penalty", "total_penalty"', index_body)
+        self.assertIn('"totals.accrued", "totals.total_accrued", "total_accrued"', index_body)
+        self.assertIn('"totals.paid", "totals.total_paid", "total_paid"', index_body)
+
+        calc_after = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
+        self.assertEqual(calc_before, calc_after)
+
+    def test_stage_13_2cd_index_totals_dom_mapping_uses_rendered_values(self):
+        index_path = self._find_repo_file("web", "index.html")
+        calc_engine_path = self._find_repo_file("web", "calc_engine.js")
+        self.assertIsNotNone(index_path)
+        self.assertIsNotNone(calc_engine_path)
+        source = index_path.read_text(encoding="utf-8")
+        calc_before = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
+
+        build_body = source.split("function buildIndexRowFromSummaryItem", 1)[1].split("function renderIndexSummaryLoading", 1)[0]
+        render_body = source.split("function render() {", 1)[1].split("tbody.onclick", 1)[0]
+        self.assertIn("function pickSummaryValueWithSource", source)
+        self.assertIn("__totalsRenderDebug", build_body)
+        self.assertIn("renderedValues", build_body)
+        self.assertIn("totalsSource", build_body)
+        self.assertIn("totalsObject", build_body)
+        self.assertIn("[index][totals-render]", render_body)
+        self.assertIn('data-field="debt"', render_body)
+        self.assertIn('data-field="penalty"', render_body)
+        self.assertIn('data-field="accrued"', render_body)
+        self.assertIn('data-field="paid"', render_body)
+        self.assertIn("totals.debt", build_body)
+        self.assertIn("totals.penalty", build_body)
+        self.assertIn("totals.accrued", build_body)
+        self.assertIn("totals.paid", build_body)
+
+        calc_after = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
+        self.assertEqual(calc_before, calc_after)
+
+    def test_stage_13_2ce_index_totals_cell_targeting_uses_data_fields(self):
+        index_path = self._find_repo_file("web", "index.html")
+        calc_engine_path = self._find_repo_file("web", "calc_engine.js")
+        self.assertIsNotNone(index_path)
+        self.assertIsNotNone(calc_engine_path)
+        source = index_path.read_text(encoding="utf-8")
+        calc_before = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
+
+        render_body = source.split("function render() {", 1)[1].split("tbody.onclick", 1)[0]
+        helper_body = source.split("function writeIndexTotalsCell", 1)[1].split("function renderIndexSummaryLoading", 1)[0]
+        self.assertIn("function writeIndexTotalsCell", source)
+        self.assertIn('querySelector(\'td[data-field="\' + field + \'"]\')', helper_body)
+        self.assertIn("[index][totals-dom-write]", helper_body)
+        self.assertIn('data-field="debt"', render_body)
+        self.assertIn('data-field="penalty"', render_body)
+        self.assertIn('data-field="accrued"', render_body)
+        self.assertIn('data-field="paid"', render_body)
+        self.assertIn('writeIndexTotalsCell(tr, r.accountUid, "debt", r.totalDebt)', render_body)
+        self.assertIn('writeIndexTotalsCell(tr, r.accountUid, "penalty", r.penalty)', render_body)
+        self.assertIn('writeIndexTotalsCell(tr, r.accountUid, "accrued", r.nachisleno)', render_body)
+        self.assertIn('writeIndexTotalsCell(tr, r.accountUid, "paid", r.oplacheno)', render_body)
+        self.assertNotIn("cells[5]", source)
+        self.assertNotIn("cells[6]", source)
+        self.assertNotIn("cells[7]", source)
+
+        calc_after = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
+        self.assertEqual(calc_before, calc_after)
+
+    def test_stage_13_2d_card_report_period_flow_diagnostics(self):
+        card_path = self._find_repo_file("web", "abonent_card.html")
+        payment_path = self._find_repo_file("web", "payment_table.js")
+        reports_path = self._find_repo_file("web", "reports.html")
+        spravka_path = self._find_repo_file("web", "spravka_sud.js")
+        data_path = self._find_repo_file("web", "data.js")
+        calc_engine_path = self._find_repo_file("web", "calc_engine.js")
+        self.assertIsNotNone(card_path)
+        self.assertIsNotNone(payment_path)
+        self.assertIsNotNone(reports_path)
+        self.assertIsNotNone(spravka_path)
+        self.assertIsNotNone(data_path)
+        self.assertIsNotNone(calc_engine_path)
+        card_source = card_path.read_text(encoding="utf-8")
+        payment_source = payment_path.read_text(encoding="utf-8")
+        reports_source = reports_path.read_text(encoding="utf-8")
+        spravka_source = spravka_path.read_text(encoding="utf-8")
+        data_source = data_path.read_text(encoding="utf-8")
+        calc_before = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
+
+        self.assertIn("[card-recalc][click]", card_source)
+        self.assertIn("[card-recalc][period-saved]", card_source)
+        self.assertIn("[card-recalc][result]", card_source)
+        self.assertIn("[report-period][readback]", card_source)
+        self.assertIn("[card-period][bootstrap-inputs]", card_source)
+        self.assertIn("[card-period][bootstrap-inputs-from-url]", card_source)
+        self.assertIn("[card-period][bootstrap-active]", card_source)
+        self.assertIn("function bootstrapActiveCalcPeriod", card_source)
+        self.assertIn("__safeLoadPaymentTableOnce(\"calc-period-bootstrap-url\", { force: true })", card_source)
+        self.assertIn("[report-period][default-created]", card_source)
+        self.assertIn("function buildDefaultReportPeriodForCard", card_source)
+        self.assertIn("responsibility.dateFrom", card_source)
+        self.assertIn("abonent.calcStartDate", card_source)
+        self.assertIn("premise.createdAt", card_source)
+        self.assertIn("ledger.earliestMonth", card_source)
+        self.assertIn("window.JKH_debugCardPeriodFlow = function(abonentId)", card_source)
+        self.assertIn("saveReportPeriodForSpravka", card_source)
+        self.assertIn("report_period_\" + uid", card_source)
+        self.assertIn("/^report_period_uid_/", card_source)
+        self.assertIn("&account=", card_source)
+        self.assertIn("&uid=", card_source)
+        self.assertIn("&from=", card_source)
+        self.assertIn("&to=", card_source)
+        self.assertIn("periodBefore", card_source)
+        self.assertIn("activeBefore", card_source)
+        self.assertIn("spravkaCanBootstrap", card_source)
+        load_body = card_source.split("function loadCalcPeriodUI()", 1)[1].split("function saveCalcPeriod", 1)[0]
+        self.assertIn('params.get("from")', load_body)
+        self.assertIn('params.get("to")', load_body)
+        self.assertIn("reportReadback.value || calcReadback.value", load_body)
+        self.assertIn("source = reportReadback.value ? \"report_period_uid\"", load_body)
+        self.assertNotIn("fullRecalcForCurrentAbonent", load_body)
+        self.assertNotIn("markCurrentAbonentSummaryDirty", load_body)
+        default_body = card_source.split("function buildDefaultReportPeriodForCard", 1)[1].split("function saveReportPeriodForSpravka", 1)[0]
+        self.assertIn("__todayISOForCardPeriod", default_body)
+        self.assertIn("__earliestLedgerMonthISO", default_body)
+        self.assertNotIn("fullRecalcForCurrentAbonent", default_body)
+        self.assertNotIn("markCurrentAbonentSummaryDirty", default_body)
+
+        helper_body = card_source.split("window.JKH_debugCardPeriodFlow = function(abonentId)", 1)[1].split("function loadCalcPeriodUI", 1)[0]
+        self.assertNotIn("storeSet(", helper_body)
+        self.assertNotIn("storeRemove(", helper_body)
+        self.assertNotIn("writePaymentLedger", helper_body)
+        self.assertNotIn("fullRecalcForCurrentAbonent", helper_body)
+        self.assertNotIn("CALC_PERIOD_CHANGED", helper_body)
+
+        self.assertIn("reportKey: uid ? (\"report_period_\" + uid) : \"\"", reports_source)
+        self.assertIn("source: \"canonical-report\"", reports_source)
+        self.assertIn("[reports][bootstrap-period]", reports_source)
+        self.assertIn("[reports][period-auto-accepted]", reports_source)
+        self.assertIn("function autoAcceptReportsPeriod", reports_source)
+        self.assertIn("auto-accept:", reports_source)
+        self.assertIn("openBtn.disabled = !ok", reports_source)
+        self.assertIn("uidFromUrl", reports_source)
+        self.assertIn("storeSetCanonical(meta.reportKey", reports_source)
+        self.assertIn("/^report_period_uid_/.test(meta.reportKey)", reports_source)
+        self.assertIn("[report-period][readback]", reports_source)
+
+        self.assertIn("[payment-table][period-filter-applied-on-load]", payment_source)
+        self.assertIn("[payment-table][period-runtime-source]", payment_source)
+        self.assertIn("[payment-table][period-url-fallback]", payment_source)
+        self.assertIn("function getPeriodFromURL", payment_source)
+        self.assertIn("params.get(\"from\")", payment_source)
+        self.assertIn("params.get(\"to\")", payment_source)
+        self.assertIn("canonical-active-missing-url-period-present", payment_source)
+        self.assertIn("function runtimeCacheSignature", payment_source)
+        self.assertIn("runtimeCachePeriodMatches", payment_source)
+        self.assertIn("runtimeRowsByIdFromRows", payment_source)
+        self.assertIn('baseRowsSource = periodActive && selectedPeriod ? "filtered"', payment_source)
+        self.assertIn("inspectRuntimeCachePeriodMatch", payment_source)
+        self.assertIn("runtimeSignature", payment_source)
+        self.assertIn("periodActive", payment_source)
+        self.assertIn("runtimeCacheUsed: runtimeCacheUsed", payment_source)
+        self.assertIn("effectiveSignature", payment_source)
+        self.assertIn("\"|period:\"", payment_source)
+        self.assertIn("scheduleRunningTotalsUpdate(view, baseRows, tbody, effectiveSignature)", payment_source)
+        self.assertIn("opts.force", payment_source)
+        self.assertIn("__paymentTableRenderedSignature = \"\"", payment_source)
+        self.assertIn("::period:", payment_source)
+
+        self.assertIn("reportStorageKey", spravka_source)
+        self.assertIn("canonical-report-period", spravka_source)
+        self.assertIn("const selectedPeriod = reportPeriod || calcPeriod", spravka_source)
+        self.assertIn("[spravka][bootstrap-period]", spravka_source)
+        self.assertIn("[spravka][return-card-period-save]", spravka_source)
+        self.assertIn("[spravka][return-card-url]", spravka_source)
+        self.assertIn("buildCardReturnUrl", spravka_source)
+        self.assertIn("saveReturnCardPeriod", spravka_source)
+        self.assertIn("report_period_\" + uid", spravka_source)
+        self.assertIn("resolveCalcPeriodStorageKey", spravka_source)
+        self.assertIn("resolveCalcPeriodActiveStorageKey", spravka_source)
+
+        self.assertIn("_setRawScoped(\"report_period_\" + uid", data_source)
+        self.assertNotIn("_setRawScoped(\"report_period_\" + id", data_source)
+
+        calc_after = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
+        self.assertEqual(calc_before, calc_after)
 
 
 if __name__ == "__main__":

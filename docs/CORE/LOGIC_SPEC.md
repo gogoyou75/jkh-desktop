@@ -50,6 +50,19 @@
 
 ## 2. Источник истины и синхронизация
 
+### 2.0.1. Period keys are view/report state
+
+`calc_period_<uid>`, `calc_period_active_<uid>` and `report_period_<uid>` are owner-scoped view/report settings. They are not financial ledger mutations and are not part of the canonical `payments_<uid>` ledger.
+
+Changing these keys must not:
+- write, rewrite or normalize `payments_<uid>`;
+- invalidate `ledger_runtime_cache_<uid>`;
+- mark `abonent_summary` as financial dirty;
+- trigger autoaccrual, full recalc, batch recalc, checkpoint or tail-recalc;
+- make the abonent stale on the index page.
+
+`CALC_PERIOD_CHANGED` is a view-only reason. It may invalidate only report/view caches. Court/report calculation may use the selected period temporarily for rendering, but financial summary state remains unchanged until an explicit financial recalculation writes a fresh derived summary.
+
 ### 2.1. Источник истины
 - **Backend / серверная БД** — источник истины.
 - **Frontend / localStorage** — рабочий кэш, офлайн-копия и транспортный слой.
@@ -1874,10 +1887,11 @@ Fatal-состояния включают, но не ограничиваютс�
 - запись ledger `payments_<uid>` через `Data.writePaymentLedger(...)`: `LEDGER_WRITE` или более точная причина вызывающего кода;
 - сохранение платежей в таблице оплат: `PAYMENTS_CHANGED`;
 - успешное применение Excel-платежей: `IMPORT_PAYMENTS_APPLIED`;
-- изменение `calc_period_<uid>` / `calc_period_active_<uid>`: `CALC_PERIOD_CHANGED`;
 - изменение `exclude_periods_<abonentId>`: `EXCLUDES_CHANGED`;
 - изменение `moratorium_<uid>`: `MORATORIUM_CHANGED`;
 - `transferResponsibility(...)` / `mergePremises(...)`: `RESPONSIBILITY_CHANGED`.
+
+`calc_period_<uid>`, `calc_period_active_<uid>` and `report_period_<uid>` are explicitly excluded from financial dirty reasons. `CALC_PERIOD_CHANGED` is accepted only as a view-only skip reason and must not make `abonent_summary` dirty.
 
 ### 21.8. Future API: dirty/recalc
 
