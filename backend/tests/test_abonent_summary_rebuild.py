@@ -1155,6 +1155,7 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         self.assertIn("[card-recalc][period-saved]", card_source)
         self.assertIn("[card-recalc][result]", card_source)
         self.assertIn("[report-period][readback]", card_source)
+        self.assertIn("[card-period][bootstrap-inputs]", card_source)
         self.assertIn("window.JKH_debugCardPeriodFlow = function(abonentId)", card_source)
         self.assertIn("saveReportPeriodForSpravka", card_source)
         self.assertIn("report_period_\" + uid", card_source)
@@ -1166,6 +1167,12 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         self.assertIn("periodBefore", card_source)
         self.assertIn("activeBefore", card_source)
         self.assertIn("spravkaCanBootstrap", card_source)
+        load_body = card_source.split("function loadCalcPeriodUI()", 1)[1].split("function saveCalcPeriod", 1)[0]
+        self.assertIn("reportReadback.value || calcReadback.value", load_body)
+        self.assertIn("source = reportReadback.value ? \"report_period_uid\"", load_body)
+        self.assertNotIn("fullRecalcForCurrentAbonent", load_body)
+        self.assertNotIn("saveCalcPeriod(", load_body)
+        self.assertNotIn("markCurrentAbonentSummaryDirty", load_body)
 
         helper_body = card_source.split("window.JKH_debugCardPeriodFlow = function(abonentId)", 1)[1].split("function loadCalcPeriodUI", 1)[0]
         self.assertNotIn("storeSet(", helper_body)

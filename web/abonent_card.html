@@ -2424,18 +2424,47 @@ function loadCalcPeriodUI(){
     }
 
     try {
-        const raw = meta.storageKey ? storeGet(meta.storageKey, meta.ownerId) : null;
-        if (raw) {
-            const obj = JSON.parse(raw);
-            fromEl.value = obj.from || "";
-            toEl.value   = obj.to || "";
+        const reportKey = getReportPeriodStorageKey(meta);
+        const reportReadback = __isCanonicalReportPeriodKey(reportKey) ? __readPeriodKey(reportKey, meta.ownerId) : { key: reportKey, raw: null, value: null };
+        const calcReadback = meta.storageKey ? __readPeriodKey(meta.storageKey, meta.ownerId) : { key: meta.storageKey, raw: null, value: null };
+        const selected = reportReadback.value || calcReadback.value;
+        const source = reportReadback.value ? "report_period_uid" : (calcReadback.value ? "calc_period_uid" : "missing");
+
+        if (selected) {
+            fromEl.value = selected.from || "";
+            toEl.value = selected.to || "";
         } else {
             fromEl.value = "";
-            toEl.value   = "";
+            toEl.value = "";
         }
+
+        try {
+            console.log("[card-period][bootstrap-inputs]", {
+                requestedId: meta.requestedId,
+                resolvedUid: meta.resolvedUid,
+                ownerId: meta.ownerId,
+                source: source,
+                reportKey: reportKey,
+                reportReadback: reportReadback,
+                periodKey: meta.storageKey,
+                periodReadback: calcReadback,
+                activeKey: meta.activeStorageKey,
+                from: fromEl.value || "",
+                to: toEl.value || ""
+            });
+        } catch (eBootstrapLog) {}
     } catch (e) {
         fromEl.value = "";
         toEl.value   = "";
+        try {
+            console.warn("[card-period][bootstrap-inputs]", {
+                requestedId: meta.requestedId,
+                resolvedUid: meta.resolvedUid,
+                ownerId: meta.ownerId,
+                source: "error",
+                reason: String(e && e.message || e)
+            });
+        } catch (eBootstrapWarn) {}
     }
 
     try {
@@ -2444,6 +2473,7 @@ function loadCalcPeriodUI(){
             resolvedUid: meta.resolvedUid,
             ownerId: meta.ownerId,
             storageKey: meta.storageKey,
+            reportKey: getReportPeriodStorageKey(meta),
             from: fromEl.value || "",
             to: toEl.value || ""
         });

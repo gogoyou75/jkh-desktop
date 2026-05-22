@@ -538,3 +538,9 @@ rg -n "splitPremise|premise-transform\]\[split|type: ['\"]split" web LOGIC_SPEC.
 - `reports.html` now auto-accepts periods bootstrapped from URL, `report_period_uid_<uid>`, or `calc_period_uid_<uid>` by saving canonical period keys and confirming readback.
 - Added `[reports][period-auto-accepted]` diagnostics and enabled opening the court report after successful auto-accept without requiring the manual "Выбрать" click.
 - No formula/FIFO/penalty changes, no `CALC_PERIOD_CHANGED` financial dirty behavior, and no `web/calc_engine.js` changes.
+
+## 2026-05-22 - Stage 13.2D.c: restore calc period inputs on card return
+
+- `abonent_card.html` now bootstraps `calcFrom` / `calcTo` from `report_period_uid_<uid>` first, then `calc_period_uid_<uid>`, and logs `[card-period][bootstrap-inputs]`.
+- Returning from reports/spravka to the card preserves the selected period without triggering automatic recalculation.
+- No formula/FIFO/penalty changes, no financial dirty behavior, no ledger row changes, and no `web/calc_engine.js` changes.
