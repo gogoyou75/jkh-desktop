@@ -428,6 +428,34 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
             self.assertNotIn("total_debt", payload)
             self.assertNotIn("total_penalty", payload)
 
+    def test_rebuild_without_body_does_not_pretend_financial_recalc(self):
+        with app_module.app.app_context():
+            self._add_user("owner-rebuild-no-financial")
+            self._put_abonents("owner-rebuild-no-financial", {
+                "1001": {"uid": "uid_rebuild_no_financial_1001", "id": "1001"},
+            })
+            app_module.db.session.add(app_module.AbonentSummary(
+                owner_id="owner-rebuild-no-financial",
+                abonent_id="1001",
+                account_uid="uid_rebuild_no_financial_1001",
+                account_number="1001",
+                summary_json=json.dumps({"summary_status": "fresh", "summary_reason": "OK"}),
+            ))
+            app_module.db.session.commit()
+        self._login("owner-rebuild-no-financial")
+
+        response = self.client.post("/api/abonent_summary/rebuild")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["counters"], {"created": 0, "updated": 1, "skipped": 0, "errors": 0})
+        with app_module.app.app_context():
+            payload = json.loads(app_module.AbonentSummary.query.one().summary_json)
+            self.assertEqual(payload["summary_status"], "missing")
+            self.assertEqual(payload["summary_reason"], "SUMMARY_NOT_BUILT")
+            self.assertNotIn("totals", payload)
+            self.assertNotIn("total_debt", payload)
+            self.assertNotEqual(payload.get("summary_status"), "fresh")
+
     def test_data_write_payment_ledger_blocks_account_number_write_path(self):
         data_path = self._find_repo_file("web", "data.js")
         if data_path is None:
@@ -1233,7 +1261,9 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         self.assertIn("penalty: penalty", summary_body)
         self.assertIn("accrued: periodTotals.total_accrued", summary_body)
         self.assertIn("paid: periodTotals.total_paid", summary_body)
+        self.assertIn("[summary][build-payload]", save_body)
         self.assertIn("[summary][save-ok]", save_body)
+        self.assertIn("[summary][save-failed]", save_body)
         self.assertIn("totalsKeys", save_body)
         self.assertIn("Расчёт выполнен, но итоговый summary для главной страницы не сохранён", card_recalc_body)
         self.assertIn("Проверить выбранные summary", index_source)

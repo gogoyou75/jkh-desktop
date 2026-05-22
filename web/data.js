@@ -1859,18 +1859,24 @@
   }
 
   async function saveAbonentSummaryAfterRecalc(abonentOrId, summary) {
+    var saveLogCtx = { uid: "", status: "", reason: "", totalsKeys: [] };
     try {
       var found = _findAbonentByIdOrUid(abonentOrId);
       var abonent = found && found.abonent ? found.abonent : null;
       var abonentId = String(found && found.id || (abonent && abonent.id) || (typeof abonentOrId === "object" ? abonentOrId && abonentOrId.id : abonentOrId) || "").trim();
       var uid = String(abonent && abonent.uid || (typeof abonentOrId === "object" ? abonentOrId && abonentOrId.uid : "") || "").trim();
+      var summaryStatus = summary && (summary.summary_status || summary.status) || "";
+      var summaryReason = summary && (summary.summary_reason || summary.reason) || "";
+      var summaryTotals = summary && summary.totals && typeof summary.totals === "object" ? summary.totals : {};
+      var summaryTotalsKeys = Object.keys(summaryTotals);
+      saveLogCtx = { uid: uid, status: String(summaryStatus || ""), reason: String(summaryReason || ""), totalsKeys: summaryTotalsKeys };
 
       if (!isValidUid(uid)) {
-        try { console.warn("[summary][save-failed]", { reason: "INVALID_UID", abonentId: abonentId, uid: uid }); } catch (eWarn) {}
+        try { console.warn("[summary][save-failed]", { uid: uid, status: summaryStatus, reason: "INVALID_UID", totalsKeys: summaryTotalsKeys, abonentId: abonentId }); } catch (eWarn) {}
         return { ok: false, skipped: true, reason: "INVALID_UID" };
       }
       if (!summary || typeof summary !== "object" || Array.isArray(summary)) {
-        try { console.warn("[summary][save-failed]", { reason: "SUMMARY_INVALID", abonentId: abonentId, uid: uid }); } catch (eSummary) {}
+        try { console.warn("[summary][save-failed]", { uid: uid, status: summaryStatus, reason: "SUMMARY_INVALID", totalsKeys: summaryTotalsKeys, abonentId: abonentId }); } catch (eSummary) {}
         return { ok: false, skipped: true, reason: "SUMMARY_INVALID" };
       }
 
@@ -1880,6 +1886,14 @@
         account_number: String(abonent && (abonent.account_number || abonent.accountNumber || abonent.ls || abonent.id) || abonentId || ""),
         summary: summary
       };
+      try {
+        console.log("[summary][build-payload]", {
+          uid: uid,
+          status: summaryStatus,
+          reason: summaryReason,
+          totalsKeys: summaryTotalsKeys
+        });
+      } catch (eBuildLog) {}
 
       var res = await fetch("/api/abonent_summary/rebuild", {
         method: "POST",
@@ -1894,16 +1908,16 @@
         throw new Error((data && data.error) || ("HTTP_" + res.status));
       }
       try {
-        var totals = summary && summary.totals && typeof summary.totals === "object" ? summary.totals : {};
         console.log("[summary][save-ok]", {
           uid: uid,
-          status: String(data.summary_status || summary.summary_status || summary.status || ""),
-          totalsKeys: Object.keys(totals)
+          status: String(data.summary_status || summaryStatus || ""),
+          reason: String(data.summary_reason || summaryReason || ""),
+          totalsKeys: summaryTotalsKeys
         });
       } catch (eOkLog) {}
       return data;
     } catch (e) {
-      try { console.warn("[summary][save-failed]", { reason: String(e && e.message || e) }); } catch (eLog) {}
+      try { console.warn("[summary][save-failed]", { uid: saveLogCtx.uid, status: saveLogCtx.status, reason: String(e && e.message || e), totalsKeys: saveLogCtx.totalsKeys }); } catch (eLog) {}
       return { ok: false, error: String(e && e.message || e) };
     }
   }

@@ -619,3 +619,10 @@ rg -n "splitPremise|premise-transform\]\[split|type: ['\"]split" web LOGIC_SPEC.
 - Frontend save path после ручного пересчёта логирует `[summary][save-ok]` с UID, status и ключами `summary.totals`; карточка показывает понятное сообщение, если расчёт выполнен, но summary для главной страницы не сохранён.
 - Кнопка index batch переименована в проверку summary, чтобы не маскировать validator как пересчёт карточек.
 - Не менялись `web/calc_engine.js`, формулы/FIFO/пени, backend financial logic, чтение `payments_<uid>` на index, hidden rebuild и storage keys.
+
+## 2026-05-22 — Stage 13.4A — summary pipeline audit diagnostics
+
+- Уточнён контракт rebuild без body: он остаётся controlled missing rebuild и не притворяется финансовым пересчётом totals.
+- Frontend save path логирует `[summary][build-payload]`, `[summary][save-ok]`, `[summary][save-failed]` с UID, status, reason и `summary.totals` keys.
+- Добавлена regression-проверка, что rebuild без body не исправляет invalid fresh финансовыми totals и не подставляет fake totals.
+- Index по-прежнему не читает `payments_<uid>` и batch остаётся validator, не пересчётом карточек.
