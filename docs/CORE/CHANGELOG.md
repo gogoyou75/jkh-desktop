@@ -632,3 +632,10 @@ rg -n "splitPremise|premise-transform\]\[split|type: ['\"]split" web LOGIC_SPEC.
 - `abonent_card.html` и `payment_table.js` теперь резолвят calc period keys через `Data.resolveCalcPeriodStorageKey(...)` / `Data.resolveCalcPeriodActiveStorageKey(...)` даже когда локальный объект абонента ещё не готов, используя requested id как вход в canonical resolver.
 - Добавлена диагностика `[calc-period][canonical-key-used]` с `requestedId`, `resolvedUid`, `storageKey`, `activeStorageKey`, `ownerId`.
 - Сохранение периода остаётся view-only: без `CALC_PERIOD_CHANGED` dirty, без legacy `calc_period_<ЛС>` writes, без hidden rebuild и без изменений `web/calc_engine.js`.
+
+## 2026-05-22 — Stage 13.4B — separate full summary from period calculation
+
+- Period/report calculation in `fullRecalcForCurrentAbonent` no longer saves its selected-period result as the main `AbonentSummary` for index; it returns period summary for card display and logs `[summary][skip-save-period-summary]`.
+- Full/canonical summary saves are logged as `[summary][save-full-summary]`; only non-period recalculation may write the main summary cache.
+- Backend transport ignores `summary_scope=period` / `report_scope=period` summaries for index by mapping them to `missing/PERIOD_SUMMARY_IGNORED` and stripping totals.
+- No `web/calc_engine.js`, FIFO, penalty formula, index ledger read, hidden rebuild, or `CALC_PERIOD_CHANGED` financial dirty changes.

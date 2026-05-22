@@ -1070,6 +1070,9 @@ def _build_missing_abonent_summary(target: dict):
 def _summary_status_from_payload(summary: dict | None):
     if not isinstance(summary, dict):
         return "missing"
+    scope = _norm_text(summary.get("summary_scope") or summary.get("report_scope")).lower()
+    if scope in {"period", "report"}:
+        return "missing"
     status = _norm_text(summary.get("summary_status") or summary.get("status")).lower()
     reason = _norm_text(summary.get("summary_reason") or summary.get("reason"))
     if status == "dirty" and reason == "CALC_PERIOD_CHANGED":
@@ -1149,6 +1152,10 @@ def _summary_with_validated_fresh_totals(summary: dict | None):
 def _summary_without_stale_totals(summary: dict | None):
     payload = _summary_with_validated_fresh_totals(summary)
     status = _summary_status_from_payload(payload)
+    scope = _norm_text(payload.get("summary_scope") or payload.get("report_scope")).lower()
+    if scope in {"period", "report"}:
+        payload["summary_reason"] = "PERIOD_SUMMARY_IGNORED"
+        payload["reason"] = "PERIOD_SUMMARY_IGNORED"
     payload["summary_status"] = status
     payload["status"] = status
     if status != "fresh":

@@ -2759,16 +2759,50 @@
     var opts = options || {};
     var period = await _resolveAbonentSummaryRecalcPeriod(abonentOrId, opts.period);
     var summary = null;
+    var periodActive = opts.saveSummary === false || String(opts.summaryScope || opts.summary_scope || "").toLowerCase() === "period";
 
     try {
       if (!period.ok) throw new Error(period.error || "PERIOD_INVALID");
       summary = buildAbonentSummaryAfterExplicitRecalc(abonentOrId, period.from, period.to);
+      if (periodActive) {
+        summary.summary_scope = "period";
+        summary.report_scope = "period";
+      } else {
+        summary.summary_scope = "full";
+      }
     } catch (e) {
       var reason = _summaryCalcErrorCode(e);
       summary = buildAbonentSummaryErrorAfterExplicitRecalc(abonentOrId, period, reason);
+      if (periodActive) {
+        summary.summary_scope = "period";
+        summary.report_scope = "period";
+      } else {
+        summary.summary_scope = "full";
+      }
     }
 
-    var saveResult = await saveAbonentSummaryAfterRecalc(abonentOrId, summary);
+    var saveResult = null;
+    if (periodActive) {
+      saveResult = { ok: true, skipped: true, reason: "PERIOD_SUMMARY_NOT_SAVED", summary_status: summary.summary_status || summary.status || "fresh", summary_reason: summary.summary_reason || summary.reason || "OK", summary_scope: "period" };
+      try {
+        console.log("[summary][skip-save-period-summary]", {
+          uid: String(summary.account_uid || summary.uid || ""),
+          periodActive: true,
+          periodFrom: String(period && period.from || ""),
+          periodTo: String(period && period.to || "")
+        });
+      } catch (eSkipLog) {}
+    } else {
+      try {
+        console.log("[summary][save-full-summary]", {
+          uid: String(summary.account_uid || summary.uid || ""),
+          periodActive: false,
+          periodFrom: String(period && period.from || ""),
+          periodTo: String(period && period.to || "")
+        });
+      } catch (eFullLog) {}
+      saveResult = await saveAbonentSummaryAfterRecalc(abonentOrId, summary);
+    }
     var status = saveResult && (saveResult.summary_status || saveResult.status) || summary.summary_status || summary.status || "error";
     var reasonOut = saveResult && (saveResult.summary_reason || saveResult.reason) || summary.summary_reason || summary.reason || "";
     return {
@@ -2839,7 +2873,22 @@
       var ledgerReason = _summaryCalcErrorCode(e);
       var periodForError = await _resolveAbonentSummaryRecalcPeriod(abonentOrId, opts.period);
       var errorSummary = buildAbonentSummaryErrorAfterExplicitRecalc(abonentOrId, periodForError, ledgerReason);
-      var errorSave = await saveAbonentSummaryAfterRecalc(abonentOrId, errorSummary);
+      var periodErrorScope = opts.saveSummary === false || String(opts.summaryScope || opts.summary_scope || "").toLowerCase() === "period";
+      if (periodErrorScope) {
+        errorSummary.summary_scope = "period";
+        errorSummary.report_scope = "period";
+        try {
+          console.log("[summary][skip-save-period-summary]", {
+            uid: uid,
+            periodActive: true,
+            periodFrom: String(periodForError && periodForError.from || ""),
+            periodTo: String(periodForError && periodForError.to || "")
+          });
+        } catch (eSkipErrLog) {}
+      }
+      var errorSave = periodErrorScope
+        ? { ok: true, skipped: true, reason: "PERIOD_SUMMARY_NOT_SAVED", summary_status: errorSummary.summary_status || errorSummary.status || "error", summary_reason: errorSummary.summary_reason || errorSummary.reason || ledgerReason, summary_scope: "period" }
+        : await saveAbonentSummaryAfterRecalc(abonentOrId, errorSummary);
       return {
         ok: false,
         uid: uid,

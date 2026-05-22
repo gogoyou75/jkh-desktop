@@ -3206,7 +3206,12 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
     if (!window.Data || typeof Data.recalculateAbonentCard !== "function") {
       return { ok:false, reason:"SUMMARY_RECALC_UNAVAILABLE", autoaccrual_changed:!!autoResult.changed, summary_status:"error", summary_reason:"SUMMARY_RECALC_UNAVAILABLE", summary:null, summary_save:{ ok:false, reason:"SUMMARY_RECALC_UNAVAILABLE" } };
     }
-    const summaryResult = await Data.recalculateAbonentCard(id, { period: opts.period });
+    const summaryResult = await Data.recalculateAbonentCard(id, {
+      period: opts.period,
+      saveSummary: !(periodActive && selectedPeriod),
+      summaryScope: (periodActive && selectedPeriod) ? "period" : "full",
+      periodActive: !!(periodActive && selectedPeriod)
+    });
     const freshArr = getPayments();
     const freshPeriodActive = isCalcPeriodActive();
     const freshSelectedPeriod = freshPeriodActive ? getCalcPeriod() : null;

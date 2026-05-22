@@ -804,6 +804,34 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         self.assertEqual(payload["error"], 0)
         self.assertEqual(payload["items"][0]["summary_status"], "fresh")
 
+    def test_period_summary_is_ignored_by_index_transport(self):
+        with app_module.app.app_context():
+            self._add_user("owner-period-summary-index")
+            self._put_abonents("owner-period-summary-index", {
+                "1007": {"uid": "uid_period_summary_index_1007", "id": "1007"},
+            })
+            period_summary = self._fresh_summary(100, 5, 105)
+            period_summary["summary_scope"] = "period"
+            period_summary["report_scope"] = "period"
+            app_module.db.session.add(app_module.AbonentSummary(
+                owner_id="owner-period-summary-index",
+                abonent_id="1007",
+                account_uid="uid_period_summary_index_1007",
+                account_number="1007",
+                summary_json=json.dumps(period_summary, sort_keys=True),
+            ))
+            app_module.db.session.commit()
+        self._login("owner-period-summary-index")
+
+        response = self.client.get("/api/abonents?limit=10")
+
+        self.assertEqual(response.status_code, 200)
+        item = response.get_json()["items"][0]
+        self.assertEqual(item["summary_status"], "missing")
+        self.assertEqual(item["summary"]["summary_status"], "missing")
+        self.assertEqual(item["summary"]["summary_reason"], "PERIOD_SUMMARY_IGNORED")
+        self.assertNotIn("totals", item["summary"])
+
     def test_mark_dirty_does_not_touch_other_owner(self):
         with app_module.app.app_context():
             self._add_user("owner-dirty-a")
@@ -980,7 +1008,9 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         self.assertIn("Data.writeLedgerRuntimeCache", body)
         self.assertIn('__paymentTableMode = "readonly_no_recalc"', body)
         self.assertIn('await loadPaymentTable("full_recalc_completed")', body)
-        self.assertIn("Data.recalculateAbonentCard(id, { period: opts.period })", body)
+        self.assertIn("Data.recalculateAbonentCard(id, {", body)
+        self.assertIn("saveSummary: !(periodActive && selectedPeriod)", body)
+        self.assertIn('summaryScope: (periodActive && selectedPeriod) ? "period" : "full"', body)
         self.assertIn("autoaccrual_changed", body)
         self.assertIn("summary_status", body)
         self.assertIn("summary_save", body)
@@ -1306,6 +1336,35 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         self.assertIn("Расчёт выполнен, но итоговый summary для главной страницы не сохранён", card_recalc_body)
         self.assertIn("Проверить выбранные summary", index_source)
         self.assertIn("Проверяет summary, не пересчитывает карточки", index_source)
+
+        calc_after = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
+        self.assertEqual(calc_before, calc_after)
+
+    def test_stage_13_4b_period_summary_is_not_saved_as_index_summary(self):
+        data_path = self._find_repo_file("web", "data.js")
+        payment_path = self._find_repo_file("web", "payment_table.js")
+        index_path = self._find_repo_file("web", "index.html")
+        calc_engine_path = self._find_repo_file("web", "calc_engine.js")
+        self.assertIsNotNone(data_path)
+        self.assertIsNotNone(payment_path)
+        self.assertIsNotNone(index_path)
+        self.assertIsNotNone(calc_engine_path)
+        data_source = data_path.read_text(encoding="utf-8")
+        payment_source = payment_path.read_text(encoding="utf-8")
+        index_source = index_path.read_text(encoding="utf-8")
+        calc_before = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
+
+        recalc_body = data_source.split("async function recalcAbonentSummaryExplicit", 1)[1].split("async function recalculateAbonentCard", 1)[0]
+        full_recalc_body = payment_source.split("window.fullRecalcForCurrentAbonent", 1)[1].split("window.__loadPaymentTable", 1)[0]
+
+        self.assertIn("[summary][skip-save-period-summary]", recalc_body)
+        self.assertIn("[summary][save-full-summary]", recalc_body)
+        self.assertIn('summary.summary_scope = "period"', recalc_body)
+        self.assertIn('summary.summary_scope = "full"', recalc_body)
+        self.assertIn("saveSummary: !(periodActive && selectedPeriod)", full_recalc_body)
+        self.assertIn('summaryScope: (periodActive && selectedPeriod) ? "period" : "full"', full_recalc_body)
+        self.assertIn("periodActive: !!(periodActive && selectedPeriod)", full_recalc_body)
+        self.assertIn("FRESH_TOTALS_MISSING", index_source)
 
         calc_after = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
         self.assertEqual(calc_before, calc_after)
