@@ -1238,6 +1238,36 @@ if (parts.length) {
   function calcPeriodKey() { return calcPeriodStorageMeta().storageKey || ""; }
   function calcPeriodActiveKey() { return calcPeriodStorageMeta().activeStorageKey || ""; }
 
+  function getPeriodFromURL(){
+    try {
+      const params = new URLSearchParams(window.location.search || "");
+      const from = String(params.get("from") || "").trim();
+      const to = String(params.get("to") || "").trim();
+      if (!from || !to) return null;
+      const fromD = parseDateAnyToDate(from);
+      const toD = parseDateAnyToDate(to);
+      if (!fromD || !toD || startOfDay(fromD) > startOfDay(toD)) return null;
+      return { from: from, to: to };
+    } catch(e) {
+      return null;
+    }
+  }
+
+  const __periodUrlFallbackLogged = {};
+  function logPeriodUrlFallbackOnce(period){
+    try {
+      const key = String(getAbonentId() || "") + "|" + String(period && period.from || "") + "|" + String(period && period.to || "");
+      if (__periodUrlFallbackLogged[key]) return;
+      __periodUrlFallbackLogged[key] = true;
+      console.log("[payment-table][period-url-fallback]", {
+        abonentId: String(getAbonentId() || ""),
+        from: period && period.from || "",
+        to: period && period.to || "",
+        reason: "canonical-active-missing-url-period-present"
+      });
+    } catch(e) {}
+  }
+
   function lastAddedPaymentKey() { return "last_added_payment_" + getAbonentId(); }
   function setLastAddedPaymentId(id) {
     try { sessionStorage.setItem(lastAddedPaymentKey(), String(id)); } catch(e) { console.warn("setLastAddedPaymentId failed", e); }
@@ -1250,25 +1280,33 @@ if (parts.length) {
   }
 
   function getCalcPeriod() {
+    let urlPeriod = null;
     try {
       const key = calcPeriodKey();
-      if (!key) return null;
+      urlPeriod = getPeriodFromURL();
+      if (!key) return urlPeriod;
       const raw = storeGetRaw(key);
-      if (!raw) return null;
+      if (!raw) return urlPeriod;
       const p = JSON.parse(raw);
       const from = String(p?.from || "");
       const to   = String(p?.to || "");
-      if (!from || !to) return null;
+      if (!from || !to) return urlPeriod;
       return { from, to };
     } catch {
-      return null;
+      return urlPeriod || getPeriodFromURL();
     }
   }
 
   function isCalcPeriodActive() {
     const key = calcPeriodActiveKey();
-    if (!key) return false;
-    return storeGetRaw(key) === "1";
+    const canonicalActive = !!(key && storeGetRaw(key) === "1");
+    if (canonicalActive) return true;
+    const urlPeriod = getPeriodFromURL();
+    if (urlPeriod) {
+      logPeriodUrlFallbackOnce(urlPeriod);
+      return true;
+    }
+    return false;
   }
 
   // ✅ ФИЛЬТР: показываем оплаты, у которых "Дата оплаты" попадает в выбранный период

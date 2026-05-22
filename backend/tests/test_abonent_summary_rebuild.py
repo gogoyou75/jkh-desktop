@@ -1214,6 +1214,11 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
 
         self.assertIn("[payment-table][period-filter-applied-on-load]", payment_source)
         self.assertIn("[payment-table][period-runtime-source]", payment_source)
+        self.assertIn("[payment-table][period-url-fallback]", payment_source)
+        self.assertIn("function getPeriodFromURL", payment_source)
+        self.assertIn("params.get(\"from\")", payment_source)
+        self.assertIn("params.get(\"to\")", payment_source)
+        self.assertIn("canonical-active-missing-url-period-present", payment_source)
         self.assertIn("function runtimeCacheSignature", payment_source)
         self.assertIn("runtimeCachePeriodMatches", payment_source)
         self.assertIn("runtimeRowsByIdFromRows", payment_source)

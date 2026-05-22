@@ -585,3 +585,10 @@ rg -n "splitPremise|premise-transform\]\[split|type: ['\"]split" web LOGIC_SPEC.
 - `scheduleRunningTotalsUpdate` runs in readonly mode when an active period is present, using filtered `view/baseRows` rather than the full ledger.
 - `[payment-table][period-runtime-source]` now reports `effectiveSignature`, `runtimeCacheUsed:false`, and `baseRowsSource:"filtered"` for period views.
 - No formula/FIFO/penalty changes, no ledger writes, no autoaccrual on return, no `CALC_PERIOD_CHANGED` financial dirty behavior, and no `web/calc_engine.js` changes.
+
+## 2026-05-22 - Stage 13.2D.j: URL period fallback for payment table after spravka return
+
+- `payment_table.js` now reads URL `from/to` as a fallback period when canonical calc-period data is missing or not active yet.
+- `isCalcPeriodActive()` treats a valid URL period as active only when canonical active key is not set, logging `[payment-table][period-url-fallback]`.
+- Period-aware signatures and filtered runtime calculations now also work when the card was restored from URL period before canonical keys are readable.
+- No formula/FIFO/penalty changes, no ledger writes, no autoaccrual on return, no `CALC_PERIOD_CHANGED` financial dirty behavior, and no `web/calc_engine.js` changes.
