@@ -578,3 +578,10 @@ rg -n "splitPremise|premise-transform\]\[split|type: ['\"]split" web LOGIC_SPEC.
 - Period view signatures are built from filtered base rows plus period state, and `[payment-table][period-runtime-source]` reports `runtimeCacheUsed:false`, `baseRowsSource:"filtered"`, and the active signature.
 - The active period path does not use full-ledger runtime cache, does not write ledger rows, and does not trigger autoaccrual/recalc on return.
 - No formula/FIFO/penalty changes, no `CALC_PERIOD_CHANGED` financial dirty behavior, and no `web/calc_engine.js` changes.
+
+## 2026-05-22 - Stage 13.2D.i: force period-aware running totals signature in payment_table
+
+- Active period loads now use `effectiveSignature = ledgerSignatureForRows(baseRows) + "|period:<from>:<to>"` for memoized totals and running-total updates.
+- `scheduleRunningTotalsUpdate` runs in readonly mode when an active period is present, using filtered `view/baseRows` rather than the full ledger.
+- `[payment-table][period-runtime-source]` now reports `effectiveSignature`, `runtimeCacheUsed:false`, and `baseRowsSource:"filtered"` for period views.
+- No formula/FIFO/penalty changes, no ledger writes, no autoaccrual on return, no `CALC_PERIOD_CHANGED` financial dirty behavior, and no `web/calc_engine.js` changes.

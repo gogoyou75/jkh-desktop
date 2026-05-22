@@ -2434,8 +2434,10 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
       }
       const baseRows = runningTotalsBaseRows(view);
       const runtimeLedgerVersion = (window.Data && Data.computeLedgerRuntimeVersion) ? String(Data.computeLedgerRuntimeVersion(getAbonentId()) || "") : "";
-      const baseSignature = periodActive && selectedPeriod ? ledgerSignatureForRows(baseRows) : ledgerSignatureForRows(arr);
-      const signature = baseSignature + "::" + runtimeCacheSignature(runtimeLedgerVersion, periodActive, selectedPeriod);
+      const effectiveSignature = periodActive && selectedPeriod
+        ? (ledgerSignatureForRows(baseRows) + "|period:" + String(selectedPeriod.from || "") + ":" + String(selectedPeriod.to || ""))
+        : ledgerSignatureForRows(arr);
+      const signature = effectiveSignature + "::" + runtimeCacheSignature(runtimeLedgerVersion, periodActive, selectedPeriod);
       if (__paymentTableRenderedSignature && __paymentTableRenderedSignature === signature) {
         try { console.log("[payment-table][init-skipped-same-signature]", { abonentId: String(getAbonentId() || ""), periodActive: !!periodActive, selectedPeriod: selectedPeriod || null }); } catch(e) {}
         return;
@@ -2462,7 +2464,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
       let baseRowsSource = periodActive && selectedPeriod ? "filtered" : "runtime_cache";
       if (periodActive && selectedPeriod) {
         runtimeCachePeriodMatches = inspectRuntimeCachePeriodMatch(true, selectedPeriod);
-        const periodRowsById = runtimeRowsByIdFromRows(view, baseRows, signature);
+        const periodRowsById = runtimeRowsByIdFromRows(view, baseRows, effectiveSignature);
         applyRuntimeRowsById(view, periodRowsById);
         __runtimeCacheState = { valid: true, reason: "", dataById: periodRowsById, periodMatches: runtimeCachePeriodMatches, builtForPeriod: true };
       } else {
@@ -2481,7 +2483,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
           runtimeCacheUsed: runtimeCacheUsed,
           runtimeCachePeriodMatches: runtimeCachePeriodMatches,
           baseRowsSource: baseRowsSource,
-          signature: signature
+          effectiveSignature: effectiveSignature
         });
       } catch(eRuntimeSourceLog) {}
       const statusBox = qs("#paymentTableStatus") || qs("#paymentStatus") || qs("#paymentsStatus");
@@ -2520,8 +2522,8 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
       __paymentTableRenderedSignature = signature;
       // Тяжёлый расчёт пени/долга не блокирует открытие карточки: строки сначала
       // рисуются с уже сохранёнными значениями, затем ro-ячейки обновляются чанками.
-      if (!isReadonlyNoRecalcMode()) {
-        scheduleRunningTotalsUpdate(view, baseRows, tbody, signature);
+      if (!isReadonlyNoRecalcMode() || (periodActive && selectedPeriod)) {
+        scheduleRunningTotalsUpdate(view, baseRows, tbody, effectiveSignature);
       }
       clearLastAddedPaymentId();
     } finally {
