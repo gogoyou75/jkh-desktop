@@ -1213,6 +1213,13 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         self.assertIn("[report-period][readback]", reports_source)
 
         self.assertIn("[payment-table][period-filter-applied-on-load]", payment_source)
+        self.assertIn("[payment-table][period-runtime-source]", payment_source)
+        self.assertIn("function runtimeCacheSignature", payment_source)
+        self.assertIn("runtimeCachePeriodMatches", payment_source)
+        self.assertIn("runtimeRowsByIdFromRows", payment_source)
+        self.assertIn("filtered_view_runtime_build", payment_source)
+        self.assertIn("runtimeSignature", payment_source)
+        self.assertIn("periodActive", payment_source)
         self.assertIn("opts.force", payment_source)
         self.assertIn("__paymentTableRenderedSignature = \"\"", payment_source)
         self.assertIn("::period:", payment_source)

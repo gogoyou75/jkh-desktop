@@ -564,3 +564,10 @@ rg -n "splitPremise|premise-transform\]\[split|type: ['\"]split" web LOGIC_SPEC.
 - `payment_table.js` includes active period state in the render signature, supports forced readonly reloads, and logs `[payment-table][period-filter-applied-on-load]` when the period filter is applied on page load.
 - Returning from spravka restores both `calcFrom` / `calcTo` and the filtered table view without autoaccrual/recalc.
 - No formula/FIFO/penalty changes, no `CALC_PERIOD_CHANGED` financial dirty behavior, no ledger row changes, and no `web/calc_engine.js` changes.
+
+## 2026-05-22 - Stage 13.2D.g: restore period-aware payment table runtime values after returning from spravka
+
+- `payment_table.js` now uses a period-aware runtime signature that includes ledger version, `periodActive`, and selected `from/to`.
+- Runtime cache created for the full ledger is not applied to an active period view; readonly period loads rebuild row runtime values from the filtered view and may refresh only `ledger_runtime_cache_<uid>`.
+- Added `[payment-table][period-runtime-source]` diagnostics with full/view row counts, cache usage, period match, and base rows source.
+- No formula/FIFO/penalty changes, no `CALC_PERIOD_CHANGED` financial dirty behavior, no ledger row changes, no autoaccrual on return, and no `web/calc_engine.js` changes.
