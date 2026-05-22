@@ -550,3 +550,10 @@ rg -n "splitPremise|premise-transform\]\[split|type: ['\"]split" web LOGIC_SPEC.
 - The card reports button now creates a default report period when `calcFrom` / `calcTo` are empty, using responsibility start, `calcStartDate`, compatible abonent start fields, premise creation date, or earliest ledger month fallback.
 - The generated period is saved into `report_period_uid_<uid>`, `calc_period_uid_<uid>`, and active calc-period state before opening reports, with `[report-period][default-created]` diagnostics.
 - No autoaccrual on open, no formula/FIFO/penalty changes, no `CALC_PERIOD_CHANGED` financial dirty behavior, no ledger row changes, and no `web/calc_engine.js` changes.
+
+## 2026-05-22 - Stage 13.2D.e: preserve report period when returning from spravka to abonent card
+
+- `spravka_sud.js` now saves and readback-checks `report_period_uid_<uid>`, `calc_period_uid_<uid>`, and `calc_period_active_uid_<uid>` before returning to the abonent card.
+- The back-to-card URL now includes `abonent`, `account`, `uid`, `from`, and `to`, with `[spravka][return-card-period-save]` and `[spravka][return-card-url]` diagnostics.
+- `abonent_card.html` now restores `calcFrom` / `calcTo` from URL `from/to` before falling back to canonical report/calc period keys, with `[card-period][bootstrap-inputs-from-url]`.
+- No autoaccrual on return, no formula/FIFO/penalty changes, no `CALC_PERIOD_CHANGED` financial dirty behavior, no ledger row changes, and no `web/calc_engine.js` changes.

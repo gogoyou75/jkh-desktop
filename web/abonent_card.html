@@ -2514,6 +2514,38 @@ function loadCalcPeriodUI(){
     }
 
     try {
+        const params = new URLSearchParams(window.location.search || "");
+        const urlFrom = String(params.get("from") || "").trim();
+        const urlTo = String(params.get("to") || "").trim();
+        if (urlFrom || urlTo) {
+            if (isValidPeriod(urlFrom, urlTo)) {
+                fromEl.value = urlFrom;
+                toEl.value = urlTo;
+                try {
+                    console.log("[card-period][bootstrap-inputs-from-url]", {
+                        requestedId: meta.requestedId,
+                        resolvedUid: meta.resolvedUid,
+                        ownerId: meta.ownerId,
+                        from: fromEl.value || "",
+                        to: toEl.value || "",
+                        source: "url"
+                    });
+                } catch (eUrlLog) {}
+                return;
+            }
+            try {
+                console.warn("[card-period][bootstrap-inputs-from-url]", {
+                    requestedId: meta.requestedId,
+                    resolvedUid: meta.resolvedUid,
+                    ownerId: meta.ownerId,
+                    from: urlFrom,
+                    to: urlTo,
+                    source: "url",
+                    reason: "INVALID_URL_PERIOD"
+                });
+            } catch (eUrlWarn) {}
+        }
+
         const reportKey = getReportPeriodStorageKey(meta);
         const reportReadback = __isCanonicalReportPeriodKey(reportKey) ? __readPeriodKey(reportKey, meta.ownerId) : { key: reportKey, raw: null, value: null };
         const calcReadback = meta.storageKey ? __readPeriodKey(meta.storageKey, meta.ownerId) : { key: meta.storageKey, raw: null, value: null };
