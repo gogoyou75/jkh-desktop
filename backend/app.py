@@ -1857,6 +1857,9 @@ def abonent_summary_rebuild():
             summary = body.get("summary")
             if not isinstance(summary, dict):
                 return jsonify(ok=False, error="summary_invalid", counters=counters), 400
+            summary_scope = _norm_text(summary.get("summary_scope") or summary.get("report_scope")).lower()
+            if summary_scope in {"period", "report"}:
+                return jsonify(ok=False, error="period_summary_not_allowed", counters=counters), 400
             summary = _summary_without_stale_totals(summary)
 
             targets = _owner_abonent_summary_targets(owner)

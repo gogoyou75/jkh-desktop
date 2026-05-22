@@ -2961,6 +2961,18 @@ async function __saveAbonentSummaryAfterUidRecalc(abonentId, from, to){
     return result;
 }
 
+async function ensureCurrentAbonentUidForCalcPeriod(source){
+    const id = getAbonentIdFromURL();
+    if (!window.Data || typeof Data.ensureAbonentUid !== "function") {
+        return { ok: false, uid: "", reason: "UID_SERVICE_UNAVAILABLE" };
+    }
+    try {
+        return await Data.ensureAbonentUid(id, { source: source || "abonent_card.calc_period" });
+    } catch (e) {
+        return { ok: false, uid: "", reason: String(e && e.message || e) };
+    }
+}
+
 function bindCalcButtons(){
     const runBtn = document.getElementById("calcRunBtn");
     const repBtn = document.getElementById("calcReportsBtn");
@@ -3118,7 +3130,7 @@ function bindCalcButtons(){
         __safeLoadPaymentTableOnce("card-period-reset", { force: true });
     });
 
-    repBtn.addEventListener("click", () => {
+    repBtn.addEventListener("click", async () => {
         const id = getAbonentIdFromURL();
         let from = fromEl.value;
         let to = toEl.value;
@@ -3136,6 +3148,11 @@ function bindCalcButtons(){
         }
         if (from || to) {
             if (isValidPeriod(from, to)) {
+                const uidResult = await ensureCurrentAbonentUidForCalcPeriod("abonent_card.reports");
+                if (!uidResult || uidResult.ok !== true || !uidResult.uid) {
+                    alert("Период расчёта не сохранён: не найден canonical UID key.");
+                    return;
+                }
                 if (!saveCalcPeriod(from, to)) {
                     __logCardPeriodSaved(getCalcPeriodStorageMeta(), { ok: false, reason: saveCalcPeriod.lastError || "CALC_PERIOD_SAVE_FAILED", reportReadback: null });
                     alert("Период расчёта не сохранён в canonical UID key. Справка не будет открыта.");

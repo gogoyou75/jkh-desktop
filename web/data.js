@@ -1867,6 +1867,7 @@
       var uid = String(abonent && abonent.uid || (typeof abonentOrId === "object" ? abonentOrId && abonentOrId.uid : "") || "").trim();
       var summaryStatus = summary && (summary.summary_status || summary.status) || "";
       var summaryReason = summary && (summary.summary_reason || summary.reason) || "";
+      var summaryScope = String(summary && (summary.summary_scope || summary.report_scope) || "").trim().toLowerCase();
       var summaryTotals = summary && summary.totals && typeof summary.totals === "object" ? summary.totals : {};
       var summaryTotalsKeys = Object.keys(summaryTotals);
       saveLogCtx = { uid: uid, status: String(summaryStatus || ""), reason: String(summaryReason || ""), totalsKeys: summaryTotalsKeys };
@@ -1878,6 +1879,16 @@
       if (!summary || typeof summary !== "object" || Array.isArray(summary)) {
         try { console.warn("[summary][save-failed]", { uid: uid, status: summaryStatus, reason: "SUMMARY_INVALID", totalsKeys: summaryTotalsKeys, abonentId: abonentId }); } catch (eSummary) {}
         return { ok: false, skipped: true, reason: "SUMMARY_INVALID" };
+      }
+      if (summaryScope === "period" || summaryScope === "report") {
+        try {
+          console.log("[summary][skip-save-period-summary]", {
+            uid: uid,
+            summary_scope: summaryScope,
+            reason: summaryReason || "PERIOD_SUMMARY_NOT_SAVED"
+          });
+        } catch (eSkipLog) {}
+        return { ok: true, skipped: true, reason: "PERIOD_SUMMARY_NOT_SAVED", summary_status: summaryStatus || "fresh", summary_reason: summaryReason || "OK", summary_scope: summaryScope };
       }
 
       var payload = {

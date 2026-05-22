@@ -639,3 +639,10 @@ rg -n "splitPremise|premise-transform\]\[split|type: ['\"]split" web LOGIC_SPEC.
 - Full/canonical summary saves are logged as `[summary][save-full-summary]`; only non-period recalculation may write the main summary cache.
 - Backend transport ignores `summary_scope=period` / `report_scope=period` summaries for index by mapping them to `missing/PERIOD_SUMMARY_IGNORED` and stripping totals.
 - No `web/calc_engine.js`, FIFO, penalty formula, index ledger read, hidden rebuild, or `CALC_PERIOD_CHANGED` financial dirty changes.
+
+## 2026-05-22 — Stage 13.4B — protect index summary from period/report saves
+
+- `Data.saveAbonentSummaryAfterRecalc(...)` now hard-skips `summary_scope=period/report` before POST and logs `[summary][skip-save-period-summary]`.
+- Backend `POST /api/abonent_summary/rebuild` rejects period/report summaries with `period_summary_not_allowed`.
+- Reports-period save path ensures canonical UID before writing calc-period keys, preserving UID-only `calc_period_uid_*` / `calc_period_active_uid_*`.
+- No calc engine, FIFO, penalty, index ledger read, hidden rebuild, or fake summary changes were added.

@@ -761,6 +761,27 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         self.assertEqual(payload["items"][0]["summary_status"], "error")
         self.assertEqual(payload["items"][0]["summary_reason"], "FRESH_TOTALS_MISSING")
 
+    def test_rebuild_rejects_period_summary_payload(self):
+        with app_module.app.app_context():
+            self._add_user("owner-period-summary-reject")
+            self._put_abonents("owner-period-summary-reject", {
+                "1001": {"uid": "uid_period_summary_reject_1001", "id": "1001"},
+            })
+            app_module.db.session.commit()
+        self._login("owner-period-summary-reject")
+
+        summary = self._fresh_summary(100, 5, 105)
+        summary["summary_scope"] = "period"
+        response = self.client.post("/api/abonent_summary/rebuild", json={
+            "account_uid": "uid_period_summary_reject_1001",
+            "summary": summary,
+        })
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json()["error"], "period_summary_not_allowed")
+        with app_module.app.app_context():
+            self.assertEqual(app_module.AbonentSummary.query.count(), 0)
+
     def test_fresh_with_required_totals_stays_fresh_for_index_and_batch_job(self):
         with app_module.app.app_context():
             self._add_user("owner-valid-fresh-batch")
@@ -958,6 +979,8 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         self.assertIn("ownerId", card_meta_body)
         self.assertIn("storeSet(meta.storageKey", card_save_body)
         self.assertIn("storeSet(meta.activeStorageKey", card_save_body)
+        self.assertIn("ensureCurrentAbonentUidForCalcPeriod", card_source)
+        self.assertIn('Data.ensureAbonentUid(id, { source: source || "abonent_card.calc_period" })', card_source)
         self.assertNotIn("calc_period_\" +", card_save_body)
         self.assertNotIn("calc_period_active_\" +", card_save_body)
         self.assertNotIn("CALC_PERIOD_CHANGED", card_save_body)
@@ -1334,6 +1357,8 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         self.assertIn("[summary][build-payload]", save_body)
         self.assertIn("[summary][save-ok]", save_body)
         self.assertIn("[summary][save-failed]", save_body)
+        self.assertIn("[summary][skip-save-period-summary]", save_body)
+        self.assertIn('summaryScope === "period" || summaryScope === "report"', save_body)
         self.assertIn("totalsKeys", save_body)
         self.assertIn("Расчёт выполнен, но итоговый summary для главной страницы не сохранён", card_recalc_body)
         self.assertIn("Проверить выбранные summary", index_source)
@@ -1361,6 +1386,7 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
 
         self.assertIn("[summary][skip-save-period-summary]", recalc_body)
         self.assertIn("[summary][save-full-summary]", recalc_body)
+        self.assertIn("[summary][skip-save-period-summary]", data_source.split("async function saveAbonentSummaryAfterRecalc", 1)[1].split("async function validateAbonentSummaryRecalcBatch", 1)[0])
         self.assertIn('summary.summary_scope = "period"', recalc_body)
         self.assertIn('summary.summary_scope = "full"', recalc_body)
         self.assertIn("!!opts.period && opts.saveSummary !== true", recalc_body)
