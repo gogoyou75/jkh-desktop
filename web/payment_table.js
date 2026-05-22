@@ -2339,7 +2339,10 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
         perfLog('load-ledger', loadStartedAt);
       }
 
-      const signature = ledgerSignatureForRows(arr);
+      const periodActive = isCalcPeriodActive();
+      const selectedPeriod = periodActive ? getCalcPeriod() : null;
+      const ledgerSignature = ledgerSignatureForRows(arr);
+      const signature = ledgerSignature + "::period:" + (periodActive ? "1" : "0") + ":" + (selectedPeriod ? String(selectedPeriod.from || "") + ":" + String(selectedPeriod.to || "") : "");
       if (__paymentTableRenderedSignature && __paymentTableRenderedSignature === signature) {
         try { console.log("[payment-table][init-skipped-same-signature]", { abonentId: String(getAbonentId() || "") }); } catch(e) {}
         return;
@@ -2362,9 +2365,19 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
         perfLog('normalize', normalizeStartedAt);
       }
 
-      const periodActive = isCalcPeriodActive();
-      const selectedPeriod = periodActive ? getCalcPeriod() : null;
       const view = applyResponsibilityRangeToView(applyCalcFilter(arr, periodActive, selectedPeriod)).slice();
+      if (periodActive && selectedPeriod) {
+        try {
+          console.log("[payment-table][period-filter-applied-on-load]", {
+            abonentId: String(getAbonentId() || ""),
+            from: selectedPeriod.from || "",
+            to: selectedPeriod.to || "",
+            rowsBefore: Array.isArray(arr) ? arr.length : 0,
+            rowsAfter: Array.isArray(view) ? view.length : 0,
+            reason: "active_calc_period"
+          });
+        } catch(ePeriodLog) {}
+      }
       const baseRows = runningTotalsBaseRows(view);
 
       // сортировка отображения — год/месяц (новые сверху),
@@ -2435,6 +2448,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
   function requestLoadPaymentTable(options){
     const opts = (options && typeof options === "object") ? options : { reason: options };
     if (opts.mode) __paymentTableMode = String(opts.mode);
+    if (opts.force) __paymentTableRenderedSignature = "";
     const reason = String(opts.reason || opts.mode || "scheduled");
     if (__paymentTableLoadScheduled) {
       try { console.log("[payment-table][init-skipped-inflight]", { reason: String(reason || "scheduled"), phase: "scheduled" }); } catch(e) {}

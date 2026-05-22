@@ -1130,7 +1130,8 @@ function __clearBrokenExcludesAndReload(){
     __safeLoadPaymentTableOnce("clear-broken-excludes");
 }
 
-function __safeLoadPaymentTableOnce(reason){
+function __safeLoadPaymentTableOnce(reason, options){
+    const opts = options || {};
     if (!__abonentCardServerRepairDone) {
         try { console.warn('[abonent_card] payment table load skipped before server repair:', reason); } catch(e){}
         return;
@@ -1149,7 +1150,7 @@ function __safeLoadPaymentTableOnce(reason){
         __paymentTableLoadScheduled = false;
         __paymentTableLoading = true;
         try {
-            window.__loadPaymentTable({ mode: 'readonly_no_recalc', reason: reason || 'abonent-card' });
+            window.__loadPaymentTable({ mode: 'readonly_no_recalc', reason: reason || 'abonent-card', force: !!opts.force });
             __hideExcludesFatalBox();
         } catch(e) {
             if (__isExcludesFatalError(e)) __showExcludesFatalBox(e);
@@ -2228,6 +2229,52 @@ function __readActiveKey(key, ownerId){
     return { key: key || "", raw: raw };
 }
 
+function bootstrapActiveCalcPeriod(meta, from, to, source){
+    const m = meta || getCalcPeriodStorageMeta();
+    const payload = { from: String(from || "").trim(), to: String(to || "").trim() };
+    const reportKey = getReportPeriodStorageKey(m);
+    const result = {
+        ok: false,
+        source: String(source || ""),
+        periodKey: m.storageKey,
+        activeKey: m.activeStorageKey,
+        reportKey: reportKey,
+        periodReadback: null,
+        activeReadback: null,
+        reportReadback: null,
+        reason: ""
+    };
+    if (!payload.from || !payload.to || !isValidPeriod(payload.from, payload.to)) {
+        result.reason = "INVALID_PERIOD";
+        try { console.warn("[card-period][bootstrap-active]", result); } catch(eInvalidLog) {}
+        return result;
+    }
+    if (!__isCanonicalCalcPeriodKey(m.storageKey) || !__isCanonicalCalcPeriodActiveKey(m.activeStorageKey)) {
+        result.reason = "CANONICAL_CALC_PERIOD_KEY_REQUIRED";
+        try { console.warn("[card-period][bootstrap-active]", result); } catch(eKeyLog) {}
+        return result;
+    }
+
+    const raw = JSON.stringify(payload);
+    storeSet(m.storageKey, raw, m.ownerId);
+    storeSet(m.activeStorageKey, "1", m.ownerId);
+    if (__isCanonicalReportPeriodKey(reportKey)) storeSet(reportKey, raw, m.ownerId);
+
+    result.periodReadback = __readPeriodKey(m.storageKey, m.ownerId);
+    result.activeReadback = __readActiveKey(m.activeStorageKey, m.ownerId);
+    result.reportReadback = __readPeriodKey(reportKey, m.ownerId);
+    result.ok = !!(
+        result.periodReadback.value &&
+        result.periodReadback.value.from === payload.from &&
+        result.periodReadback.value.to === payload.to &&
+        result.activeReadback.raw === "1" &&
+        (!__isCanonicalReportPeriodKey(reportKey) || (result.reportReadback.value && result.reportReadback.value.from === payload.from && result.reportReadback.value.to === payload.to))
+    );
+    result.reason = result.ok ? "" : "BOOTSTRAP_ACTIVE_READBACK_FAILED";
+    try { console.log("[card-period][bootstrap-active]", result); } catch(eLog) {}
+    return result;
+}
+
 function __toISODateForCardPeriod(value){
     const raw = String(value || "").trim();
     if (!raw) return "";
@@ -2521,6 +2568,8 @@ function loadCalcPeriodUI(){
             if (isValidPeriod(urlFrom, urlTo)) {
                 fromEl.value = urlFrom;
                 toEl.value = urlTo;
+                bootstrapActiveCalcPeriod(meta, urlFrom, urlTo, "url");
+                __safeLoadPaymentTableOnce("calc-period-bootstrap-url", { force: true });
                 try {
                     console.log("[card-period][bootstrap-inputs-from-url]", {
                         requestedId: meta.requestedId,
@@ -2555,6 +2604,8 @@ function loadCalcPeriodUI(){
         if (selected) {
             fromEl.value = selected.from || "";
             toEl.value = selected.to || "";
+            bootstrapActiveCalcPeriod(meta, fromEl.value, toEl.value, source);
+            __safeLoadPaymentTableOnce("calc-period-bootstrap-" + source, { force: true });
         } else {
             fromEl.value = "";
             toEl.value = "";

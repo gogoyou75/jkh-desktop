@@ -557,3 +557,10 @@ rg -n "splitPremise|premise-transform\]\[split|type: ['\"]split" web LOGIC_SPEC.
 - The back-to-card URL now includes `abonent`, `account`, `uid`, `from`, and `to`, with `[spravka][return-card-period-save]` and `[spravka][return-card-url]` diagnostics.
 - `abonent_card.html` now restores `calcFrom` / `calcTo` from URL `from/to` before falling back to canonical report/calc period keys, with `[card-period][bootstrap-inputs-from-url]`.
 - No autoaccrual on return, no formula/FIFO/penalty changes, no `CALC_PERIOD_CHANGED` financial dirty behavior, no ledger row changes, and no `web/calc_engine.js` changes.
+
+## 2026-05-22 - Stage 13.2D.f: restore filtered payment table after return from spravka
+
+- Card period bootstrap now writes and readback-checks active canonical calc/report period keys before the payment table load, logging `[card-period][bootstrap-active]`.
+- `payment_table.js` includes active period state in the render signature, supports forced readonly reloads, and logs `[payment-table][period-filter-applied-on-load]` when the period filter is applied on page load.
+- Returning from spravka restores both `calcFrom` / `calcTo` and the filtered table view without autoaccrual/recalc.
+- No formula/FIFO/penalty changes, no `CALC_PERIOD_CHANGED` financial dirty behavior, no ledger row changes, and no `web/calc_engine.js` changes.
