@@ -647,6 +647,13 @@ rg -n "splitPremise|premise-transform\]\[split|type: ['\"]split" web LOGIC_SPEC.
 - Reports-period save path ensures canonical UID before writing calc-period keys, preserving UID-only `calc_period_uid_*` / `calc_period_active_uid_*`.
 - No calc engine, FIFO, penalty, index ledger read, hidden rebuild, or fake summary changes were added.
 
+## 2026-05-22 - Stage 13.4F - legacy period summary read masking
+
+- Added read-only backend masking for legacy fresh summaries without `summary_scope` whose stored `period.from/to` conflicts with known canonical abonent boundaries.
+- Contaminated legacy summaries are transported as `missing` / `PERIOD_SUMMARY_LEGACY` with totals aliases removed; the database row is not updated.
+- Unknown canonical boundaries are diagnostic-only and are not aggressively masked.
+- No SQL cleanup, hidden rebuild, backend recalculation, index ledger read, `calc_engine.js`, FIFO, penalty, or formula changes were added.
+
 ## 2026-05-22 - Stage 13.4E - reports button without card recalculation
 
 - Reports button in abonent card is kept as a navigation/report-period action only: UID ensure, calc/report period save, and transition to reports page.

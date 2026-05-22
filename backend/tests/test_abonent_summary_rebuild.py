@@ -853,6 +853,100 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         self.assertEqual(item["summary"]["summary_reason"], "PERIOD_SUMMARY_IGNORED")
         self.assertNotIn("totals", item["summary"])
 
+    def test_legacy_period_summary_contamination_is_masked_on_index_transport(self):
+        with app_module.app.app_context():
+            self._add_user("owner-legacy-period-mask")
+            self._put_abonents("owner-legacy-period-mask", {
+                "1007": {
+                    "uid": "uid_legacy_period_mask_1007",
+                    "id": "1007",
+                    "calcStartDate": "2020-01-01",
+                    "calcEndDate": "2026-05-22",
+                },
+            })
+            legacy_summary = self._fresh_summary(100, 5, 105)
+            legacy_summary["period"] = {"from": "2026-01-01", "to": "2026-01-31"}
+            app_module.db.session.add(app_module.AbonentSummary(
+                owner_id="owner-legacy-period-mask",
+                abonent_id="1007",
+                account_uid="uid_legacy_period_mask_1007",
+                account_number="1007",
+                summary_json=json.dumps(legacy_summary, sort_keys=True),
+            ))
+            app_module.db.session.commit()
+        self._login("owner-legacy-period-mask")
+
+        response = self.client.get("/api/abonents?limit=10")
+
+        self.assertEqual(response.status_code, 200)
+        item = response.get_json()["items"][0]
+        self.assertEqual(item["summary_status"], "missing")
+        self.assertEqual(item["summary"]["summary_status"], "missing")
+        self.assertEqual(item["summary"]["summary_reason"], "PERIOD_SUMMARY_LEGACY")
+        self.assertNotIn("totals", item["summary"])
+        with app_module.app.app_context():
+            row = app_module.AbonentSummary.query.filter_by(account_uid="uid_legacy_period_mask_1007").first()
+            stored = json.loads(row.summary_json)
+            self.assertEqual(stored["summary_status"], "fresh")
+            self.assertIn("totals", stored)
+
+    def test_legacy_summary_with_canonical_full_period_stays_fresh(self):
+        with app_module.app.app_context():
+            self._add_user("owner-legacy-period-full")
+            self._put_abonents("owner-legacy-period-full", {
+                "1007": {
+                    "uid": "uid_legacy_period_full_1007",
+                    "id": "1007",
+                    "calcStartDate": "2020-01-01",
+                    "calcEndDate": "2026-05-22",
+                },
+            })
+            summary = self._fresh_summary(100, 5, 105)
+            summary["period"] = {"from": "2020-01-01", "to": "2026-05-22"}
+            app_module.db.session.add(app_module.AbonentSummary(
+                owner_id="owner-legacy-period-full",
+                abonent_id="1007",
+                account_uid="uid_legacy_period_full_1007",
+                account_number="1007",
+                summary_json=json.dumps(summary, sort_keys=True),
+            ))
+            app_module.db.session.commit()
+        self._login("owner-legacy-period-full")
+
+        response = self.client.get("/api/abonents?limit=10")
+
+        self.assertEqual(response.status_code, 200)
+        item = response.get_json()["items"][0]
+        self.assertEqual(item["summary_status"], "fresh")
+        self.assertEqual(item["summary"]["summary_status"], "fresh")
+        self.assertEqual(item["summary"]["totals"]["debt"], 105)
+
+    def test_legacy_period_summary_with_unknown_boundaries_is_not_masked(self):
+        with app_module.app.app_context():
+            self._add_user("owner-legacy-period-unknown")
+            self._put_abonents("owner-legacy-period-unknown", {
+                "1007": {"uid": "uid_legacy_period_unknown_1007", "id": "1007"},
+            })
+            summary = self._fresh_summary(100, 5, 105)
+            summary["period"] = {"from": "2026-01-01", "to": "2026-01-31"}
+            app_module.db.session.add(app_module.AbonentSummary(
+                owner_id="owner-legacy-period-unknown",
+                abonent_id="1007",
+                account_uid="uid_legacy_period_unknown_1007",
+                account_number="1007",
+                summary_json=json.dumps(summary, sort_keys=True),
+            ))
+            app_module.db.session.commit()
+        self._login("owner-legacy-period-unknown")
+
+        response = self.client.get("/api/abonents?limit=10")
+
+        self.assertEqual(response.status_code, 200)
+        item = response.get_json()["items"][0]
+        self.assertEqual(item["summary_status"], "fresh")
+        self.assertEqual(item["summary"]["summary_status"], "fresh")
+        self.assertEqual(item["summary"]["totals"]["debt"], 105)
+
     def test_mark_dirty_does_not_touch_other_owner(self):
         with app_module.app.app_context():
             self._add_user("owner-dirty-a")
