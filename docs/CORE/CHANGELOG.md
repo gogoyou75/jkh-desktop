@@ -654,6 +654,13 @@ rg -n "splitPremise|premise-transform\]\[split|type: ['\"]split" web LOGIC_SPEC.
 - If canonical reset readback fails, the card shows `Период не сброшен на сервере` and does not silently present a successful reset.
 - No financial dirty, summary save, hidden rebuild, index ledger read, `calc_engine.js`, FIFO, penalty, or formula changes were added.
 
+## 2026-05-23 - Stage 13.4G - reset restore race guard
+
+- Added the global `window.__periodResetInProgress` guard so card reset blocks late restore from URL, `report_period_uid_*`, `calc_period_uid_*`, and async bootstrap writes until the user manually enters/saves a new period.
+- Reset now logs `[period][reset]`, `[period][restore-blocked-after-reset]`, `[period][async-override-blocked]`, `[period][manual-period-input-after-reset]`, `[period][reset-readback-ok]`, and `[period][reset-readback-failed]`; normal restore logs `[period][restore-source]`.
+- Payment table reset now clears its in-memory calc-period meta cache together with rendered signatures and memoized totals.
+- No `calc_engine.js`, backend financial logic, FIFO, penalty, formulas, summary dirty, server-first, or ledger behavior changes were added.
+
 ## 2026-05-22 - Stage 13.4F - legacy period summary read masking
 
 - Added read-only backend masking for legacy fresh summaries without `summary_scope` whose stored `period.from/to` conflicts with known canonical abonent boundaries.

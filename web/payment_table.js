@@ -1834,6 +1834,7 @@ function perfLog(stage, startedAt){
 
 window.JKH_resetPaymentTablePeriodRuntime = function(reason) {
   try { __paymentTotalsMemo.clear(); } catch(eMemo) {}
+  try { __calcPeriodMetaCache = null; } catch(eMeta) {}
   __paymentTableRenderedSignature = "";
   __paymentTableCalcToken++;
   __runtimeCacheState = { valid: false, reason: "period-reset", dataById: {}, periodMatches: false };

@@ -696,6 +696,10 @@ Doc: docs/LOGIC_SPEC_v1.5.3.md
 </div>
 
 <script>
+if (typeof window.__periodResetInProgress !== "boolean") {
+    window.__periodResetInProgress = false;
+}
+
 function getAbonentIdFromURL() {
     const params = new URLSearchParams(window.location.search || "");
     const uid = String(params.get("uid") || "").trim();
@@ -2251,10 +2255,12 @@ function resetCalcPeriodCanonicalState(meta, source){
         reportReadback: null,
         reason: ""
     };
+    try { console.log("[period][reset]", result); } catch (ePeriodResetLog) {}
     try { console.log("[calc-period][reset-start]", result); } catch (eStartLog) {}
 
     if (!__isCanonicalCalcPeriodKey(m.storageKey) || !__isCanonicalCalcPeriodActiveKey(m.activeStorageKey)) {
         result.reason = "CANONICAL_CALC_PERIOD_KEY_REQUIRED";
+        try { console.warn("[period][reset-readback-failed]", result); } catch (ePeriodKeyLog) {}
         try { console.warn("[calc-period][reset-readback-failed]", result); } catch (eKeyLog) {}
         return result;
     }
@@ -2267,13 +2273,22 @@ function resetCalcPeriodCanonicalState(meta, source){
     result.periodReadback = __readPeriodKey(m.storageKey, m.ownerId);
     result.activeReadback = __readActiveKey(m.activeStorageKey, m.ownerId);
     result.reportReadback = __isCanonicalReportPeriodKey(reportKey) ? __readPeriodKey(reportKey, m.ownerId) : { key: reportKey, raw: null, value: null };
-    result.ok = !result.periodReadback.value && result.activeReadback.raw !== "1" && !result.reportReadback.value;
+    result.ok = !result.periodReadback.value && __isCalcPeriodInactiveReadback(result.activeReadback.raw) && !result.reportReadback.value;
     result.reason = result.ok ? "" : "CALC_PERIOD_RESET_READBACK_FAILED";
     try {
-        if (result.ok) console.log("[calc-period][reset-readback-ok]", result);
-        else console.warn("[calc-period][reset-readback-failed]", result);
+        if (result.ok) {
+            console.log("[period][reset-readback-ok]", result);
+            console.log("[calc-period][reset-readback-ok]", result);
+        } else {
+            console.warn("[period][reset-readback-failed]", result);
+            console.warn("[calc-period][reset-readback-failed]", result);
+        }
     } catch (eReadbackLog) {}
     return result;
+}
+
+function __isCalcPeriodInactiveReadback(raw){
+    return raw === "0" || raw === false || raw === "false";
 }
 
 function bootstrapActiveCalcPeriod(meta, from, to, source){
@@ -2291,6 +2306,11 @@ function bootstrapActiveCalcPeriod(meta, from, to, source){
         reportReadback: null,
         reason: ""
     };
+    if (window.__periodResetInProgress === true) {
+        result.reason = "RESET_IN_PROGRESS_SKIP_AUTO_RESTORE";
+        try { console.warn("[period][async-override-blocked]", result); } catch(eResetLog) {}
+        return result;
+    }
     if (!payload.from || !payload.to || !isValidPeriod(payload.from, payload.to)) {
         result.reason = "INVALID_PERIOD";
         try { console.warn("[card-period][bootstrap-active]", result); } catch(eInvalidLog) {}
@@ -2600,6 +2620,21 @@ function loadCalcPeriodUI(){
     const fromEl = document.getElementById("calcFrom");
     const toEl   = document.getElementById("calcTo");
     if (!fromEl || !toEl) return;
+    if (window.__periodResetInProgress === true) {
+        fromEl.value = "";
+        toEl.value = "";
+        try {
+            console.warn("[period][restore-blocked-after-reset]", {
+                requestedId: meta.requestedId,
+                resolvedUid: meta.resolvedUid,
+                ownerId: meta.ownerId,
+                periodKey: meta.storageKey,
+                activeKey: meta.activeStorageKey,
+                source: "loadCalcPeriodUI"
+            });
+        } catch (eResetRestoreLog) {}
+        return;
+    }
     if (!meta.storageKey || !meta.activeStorageKey || !meta.resolvedUid) {
         __logCalcPeriodNoCanonicalOnce({ requestedId: meta.requestedId, abonentId: meta.requestedId, resolvedUid: meta.resolvedUid, ownerId: meta.ownerId, reason: "CANONICAL_KEY_NOT_READY", source: "abonent_card.load" });
         fromEl.value = "";
@@ -2615,6 +2650,7 @@ function loadCalcPeriodUI(){
             if (isValidPeriod(urlFrom, urlTo)) {
                 fromEl.value = urlFrom;
                 toEl.value = urlTo;
+                try { console.log("[period][restore-source]", { source: "url", from: urlFrom, to: urlTo, requestedId: meta.requestedId, resolvedUid: meta.resolvedUid, ownerId: meta.ownerId }); } catch (eRestoreUrlLog) {}
                 bootstrapActiveCalcPeriod(meta, urlFrom, urlTo, "url");
                 __safeLoadPaymentTableOnce("calc-period-bootstrap-url", { force: true });
                 try {
@@ -2651,6 +2687,7 @@ function loadCalcPeriodUI(){
         if (selected) {
             fromEl.value = selected.from || "";
             toEl.value = selected.to || "";
+            try { console.log("[period][restore-source]", { source: source, from: fromEl.value || "", to: toEl.value || "", requestedId: meta.requestedId, resolvedUid: meta.resolvedUid, ownerId: meta.ownerId, reportKey: reportKey, periodKey: meta.storageKey }); } catch (eRestoreKeyLog) {}
             bootstrapActiveCalcPeriod(meta, fromEl.value, toEl.value, source);
             __safeLoadPaymentTableOnce("calc-period-bootstrap-" + source, { force: true });
         } else {
@@ -2701,6 +2738,10 @@ function loadCalcPeriodUI(){
 }
 
 // intentionally local-only: период расчёта это UI-параметр и не отправляется на сервер
+// Period state is managed as one UI/report service with separate canonical keys:
+// calc_period_uid_<uid> stores the card selection, calc_period_active_uid_<uid>
+// stores activity, and report_period_uid_<uid> stores the reports period.
+// Reset must clear/deactivate all related keys; this is view state, not ledger data.
 function saveCalcPeriod(from, to){
     saveCalcPeriod.lastError = "";
     const meta = getCalcPeriodStorageMeta();
@@ -2794,6 +2835,10 @@ function saveCalcPeriod(from, to){
             to: payloadTo
         });
     } catch (e) {}
+    if (window.__periodResetInProgress === true) {
+        window.__periodResetInProgress = false;
+        try { console.log("[period][reset-flag-cleared-by-save]", { requestedId: meta.requestedId, resolvedUid: meta.resolvedUid, ownerId: meta.ownerId, periodKey: meta.storageKey, activeKey: meta.activeStorageKey }); } catch (eResetSaveLog) {}
+    }
     return true;
 }
 
@@ -3033,6 +3078,24 @@ function bindCalcButtons(){
     const toEl   = document.getElementById("calcTo");
     if (!runBtn || !repBtn || !resetBtn || !fromEl || !toEl) return;
 
+    function clearPeriodResetFlagAfterManualInput(eventName){
+        if (window.__periodResetInProgress === true) {
+            window.__periodResetInProgress = false;
+            try {
+                console.log("[period][manual-period-input-after-reset]", {
+                    event: String(eventName || ""),
+                    abonentId: String(getAbonentIdFromURL() || ""),
+                    from: fromEl.value || "",
+                    to: toEl.value || ""
+                });
+            } catch (eManualLog) {}
+        }
+    }
+    fromEl.addEventListener("input", function(){ clearPeriodResetFlagAfterManualInput("input:from"); });
+    fromEl.addEventListener("change", function(){ clearPeriodResetFlagAfterManualInput("change:from"); });
+    toEl.addEventListener("input", function(){ clearPeriodResetFlagAfterManualInput("input:to"); });
+    toEl.addEventListener("change", function(){ clearPeriodResetFlagAfterManualInput("change:to"); });
+
     function manualRecalcErrorMessage(recalcResult, reason){
         if (recalcResult && recalcResult.summary_status === "fresh" && recalcResult.summary_save && recalcResult.summary_save.ok !== true) {
             return "Расчёт выполнен, но итоговый summary для главной страницы не сохранён";
@@ -3149,11 +3212,7 @@ function bindCalcButtons(){
         const id = getAbonentIdFromURL();
         const meta = getCalcPeriodStorageMeta();
         const urlBefore = String(window.location.href || "");
-        const resetResult = resetCalcPeriodCanonicalState(meta, "abonent_card.reset-button");
-        if (!resetResult.ok) {
-            alert("Период не сброшен на сервере");
-            return;
-        }
+        window.__periodResetInProgress = true;
         fromEl.value = "";
         toEl.value = "";
         let urlAfter = urlBefore;
@@ -3164,6 +3223,13 @@ function bindCalcButtons(){
             urlAfter = u.toString();
             window.history.replaceState({}, "", urlAfter);
         } catch(eUrl) {}
+        const resetResult = resetCalcPeriodCanonicalState(meta, "abonent_card.reset-button");
+        if (!resetResult.ok) {
+            alert("Период не сброшен на сервере/в хранилище");
+            return;
+        }
+        fromEl.value = "";
+        toEl.value = "";
         try {
             console.log("[card-period][reset]", {
                 abonentId: String(id || ""),
