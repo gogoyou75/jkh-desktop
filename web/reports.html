@@ -213,8 +213,9 @@
 </div>
 
 <script>
+window.JKH_REPORT_MODE = "readonly_report";
 function getAbonentIdFromURL() {
-    const params = new URLSearchParams(window.location.search || "");
+const params = new URLSearchParams(window.location.search || "");
     return String(params.get("abonent") || "").trim();
 }
 
@@ -327,7 +328,8 @@ function storeGetCanonical(key, ownerId){
 }
 
 function storeSetCanonical(key, value, ownerId){
-    try { return (window.JKHStore && JKHStore.setRaw) ? JKHStore.setRaw(key, value, ownerId) : false; } catch(e) { return false; }
+    try { console.warn("[reports][write-blocked-readonly]", { key: String(key || ""), ownerId: String(ownerId || "") }); } catch(eLog) {}
+    return false;
 }
 
 function getCanonicalAbonent(id){
@@ -661,8 +663,10 @@ async function initReportsPage() {
 
         if (!saveCanonicalPeriod(abonent, from, to)) return;
 
+        try { console.log("[reports][derived-calc-start]", { page: "reports", target: "spravka_sud", abonentId: currentId, from: from || "", to: to || "" }); } catch(eStartLog) {}
         let href = "spravka_sud.html?abonent=" + encodeURIComponent(currentId) + "&from=" + encodeURIComponent(from || "") + "&to=" + encodeURIComponent(to || "");
         href = appendReportsContextToHref(href);
+        try { console.log("[reports][derived-calc-done]", { page: "reports", target: "navigation", href: href }); } catch(eDoneLog) {}
         location.href = href;
     });
 }

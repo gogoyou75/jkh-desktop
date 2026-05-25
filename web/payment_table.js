@@ -1479,6 +1479,9 @@ if (parts.length) {
     const statusBox = qs("#paymentTableStatus") || qs("#paymentStatus") || qs("#paymentsStatus");
     if (statusBox) statusBox.textContent = "Итог устарел — нажмите Пересчитать.";
     try {
+      if (window.JKHSetSummaryStatus) window.JKHSetSummaryStatus((window.JKH_SUMMARY_STATUS && window.JKH_SUMMARY_STATUS.DIRTY) || "dirty", "PAYMENTS_CHANGED");
+    } catch(eSummaryDirty) {}
+    try {
       console.log("[payment-save][skip-full-recalc]", {
         abonentId: String(getAbonentId() || ""),
         reason: "ledger_mutation_runtime_cache_invalidated"
@@ -1492,18 +1495,27 @@ if (parts.length) {
 
   function replaceRowWithPersisted(row, oldTr){
     if (!oldTr || !oldTr.parentNode) return null;
-    var nextRow = Object.assign({}, row || {});
+    var persistedRows = getPayments();
+    var persisted = (Array.isArray(persistedRows) ? persistedRows : []).find(function(x){ return String(x && x.id) === String(row && row.id); }) || row;
+    var nextRow = Object.assign({}, persisted || {});
     nextRow.pay_main = "";
     nextRow.pay_penalty = "";
     nextRow.total = "";
     nextRow.total_debt = "";
     var newTr = makeRow(nextRow);
     oldTr.parentNode.replaceChild(newTr, oldTr);
+    try { console.log("[payment-table][row-refresh-no-recalc]", { abonentId: String(getAbonentId() || ""), rowId: String(row && row.id || "") }); } catch(eLog) {}
     return newTr;
   }
 
   function oldTrRemoveNoRecalc(tr){
+    var ym = tr && tr.dataset ? String(tr.dataset.ym || "") : "";
+    var rowId = tr && tr.dataset ? String(tr.dataset.rowId || "") : "";
     if (tr && tr.parentNode) tr.parentNode.removeChild(tr);
+    try {
+      console.log("[payment-table][row-delete-no-recalc]", { abonentId: String(getAbonentId() || ""), rowId: rowId });
+      console.log("[payment-table][month-refresh-no-recalc]", { abonentId: String(getAbonentId() || ""), ym: ym });
+    } catch(eLog) {}
     markPaymentRuntimeStaleUI(null);
   }
 
@@ -2750,6 +2762,10 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
     if (opts.mode) __paymentTableMode = String(opts.mode);
     if (opts.force) __paymentTableRenderedSignature = "";
     const reason = String(opts.reason || opts.mode || "scheduled");
+    if (reason.toLowerCase().indexOf("import") >= 0) {
+      __paymentTableRenderedSignature = "";
+      try { console.log("[payment-table][import-render-no-recalc]", { reason: reason, mode: __paymentTableMode }); } catch(eImportLog) {}
+    }
     if (__paymentTableLoadScheduled) {
       try { console.log("[payment-table][init-skipped-inflight]", { reason: String(reason || "scheduled"), phase: "scheduled" }); } catch(e) {}
       return;

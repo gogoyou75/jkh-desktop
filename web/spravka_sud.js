@@ -27,6 +27,7 @@
 (function () {
   if (window.__SPRAVKA_SUD_JS_LOADED__) return;
   window.__SPRAVKA_SUD_JS_LOADED__ = true;
+  window.JKH_REPORT_MODE = "derived_calculation";
   let __spravkaReturnCardPeriodContext = null;
 
   function $(id){ return document.getElementById(id); }
@@ -45,11 +46,7 @@
   }
 
   function storeSet(key, value, ownerId){
-    try {
-      if (window.JKHStore && typeof window.JKHStore.setRaw === "function") {
-        return JKHStore.setRaw(key, value, ownerId);
-      }
-    } catch (e) {}
+    try { console.warn("[reports][write-blocked-readonly]", { page: "spravka_sud", key: String(key || ""), ownerId: String(ownerId || "") }); } catch (e) {}
     return false;
   }
 
@@ -553,6 +550,20 @@
     return result;
   }
 
+  function showDerivedProgress(text){
+    let el = document.getElementById("spravkaDerivedProgress");
+    if (!el) {
+      el = document.createElement("div");
+      el.id = "spravkaDerivedProgress";
+      el.style.cssText = "width:960px;margin:8px auto;padding:8px 10px;border:1px solid #d9e2ef;background:#f7fbff;color:#345;";
+      const anchor = document.querySelector(".spravka-actions") || document.body.firstChild;
+      if (anchor && anchor.parentNode) anchor.parentNode.insertBefore(el, anchor.nextSibling);
+      else document.body.appendChild(el);
+    }
+    el.textContent = String(text || "");
+    el.style.display = text ? "block" : "none";
+  }
+
   function configureBackToCardPeriod(ctx, abonent, period){
     const back = $("backToCard");
     const href = buildCardReturnUrl(ctx, abonent, period);
@@ -625,6 +636,9 @@
 
       try {
       const ctx = getContext();
+      showDerivedProgress("Формирование справки...");
+      try { console.log("[reports][readonly-open]", { page: "spravka_sud", source: "url", abonentId: ctx.abonentId, uid: ctx.uid || "", from: ctx.from || "", to: ctx.to || "", writes: false }); } catch(eReadonlyLog) {}
+      try { console.log("[reports][derived-calc-start]", { page: "spravka_sud", abonentId: ctx.abonentId }); } catch(eDerivedStart) {}
       setupBackToCard(ctx);
       if (!ctx.abonentId) {
         showFatal("Не передан параметр abonent в URL.");
@@ -933,6 +947,8 @@
       setText("sumMainDebt", moneyDot(finalTotals.principal));
       setText("sumDebtPenalty", moneyDot(finalTotals.penaltyDebt));
       setText("sumTotalDebt", moneyDot(finalTotals.total));
+      showDerivedProgress("");
+      try { console.log("[reports][derived-calc-done]", { page: "spravka_sud", abonentId: ctx.abonentId, rows: Array.isArray(viewRows) ? viewRows.length : 0 }); } catch(eDerivedDone) {}
 
       setText("mainDebt", moneyDot(finalTotals.principal));
       setText("peniDebt", moneyDot(finalTotals.penaltyDebt));
@@ -944,9 +960,7 @@
         const stored = storeGet(keyNotes, ctx.readOwner);
         if (stored !== null) notesEl.value = stored;
         notesEl.addEventListener("input", function(){
-          if (window.JKHStore && typeof JKHStore.setRaw === "function") {
-            JKHStore.setRaw(keyNotes, notesEl.value, ctx.readOwner);
-          }
+          try { console.warn("[reports][write-blocked-readonly]", { page: "spravka_sud", key: keyNotes, ownerId: ctx.readOwner, source: "notes" }); } catch(e) {}
         });
       }
 

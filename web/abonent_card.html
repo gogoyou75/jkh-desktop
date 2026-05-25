@@ -2994,10 +2994,11 @@ function isValidPeriod(from, to){
 
 function __normalizeSummaryStatus(status){
     const s = String(status || "missing").trim().toLowerCase();
-    return (s === "fresh" || s === "dirty" || s === "missing" || s === "error") ? s : "error";
+    return (s === "fresh" || s === "dirty" || s === "missing" || s === "error" || s === "calculating") ? s : "error";
 }
 
 function __summaryStatusText(status){
+    if (status === "calculating") return "calculating - расчет выполняется";
     if (status === "fresh") return "fresh — итог актуален";
     if (status === "dirty") return "dirty — требуется пересчёт";
     if (status === "missing") return "missing — итог ещё не создан";
@@ -3006,6 +3007,7 @@ function __summaryStatusText(status){
 }
 
 function __summaryWarningText(status){
+    if (status === "calculating") return "Идет расчет. При ошибке итоги не заменяются нулевыми значениями.";
     if (status === "dirty") return "Итог устарел после изменений. Старые totals не показываются как свежие. Нажмите «Пересчитать», чтобы обновить summary.";
     if (status === "missing") return "Итог ещё не создан. Старые totals не подставляются. Нажмите «Пересчитать», чтобы создать summary.";
     if (status === "error") return "Расчёт summary невозможен. Проверьте причину ошибки и выполните «Пересчитать» после исправления данных.";
@@ -3032,7 +3034,15 @@ function renderAbonentSummaryStatus(status, reason){
         warningEl.style.display = text ? "block" : "none";
         warningEl.className = "summary-warning" + (normalized === "error" ? " summary-error" : "");
     }
+    try {
+        console.log("[summary][status-set]", { status: normalized, reason: String(reason || "") });
+        if (normalized === "calculating") console.log("[summary][calculating]", { reason: String(reason || "") });
+        if (normalized === "fresh") console.log("[summary][fresh]", { reason: String(reason || "") });
+        if (normalized === "error") console.log("[summary][error]", { reason: String(reason || "") });
+    } catch(eStatusLog) {}
 }
+
+window.JKHSetSummaryStatus = renderAbonentSummaryStatus;
 
 async function loadAbonentSummaryStatus(){
     const { id, a } = getCurrentAbonent();
@@ -3212,6 +3222,7 @@ function bindCalcButtons(){
         }
 
         runBtn.disabled = true;
+        renderAbonentSummaryStatus((window.JKH_SUMMARY_STATUS && window.JKH_SUMMARY_STATUS.CALCULATING) || "calculating", "EXPLICIT_RECALC");
         runBtn.textContent = "Пересчёт…";
 
         try {
@@ -3223,6 +3234,7 @@ function bindCalcButtons(){
             }
 
             if (!uidResult || uidResult.ok !== true || !uidResult.uid) {
+                renderAbonentSummaryStatus("error", "UID_NOT_SAVED");
                 alert("Период расчёта не сохранён: UID абонента не сохранён.");
                 return;
             }
