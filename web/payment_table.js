@@ -1417,6 +1417,93 @@ if (parts.length) {
     return readPaymentLedgerRowsCached(key);
   }
 
+  const __paymentDraftRowsByAbonent = new Map();
+
+  function draftRowsKey(){
+    return String(getAbonentId() || "");
+  }
+
+  function getPaymentDraftRows(){
+    const key = draftRowsKey();
+    if (!key) return [];
+    const rows = __paymentDraftRowsByAbonent.get(key);
+    return Array.isArray(rows) ? rows : [];
+  }
+
+  function setPaymentDraftRows(rows){
+    const key = draftRowsKey();
+    if (!key) return;
+    __paymentDraftRowsByAbonent.set(key, Array.isArray(rows) ? rows : []);
+  }
+
+  function isPaymentDraftRow(row){
+    return !!(row && row.__draft === true);
+  }
+
+  function readPaymentRowForEdit(rowId){
+    const drafts = getPaymentDraftRows();
+    const draft = drafts.find(x => String(x.id) === String(rowId));
+    if (draft) return { row: draft, draft: true, arr: getPayments(), drafts: drafts };
+    const arr = getPayments();
+    return { row: arr.find(x => String(x.id) === String(rowId)) || null, draft: false, arr: arr, drafts: drafts };
+  }
+
+  function showRowSoftMessage(tr, message, tone){
+    if (!tr) return;
+    var cell = qs(".id-cell", tr) || tr.lastElementChild;
+    if (!cell) return;
+    var box = qs(".payment-row-status", cell);
+    if (!box) {
+      box = document.createElement("div");
+      box.className = "payment-row-status";
+      box.style.cssText = "margin-top:4px;font-size:11px;line-height:1.2;";
+      cell.appendChild(box);
+    }
+    box.textContent = String(message || "");
+    box.style.color = tone === "ok" ? "#116611" : (tone === "warn" ? "#7a5300" : "#555");
+  }
+
+  function normalizeDraftPaymentRowForSave(row){
+    var copy = Object.assign({}, row || {});
+    delete copy.__draft;
+    delete copy.__draftStatus;
+    delete copy.__draftMessage;
+    normalizePaymentRow(copy);
+    return copy;
+  }
+
+  async function trySaveDraftRowIfValid(tr, rowId){
+    const edit = readPaymentRowForEdit(rowId);
+    const row = edit.row;
+    if (!row || !edit.draft) return false;
+    const paid = r2(Math.max(0, toNum(row.paid)));
+    if (paid <= 0.0000001) {
+      showRowSoftMessage(tr, "Черновик: укажите сумму оплаты.", "warn");
+      return false;
+    }
+    if (!String(row.paid_date || "").trim()) {
+      showRowSoftMessage(tr, "Черновик: дата оплаты нужна для сохранения.", "warn");
+      return false;
+    }
+
+    const persisted = normalizeDraftPaymentRowForSave(row);
+    const arr = getPayments();
+    const next = arr.filter(x => String(x.id) !== String(persisted.id));
+    next.push(persisted);
+    try {
+      showRowSoftMessage(tr, "Сохранение оплаты...", "warn");
+      await savePaymentsAndFlush(next);
+      setPaymentDraftRows(getPaymentDraftRows().filter(x => String(x.id) !== String(rowId)));
+      showRowSoftMessage(tr, "Оплата сохранена", "ok");
+      setLastAddedPaymentId(persisted.id);
+      loadPaymentTable();
+      return true;
+    } catch(e) {
+      showRowSoftMessage(tr, "Ошибка сохранения оплаты.", "warn");
+      throw e;
+    }
+  }
+
 
   /* =========================================================
      DATA CONTRACT (PaymentRow) — нормализация перед сохранением
@@ -1540,6 +1627,10 @@ if (parts.length) {
         alert("Ошибка сохранения оплат. Данные НЕ записаны на сервер.");
       }
       throw e;
+    } finally {
+      try {
+        if (window.JKHBusy && typeof JKHBusy.hide === "function") JKHBusy.hide();
+      } catch(eHide) {}
     }
   }
 
@@ -2435,10 +2526,12 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
       if (!tbody) return;
 
       let arr;
+      let draftRows = [];
       const loadStartedAt = perfNow();
       try { console.time('[payment-table] load-ledger'); } catch(e) {}
       try {
         arr = getPayments();
+        draftRows = getPaymentDraftRows();
       } catch (e) {
         if (e && e.code === "LEDGER_JSON_INVALID") {
           tbody.innerHTML = '<tr><td colspan="20" style="color:#b00020;font-weight:700;">' + LEDGER_FATAL_MESSAGE + '</td></tr>';
@@ -2466,12 +2559,18 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
           normalizePeriod(r);
           calcRowBase(r);
         });
+        draftRows.forEach(r => {
+          normalizePaidDateISO(r);
+          if (String(r?.paid_date || "").trim()) syncYearMonthFromPaidDate(r);
+          normalizePeriod(r);
+        });
       } finally {
         try { console.timeEnd('[payment-table] normalize-rows'); } catch(e) {}
         perfLog('normalize', normalizeStartedAt);
       }
 
-      const view = applyResponsibilityRangeToView(applyCalcFilter(arr, periodActive, selectedPeriod)).slice();
+      const displayRows = arr.concat(draftRows);
+      const view = applyResponsibilityRangeToView(applyCalcFilter(displayRows, periodActive, selectedPeriod)).slice();
       if (periodActive && selectedPeriod) {
         try {
           console.log("[payment-table][period-filter-applied-on-load]", {
@@ -2484,11 +2583,12 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
           });
         } catch(ePeriodLog) {}
       }
-      const baseRows = runningTotalsBaseRows(view);
+      const baseRows = runningTotalsBaseRows(view.filter(function(r){ return !isPaymentDraftRow(r); }));
       const runtimeLedgerVersion = (window.Data && Data.computeLedgerRuntimeVersion) ? String(Data.computeLedgerRuntimeVersion(getAbonentId()) || "") : "";
+      const draftSignature = ledgerSignatureForRows(draftRows);
       const effectiveSignature = periodActive && selectedPeriod
-        ? (ledgerSignatureForRows(baseRows) + "|period:" + String(selectedPeriod.from || "") + ":" + String(selectedPeriod.to || ""))
-        : ledgerSignatureForRows(arr);
+        ? (ledgerSignatureForRows(baseRows) + "|period:" + String(selectedPeriod.from || "") + ":" + String(selectedPeriod.to || "") + "|draft:" + draftSignature)
+        : (ledgerSignatureForRows(arr) + "|draft:" + draftSignature);
       const signature = effectiveSignature + "::" + runtimeCacheSignature(runtimeLedgerVersion, periodActive, selectedPeriod);
       if (__paymentTableRenderedSignature && __paymentTableRenderedSignature === signature) {
         try { console.log("[payment-table][init-skipped-same-signature]", { abonentId: String(getAbonentId() || ""), periodActive: !!periodActive, selectedPeriod: selectedPeriod || null }); } catch(e) {}
@@ -2656,6 +2756,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
     const _hasAccrued = toNum(r?.accrued ?? 0) > 0.0000001;
     const _hasPaid = toNum(r?.paid ?? 0) > 0.0000001;
     tr.classList.add(_hasAccrued ? "row-accrual" : (_hasPaid ? "row-payment" : "row-other"));
+    if (isPaymentDraftRow(r)) tr.classList.add("row-draft");
 
     const usePeriod = !!r.use_period;
     const lockPeriod = false; // period selects must stay editable in manual mode
@@ -2720,9 +2821,10 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
 
       <td class="id-cell">
         <div style="display:flex; gap:6px; align-items:center; justify-content:space-between;">
-          <span>${r.id}</span>
+          <span>${isPaymentDraftRow(r) ? "draft" : r.id}</span>
           <button class="row-del" type="button" title="Удалить" style="${(locked || _hasAccrued) ? "display:none" : ""}">✖</button>
         </div>
+        ${isPaymentDraftRow(r) ? '<div class="payment-row-status" style="margin-top:4px;font-size:11px;line-height:1.2;color:#7a5300;">Черновик не сохранён</div>' : ''}
       </td>
     `;
 
@@ -2752,11 +2854,23 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
       }
     } catch(e) { console.error(e); throw e; }
 
+    function editableRow(){
+      return readPaymentRowForEdit(rowId);
+    }
+
+    async function saveEditable(arr, edit){
+      if (edit && edit.draft) return trySaveDraftRowIfValid(tr, rowId);
+      await savePaymentsAndFlush(arr);
+      showRowSoftMessage(tr, "Оплата сохранена", "ok");
+      return true;
+    }
+
     const toggle = qs(".toggle-period", tr);
     if (toggle) {
       toggle.addEventListener("click", async () => {
-        const arr = getPayments();
-        const row = arr.find(x => String(x.id) === String(rowId));
+        const edit = editableRow();
+        const arr = edit.arr;
+        const row = edit.row;
         if (!row) return;
 
         if (toggle.tagName === "BUTTON") {
@@ -2764,7 +2878,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
           // default period = month/year строки (но НЕ блокируем редактирование)
           enforcePeriodSameAsYm(row);
           normalizePeriod(row);
-          await savePaymentsAndFlush(arr);
+          await saveEditable(arr, edit);
           loadPaymentTable();
           return;
         }
@@ -2776,7 +2890,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
             enforcePeriodSameAsYm(row);
             normalizePeriod(row);
           }
-          await savePaymentsAndFlush(arr);
+          await saveEditable(arr, edit);
           loadPaymentTable();
         }
       });
@@ -2788,8 +2902,9 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
 
       if (needFullRerender) {
         el.addEventListener("change", async () => {
-          const arr = getPayments();
-          const row = arr.find(x => String(x.id) === String(rowId));
+          const edit = editableRow();
+          const arr = edit.arr;
+          const row = edit.row;
           if (!row) return;
 
           row[field] = el.value;
@@ -2797,7 +2912,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
           // period strings (period_from/period_to) должны обновиться
           normalizePeriod(row);
 
-          await savePaymentsAndFlush(arr);
+          await saveEditable(arr, edit);
           loadPaymentTable();
         });
         return;
@@ -2807,13 +2922,14 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
       // CRITICAL: type=date — никаких перерисовок на input (иначе календарь сбивается).
       if (field === "paid_date") {
         el.addEventListener("change", async () => {
-          const arr = getPayments();
-          const row = arr.find(x => String(x.id) === String(rowId));
+          const edit = editableRow();
+          const arr = edit.arr;
+          const row = edit.row;
           if (!row) return;
 
           row[field] = el.value;
           syncYearMonthFromPaidDate(row);
-          await savePaymentsAndFlush(arr);
+          await saveEditable(arr, edit);
 
           // Перерисовываем ТОЛЬКО после выбора даты
           loadPaymentTable();
@@ -2822,8 +2938,9 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
       }
 
       el.addEventListener("input", async () => {
-        const arr = getPayments();
-        const row = arr.find(x => String(x.id) === String(rowId));
+        const edit = editableRow();
+        const arr = edit.arr;
+        const row = edit.row;
         if (!row) return;
 
         row[field] = el.value;
@@ -2842,12 +2959,20 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
   // НЕ форматируем до 0.00 на каждый символ (только на blur)
 }
 // ✅ ВОТ ТУТ ИСПРАВЛЕНИЕ: больше НЕ loadPaymentTable() на каждый символ
-          await savePaymentsAndFlush(arr);
-          refreshRunningTotalsInDOM();
+          if (edit.draft) {
+            if (toNum(row.paid) > 0.0000001 && !String(row.paid_date || "").trim()) {
+              showRowSoftMessage(tr, "Черновик: дата оплаты нужна для сохранения.", "warn");
+            } else {
+              showRowSoftMessage(tr, "Черновик не сохранён", "warn");
+            }
+          } else {
+            await savePaymentsAndFlush(arr);
+            refreshRunningTotalsInDOM();
+          }
           return;
         }
 
-        await savePaymentsAndFlush(arr);
+        await saveEditable(arr, edit);
       });
     });
 
@@ -2863,12 +2988,17 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
       try { paidEl.select(); } catch(e) {}
     });
     paidEl.addEventListener("blur", async () => {
-      const arr = getPayments();
-      const row = arr.find(x => String(x.id) === String(rowId));
+      const edit = editableRow();
+      const arr = edit.arr;
+      const row = edit.row;
       if (!row) return;
       paidEl.value = fmtMoneyHuman(row.paid);
-      await savePaymentsAndFlush(arr);
-      refreshRunningTotalsInDOM();
+      if (edit.draft) {
+        await trySaveDraftRowIfValid(tr, rowId);
+      } else {
+        await saveEditable(arr, edit);
+        refreshRunningTotalsInDOM();
+      }
     });
 
     paidEl.addEventListener("keydown", (e) => {
@@ -2884,8 +3014,9 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
   if (srcSel) {
     srcSel.addEventListener('change', async () => {
       let val = String(srcSel.value || '').trim();
-      const arr = getPayments();
-      const row = arr.find(x => String(x.id) === String(rowId));
+      const edit = editableRow();
+      const arr = edit.arr;
+      const row = edit.row;
       if (!row) return;
 
       if (val === '__new__') {
@@ -2902,13 +3033,13 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
           savePaymentSources(sources);
         }
         row.source = n;
-        await savePaymentsAndFlush(arr);
+        await saveEditable(arr, edit);
         loadPaymentTable();
         return;
       }
 
       row.source = val || (ensurePaymentSources()[0] || '');
-      await savePaymentsAndFlush(arr);
+      await saveEditable(arr, edit);
     });
   }
 
@@ -2916,13 +3047,22 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
 
     const noteArea = qs(".note-inline", tr);
     if (noteArea) {
-      noteArea.addEventListener("input", () => saveNoteDebounced(rowId, noteArea.value));
+      noteArea.addEventListener("input", () => {
+        const edit = editableRow();
+        if (edit.draft && edit.row) {
+          edit.row.note = noteArea.value || "";
+          showRowSoftMessage(tr, "Черновик не сохранён", "warn");
+          return;
+        }
+        saveNoteDebounced(rowId, noteArea.value);
+      });
       noteArea.addEventListener("blur", async () => {
-        const arr = getPayments();
-        const row = arr.find(x => String(x.id) === String(rowId));
+        const edit = editableRow();
+        const arr = edit.arr;
+        const row = edit.row;
         if (!row) return;
         row.note = noteArea.value || "";
-        await savePaymentsAndFlush(arr);
+        await saveEditable(arr, edit);
       });
     }
 
@@ -2930,6 +3070,11 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
     if (delBtn) {
       delBtn.addEventListener("click", async () => {
         if (!confirm("Удалить оплату?")) return;
+        if (isPaymentDraftRow(rowSnapshot)) {
+          setPaymentDraftRows(getPaymentDraftRows().filter(x => String(x.id) !== String(rowId)));
+          loadPaymentTable();
+          return;
+        }
         let arr = getPayments();
         arr = arr.filter(x => String(x.id) !== String(rowId));
         await savePaymentsAndFlush(arr);
@@ -3262,7 +3407,9 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
 
   window.addPaymentRow = async function addPaymentRow() {
     const arr = getPayments();
-    const nextId = arr.length ? Math.max(...arr.map(x => Number(x.id) || 0)) + 1 : 1;
+    const drafts = getPaymentDraftRows();
+    const allKnownRows = arr.concat(drafts);
+    const nextId = allKnownRows.length ? Math.max(...allKnownRows.map(x => Number(x.id) || 0)) + 1 : 1;
 
     const d = new Date();
     const defM = pad2(d.getMonth() + 1);
@@ -3290,18 +3437,20 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
       note: "",
       pay_main: 0,
       pay_penalty: 0,
-      total_debt: 0
+      total_debt: 0,
+      __draft: true,
+      __draftStatus: "local"
     };
 
-    arr.push(row);
-    await savePaymentsAndFlush(arr);
+    drafts.push(row);
+    setPaymentDraftRows(drafts);
 
     // ✅ Итог карточки (Всего задолженность = Долг + Пени)
     JKH_RecalcAbonentTotalDebtCard();
     // ✅ Заголовки колонок
     JKH_RenameDebtPenaltyHeaders();
     setLastAddedPaymentId(nextId);
-    loadPaymentTable();
+    loadPaymentTable("add-payment-draft");
   };
 
   document.addEventListener("DOMContentLoaded", async () => {

@@ -3334,12 +3334,7 @@ function bindCalcButtons(){
                     alert("Период расчёта не сохранён: не найден canonical UID key.");
                     return;
                 }
-                if (!saveCalcPeriod(from, to)) {
-                    __logCardPeriodSaved(getCalcPeriodStorageMeta(), { ok: false, reason: saveCalcPeriod.lastError || "CALC_PERIOD_SAVE_FAILED", reportReadback: null });
-                    alert("Период расчёта не сохранён в canonical UID key. Справка не будет открыта.");
-                    return;
-                }
-                reportPeriodResult = saveReportPeriodForSpravka(from, to, { source: "abonent_card.reports" });
+                reportPeriodResult = { ok: true, reportKey: getReportPeriodStorageKey(getCalcPeriodStorageMeta()), reason: "URL_ONLY" };
                 __logCardPeriodSaved(getCalcPeriodStorageMeta(), reportPeriodResult);
                 if (!reportPeriodResult.ok) {
                     alert("РџРµСЂРёРѕРґ РґР»СЏ СЃРїСЂР°РІРєРё РЅРµ СЃРѕС…СЂР°РЅС‘РЅ: " + String(reportPeriodResult.reason || "REPORT_PERIOD_READBACK_FAILED") + " (" + String(reportPeriodResult.reportKey || "report_period_uid_<uid>") + ").");
@@ -3349,7 +3344,6 @@ function bindCalcButtons(){
                 console.warn("[calc-period][save-skipped-invalid-before-reports]", { abonentId: String(id || ""), from: from || "", to: to || "" });
             }
         }
-        if (!confirmCalcPeriodSaved()) return;
         const meta = getCalcPeriodStorageMeta();
         // ✅ FIX: forward active db key (if present) to reports page
         // to keep correct data when multiple bases exist in localStorage.
