@@ -1,30 +1,23 @@
 import hashlib
 import json
 import os
+import re
 import sys
 import tempfile
 import unittest
 from pathlib import Path
 from sqlalchemy import create_engine
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from _repo_paths import find_repo_file
 import app as app_module
 
 
 class AbonentSummaryRebuildTest(unittest.TestCase):
     @staticmethod
     def _find_repo_file(*parts: str):
-        tests_dir = Path(__file__).resolve().parent
-        backend_dir = tests_dir.parent
-        repo_root = backend_dir.parent
-        candidates = [
-            repo_root.joinpath(*parts),
-            Path("/app").joinpath(*parts),
-        ]
-        for candidate in candidates:
-            if candidate.exists():
-                return candidate
-        return None
+        return find_repo_file(*parts)
 
     @classmethod
     def setUpClass(cls):
@@ -458,8 +451,7 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
 
     def test_data_write_payment_ledger_blocks_account_number_write_path(self):
         data_path = self._find_repo_file("web", "data.js")
-        if data_path is None:
-            self.skipTest("web/data.js is unavailable in this runtime image")
+        self.assertIsNotNone(data_path)
         src = data_path.read_text(encoding="utf-8")
 
         self.assertIn("LS_LEDGER_WRITE_FORBIDDEN", src)
@@ -468,8 +460,7 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
 
     def test_rebuild_does_not_touch_calc_engine_js(self):
         calc_engine_path = self._find_repo_file("web", "calc_engine.js")
-        if calc_engine_path is None:
-            self.skipTest("web/calc_engine.js is unavailable in this runtime image")
+        self.assertIsNotNone(calc_engine_path)
         before = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
         with app_module.app.app_context():
             self._add_user("owner-calc-engine")

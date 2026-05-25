@@ -38,6 +38,7 @@ services:
     container_name: jkh_api
     volumes:
       - ./backend:/app
+      - ./web:/app/web:ro
     env_file:
       - .env
     environment:
