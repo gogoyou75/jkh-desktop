@@ -1,30 +1,23 @@
 import hashlib
 import json
 import os
+import re
 import sys
 import tempfile
 import unittest
 from pathlib import Path
 from sqlalchemy import create_engine
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from _repo_paths import find_repo_file
 import app as app_module
 
 
 class AbonentSummaryRebuildTest(unittest.TestCase):
     @staticmethod
     def _find_repo_file(*parts: str):
-        tests_dir = Path(__file__).resolve().parent
-        backend_dir = tests_dir.parent
-        repo_root = backend_dir.parent
-        candidates = [
-            repo_root.joinpath(*parts),
-            Path("/app").joinpath(*parts),
-        ]
-        for candidate in candidates:
-            if candidate.exists():
-                return candidate
-        return None
+        return find_repo_file(*parts)
 
     @classmethod
     def setUpClass(cls):
@@ -95,7 +88,7 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
             "summary_status": "fresh",
             "summary_reason": "OK",
             "period": {"from": "2026-01-01", "to": "2026-01-31"},
-            "totals": {"principal": principal, "penalty": penalty, "total": total},
+            "totals": {"principal": principal, "debt": total, "penalty": penalty, "total": total, "accrued": principal, "paid": 0},
             "calc_engine_version": "test",
             "generated_at": "2026-02-01T00:00:00Z",
         }
@@ -142,7 +135,12 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
             payload = json.loads(row.summary_json)
             self.assertEqual(payload["summary_status"], "fresh")
             self.assertEqual(payload["summary_reason"], "OK")
-            self.assertEqual(payload["totals"], {"principal": 10, "penalty": 2, "total": 12})
+            self.assertEqual(payload["totals"]["principal"], 10)
+            self.assertEqual(payload["totals"]["debt"], 12)
+            self.assertEqual(payload["totals"]["penalty"], 2)
+            self.assertEqual(payload["totals"]["total"], 12)
+            self.assertEqual(payload["totals"]["accrued"], 10)
+            self.assertEqual(payload["totals"]["paid"], 0)
 
     def test_single_upsert_preserves_fresh_summary_metadata_fields(self):
         with app_module.app.app_context():
@@ -423,10 +421,37 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
             self.assertNotIn("total_debt", payload)
             self.assertNotIn("total_penalty", payload)
 
+    def test_rebuild_without_body_does_not_pretend_financial_recalc(self):
+        with app_module.app.app_context():
+            self._add_user("owner-rebuild-no-financial")
+            self._put_abonents("owner-rebuild-no-financial", {
+                "1001": {"uid": "uid_rebuild_no_financial_1001", "id": "1001"},
+            })
+            app_module.db.session.add(app_module.AbonentSummary(
+                owner_id="owner-rebuild-no-financial",
+                abonent_id="1001",
+                account_uid="uid_rebuild_no_financial_1001",
+                account_number="1001",
+                summary_json=json.dumps({"summary_status": "fresh", "summary_reason": "OK"}),
+            ))
+            app_module.db.session.commit()
+        self._login("owner-rebuild-no-financial")
+
+        response = self.client.post("/api/abonent_summary/rebuild")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["counters"], {"created": 0, "updated": 1, "skipped": 0, "errors": 0})
+        with app_module.app.app_context():
+            payload = json.loads(app_module.AbonentSummary.query.one().summary_json)
+            self.assertEqual(payload["summary_status"], "missing")
+            self.assertEqual(payload["summary_reason"], "SUMMARY_NOT_BUILT")
+            self.assertNotIn("totals", payload)
+            self.assertNotIn("total_debt", payload)
+            self.assertNotEqual(payload.get("summary_status"), "fresh")
+
     def test_data_write_payment_ledger_blocks_account_number_write_path(self):
         data_path = self._find_repo_file("web", "data.js")
-        if data_path is None:
-            self.skipTest("web/data.js is unavailable in this runtime image")
+        self.assertIsNotNone(data_path)
         src = data_path.read_text(encoding="utf-8")
 
         self.assertIn("LS_LEDGER_WRITE_FORBIDDEN", src)
@@ -435,8 +460,7 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
 
     def test_rebuild_does_not_touch_calc_engine_js(self):
         calc_engine_path = self._find_repo_file("web", "calc_engine.js")
-        if calc_engine_path is None:
-            self.skipTest("web/calc_engine.js is unavailable in this runtime image")
+        self.assertIsNotNone(calc_engine_path)
         before = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
         with app_module.app.app_context():
             self._add_user("owner-calc-engine")
@@ -645,6 +669,324 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
             row = app_module.AbonentSummary.query.one()
             self.assertEqual(json.loads(row.summary_json), original_summary)
 
+    def test_index_api_maps_legacy_calc_period_changed_dirty_to_missing(self):
+        with app_module.app.app_context():
+            self._add_user("owner-period-legacy-index")
+            self._put_abonents("owner-period-legacy-index", {
+                "1001": {"uid": "uid_period_legacy_index_1001", "id": "1001"},
+            })
+            app_module.db.session.add(app_module.AbonentSummary(
+                owner_id="owner-period-legacy-index",
+                abonent_id="1001",
+                account_uid="uid_period_legacy_index_1001",
+                account_number="1001",
+                summary_json=json.dumps({
+                    "summary_status": "dirty",
+                    "summary_reason": "CALC_PERIOD_CHANGED",
+                    "status": "dirty",
+                    "reason": "CALC_PERIOD_CHANGED",
+                }, sort_keys=True),
+            ))
+            app_module.db.session.commit()
+        self._login("owner-period-legacy-index")
+
+        response = self.client.get("/api/abonents?limit=10")
+
+        self.assertEqual(response.status_code, 200)
+        item = response.get_json()["items"][0]
+        self.assertEqual(item["summary_status"], "missing")
+        self.assertEqual(item["summary"]["summary_status"], "missing")
+        self.assertEqual(item["summary"]["summary_reason"], "CALC_PERIOD_CHANGED")
+
+        dirty_response = self.client.get("/api/abonents?limit=10&summary_status=dirty")
+        missing_response = self.client.get("/api/abonents?limit=10&summary_status=missing")
+        self.assertEqual(dirty_response.status_code, 200)
+        self.assertEqual(missing_response.status_code, 200)
+        self.assertEqual(dirty_response.get_json()["items"], [])
+        self.assertEqual(len(missing_response.get_json()["items"]), 1)
+
+    def test_invalid_fresh_without_totals_is_error_for_index_and_batch_job(self):
+        with app_module.app.app_context():
+            self._add_user("owner-invalid-fresh-batch")
+            self._put_abonents("owner-invalid-fresh-batch", {
+                "1001": {"uid": "uid_invalid_fresh_batch_1001", "id": "1001"},
+            })
+            app_module.db.session.add(app_module.AbonentSummary(
+                owner_id="owner-invalid-fresh-batch",
+                abonent_id="1001",
+                account_uid="uid_invalid_fresh_batch_1001",
+                account_number="1001",
+                summary_json=json.dumps({
+                    "summary_status": "fresh",
+                    "summary_reason": "OK",
+                    "status": "fresh",
+                    "reason": "OK",
+                }, sort_keys=True),
+            ))
+            app_module.db.session.commit()
+        self._login("owner-invalid-fresh-batch")
+
+        index_response = self.client.get("/api/abonents?limit=10")
+
+        self.assertEqual(index_response.status_code, 200)
+        index_item = index_response.get_json()["items"][0]
+        self.assertEqual(index_item["summary_status"], "error")
+        self.assertEqual(index_item["summary"]["summary_status"], "error")
+        self.assertEqual(index_item["summary"]["summary_reason"], "FRESH_TOTALS_MISSING")
+        self.assertNotIn("totals", index_item["summary"])
+
+        create_response = self.client.post("/api/abonent_summary/recalc_batch_job", json={
+            "uids": ["uid_invalid_fresh_batch_1001"],
+            "reason": "MANUAL_RECALC",
+        })
+        self.assertEqual(create_response.status_code, 200)
+        job_id = create_response.get_json()["job_id"]
+
+        run_response = self.client.post(f"/api/abonent_summary/recalc_batch_job/{job_id}/run")
+
+        self.assertEqual(run_response.status_code, 200)
+        payload = run_response.get_json()
+        self.assertEqual(payload["processed"], 1)
+        self.assertEqual(payload["fresh"], 0)
+        self.assertEqual(payload["error"], 1)
+        self.assertEqual(payload["items"][0]["summary_status"], "error")
+        self.assertEqual(payload["items"][0]["summary_reason"], "FRESH_TOTALS_MISSING")
+
+    def test_rebuild_rejects_period_summary_payload(self):
+        with app_module.app.app_context():
+            self._add_user("owner-period-summary-reject")
+            self._put_abonents("owner-period-summary-reject", {
+                "1001": {"uid": "uid_period_summary_reject_1001", "id": "1001"},
+            })
+            app_module.db.session.commit()
+        self._login("owner-period-summary-reject")
+
+        summary = self._fresh_summary(100, 5, 105)
+        summary["summary_scope"] = "period"
+        response = self.client.post("/api/abonent_summary/rebuild", json={
+            "account_uid": "uid_period_summary_reject_1001",
+            "summary": summary,
+        })
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json()["error"], "period_summary_not_allowed")
+        with app_module.app.app_context():
+            self.assertEqual(app_module.AbonentSummary.query.count(), 0)
+
+    def test_rebuild_masks_full_summary_payload_with_report_period(self):
+        with app_module.app.app_context():
+            self._add_user("owner-full-summary-report-period")
+            self._put_abonents("owner-full-summary-report-period", {
+                "1001": {
+                    "uid": "uid_full_summary_report_period_1001",
+                    "id": "1001",
+                    "calcStartDate": "2020-01-01",
+                    "calcEndDate": "2026-05-22",
+                },
+            })
+            app_module.db.session.commit()
+        self._login("owner-full-summary-report-period")
+
+        summary = self._fresh_summary(100, 5, 105)
+        summary["summary_scope"] = "full"
+        summary["calculation_mode"] = "FULL_SUMMARY_REBUILD"
+        summary["period"] = {"from": "2026-01-01", "to": "2026-01-31"}
+        response = self.client.post("/api/abonent_summary/rebuild", json={
+            "account_uid": "uid_full_summary_report_period_1001",
+            "summary": summary,
+        })
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["summary_status"], "missing")
+        self.assertEqual(response.get_json()["summary_reason"], "PERIOD_SUMMARY_LEGACY")
+        with app_module.app.app_context():
+            stored = json.loads(app_module.AbonentSummary.query.one().summary_json)
+            self.assertEqual(stored["summary_status"], "missing")
+            self.assertEqual(stored["summary_reason"], "PERIOD_SUMMARY_LEGACY")
+            self.assertNotIn("totals", stored)
+
+    def test_fresh_with_required_totals_stays_fresh_for_index_and_batch_job(self):
+        with app_module.app.app_context():
+            self._add_user("owner-valid-fresh-batch")
+            self._put_abonents("owner-valid-fresh-batch", {
+                "1001": {"uid": "uid_valid_fresh_batch_1001", "id": "1001"},
+            })
+            app_module.db.session.add(app_module.AbonentSummary(
+                owner_id="owner-valid-fresh-batch",
+                abonent_id="1001",
+                account_uid="uid_valid_fresh_batch_1001",
+                account_number="1001",
+                summary_json=json.dumps(self._fresh_summary(100, 5, 105), sort_keys=True),
+            ))
+            app_module.db.session.commit()
+        self._login("owner-valid-fresh-batch")
+
+        index_response = self.client.get("/api/abonents?limit=10")
+
+        self.assertEqual(index_response.status_code, 200)
+        index_item = index_response.get_json()["items"][0]
+        self.assertEqual(index_item["summary_status"], "fresh")
+        self.assertEqual(index_item["summary"]["summary_status"], "fresh")
+        self.assertEqual(index_item["summary"]["totals"]["debt"], 105)
+        self.assertEqual(index_item["summary"]["totals"]["penalty"], 5)
+        self.assertEqual(index_item["summary"]["totals"]["accrued"], 100)
+        self.assertEqual(index_item["summary"]["totals"]["paid"], 0)
+
+        create_response = self.client.post("/api/abonent_summary/recalc_batch_job", json={
+            "uids": ["uid_valid_fresh_batch_1001"],
+            "reason": "MANUAL_RECALC",
+        })
+        self.assertEqual(create_response.status_code, 200)
+        job_id = create_response.get_json()["job_id"]
+
+        run_response = self.client.post(f"/api/abonent_summary/recalc_batch_job/{job_id}/run")
+
+        self.assertEqual(run_response.status_code, 200)
+        payload = run_response.get_json()
+        self.assertEqual(payload["processed"], 1)
+        self.assertEqual(payload["fresh"], 1)
+        self.assertEqual(payload["error"], 0)
+        self.assertEqual(payload["items"][0]["summary_status"], "fresh")
+
+    def test_period_summary_is_ignored_by_index_transport(self):
+        with app_module.app.app_context():
+            self._add_user("owner-period-summary-index")
+            self._put_abonents("owner-period-summary-index", {
+                "1007": {"uid": "uid_period_summary_index_1007", "id": "1007"},
+            })
+            period_summary = self._fresh_summary(100, 5, 105)
+            period_summary["summary_scope"] = "period"
+            period_summary["report_scope"] = "period"
+            app_module.db.session.add(app_module.AbonentSummary(
+                owner_id="owner-period-summary-index",
+                abonent_id="1007",
+                account_uid="uid_period_summary_index_1007",
+                account_number="1007",
+                summary_json=json.dumps(period_summary, sort_keys=True),
+            ))
+            app_module.db.session.commit()
+        self._login("owner-period-summary-index")
+
+        response = self.client.get("/api/abonents?limit=10")
+
+        self.assertEqual(response.status_code, 200)
+        item = response.get_json()["items"][0]
+        self.assertEqual(item["summary_status"], "missing")
+        self.assertEqual(item["summary"]["summary_status"], "missing")
+        self.assertEqual(item["summary"]["summary_reason"], "PERIOD_SUMMARY_IGNORED")
+        self.assertNotIn("totals", item["summary"])
+
+    def test_legacy_period_summary_contamination_is_masked_on_index_transport(self):
+        with app_module.app.app_context():
+            self._add_user("owner-legacy-period-mask")
+            self._put_abonents("owner-legacy-period-mask", {
+                "1007": {
+                    "uid": "uid_legacy_period_mask_1007",
+                    "id": "1007",
+                    "calcStartDate": "2020-01-01",
+                    "calcEndDate": "2026-05-22",
+                },
+            })
+            legacy_summary = self._fresh_summary(100, 5, 105)
+            legacy_summary["period"] = {"from": "2026-01-01", "to": "2026-01-31"}
+            app_module.db.session.add(app_module.AbonentSummary(
+                owner_id="owner-legacy-period-mask",
+                abonent_id="1007",
+                account_uid="uid_legacy_period_mask_1007",
+                account_number="1007",
+                summary_json=json.dumps(legacy_summary, sort_keys=True),
+            ))
+            app_module.db.session.commit()
+        self._login("owner-legacy-period-mask")
+
+        response = self.client.get("/api/abonents?limit=10")
+
+        self.assertEqual(response.status_code, 200)
+        item = response.get_json()["items"][0]
+        self.assertEqual(item["summary_status"], "missing")
+        self.assertEqual(item["summary"]["summary_status"], "missing")
+        self.assertEqual(item["summary"]["summary_reason"], "PERIOD_SUMMARY_LEGACY")
+        self.assertNotIn("totals", item["summary"])
+        with app_module.app.app_context():
+            row = app_module.AbonentSummary.query.filter_by(account_uid="uid_legacy_period_mask_1007").first()
+            stored = json.loads(row.summary_json)
+            self.assertEqual(stored["summary_status"], "fresh")
+            self.assertIn("totals", stored)
+
+        create_response = self.client.post("/api/abonent_summary/recalc_batch_job", json={
+            "uids": ["uid_legacy_period_mask_1007"],
+            "reason": "MANUAL_RECALC",
+        })
+        self.assertEqual(create_response.status_code, 200)
+        job_id = create_response.get_json()["job_id"]
+
+        run_response = self.client.post(f"/api/abonent_summary/recalc_batch_job/{job_id}/run")
+
+        self.assertEqual(run_response.status_code, 200)
+        payload = run_response.get_json()
+        self.assertEqual(payload["processed"], 1)
+        self.assertEqual(payload["fresh"], 0)
+        self.assertEqual(payload["error"], 1)
+        self.assertEqual(payload["items"][0]["summary_status"], "missing")
+        self.assertEqual(payload["items"][0]["summary_reason"], "PERIOD_SUMMARY_LEGACY")
+
+    def test_legacy_summary_with_canonical_full_period_stays_fresh(self):
+        with app_module.app.app_context():
+            self._add_user("owner-legacy-period-full")
+            self._put_abonents("owner-legacy-period-full", {
+                "1007": {
+                    "uid": "uid_legacy_period_full_1007",
+                    "id": "1007",
+                    "calcStartDate": "2020-01-01",
+                    "calcEndDate": "2026-05-22",
+                },
+            })
+            summary = self._fresh_summary(100, 5, 105)
+            summary["period"] = {"from": "2020-01-01", "to": "2026-05-22"}
+            app_module.db.session.add(app_module.AbonentSummary(
+                owner_id="owner-legacy-period-full",
+                abonent_id="1007",
+                account_uid="uid_legacy_period_full_1007",
+                account_number="1007",
+                summary_json=json.dumps(summary, sort_keys=True),
+            ))
+            app_module.db.session.commit()
+        self._login("owner-legacy-period-full")
+
+        response = self.client.get("/api/abonents?limit=10")
+
+        self.assertEqual(response.status_code, 200)
+        item = response.get_json()["items"][0]
+        self.assertEqual(item["summary_status"], "fresh")
+        self.assertEqual(item["summary"]["summary_status"], "fresh")
+        self.assertEqual(item["summary"]["totals"]["debt"], 105)
+
+    def test_legacy_period_summary_with_unknown_boundaries_is_not_masked(self):
+        with app_module.app.app_context():
+            self._add_user("owner-legacy-period-unknown")
+            self._put_abonents("owner-legacy-period-unknown", {
+                "1007": {"uid": "uid_legacy_period_unknown_1007", "id": "1007"},
+            })
+            summary = self._fresh_summary(100, 5, 105)
+            summary["period"] = {"from": "2026-01-01", "to": "2026-01-31"}
+            app_module.db.session.add(app_module.AbonentSummary(
+                owner_id="owner-legacy-period-unknown",
+                abonent_id="1007",
+                account_uid="uid_legacy_period_unknown_1007",
+                account_number="1007",
+                summary_json=json.dumps(summary, sort_keys=True),
+            ))
+            app_module.db.session.commit()
+        self._login("owner-legacy-period-unknown")
+
+        response = self.client.get("/api/abonents?limit=10")
+
+        self.assertEqual(response.status_code, 200)
+        item = response.get_json()["items"][0]
+        self.assertEqual(item["summary_status"], "fresh")
+        self.assertEqual(item["summary"]["summary_status"], "fresh")
+        self.assertEqual(item["summary"]["totals"]["debt"], 105)
+
     def test_mark_dirty_does_not_touch_other_owner(self):
         with app_module.app.app_context():
             self._add_user("owner-dirty-a")
@@ -742,13 +1084,62 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         self.assertNotIn("recalc", combined.lower())
         self.assertNotIn("autoaccrual", combined.lower())
 
+    def test_stage_13_4b_calc_period_uses_uid_resolvers_not_legacy_account_keys(self):
+        card_path = self._find_repo_file("web", "abonent_card.html")
+        payment_path = self._find_repo_file("web", "payment_table.js")
+        calc_engine_path = self._find_repo_file("web", "calc_engine.js")
+        self.assertIsNotNone(card_path)
+        self.assertIsNotNone(payment_path)
+        self.assertIsNotNone(calc_engine_path)
+        card_source = card_path.read_text(encoding="utf-8")
+        payment_source = payment_path.read_text(encoding="utf-8")
+        calc_before = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
+
+        card_meta_body = card_source.split("function getCalcPeriodStorageMeta()", 1)[1].split("function calcPeriodKey()", 1)[0]
+        payment_meta_body = payment_source.split("function calcPeriodStorageMeta()", 1)[1].split("function calcPeriodKey()", 1)[0]
+        card_save_body = card_source.split("function saveCalcPeriod(from, to){", 1)[1].split("function setCalcPeriodActive", 1)[0]
+        full_recalc_body = payment_source.split("window.fullRecalcForCurrentAbonent", 1)[1].split("window.__loadPaymentTable", 1)[0]
+
+        self.assertIn("Data.resolveCalcPeriodStorageKey(resolverInput)", card_meta_body)
+        self.assertIn("Data.resolveCalcPeriodActiveStorageKey(resolverInput)", card_meta_body)
+        self.assertIn("Data.resolveCalcPeriodStorageKey(resolverInput)", payment_meta_body)
+        self.assertIn("Data.resolveCalcPeriodActiveStorageKey(resolverInput)", payment_meta_body)
+        self.assertIn("function __logCalcPeriodCanonicalUsed(payload)", card_source)
+        self.assertIn("__logCalcPeriodCanonicalUsed({", card_meta_body)
+        self.assertIn("logCalcPeriodOnce", payment_meta_body)
+        self.assertIn("source: \"abonent_card\"", card_meta_body)
+        self.assertIn('source: "payment_table"', payment_meta_body)
+        self.assertIn("requestedId", card_meta_body)
+        self.assertIn("resolvedUid", card_meta_body)
+        self.assertIn("storageKey", card_meta_body)
+        self.assertIn("activeStorageKey", card_meta_body)
+        self.assertIn("ownerId", card_meta_body)
+        self.assertIn("requestedId", payment_meta_body)
+        self.assertIn("resolvedUid", payment_meta_body)
+        self.assertIn("storageKey", payment_meta_body)
+        self.assertIn("activeStorageKey", payment_meta_body)
+        self.assertIn("ownerId", payment_meta_body)
+        self.assertIn("storeSet(meta.storageKey", card_save_body)
+        self.assertIn("storeSet(meta.activeStorageKey", card_save_body)
+        self.assertIn("ensureCurrentAbonentUidForCalcPeriod", card_source)
+        self.assertIn('Data.ensureAbonentUid(id, { source: source || "abonent_card.calc_period" })', card_source)
+        self.assertNotIn("calc_period_\" +", card_save_body)
+        self.assertNotIn("calc_period_active_\" +", card_save_body)
+        self.assertNotIn("CALC_PERIOD_CHANGED", card_save_body)
+        self.assertNotIn("markAbonentSummaryDirty", card_save_body)
+        self.assertNotIn("CALC_PERIOD_CHANGED", full_recalc_body)
+
+        calc_after = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
+        self.assertEqual(calc_before, calc_after)
+
     def test_calc_period_changed_is_not_used_by_index_or_batch_recalc(self):
         for parts in (("web", "index.html"), ("web", "data.js")):
             path = self._find_repo_file(*parts)
             self.assertIsNotNone(path)
             source = path.read_text(encoding="utf-8")
             if parts[-1] == "index.html":
-                self.assertNotIn("CALC_PERIOD_CHANGED", source)
+                self.assertIn("CALC_PERIOD_CHANGED_VIEW_ONLY_LEGACY", source)
+                self.assertNotIn('summaryStatus: "dirty", summaryReason: "CALC_PERIOD_CHANGED"', source)
             if parts[-1] == "data.js":
                 pattern = re.compile(r"recalc_batch[^\\n]+CALC_PERIOD_CHANGED|CALC_PERIOD_CHANGED[^\\n]+recalc_batch", re.I)
                 self.assertIsNone(pattern.search(source))
@@ -782,7 +1173,9 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         self.assertIn("Data.writeLedgerRuntimeCache", body)
         self.assertIn('__paymentTableMode = "readonly_no_recalc"', body)
         self.assertIn('await loadPaymentTable("full_recalc_completed")', body)
-        self.assertIn("Data.recalculateAbonentCard(id, { period: opts.period })", body)
+        self.assertIn("Data.recalculateAbonentCard(id, {", body)
+        self.assertIn("saveSummary: !(periodActive && selectedPeriod)", body)
+        self.assertIn('summaryScope: (periodActive && selectedPeriod) ? "period" : "full"', body)
         self.assertIn("autoaccrual_changed", body)
         self.assertIn("summary_status", body)
         self.assertIn("summary_save", body)
@@ -809,6 +1202,8 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
 
         self.assertIn("applyAutoAccrual: true", body)
         self.assertIn("period: { from: from, to: to }", body)
+        self.assertIn("saveSummary: false", source)
+        self.assertIn('summaryScope: "period"', source)
         self.assertIn("recalcResult.summary", body)
         self.assertIn("manualRecalcErrorMessage", source)
         self.assertIn("Не задан период ответственности/дата начала расчёта", source)
@@ -843,6 +1238,8 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         self.assertNotIn("_setProjectRaw", diagnostic_body)
         self.assertNotIn("_removeProjectRaw", diagnostic_body)
         self.assertIn("LEGACY_ONLY", diagnostic_body)
+        self.assertIn("LEGACY_EMPTY", data_source)
+        self.assertIn("LEGACY_LEDGER_EMPTY", data_source)
         self.assertIn("MIXED_CANONICAL_AND_LEGACY", diagnostic_body)
         self.assertIn("UID_MISSING_WITH_LEGACY", diagnostic_body)
 
@@ -854,8 +1251,10 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
 
         recalc_body = data_source.split("async function recalculateAbonentCard", 1)[1].split("// ============================================================", 1)[0]
         self.assertIn("[summary][fresh-blocked-legacy-ledger]", data_source)
-        self.assertIn("LEGACY_LEDGER_MIGRATION_REQUIRED", recalc_body)
         self.assertIn("canonicalRaw === null || canonicalRaw === undefined", recalc_body)
+        self.assertIn("_safeLedgerInfoForDiagnostic(legacyKey)", recalc_body)
+        self.assertIn("legacyInfo.rowsCount > 0", recalc_body)
+        self.assertIn("_logFreshBlockedLegacyLedger", recalc_body)
 
         ensure_body = data_source.split("function ensureAbonentUidOnRecord", 1)[1].split("async function ensureAbonentUid", 1)[0]
         self.assertIn("[uid][generation-blocked-legacy-ledger]", data_source)
@@ -913,13 +1312,27 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         self.assertIn("[ledger-migration][abonent-debug]", helper_body)
         self.assertIn("whySummaryFreshBlocked", helper_body)
         self.assertIn("whyIndexTotalsEmpty", helper_body)
-        self.assertIn("LEGACY_LEDGER_MIGRATION_REQUIRED", helper_body)
-        self.assertIn("UID_MISSING_WITH_LEGACY_LEDGER", helper_body)
-        self.assertIn("MIXED_LEDGER_DIFFERENCE", helper_body)
-        self.assertIn("RESPONSIBILITY_PERIOD_MISSING", helper_body)
-        self.assertIn("CANONICAL_LEDGER_EMPTY", helper_body)
-        self.assertIn("TOTALS_EMPTY", helper_body)
+        self.assertIn("blockers", helper_body)
+        self.assertIn("warnings", helper_body)
+        self.assertIn("item.issues", helper_body)
+        self.assertIn('state: item ? item.state : "ABONENT_NOT_FOUND"', helper_body)
+        self.assertIn('state = "BLOCKED_UID_MISSING_WITH_LEGACY"', data_source)
+        self.assertIn('issues.push("UID_MISSING_WITH_LEGACY_LEDGER")', data_source)
+        self.assertIn('item.state === "LEGACY_EMPTY"', helper_body)
+        self.assertIn('warnings.push("LEGACY_LEDGER_EMPTY")', helper_body)
+        self.assertIn('state = "BLOCKED_MIXED_LEDGER"', data_source)
+        self.assertIn('issues.push("MIXED_CANONICAL_AND_LEGACY")', data_source)
+        self.assertIn("hasResponsibilityStart", data_source)
+        self.assertIn("responsibilityFrom", data_source)
+        self.assertIn("respFrom", data_source)
+        self.assertIn('state = "CANONICAL_EMPTY"', data_source)
+        self.assertIn("item.hasCanonical", data_source)
+        self.assertIn("item.canonicalRowsCount <= 0", data_source)
+        self.assertIn('item.summaryStatus === "fresh"', data_source)
+        self.assertIn("whyIndexTotalsEmpty: item ? _whyIndexTotalsEmpty(item, abonent) : \"UNKNOWN\"", helper_body)
         self.assertIn("mixedComparison", helper_body)
+        self.assertIn("canonicalRowsCount", data_source)
+        self.assertIn("legacyRowsCount", data_source)
         self.assertIn("checksumEqual", data_source)
         self.assertIn("totalsEqual", data_source)
         self.assertNotIn("_setProjectRaw", helper_body)
@@ -1069,11 +1482,243 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         self.assertIn("total_debt: total", summary_body)
         self.assertIn("total_penalty: penalty", summary_body)
 
+        totals_keys_body = index_source.split("const INDEX_SUMMARY_TOTAL_KEYS = {", 1)[1].split("};", 1)[0]
         index_body = index_source.split("function buildIndexRowFromSummaryItem", 1)[1].split("function renderIndexSummaryLoading", 1)[0]
-        self.assertIn('"totals.debt", "totals.total", "totals.total_debt", "total_debt"', index_body)
-        self.assertIn('"totals.penalty", "totals.total_penalty", "total_penalty"', index_body)
-        self.assertIn('"totals.accrued", "totals.total_accrued", "total_accrued"', index_body)
-        self.assertIn('"totals.paid", "totals.total_paid", "total_paid"', index_body)
+        self.assertIn("function pickSummaryValueWithSource(summary, keys)", index_source)
+        self.assertIn("INDEX_SUMMARY_TOTAL_KEYS", index_source)
+        self.assertIn('debt: ["totals.debt"', totals_keys_body)
+        self.assertIn('"total_debt"', totals_keys_body)
+        self.assertIn('penalty: ["totals.penalty"', totals_keys_body)
+        self.assertIn('"total_penalty"', totals_keys_body)
+        self.assertIn('accrued: ["totals.accrued"', totals_keys_body)
+        self.assertIn('"total_accrued"', totals_keys_body)
+        self.assertIn('paid: ["totals.paid"', totals_keys_body)
+        self.assertIn('"total_paid"', totals_keys_body)
+        self.assertIn("pickSummaryValueWithSource(summary, INDEX_SUMMARY_TOTAL_KEYS.debt)", index_body)
+        self.assertIn("pickSummaryValueWithSource(summary, INDEX_SUMMARY_TOTAL_KEYS.penalty)", index_body)
+        self.assertIn("pickSummaryValueWithSource(summary, INDEX_SUMMARY_TOTAL_KEYS.accrued)", index_body)
+        self.assertIn("pickSummaryValueWithSource(summary, INDEX_SUMMARY_TOTAL_KEYS.paid)", index_body)
+
+        calc_after = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
+        self.assertEqual(calc_before, calc_after)
+
+    def test_stage_13_4_card_summary_pipeline_contract(self):
+        data_path = self._find_repo_file("web", "data.js")
+        card_path = self._find_repo_file("web", "abonent_card.html")
+        index_path = self._find_repo_file("web", "index.html")
+        calc_engine_path = self._find_repo_file("web", "calc_engine.js")
+        self.assertIsNotNone(data_path)
+        self.assertIsNotNone(card_path)
+        self.assertIsNotNone(index_path)
+        self.assertIsNotNone(calc_engine_path)
+        data_source = data_path.read_text(encoding="utf-8")
+        card_source = card_path.read_text(encoding="utf-8")
+        index_source = index_path.read_text(encoding="utf-8")
+        calc_before = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
+
+        summary_body = data_source.split("function buildAbonentSummaryAfterExplicitRecalc", 1)[1].split("function buildAbonentSummaryErrorAfterExplicitRecalc", 1)[0]
+        save_body = data_source.split("async function saveAbonentSummaryAfterRecalc", 1)[1].split("async function validateAbonentSummaryRecalcBatch", 1)[0]
+        card_recalc_body = card_source.split("function bindCalcButtons", 1)[1].split("resetBtn.addEventListener", 1)[0]
+
+        self.assertIn("totals: {", summary_body)
+        self.assertIn("debt: total", summary_body)
+        self.assertIn("penalty: penalty", summary_body)
+        self.assertIn("accrued: periodTotals.total_accrued", summary_body)
+        self.assertIn("paid: periodTotals.total_paid", summary_body)
+        self.assertIn("[summary][build-payload]", save_body)
+        self.assertIn("[summary][save-ok]", save_body)
+        self.assertIn("[summary][save-failed]", save_body)
+        self.assertIn("[summary][skip-save-period-summary]", save_body)
+        self.assertIn('summaryScope === "period" || summaryScope === "report"', save_body)
+        self.assertIn("totalsKeys", save_body)
+        self.assertIn("Расчёт выполнен, но итоговый summary для главной страницы не сохранён", card_recalc_body)
+        self.assertIn("Проверить выбранные summary", index_source)
+        self.assertIn("Проверяет summary, не пересчитывает карточки", index_source)
+
+        calc_after = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
+        self.assertEqual(calc_before, calc_after)
+
+    def test_stage_13_4b_period_summary_is_not_saved_as_index_summary(self):
+        data_path = self._find_repo_file("web", "data.js")
+        payment_path = self._find_repo_file("web", "payment_table.js")
+        index_path = self._find_repo_file("web", "index.html")
+        calc_engine_path = self._find_repo_file("web", "calc_engine.js")
+        self.assertIsNotNone(data_path)
+        self.assertIsNotNone(payment_path)
+        self.assertIsNotNone(index_path)
+        self.assertIsNotNone(calc_engine_path)
+        data_source = data_path.read_text(encoding="utf-8")
+        payment_source = payment_path.read_text(encoding="utf-8")
+        index_source = index_path.read_text(encoding="utf-8")
+        calc_before = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
+
+        recalc_body = data_source.split("async function recalcAbonentSummaryExplicit", 1)[1].split("async function recalculateAbonentCard", 1)[0]
+        full_recalc_body = payment_source.split("window.fullRecalcForCurrentAbonent", 1)[1].split("window.__loadPaymentTable", 1)[0]
+
+        self.assertIn("[summary][skip-save-period-summary]", recalc_body)
+        self.assertIn("[summary][save-full-summary]", recalc_body)
+        save_body = data_source.split("async function saveAbonentSummaryAfterRecalc", 1)[1].split("async function validateAbonentSummaryRecalcBatch", 1)[0]
+        self.assertIn("[summary][skip-save-period-summary]", save_body)
+        self.assertIn("var summaryPayload =", save_body)
+        self.assertIn("summaryPayload.summary_scope || summaryPayload.report_scope || summaryPayload.scope", save_body)
+        self.assertIn("summary: summaryPayload", save_body)
+        self.assertIn('summary.summary_scope = "period"', recalc_body)
+        self.assertIn('summary.summary_scope = "full"', recalc_body)
+        self.assertIn('mode === SUMMARY_RECALC_MODE_REPORT', recalc_body)
+        self.assertIn("saveSummary: !(periodActive && selectedPeriod)", full_recalc_body)
+        self.assertIn('summaryScope: (periodActive && selectedPeriod) ? "period" : "full"', full_recalc_body)
+        self.assertIn("periodActive: !!(periodActive && selectedPeriod)", full_recalc_body)
+        self.assertIn("FRESH_TOTALS_MISSING", index_source)
+
+        calc_after = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
+        self.assertEqual(calc_before, calc_after)
+
+    def test_stage_13_5_full_summary_uses_canonical_period_not_report_period(self):
+        data_path = self._find_repo_file("web", "data.js")
+        backend_path = self._find_repo_file("backend", "app.py")
+        calc_engine_path = self._find_repo_file("web", "calc_engine.js")
+        self.assertIsNotNone(data_path)
+        self.assertIsNotNone(backend_path)
+        self.assertIsNotNone(calc_engine_path)
+        data_source = data_path.read_text(encoding="utf-8")
+        backend_source = backend_path.read_text(encoding="utf-8")
+        calc_before = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
+
+        resolver_body = data_source.split("async function _resolveAbonentSummaryRecalcPeriod", 1)[1].split("function resolveAbonentRegnumForSummary", 1)[0]
+        recalc_body = data_source.split("async function recalcAbonentSummaryExplicit", 1)[1].split("async function recalculateAbonentCard", 1)[0]
+        save_body = backend_source.split("@app.post(\"/api/abonent_summary/rebuild\")", 1)[1].split("@app.post(\"/api/auth/register\")", 1)[0]
+
+        self.assertIn("FULL_SUMMARY_REBUILD", data_source)
+        self.assertIn("REPORT_PERIOD_CALCULATION", data_source)
+        self.assertIn("mode === SUMMARY_RECALC_MODE_REPORT && explicitPeriod", resolver_body)
+        self.assertIn("mode === SUMMARY_RECALC_MODE_FULL", resolver_body)
+        self.assertIn("RESPONSIBILITY_DATE_MISSING", resolver_body)
+        self.assertIn("source = \"canonical_full_period\"", resolver_body)
+        self.assertIn('summary.calculation_mode = SUMMARY_RECALC_MODE_FULL', recalc_body)
+        self.assertIn('summary.calculation_mode = SUMMARY_RECALC_MODE_REPORT', recalc_body)
+        self.assertNotIn("await _readCurrentAbonentSummaryPeriod", resolver_body.split("if (mode === SUMMARY_RECALC_MODE_FULL)", 1)[0])
+        self.assertIn("_summary_without_stale_totals(summary, target, owner)", save_body)
+        self.assertIn("targets_by_uid", backend_source)
+        self.assertIn("_summary_from_row_or_missing(row, target)", backend_source)
+        self.assertIn("PERIOD_SUMMARY_LEGACY", backend_source)
+        self.assertIn('if (msg.indexOf("RATES_JSON_INVALID") >= 0) return "RATES_JSON_INVALID";', data_source)
+        self.assertIn('if (msg.indexOf("EXCLUDES_JSON_INVALID") >= 0) return "EXCLUDES_JSON_INVALID";', data_source)
+
+        calc_after = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
+        self.assertEqual(calc_before, calc_after)
+
+    def test_stage_13_4c_canonical_active_calc_period_key_is_not_legacy(self):
+        card_path = self._find_repo_file("web", "abonent_card.html")
+        payment_path = self._find_repo_file("web", "payment_table.js")
+        calc_engine_path = self._find_repo_file("web", "calc_engine.js")
+        self.assertIsNotNone(card_path)
+        self.assertIsNotNone(payment_path)
+        self.assertIsNotNone(calc_engine_path)
+        card_source = card_path.read_text(encoding="utf-8")
+        payment_source = payment_path.read_text(encoding="utf-8")
+        calc_before = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
+
+        self.assertNotIn("calc_period_(active_)?(?!uid_)", card_source)
+        self.assertNotIn("calc_period_(active_)?(?!uid_)", payment_source)
+        for source in (card_source, payment_source):
+            self.assertIn("calc_period_active_(?!uid_)", source)
+            self.assertIn("calc_period_(?!uid_|active_uid_)", source)
+
+        calc_after = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
+        self.assertEqual(calc_before, calc_after)
+
+    def test_stage_13_4e_reports_button_does_not_run_card_recalc(self):
+        card_path = self._find_repo_file("web", "abonent_card.html")
+        calc_engine_path = self._find_repo_file("web", "calc_engine.js")
+        self.assertIsNotNone(card_path)
+        self.assertIsNotNone(calc_engine_path)
+        card_source = card_path.read_text(encoding="utf-8")
+        calc_before = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
+
+        reports_body = card_source.split('repBtn.addEventListener("click"', 1)[1].split("});\n}", 1)[0]
+        self.assertIn("[reports][open-with-period]", reports_body)
+        self.assertIn("ensureCurrentAbonentUidForCalcPeriod", reports_body)
+        self.assertIn("saveCalcPeriod(from, to)", reports_body)
+        self.assertIn("saveReportPeriodForSpravka", reports_body)
+        self.assertIn("location.href = href", reports_body)
+        self.assertIn("[reports][blocked-card-recalc]", card_source)
+        self.assertNotIn("fullRecalcForCurrentAbonent", reports_body)
+        self.assertNotIn("Data.recalculateAbonentCard", reports_body)
+        self.assertNotIn("saveAbonentSummaryAfterRecalc", reports_body)
+        self.assertNotIn("/api/abonent_summary/rebuild", reports_body)
+        self.assertNotIn("applyAutoAccrual", reports_body)
+
+        calc_after = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
+        self.assertEqual(calc_before, calc_after)
+
+    def test_stage_13_4g_calc_period_reset_persists_canonical_empty_state(self):
+        card_path = self._find_repo_file("web", "abonent_card.html")
+        calc_engine_path = self._find_repo_file("web", "calc_engine.js")
+        self.assertIsNotNone(card_path)
+        self.assertIsNotNone(calc_engine_path)
+        card_source = card_path.read_text(encoding="utf-8")
+        calc_before = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
+
+        meta_body = card_source.split("function getCalcPeriodStorageMeta()", 1)[1].split("function calcPeriodKey()", 1)[0]
+        reset_helper = card_source.split("function resetCalcPeriodCanonicalState", 1)[1].split("function bootstrapActiveCalcPeriod", 1)[0]
+        reset_handler = card_source.split('resetBtn.addEventListener("click"', 1)[1].split('repBtn.addEventListener("click"', 1)[0]
+        self.assertIn("Data.resolveCalcPeriodStorageKey(resolverInput)", meta_body)
+        self.assertIn("Data.resolveCalcPeriodActiveStorageKey(resolverInput)", meta_body)
+        self.assertIn("[calc-period][reset-start]", reset_helper)
+        self.assertIn("[calc-period][reset-saved]", reset_helper)
+        self.assertIn("[calc-period][reset-readback-ok]", reset_helper)
+        self.assertIn("[calc-period][reset-readback-failed]", reset_helper)
+        self.assertIn("storeRemove(m.storageKey", reset_helper)
+        self.assertIn('storeSet(m.activeStorageKey, "0"', reset_helper)
+        self.assertIn("storeRemove(reportKey", reset_helper)
+        self.assertIn("__isCalcPeriodInactiveReadback(result.activeReadback.raw)", reset_helper)
+        self.assertIn("await resetCalcPeriodCanonicalState(meta", reset_handler)
+        self.assertIn("Период не сброшен на сервере/в хранилище", reset_handler)
+        self.assertNotIn("markCurrentAbonentSummaryDirty", reset_handler)
+        self.assertNotIn("CALC_PERIOD_CHANGED", reset_handler)
+        self.assertNotIn("saveAbonentSummaryAfterRecalc", reset_handler)
+        self.assertNotIn("fullRecalcForCurrentAbonent", reset_handler)
+        self.assertNotIn("calc_period_\" +", reset_handler)
+        self.assertNotIn("calc_period_active_\" +", reset_handler)
+
+        calc_after = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
+        self.assertEqual(calc_before, calc_after)
+
+    def test_stage_13_4h_period_reset_uses_server_delete_contract(self):
+        data_path = self._find_repo_file("web", "data.js")
+        card_path = self._find_repo_file("web", "abonent_card.html")
+        calc_engine_path = self._find_repo_file("web", "calc_engine.js")
+        self.assertIsNotNone(data_path)
+        self.assertIsNotNone(card_path)
+        self.assertIsNotNone(calc_engine_path)
+        data_source = data_path.read_text(encoding="utf-8")
+        card_source = card_path.read_text(encoding="utf-8")
+        calc_before = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
+
+        helper_body = data_source.split("async function resetCalcPeriodKeysForAbonent", 1)[1].split("function resolvePaymentLedgerKey", 1)[0]
+        delete_body = data_source.split("async function _serverStoreDelete", 1)[1].split("async function _serverStoreSet", 1)[0]
+        reset_handler = card_source.split('resetBtn.addEventListener("click"', 1)[1].split('repBtn.addEventListener("click"', 1)[0]
+        self.assertIn("resetCalcPeriodKeysForAbonent: resetCalcPeriodKeysForAbonent", data_source)
+        self.assertIn('method: "DELETE"', delete_body)
+        self.assertIn("_serverStoreDelete(ownerId, keys.calcKey)", helper_body)
+        self.assertIn("_serverStoreDelete(ownerId, keys.reportKey)", helper_body)
+        self.assertIn('_serverStoreSet(ownerId, keys.activeKey, "0")', helper_body)
+        self.assertIn("_serverStoreDelete(ownerId, keys.legacyCalcKey)", helper_body)
+        self.assertIn("_serverStoreDelete(ownerId, keys.legacyReportKey)", helper_body)
+        self.assertNotIn("value: null", helper_body)
+        self.assertNotIn('_setRawScoped(keys.legacyCalcKey', helper_body)
+        self.assertNotIn('_setRawScoped(keys.legacyReportKey', helper_body)
+        self.assertIn("Data.resetCalcPeriodKeysForAbonent", card_source)
+        self.assertIn("window.JKH_debugCalcPeriodKeys", card_source)
+        self.assertIn("[period][server-reset-readback-ok]", helper_body)
+        self.assertIn("[period][server-reset-readback-failed]", helper_body)
+        self.assertIn("[period][restore-source]", card_source)
+        self.assertIn("key:", card_source)
+        self.assertIn("raw:", card_source)
+        load_body = card_source.split("function loadCalcPeriodUI()", 1)[1].split("function saveCalcPeriod", 1)[0]
+        self.assertNotIn("summary.period", load_body)
+        self.assertNotIn("markCurrentAbonentSummaryDirty", reset_handler)
+        self.assertNotIn("CALC_PERIOD_CHANGED", reset_handler)
 
         calc_after = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
         self.assertEqual(calc_before, calc_after)
@@ -1098,10 +1743,11 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         self.assertIn('data-field="penalty"', render_body)
         self.assertIn('data-field="accrued"', render_body)
         self.assertIn('data-field="paid"', render_body)
-        self.assertIn("totals.debt", build_body)
-        self.assertIn("totals.penalty", build_body)
-        self.assertIn("totals.accrued", build_body)
-        self.assertIn("totals.paid", build_body)
+        self.assertIn("INDEX_SUMMARY_TOTAL_KEYS", source)
+        self.assertIn("pickSummaryValueWithSource(summary, INDEX_SUMMARY_TOTAL_KEYS.debt)", build_body)
+        self.assertIn("pickSummaryValueWithSource(summary, INDEX_SUMMARY_TOTAL_KEYS.penalty)", build_body)
+        self.assertIn("pickSummaryValueWithSource(summary, INDEX_SUMMARY_TOTAL_KEYS.accrued)", build_body)
+        self.assertIn("pickSummaryValueWithSource(summary, INDEX_SUMMARY_TOTAL_KEYS.paid)", build_body)
 
         calc_after = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
         self.assertEqual(calc_before, calc_after)
@@ -1130,6 +1776,44 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         self.assertNotIn("cells[5]", source)
         self.assertNotIn("cells[6]", source)
         self.assertNotIn("cells[7]", source)
+
+        calc_after = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
+        self.assertEqual(calc_before, calc_after)
+
+    def test_stage_13_3_index_invalid_fresh_totals_are_not_rendered_as_fresh(self):
+        index_path = self._find_repo_file("web", "index.html")
+        data_path = self._find_repo_file("web", "data.js")
+        calc_engine_path = self._find_repo_file("web", "calc_engine.js")
+        self.assertIsNotNone(index_path)
+        self.assertIsNotNone(data_path)
+        self.assertIsNotNone(calc_engine_path)
+        index_source = index_path.read_text(encoding="utf-8")
+        data_source = data_path.read_text(encoding="utf-8")
+        calc_before = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
+
+        build_body = index_source.split("function buildIndexRowFromSummaryItem", 1)[1].split("function writeIndexTotalsCell", 1)[0]
+        debug_body = index_source.split("window.JKH_debugIndexSummaryRows = function()", 1)[1].split("window.JKH_getIndexRenderDebugState", 1)[0]
+        render_body = index_source.split("function render() {", 1)[1].split("tbody.onclick", 1)[0]
+        self.assertIn("function validateIndexSummaryTotals", index_source)
+        self.assertIn("INDEX_SUMMARY_TOTAL_KEYS", index_source)
+        self.assertIn("FRESH_TOTALS_MISSING", index_source)
+        self.assertIn("FRESH_TOTALS_INVALID", index_source)
+        self.assertIn('const isFresh = status === "fresh" && totalsValidation.validFreshTotals', build_body)
+        self.assertIn("displayStatus", build_body)
+        self.assertIn("rawSummaryStatus", build_body)
+        self.assertIn("hasTotalsObject", build_body)
+        self.assertIn("totalsFinite", build_body)
+        self.assertIn("whyEmptyTotals", build_body)
+        self.assertIn("exactGuard", build_body)
+        self.assertIn("[index][summary-row-empty]", render_body)
+        self.assertIn("[index][summary-row-invalid-fresh]", render_body)
+        self.assertIn("window.JKH_debugIndexSummaryRows = function()", index_source)
+        for required in ("account", "uid", "summary_status", "summary_reason", "hasTotalsObject", "totalsFinite", "renderedValues", "whyEmptyTotals", "exactGuard"):
+            self.assertIn(required, debug_body)
+
+        dirty_body = data_source.split("async function markAbonentSummaryDirty", 1)[1].split("function markAbonentSummaryDirtyLater", 1)[0]
+        self.assertIn('reasonCode === "CALC_PERIOD_CHANGED"', dirty_body)
+        self.assertIn("view_only_reason", dirty_body)
 
         calc_after = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
         self.assertEqual(calc_before, calc_after)

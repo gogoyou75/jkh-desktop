@@ -918,6 +918,12 @@ def _summary_identity_value(abonent: dict, keys, fallback: str = ""):
     return fallback
 
 
+def _summary_identity_values(abonent: dict, keys):
+    if not isinstance(abonent, dict):
+        return {}
+    return {key: _norm_text(abonent.get(key)) for key in keys if _norm_text(abonent.get(key))}
+
+
 
 
 def _owner_abonents_db_v1_summary_targets(owner_id: str):
@@ -957,12 +963,21 @@ def _owner_abonents_db_v1_summary_targets(owner_id: str):
             "abonent_id": abonent_id,
             "account_uid": account_uid,
             "account_number": account_number,
+            "source": abonent,
             "identity": {
                 "abonent_id": abonent_id,
                 "account_uid": account_uid,
                 "account_number": account_number,
                 "fio": _summary_identity_value(abonent, ("fio", "fullName", "full_name")),
                 "address": _summary_identity_value(abonent, ("address", "addr")),
+                **_summary_identity_values(abonent, (
+                    "calcStartDate", "calc_start_date",
+                    "dateFrom", "date_from",
+                    "responsibilityFrom", "respFrom",
+                    "calcEndDate", "calc_end_date",
+                    "dateTo", "date_to",
+                    "responsibilityTo", "respTo",
+                )),
             },
         })
 
@@ -1032,12 +1047,21 @@ def _owner_abonent_summary_targets(owner_id: str):
                 "abonent_id": abonent_id,
                 "account_uid": account_uid,
                 "account_number": account_number,
+                "source": abonent,
                 "identity": {
                     "abonent_id": abonent_id,
                     "account_uid": account_uid,
                     "account_number": account_number,
                     "fio": _summary_identity_value(abonent, ("fio", "fullName", "full_name")),
                     "address": _summary_identity_value(abonent, ("address", "addr")),
+                    **_summary_identity_values(abonent, (
+                        "calcStartDate", "calc_start_date",
+                        "dateFrom", "date_from",
+                        "responsibilityFrom", "respFrom",
+                        "calcEndDate", "calc_end_date",
+                        "dateTo", "date_to",
+                        "responsibilityTo", "respTo",
+                    )),
                 },
             })
 
@@ -1070,15 +1094,203 @@ def _build_missing_abonent_summary(target: dict):
 def _summary_status_from_payload(summary: dict | None):
     if not isinstance(summary, dict):
         return "missing"
+    scope = _norm_text(summary.get("summary_scope") or summary.get("report_scope")).lower()
+    if scope in {"period", "report"}:
+        return "missing"
     status = _norm_text(summary.get("summary_status") or summary.get("status")).lower()
+    reason = _norm_text(summary.get("summary_reason") or summary.get("reason"))
+    if status == "dirty" and reason == "CALC_PERIOD_CHANGED":
+        return "missing"
     if status in {"fresh", "dirty", "missing", "error"}:
         return status
     return "missing"
 
 
-def _summary_without_stale_totals(summary: dict | None):
+def _summary_finite_number(value):
+    if value is None:
+        return False
+    if isinstance(value, str) and not value.strip():
+        return False
+    try:
+        n = Decimal(str(value).replace(",", "."))
+    except (InvalidOperation, ValueError, TypeError):
+        return False
+    return n.is_finite()
+
+
+def _pick_summary_total(summary: dict, totals: dict, keys: tuple[str, ...]):
+    for key in keys:
+        if key.startswith("totals."):
+            value = totals.get(key.split(".", 1)[1])
+        else:
+            value = summary.get(key)
+        if value is not None and not (isinstance(value, str) and not value.strip()):
+            return value
+    return None
+
+
+def _fresh_totals_validation_reason(summary: dict | None):
+    if _summary_status_from_payload(summary) != "fresh":
+        return ""
+    if not isinstance(summary, dict):
+        return "FRESH_TOTALS_MISSING"
+
+    totals = summary.get("totals")
+    if not isinstance(totals, dict):
+        return "FRESH_TOTALS_MISSING"
+
+    required = {
+        "debt": ("totals.debt", "totals.total", "totals.total_debt"),
+        "penalty": ("totals.penalty", "totals.total_penalty"),
+        "accrued": ("totals.accrued", "totals.total_accrued"),
+        "paid": ("totals.paid", "totals.total_paid"),
+    }
+    missing = False
+    invalid = False
+    for keys in required.values():
+        value = _pick_summary_total(summary, totals, keys)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            missing = True
+            continue
+        if not _summary_finite_number(value):
+            invalid = True
+
+    if missing:
+        return "FRESH_TOTALS_MISSING"
+    if invalid:
+        return "FRESH_TOTALS_INVALID"
+    return ""
+
+
+def _summary_with_validated_fresh_totals(summary: dict | None):
     payload = summary.copy() if isinstance(summary, dict) else {}
+    reason = _fresh_totals_validation_reason(payload)
+    if reason:
+        payload["summary_status"] = "error"
+        payload["summary_reason"] = reason
+        payload["status"] = "error"
+        payload["reason"] = reason
+    return payload
+
+
+def _summary_date_iso(value):
+    if isinstance(value, datetime):
+        return value.date().isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    text_value = _norm_text(value)
+    if not text_value:
+        return ""
+    match = re.search(r"\d{4}-\d{2}-\d{2}", text_value)
+    if match:
+        return match.group(0)
+    return ""
+
+
+def _pick_summary_boundary(target: dict | None, keys: tuple[str, ...]):
+    if not isinstance(target, dict):
+        return ""
+    identity = target.get("identity") if isinstance(target.get("identity"), dict) else {}
+    source = target.get("source") if isinstance(target.get("source"), dict) else {}
+    for container in (target, identity, source):
+        for key in keys:
+            value = _summary_date_iso(container.get(key))
+            if value:
+                return value
+    return ""
+
+
+def _is_legacy_period_summary_contamination(summary: dict | None, target: dict | None):
+    if not isinstance(summary, dict):
+        return False
+    status = _norm_text(summary.get("summary_status") or summary.get("status")).lower()
+    if status != "fresh":
+        return False
+    scope = _norm_text(summary.get("summary_scope") or summary.get("report_scope")).lower()
+    if scope in {"period", "report"}:
+        return False
+    period = summary.get("period")
+    if not isinstance(period, dict):
+        return False
+    summary_from = _summary_date_iso(period.get("from"))
+    summary_to = _summary_date_iso(period.get("to"))
+    if not summary_from or not summary_to:
+        return False
+
+    canonical_from = _pick_summary_boundary(target, (
+        "calcStartDate", "calc_start_date",
+        "dateFrom", "date_from",
+        "responsibilityFrom", "respFrom",
+    ))
+    canonical_to = _pick_summary_boundary(target, (
+        "calcEndDate", "calc_end_date",
+        "dateTo", "date_to",
+        "responsibilityTo", "respTo",
+    ))
+    if not canonical_from and not canonical_to:
+        try:
+            app.logger.info(
+                "[summary][legacy-period-contamination][skip] owner_id=%s account_uid=%s abonent_id=%s summary_from=%s summary_to=%s reason=CANONICAL_BOUNDARIES_UNKNOWN",
+                _norm_text(target.get("owner_id")) if isinstance(target, dict) else "",
+                _norm_text(target.get("account_uid")) if isinstance(target, dict) else "",
+                _norm_text(target.get("abonent_id")) if isinstance(target, dict) else "",
+                summary_from,
+                summary_to,
+            )
+        except Exception:
+            pass
+        return False
+
+    return bool(
+        (canonical_from and summary_from != canonical_from) or
+        (canonical_to and summary_to != canonical_to)
+    )
+
+
+def _log_legacy_period_summary_contamination(owner_id: str, account_uid: str, abonent_id: str, summary: dict, target: dict | None):
+    period = summary.get("period") if isinstance(summary.get("period"), dict) else {}
+    try:
+        app.logger.warning(
+            "[summary][legacy-period-contamination] owner_id=%s account_uid=%s abonent_id=%s summary_from=%s summary_to=%s canonical_from=%s canonical_to=%s",
+            _norm_text(owner_id),
+            _norm_text(account_uid),
+            _norm_text(abonent_id),
+            _summary_date_iso(period.get("from")),
+            _summary_date_iso(period.get("to")),
+            _pick_summary_boundary(target, (
+                "calcStartDate", "calc_start_date",
+                "dateFrom", "date_from",
+                "responsibilityFrom", "respFrom",
+            )),
+            _pick_summary_boundary(target, (
+                "calcEndDate", "calc_end_date",
+                "dateTo", "date_to",
+                "responsibilityTo", "respTo",
+            )),
+        )
+    except Exception:
+        pass
+
+
+def _summary_without_stale_totals(summary: dict | None, target: dict | None = None, owner_id: str = ""):
+    payload = _summary_with_validated_fresh_totals(summary)
+    if _is_legacy_period_summary_contamination(payload, target):
+        _log_legacy_period_summary_contamination(
+            owner_id,
+            _norm_text(target.get("account_uid")) if isinstance(target, dict) else "",
+            _norm_text(target.get("abonent_id")) if isinstance(target, dict) else "",
+            payload,
+            target,
+        )
+        payload["summary_status"] = "missing"
+        payload["status"] = "missing"
+        payload["summary_reason"] = "PERIOD_SUMMARY_LEGACY"
+        payload["reason"] = "PERIOD_SUMMARY_LEGACY"
     status = _summary_status_from_payload(payload)
+    scope = _norm_text(payload.get("summary_scope") or payload.get("report_scope")).lower()
+    if scope in {"period", "report"}:
+        payload["summary_reason"] = "PERIOD_SUMMARY_IGNORED"
+        payload["reason"] = "PERIOD_SUMMARY_IGNORED"
     payload["summary_status"] = status
     payload["status"] = status
     if status != "fresh":
@@ -1113,7 +1325,7 @@ def _summary_from_row_or_missing(row: AbonentSummary | None, target: dict):
         summary = json.loads(row.summary_json or "{}")
     except (TypeError, ValueError):
         summary = {"summary_status": "error", "summary_reason": "SUMMARY_JSON_INVALID"}
-    return _summary_without_stale_totals(summary)
+    return _summary_without_stale_totals(summary, target, row.owner_id)
 
 
 def _batch_job_payload(job: RecalcBatchJob):
@@ -1190,6 +1402,8 @@ def _recalc_batch_process_job(owner_id: str, job: RecalcBatchJob, step_limit: in
                 job.finished_at = datetime.utcnow()
             db.session.commit()
         return
+    targets = _owner_abonent_summary_targets(owner_id)
+    targets_by_uid = {_norm_text(t.get("account_uid")): t for t in targets if _norm_text(t.get("account_uid"))}
     for item in items:
         item.status = "running"
         if not item.started_at:
@@ -1197,7 +1411,9 @@ def _recalc_batch_process_job(owner_id: str, job: RecalcBatchJob, step_limit: in
         db.session.commit()
         try:
             row = AbonentSummary.query.filter_by(owner_id=owner_id, account_uid=item.account_uid).order_by(AbonentSummary.id.asc()).first()
-            summary = _summary_from_row_or_missing(row, {"account_uid": item.account_uid, "abonent_id": "", "account_number": "", "identity": {}})
+            target = targets_by_uid.get(_norm_text(item.account_uid)) or {"account_uid": item.account_uid, "abonent_id": "", "account_number": "", "identity": {}}
+            summary = _summary_from_row_or_missing(row, target)
+            summary = _summary_with_validated_fresh_totals(summary)
             s_status = _summary_status_from_payload(summary)
             s_reason = _norm_text(summary.get("summary_reason") or summary.get("reason") or "")
             if s_status == "fresh":
@@ -1779,11 +1995,15 @@ def abonent_summary_rebuild():
             summary = body.get("summary")
             if not isinstance(summary, dict):
                 return jsonify(ok=False, error="summary_invalid", counters=counters), 400
+            summary_scope = _norm_text(summary.get("summary_scope") or summary.get("report_scope")).lower()
+            if summary_scope in {"period", "report"}:
+                return jsonify(ok=False, error="period_summary_not_allowed", counters=counters), 400
 
             targets = _owner_abonent_summary_targets(owner)
             target = next((t for t in targets if _norm_text(t.get("account_uid")) == account_uid), None)
             if not target:
                 return jsonify(ok=False, error="uid_not_found", counters=counters), 404
+            summary = _summary_without_stale_totals(summary, target, owner)
 
             abonent_id = _norm_text(body.get("abonent_id")) or _norm_text(target.get("abonent_id"))
             account_number = _norm_text(body.get("account_number")) or _norm_text(target.get("account_number"))
@@ -1805,7 +2025,12 @@ def abonent_summary_rebuild():
                 counters["created"] += 1
 
             db.session.commit()
-            return jsonify(ok=True, counters=counters)
+            return jsonify(
+                ok=True,
+                counters=counters,
+                summary_status=_summary_status_from_payload(summary),
+                summary_reason=_norm_text(summary.get("summary_reason") or summary.get("reason")),
+            )
 
         targets = _owner_abonent_summary_targets(owner)
         for target in targets:

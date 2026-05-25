@@ -552,6 +552,161 @@
     return resolveCalcPeriodStorageKey(abonentOrId, { suffix: "_active" });
   }
 
+  function _resolveReportPeriodStorageKey(abonentOrId) {
+    var found = _findAbonentByIdOrUid(abonentOrId);
+    var abonent = found && found.abonent ? found.abonent : null;
+    var uid = String(abonent && abonent.uid || "").trim();
+    if (!isValidUid(uid)) return "";
+    return "report_period_" + uid;
+  }
+
+  async function _serverStoreDelete(ownerId, key) {
+    var res = await fetch("/api/store", {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify({ owner: ownerId, key: key })
+    });
+    var txt = await res.text();
+    var data = null;
+    try { data = JSON.parse(txt); } catch (e) {}
+    return { ok: !!(res.ok && data && data.ok === true), status: res.status, data: data, text: txt, key: key };
+  }
+
+  async function _serverStoreSet(ownerId, key, value) {
+    var res = await fetch("/api/store", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify({ owner: ownerId, key: key, value: String(value == null ? "" : value) })
+    });
+    var txt = await res.text();
+    var data = null;
+    try { data = JSON.parse(txt); } catch (e) {}
+    return { ok: !!(res.ok && data && data.ok === true), status: res.status, data: data, text: txt, key: key };
+  }
+
+  async function _serverStoreGet(ownerId, key) {
+    var url = "/api/store?owner=" + encodeURIComponent(ownerId) + "&key=" + encodeURIComponent(key);
+    var res = await fetch(url, { method: "GET", credentials: "include" });
+    var txt = await res.text();
+    var data = null;
+    try { data = JSON.parse(txt); } catch (e) {}
+    return { ok: !!(res.ok && data && data.ok === true), missing: res.status === 404, status: res.status, data: data, text: txt, key: key, raw: data && data.value };
+  }
+
+  function _readPeriodResetLocal(keys, ownerId) {
+    return {
+      calc: { key: keys.calcKey, raw: keys.calcKey ? _getRawScoped(keys.calcKey, ownerId) : null },
+      active: { key: keys.activeKey, raw: keys.activeKey ? _getRawScoped(keys.activeKey, ownerId) : null },
+      report: { key: keys.reportKey, raw: keys.reportKey ? _getRawScoped(keys.reportKey, ownerId) : null },
+      legacyCalc: { key: keys.legacyCalcKey, raw: keys.legacyCalcKey ? _getRawScoped(keys.legacyCalcKey, ownerId) : null },
+      legacyReport: { key: keys.legacyReportKey, raw: keys.legacyReportKey ? _getRawScoped(keys.legacyReportKey, ownerId) : null }
+    };
+  }
+
+  function _isResetLocalReadbackOk(readback) {
+    return !!readback &&
+      !readback.calc.raw &&
+      String(readback.active.raw) === "0" &&
+      !readback.report.raw &&
+      !readback.legacyCalc.raw &&
+      !readback.legacyReport.raw;
+  }
+
+  async function resetCalcPeriodKeysForAbonent(abonentOrId, options) {
+    var opts = options || {};
+    var found = _findAbonentByIdOrUid(abonentOrId);
+    var requestedId = String(found && found.id || (abonentOrId && typeof abonentOrId === "object" ? abonentOrId.id : abonentOrId) || "").trim();
+    var abonent = found && found.abonent ? found.abonent : null;
+    var uid = String(abonent && abonent.uid || "").trim();
+    var ownerId = String(opts.ownerId || _ownerId() || "").trim();
+    var keys = {
+      calcKey: resolveCalcPeriodStorageKey(abonent || requestedId),
+      activeKey: resolveCalcPeriodActiveStorageKey(abonent || requestedId),
+      reportKey: _resolveReportPeriodStorageKey(abonent || requestedId),
+      legacyCalcKey: requestedId ? "calc_period_" + requestedId : "",
+      legacyReportKey: requestedId ? "report_period_" + requestedId : ""
+    };
+    var result = {
+      ok: false,
+      requestedId: requestedId,
+      uid: uid,
+      ownerId: ownerId,
+      keys: keys,
+      source: String(opts.source || "Data.resetCalcPeriodKeysForAbonent"),
+      localReadback: null,
+      serverPersist: [],
+      serverReadback: [],
+      reason: ""
+    };
+
+    if (!ownerId || !uid || !keys.calcKey || !keys.activeKey || !keys.reportKey) {
+      result.reason = "CANONICAL_PERIOD_KEYS_REQUIRED";
+      return result;
+    }
+
+    _removeRawScoped(keys.calcKey, ownerId);
+    _setRawScoped(keys.activeKey, "0", ownerId);
+    _removeRawScoped(keys.reportKey, ownerId);
+    if (keys.legacyCalcKey) _removeRawScoped(keys.legacyCalcKey, ownerId);
+    if (keys.legacyReportKey) _removeRawScoped(keys.legacyReportKey, ownerId);
+
+    result.localReadback = _readPeriodResetLocal(keys, ownerId);
+    if (_isResetLocalReadbackOk(result.localReadback)) {
+      try { console.log("[period][reset-local-readback-ok]", result); } catch (eLocalOk) {}
+    } else {
+      result.reason = "LOCAL_RESET_READBACK_FAILED";
+      try { console.warn("[period][reset-local-readback-failed]", result); } catch (eLocalFail) {}
+      return result;
+    }
+
+    try {
+      result.serverPersist.push(await _serverStoreDelete(ownerId, keys.calcKey));
+      result.serverPersist.push(await _serverStoreDelete(ownerId, keys.reportKey));
+      result.serverPersist.push(await _serverStoreSet(ownerId, keys.activeKey, "0"));
+      if (keys.legacyCalcKey) result.serverPersist.push(await _serverStoreDelete(ownerId, keys.legacyCalcKey));
+      if (keys.legacyReportKey) result.serverPersist.push(await _serverStoreDelete(ownerId, keys.legacyReportKey));
+    } catch (ePersist) {
+      result.reason = String(ePersist && ePersist.message || ePersist || "SERVER_RESET_PERSIST_FAILED");
+      try { console.warn("[period][reset-server-persist-failed]", result); } catch (ePersistLog) {}
+      return result;
+    }
+
+    var persistOk = result.serverPersist.every(function (item) { return item && item.ok === true; });
+    if (!persistOk) {
+      result.reason = "SERVER_RESET_PERSIST_FAILED";
+      try { console.warn("[period][reset-server-persist-failed]", result); } catch (ePersistFailLog) {}
+      return result;
+    }
+    try { console.log("[period][reset-server-persist-ok]", result); } catch (ePersistOkLog) {}
+
+    try {
+      result.serverReadback.push(await _serverStoreGet(ownerId, keys.calcKey));
+      result.serverReadback.push(await _serverStoreGet(ownerId, keys.reportKey));
+      result.serverReadback.push(await _serverStoreGet(ownerId, keys.activeKey));
+      if (keys.legacyCalcKey) result.serverReadback.push(await _serverStoreGet(ownerId, keys.legacyCalcKey));
+      if (keys.legacyReportKey) result.serverReadback.push(await _serverStoreGet(ownerId, keys.legacyReportKey));
+    } catch (eReadback) {
+      result.reason = String(eReadback && eReadback.message || eReadback || "SERVER_RESET_READBACK_FAILED");
+      try { console.warn("[period][server-reset-readback-failed]", result); } catch (eReadbackLog) {}
+      return result;
+    }
+
+    var serverOk = result.serverReadback.every(function (item) {
+      if (!item) return false;
+      if (item.key === keys.activeKey) return item.ok === true && String(item.raw) === "0";
+      return item.missing === true || item.raw === null || item.raw === undefined || String(item.raw) === "";
+    });
+    result.ok = serverOk;
+    result.reason = serverOk ? "" : "SERVER_RESET_READBACK_FAILED";
+    try {
+      if (serverOk) console.log("[period][server-reset-readback-ok]", result);
+      else console.warn("[period][server-reset-readback-failed]", result);
+    } catch (eServerReadLog) {}
+    return result;
+  }
+
   function resolvePaymentLedgerKey(abonentOrId, options) {
     var opts = options || {};
     var found = _findAbonentByIdOrUid(abonentOrId);
@@ -1746,6 +1901,10 @@
 
   async function markAbonentSummaryDirty(abonentOrId, reason) {
     try {
+      var reasonCode = String(reason || "UNKNOWN_CHANGE").trim() || "UNKNOWN_CHANGE";
+      if (reasonCode === "CALC_PERIOD_CHANGED") {
+        return { ok: true, skipped: true, status: "skipped", reason: reasonCode, view_only_reason: reasonCode };
+      }
       var found = _findAbonentByIdOrUid(abonentOrId);
       var abonent = found && found.abonent ? found.abonent : null;
       var abonentId = String(found && found.id || (abonent && abonent.id) || (typeof abonentOrId === "object" ? abonentOrId && abonentOrId.id : abonentOrId) || "").trim();
@@ -1758,7 +1917,7 @@
 
       var payload = {
         account_uid: uid,
-        reason: String(reason || "UNKNOWN_CHANGE").trim() || "UNKNOWN_CHANGE"
+        reason: reasonCode
       };
 
       var res = await fetch("/api/abonent_summary/mark_dirty", {
@@ -1855,27 +2014,53 @@
   }
 
   async function saveAbonentSummaryAfterRecalc(abonentOrId, summary) {
+    var saveLogCtx = { uid: "", status: "", reason: "", totalsKeys: [] };
     try {
       var found = _findAbonentByIdOrUid(abonentOrId);
       var abonent = found && found.abonent ? found.abonent : null;
       var abonentId = String(found && found.id || (abonent && abonent.id) || (typeof abonentOrId === "object" ? abonentOrId && abonentOrId.id : abonentOrId) || "").trim();
       var uid = String(abonent && abonent.uid || (typeof abonentOrId === "object" ? abonentOrId && abonentOrId.uid : "") || "").trim();
+      var summaryPayload = (summary && typeof summary === "object" && !Array.isArray(summary)) ? summary : null;
+      var summaryStatus = summaryPayload && (summaryPayload.summary_status || summaryPayload.status) || "";
+      var summaryReason = summaryPayload && (summaryPayload.summary_reason || summaryPayload.reason) || "";
+      var summaryScope = String(summaryPayload && (summaryPayload.summary_scope || summaryPayload.report_scope || summaryPayload.scope) || "").trim().toLowerCase();
+      var summaryTotals = summaryPayload && summaryPayload.totals && typeof summaryPayload.totals === "object" ? summaryPayload.totals : {};
+      var summaryTotalsKeys = Object.keys(summaryTotals);
+      saveLogCtx = { uid: uid, status: String(summaryStatus || ""), reason: String(summaryReason || ""), totalsKeys: summaryTotalsKeys };
 
       if (!isValidUid(uid)) {
-        try { console.warn("[summary][save-failed]", { reason: "INVALID_UID", abonentId: abonentId, uid: uid }); } catch (eWarn) {}
+        try { console.warn("[summary][save-failed]", { uid: uid, status: summaryStatus, reason: "INVALID_UID", totalsKeys: summaryTotalsKeys, abonentId: abonentId }); } catch (eWarn) {}
         return { ok: false, skipped: true, reason: "INVALID_UID" };
       }
-      if (!summary || typeof summary !== "object" || Array.isArray(summary)) {
-        try { console.warn("[summary][save-failed]", { reason: "SUMMARY_INVALID", abonentId: abonentId, uid: uid }); } catch (eSummary) {}
+      if (!summaryPayload) {
+        try { console.warn("[summary][save-failed]", { uid: uid, status: summaryStatus, reason: "SUMMARY_INVALID", totalsKeys: summaryTotalsKeys, abonentId: abonentId }); } catch (eSummary) {}
         return { ok: false, skipped: true, reason: "SUMMARY_INVALID" };
+      }
+      if (summaryScope === "period" || summaryScope === "report") {
+        try {
+          console.log("[summary][skip-save-period-summary]", {
+            uid: uid,
+            summary_scope: summaryScope,
+            reason: summaryReason || "PERIOD_SUMMARY_NOT_SAVED"
+          });
+        } catch (eSkipLog) {}
+        return { ok: true, skipped: true, reason: "PERIOD_SUMMARY_NOT_SAVED", summary_status: summaryStatus || "fresh", summary_reason: summaryReason || "OK", summary_scope: summaryScope };
       }
 
       var payload = {
         account_uid: uid,
         abonent_id: String(abonentId || abonent && abonent.id || ""),
         account_number: String(abonent && (abonent.account_number || abonent.accountNumber || abonent.ls || abonent.id) || abonentId || ""),
-        summary: summary
+        summary: summaryPayload
       };
+      try {
+        console.log("[summary][build-payload]", {
+          uid: uid,
+          status: summaryStatus,
+          reason: summaryReason,
+          totalsKeys: summaryTotalsKeys
+        });
+      } catch (eBuildLog) {}
 
       var res = await fetch("/api/abonent_summary/rebuild", {
         method: "POST",
@@ -1889,9 +2074,17 @@
       if (!res.ok || !data || data.ok === false) {
         throw new Error((data && data.error) || ("HTTP_" + res.status));
       }
+      try {
+        console.log("[summary][save-ok]", {
+          uid: uid,
+          status: String(data.summary_status || summaryStatus || ""),
+          reason: String(data.summary_reason || summaryReason || ""),
+          totalsKeys: summaryTotalsKeys
+        });
+      } catch (eOkLog) {}
       return data;
     } catch (e) {
-      try { console.warn("[summary][save-failed]", { reason: String(e && e.message || e) }); } catch (eLog) {}
+      try { console.warn("[summary][save-failed]", { uid: saveLogCtx.uid, status: saveLogCtx.status, reason: String(e && e.message || e), totalsKeys: saveLogCtx.totalsKeys }); } catch (eLog) {}
       return { ok: false, error: String(e && e.message || e) };
     }
   }
@@ -2048,9 +2241,9 @@
     if (e && e.code) return String(e.code);
     var msg = String(e && e.message || e || "CALC_FAILED");
     if (msg.indexOf("MISSING_REQUIRED_RATE") >= 0) return "MISSING_REQUIRED_RATE";
-    if (msg.indexOf("RATES_JSON_INVALID") >= 0) return "RATES_MISSING";
+    if (msg.indexOf("RATES_JSON_INVALID") >= 0) return "RATES_JSON_INVALID";
     if (msg.indexOf("RATES_MISSING") >= 0) return "RATES_MISSING";
-    if (msg.indexOf("EXCLUDES_JSON_INVALID") >= 0) return "EXCLUDES_INVALID";
+    if (msg.indexOf("EXCLUDES_JSON_INVALID") >= 0) return "EXCLUDES_JSON_INVALID";
     if (msg.indexOf("EXCLUDES_INVALID") >= 0) return "EXCLUDES_INVALID";
     if (msg.indexOf("LEDGER_JSON_INVALID") >= 0) return "LEDGER_JSON_INVALID";
     if (msg.indexOf("START_DATE_MISSING") >= 0) return "START_DATE_MISSING";
@@ -2179,19 +2372,55 @@
     return null;
   }
 
-  async function _resolveAbonentSummaryRecalcPeriod(abonentOrId, explicitPeriod) {
-    if (explicitPeriod && typeof explicitPeriod === "object") {
-      return { ok: _isValidIsoPeriod(explicitPeriod.from, explicitPeriod.to), from: String(explicitPeriod.from || ""), to: String(explicitPeriod.to || ""), error: "PERIOD_INVALID" };
+  var SUMMARY_RECALC_MODE_FULL = "FULL_SUMMARY_REBUILD";
+  var SUMMARY_RECALC_MODE_REPORT = "REPORT_PERIOD_CALCULATION";
+
+  function _normalizeSummaryRecalcMode(options) {
+    var opts = options || {};
+    var raw = String(opts.mode || opts.recalcMode || opts.summaryMode || "").trim().toUpperCase();
+    if (raw === SUMMARY_RECALC_MODE_FULL || raw === "FULL") return SUMMARY_RECALC_MODE_FULL;
+    if (raw === SUMMARY_RECALC_MODE_REPORT || raw === "REPORT" || raw === "PERIOD") return SUMMARY_RECALC_MODE_REPORT;
+    var scope = String(opts.summaryScope || opts.summary_scope || "").trim().toLowerCase();
+    if (opts.saveSummary === false || scope === "period" || scope === "report") return SUMMARY_RECALC_MODE_REPORT;
+    return SUMMARY_RECALC_MODE_FULL;
+  }
+
+  async function _resolveAbonentSummaryRecalcPeriod(abonentOrId, explicitPeriod, options) {
+    var mode = _normalizeSummaryRecalcMode(options || {});
+
+    if (mode === SUMMARY_RECALC_MODE_REPORT && explicitPeriod && typeof explicitPeriod === "object") {
+      return { ok: _isValidIsoPeriod(explicitPeriod.from, explicitPeriod.to), from: String(explicitPeriod.from || ""), to: String(explicitPeriod.to || ""), error: "PERIOD_INVALID", mode: mode };
     }
+
+    if (mode === SUMMARY_RECALC_MODE_FULL) {
+      var fullResponsibilityPeriod = _readActiveResponsibilityPeriod(abonentOrId);
+      if (fullResponsibilityPeriod) {
+        fullResponsibilityPeriod.mode = mode;
+        fullResponsibilityPeriod.source = "canonical_full_period";
+        return fullResponsibilityPeriod;
+      }
+      return { ok: false, error: "RESPONSIBILITY_DATE_MISSING", from: "", to: "", mode: mode };
+    }
+
     var period = _readAbonentCalcPeriod(abonentOrId);
-    if (period.ok || period.error !== "PERIOD_REQUIRED") return period;
+    if (period.ok || period.error !== "PERIOD_REQUIRED") {
+      period.mode = mode;
+      return period;
+    }
 
     var summaryPeriod = await _readCurrentAbonentSummaryPeriod(abonentOrId);
-    if (summaryPeriod) return summaryPeriod;
+    if (summaryPeriod) {
+      summaryPeriod.mode = mode;
+      return summaryPeriod;
+    }
 
     var responsibilityPeriod = _readActiveResponsibilityPeriod(abonentOrId);
-    if (responsibilityPeriod) return responsibilityPeriod;
+    if (responsibilityPeriod) {
+      responsibilityPeriod.mode = mode;
+      return responsibilityPeriod;
+    }
 
+    period.mode = mode;
     return period;
   }
 
@@ -2467,7 +2696,7 @@
     var abonentsApiPayload = null;
     var abonentApiRow = null;
 
-    try { period = await _resolveAbonentSummaryRecalcPeriod(abonent || id, null); } catch (ePeriod) { period = { ok: false, error: String(ePeriod && ePeriod.message || ePeriod) }; }
+    try { period = await _resolveAbonentSummaryRecalcPeriod(abonent || id, null, { mode: SUMMARY_RECALC_MODE_FULL }); } catch (ePeriod) { period = { ok: false, error: String(ePeriod && ePeriod.message || ePeriod) }; }
     try { responsibility = _readActiveResponsibilityPeriod(abonent || id); } catch (eResp) { responsibility = { ok: false, error: String(eResp && eResp.message || eResp) }; }
 
     try {
@@ -2731,20 +2960,59 @@
 
   async function recalcAbonentSummaryExplicit(abonentOrId, options) {
     var opts = options || {};
-    var period = await _resolveAbonentSummaryRecalcPeriod(abonentOrId, opts.period);
     var summary = null;
+    var mode = _normalizeSummaryRecalcMode(opts);
+    var period = await _resolveAbonentSummaryRecalcPeriod(abonentOrId, opts.period, { mode: mode, summaryScope: opts.summaryScope || opts.summary_scope, saveSummary: opts.saveSummary });
+    var periodActive = mode === SUMMARY_RECALC_MODE_REPORT;
 
     try {
       if (!period.ok) throw new Error(period.error || "PERIOD_INVALID");
       summary = buildAbonentSummaryAfterExplicitRecalc(abonentOrId, period.from, period.to);
+      if (periodActive) {
+        summary.summary_scope = "period";
+        summary.report_scope = "period";
+        summary.calculation_mode = SUMMARY_RECALC_MODE_REPORT;
+      } else {
+        summary.summary_scope = "full";
+        summary.calculation_mode = SUMMARY_RECALC_MODE_FULL;
+      }
     } catch (e) {
       var reason = _summaryCalcErrorCode(e);
       summary = buildAbonentSummaryErrorAfterExplicitRecalc(abonentOrId, period, reason);
+      if (periodActive) {
+        summary.summary_scope = "period";
+        summary.report_scope = "period";
+        summary.calculation_mode = SUMMARY_RECALC_MODE_REPORT;
+      } else {
+        summary.summary_scope = "full";
+        summary.calculation_mode = SUMMARY_RECALC_MODE_FULL;
+      }
     }
 
-    var saveResult = await saveAbonentSummaryAfterRecalc(abonentOrId, summary);
-    var status = summary.summary_status || summary.status || "error";
-    var reasonOut = summary.summary_reason || summary.reason || "";
+    var saveResult = null;
+    if (periodActive) {
+      saveResult = { ok: true, skipped: true, reason: "PERIOD_SUMMARY_NOT_SAVED", summary_status: summary.summary_status || summary.status || "fresh", summary_reason: summary.summary_reason || summary.reason || "OK", summary_scope: "period" };
+      try {
+        console.log("[summary][skip-save-period-summary]", {
+          uid: String(summary.account_uid || summary.uid || ""),
+          periodActive: true,
+          periodFrom: String(period && period.from || ""),
+          periodTo: String(period && period.to || "")
+        });
+      } catch (eSkipLog) {}
+    } else {
+      try {
+        console.log("[summary][save-full-summary]", {
+          uid: String(summary.account_uid || summary.uid || ""),
+          periodActive: false,
+          periodFrom: String(period && period.from || ""),
+          periodTo: String(period && period.to || "")
+        });
+      } catch (eFullLog) {}
+      saveResult = await saveAbonentSummaryAfterRecalc(abonentOrId, summary);
+    }
+    var status = saveResult && (saveResult.summary_status || saveResult.status) || summary.summary_status || summary.status || "error";
+    var reasonOut = saveResult && (saveResult.summary_reason || saveResult.reason) || summary.summary_reason || summary.reason || "";
     return {
       ok: !!(saveResult && saveResult.ok === true && status === "fresh"),
       uid: String(summary.account_uid || summary.uid || ""),
@@ -2811,9 +3079,34 @@
       if (raw !== null && raw !== undefined) _parseLedgerRows(raw, ledgerKey);
     } catch (e) {
       var ledgerReason = _summaryCalcErrorCode(e);
-      var periodForError = await _resolveAbonentSummaryRecalcPeriod(abonentOrId, opts.period);
+      var errorScopeOpt = String(opts.summaryScope || opts.summary_scope || "").toLowerCase();
+      var periodErrorScope = opts.saveSummary === false || errorScopeOpt === "period" || errorScopeOpt === "report";
+      var periodForError = await _resolveAbonentSummaryRecalcPeriod(abonentOrId, opts.period, {
+        mode: periodErrorScope ? SUMMARY_RECALC_MODE_REPORT : SUMMARY_RECALC_MODE_FULL,
+        summaryScope: opts.summaryScope || opts.summary_scope,
+        saveSummary: opts.saveSummary
+      });
       var errorSummary = buildAbonentSummaryErrorAfterExplicitRecalc(abonentOrId, periodForError, ledgerReason);
-      var errorSave = await saveAbonentSummaryAfterRecalc(abonentOrId, errorSummary);
+      if (periodErrorScope) {
+        errorSummary.summary_scope = "period";
+        errorSummary.report_scope = "period";
+        errorSummary.calculation_mode = SUMMARY_RECALC_MODE_REPORT;
+        try {
+          console.log("[summary][skip-save-period-summary]", {
+            uid: uid,
+            periodActive: true,
+            periodFrom: String(periodForError && periodForError.from || ""),
+            periodTo: String(periodForError && periodForError.to || "")
+          });
+        } catch (eSkipErrLog) {}
+      }
+      if (!periodErrorScope) {
+        errorSummary.summary_scope = "full";
+        errorSummary.calculation_mode = SUMMARY_RECALC_MODE_FULL;
+      }
+      var errorSave = periodErrorScope
+        ? { ok: true, skipped: true, reason: "PERIOD_SUMMARY_NOT_SAVED", summary_status: errorSummary.summary_status || errorSummary.status || "error", summary_reason: errorSummary.summary_reason || errorSummary.reason || ledgerReason, summary_scope: "period" }
+        : await saveAbonentSummaryAfterRecalc(abonentOrId, errorSummary);
       return {
         ok: false,
         uid: uid,
@@ -2867,6 +3160,7 @@
     ensureAbonentUid: ensureAbonentUid,
     resolveCalcPeriodStorageKey: resolveCalcPeriodStorageKey,
     resolveCalcPeriodActiveStorageKey: resolveCalcPeriodActiveStorageKey,
+    resetCalcPeriodKeysForAbonent: resetCalcPeriodKeysForAbonent,
     resolvePaymentLedgerKey: resolvePaymentLedgerKey,
     getRuntimeCacheKey: getRuntimeCacheKey,
     resolveRuntimeCacheKey: resolveRuntimeCacheKey,

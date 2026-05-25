@@ -63,6 +63,12 @@ Changing these keys must not:
 
 `CALC_PERIOD_CHANGED` is a view-only reason. It may invalidate only report/view caches. Court/report calculation may use the selected period temporarily for rendering, but financial summary state remains unchanged until an explicit financial recalculation writes a fresh derived summary.
 
+Stage 13.5 canonical full summary modes:
+- `FULL_SUMMARY_REBUILD` builds `abonent_summary` only over the canonical full financial period: `calcStartDate` / responsibility start through `calcEndDate` / responsibility close / current calculation date.
+- `FULL_SUMMARY_REBUILD` must not use `report_period_<uid>`, `calc_period_<uid>` or `calc_period_active_<uid>` as period boundaries, fingerprint inputs, dirty reasons, or saved full-summary period values.
+- `REPORT_PERIOD_CALCULATION` may use the selected report/view period only for temporary court/report rendering and must not overwrite full `abonent_summary` totals.
+- Fatal calculation errors such as `LEDGER_JSON_INVALID`, `RATES_MISSING`, `RATES_JSON_INVALID`, `MISSING_REQUIRED_RATE`, `EXCLUDES_JSON_INVALID`, `EXCLUDES_INVALID`, `START_DATE_MISSING` and `RESPONSIBILITY_DATE_MISSING` are preserved as `summary_status = error` without fake zero totals.
+
 ### 2.1. Источник истины
 - **Backend / серверная БД** — источник истины.
 - **Frontend / localStorage** — рабочий кэш, офлайн-копия и транспортный слой.
@@ -1522,7 +1528,7 @@ UI имеет право использовать `calc_summary_<uid>` толь�
 `calc_checkpoint_<uid>` хранится вместе с summary и фиксирует `uid`, `abonentId`, `generatedAt`, `calcEngineVersion`, `summaryFormatVersion`, `canonVersion`, период расчёта, ключ/значение расчётного периода и lightweight fingerprints для ledger, тарифов, ставок, исключений, моратория и responsibility data.
 Checkpoint проверяется при каждом чтении summary. Несовпадение fingerprint или версии не исправляется автоматически, не очищается молча, не считается совместимым автоматически и не запускает автоматический пересчёт. Версии являются отдельными ручными константами и не вычисляются через hash файлов.
 
-Выбранный calc period является строгой границей summary: fresh summary может описывать только период, сохранённый в `calc_period_<uid>` / `calc_period_active_<uid>` на момент пересчёта. Изменение периода переводит ранее записанный summary в not-fresh состояние (`dirty` / mismatch) и требует явного пересчёта.
+Stage 13.5 correction: selected `calc_period_<uid>` / `calc_period_active_<uid>` is a view/report boundary only. It may limit `REPORT_PERIOD_CALCULATION`, but it is not a boundary for canonical full `abonent_summary`, does not enter full-summary fingerprints and does not make full summary dirty.
 
 Отсутствующие начисления внутри выбранного периода блокируют fresh summary. В этом состоянии UI должен показывать «Требуется пересчёт» и предлагать подготовить начисления, но не должен подменять отсутствующие строки нулевым итогом и не должен считать старый summary актуальным.
 
@@ -1773,7 +1779,7 @@ Fatal-состояния включают, но не ограничиваютс�
 - `payments_<uid>`;
 - платежей из Excel;
 - ручных начислений;
-- `calc_period_<uid>`;
+- financial responsibility period (`calcStartDate` / `calcEndDate`); `calc_period_<uid>` is view/report state and must not mark `abonent_summary` dirty;
 - `exclude_periods_<abonentId>`;
 - `moratorium_<abonentId>`;
 - transfer/frozen debt данных;

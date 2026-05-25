@@ -55,7 +55,7 @@
   }
   function isLegacyCalcPeriodKey(key){
     const k = String(key || "");
-    return /^calc_period_(active_)?(?!uid_)/.test(k);
+    return /^calc_period_active_(?!uid_)/.test(k) || /^calc_period_(?!uid_|active_uid_)/.test(k);
   }
   function storeSetRaw(key, value){
     if (!(window.JKHStore && typeof window.JKHStore.setRaw === "function")) return;
@@ -1219,20 +1219,18 @@ if (parts.length) {
     }
 
     const abonent = (typeof window.Data.getAbonent === "function") ? window.Data.getAbonent(id) : null;
-    if (!abonent) {
-      logCalcPeriodOnce("[calc-period][save-skipped-no-canonical-key]", { abonentId: id, reason: "ABONENT_NOT_READY", source: "payment_table" });
-      return { cacheKey: cacheKey, storageKey: "", activeStorageKey: "", abonentId: id };
-    }
-
-    const storageKey = String(window.Data.resolveCalcPeriodStorageKey(abonent) || "");
-    const activeStorageKey = String(window.Data.resolveCalcPeriodActiveStorageKey(abonent) || "");
+    const resolverInput = abonent || id;
+    const storageKey = String(window.Data.resolveCalcPeriodStorageKey(resolverInput) || "");
+    const activeStorageKey = String(window.Data.resolveCalcPeriodActiveStorageKey(resolverInput) || "");
+    let resolvedUid = String(abonent && abonent.uid || "");
+    if (!resolvedUid && /^calc_period_uid_/.test(storageKey)) resolvedUid = storageKey.replace(/^calc_period_/, "");
     if (!storageKey || !activeStorageKey) {
-      logCalcPeriodOnce("[calc-period][save-skipped-no-canonical-key]", { abonentId: id, reason: "CANONICAL_KEY_NOT_READY", source: "payment_table" });
+      logCalcPeriodOnce("[calc-period][save-skipped-no-canonical-key]", { requestedId: id, resolvedUid: resolvedUid, ownerId: owner, reason: "CANONICAL_KEY_NOT_READY", source: "payment_table" });
       return { cacheKey: cacheKey, storageKey: "", activeStorageKey: "", abonentId: id };
     }
 
-    __calcPeriodMetaCache = { cacheKey: cacheKey, storageKey: storageKey, activeStorageKey: activeStorageKey, abonentId: id };
-    logCalcPeriodOnce("[calc-period][canonical-key-used]", { abonentId: id, storageKey: storageKey, activeKey: activeStorageKey, source: "payment_table" });
+    __calcPeriodMetaCache = { cacheKey: cacheKey, storageKey: storageKey, activeStorageKey: activeStorageKey, abonentId: id, resolvedUid: resolvedUid };
+    logCalcPeriodOnce("[calc-period][canonical-key-used]", { requestedId: id, resolvedUid: resolvedUid, storageKey: storageKey, activeStorageKey: activeStorageKey, ownerId: owner, source: "payment_table" });
     return __calcPeriodMetaCache;
   }
   function calcPeriodKey() { return calcPeriodStorageMeta().storageKey || ""; }
@@ -1836,6 +1834,7 @@ function perfLog(stage, startedAt){
 
 window.JKH_resetPaymentTablePeriodRuntime = function(reason) {
   try { __paymentTotalsMemo.clear(); } catch(eMemo) {}
+  try { __calcPeriodMetaCache = null; } catch(eMeta) {}
   __paymentTableRenderedSignature = "";
   __paymentTableCalcToken++;
   __runtimeCacheState = { valid: false, reason: "period-reset", dataById: {}, periodMatches: false };
@@ -3208,7 +3207,12 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
     if (!window.Data || typeof Data.recalculateAbonentCard !== "function") {
       return { ok:false, reason:"SUMMARY_RECALC_UNAVAILABLE", autoaccrual_changed:!!autoResult.changed, summary_status:"error", summary_reason:"SUMMARY_RECALC_UNAVAILABLE", summary:null, summary_save:{ ok:false, reason:"SUMMARY_RECALC_UNAVAILABLE" } };
     }
-    const summaryResult = await Data.recalculateAbonentCard(id, { period: opts.period });
+    const summaryResult = await Data.recalculateAbonentCard(id, {
+      period: opts.period,
+      saveSummary: !(periodActive && selectedPeriod),
+      summaryScope: (periodActive && selectedPeriod) ? "period" : "full",
+      periodActive: !!(periodActive && selectedPeriod)
+    });
     const freshArr = getPayments();
     const freshPeriodActive = isCalcPeriodActive();
     const freshSelectedPeriod = freshPeriodActive ? getCalcPeriod() : null;

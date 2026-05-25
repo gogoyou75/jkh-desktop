@@ -5,6 +5,14 @@
 - Ошибки dirty endpoint логируются как `[summary][mark-dirty-failed]` и не блокируют основное сохранение.
 - Зафиксировано, что `abonent_summary` имеет состояния `fresh` / `dirty` / `missing` / `error`; `dirty` не запускает пересчёт, а `fresh` появляется только после явного UID-пересчёта и single upsert.
 
+## 2026-05-25 - Stage 13.5 canonical full summary rebuild stabilization
+
+- `FULL_SUMMARY_REBUILD` now resolves `abonent_summary` period from canonical responsibility boundaries, not from `calc_period_<uid>` / `report_period_<uid>`.
+- `REPORT_PERIOD_CALCULATION` is separated as a temporary view/report calculation and is not saved as full summary totals.
+- Backend single summary upsert now validates stored full-summary payloads against canonical period boundaries and masks legacy short-period contamination as missing without totals.
+- Fatal reasons such as `RATES_JSON_INVALID` and `EXCLUDES_JSON_INVALID` are preserved instead of being collapsed into broader fallback reasons.
+- `web/calc_engine.js` was not changed.
+
 # CHANGELOG
 
 ## 2026-05-17 — Abonent summary single UID integration
@@ -599,3 +607,92 @@ rg -n "splitPremise|premise-transform\]\[split|type: ['\"]split" web LOGIC_SPEC.
 - Added `window.JKH_resetPaymentTablePeriodRuntime(reason)` to clear period-derived render signature and memoized totals without touching ledger rows.
 - Full readonly table reload after reset logs `[payment-table][period-runtime-reset]` and `[payment-table][full-view-after-period-reset]`.
 - No formula/FIFO/penalty changes, no ledger writes, no autoaccrual, no `CALC_PERIOD_CHANGED` financial dirty behavior, and no `web/calc_engine.js` changes.
+
+## 2026-05-22 — Stage 13.3 — index empty totals and summary status consistency
+
+- `index.html` теперь валидирует fresh summary перед отображением totals: fresh без `summary.totals`, без обязательных debt/penalty/accrued/paid или с non-finite значениями отображается как `error` с reason `FRESH_TOTALS_MISSING` / `FRESH_TOTALS_INVALID`.
+- Добавлен read-only diagnostic helper `window.JKH_debugIndexSummaryRows()` и console diagnostics `[index][summary-row-empty]` / `[index][summary-row-invalid-fresh]` для точной причины пустых расчетных колонок.
+- Legacy `CALC_PERIOD_CHANGED` больше не трактуется как financial dirty: backend index payload нормализует старый dirty reason в `missing`, frontend показывает view-only legacy reason и клиентский dirty helper не отправляет этот reason на сервер.
+- `web/calc_engine.js`, формулы, FIFO, пени, чтение `payments_<uid>` на index, autoaccrual и hidden rebuild не изменялись.
+
+## 2026-05-22 — Stage 13.3E — batch invalid fresh totals guard
+
+- Backend summary transport теперь валидирует `fresh` totals перед index payload и batch job accounting: fresh без `summary.totals` или без finite debt/penalty/accrued/paid превращается в `error` с `FRESH_TOTALS_MISSING` / `FRESH_TOTALS_INVALID`.
+- Batch job больше не считает invalid fresh как fresh: такие UID идут в `error_count`, item получает `summary_status=error` и точный `summary_reason`.
+- Не добавлялись hidden rebuild, fake zero totals, чтение `payments_<uid>` на index, autoaccrual или изменения `web/calc_engine.js`.
+
+## 2026-05-22 — Stage 13.4 — abonent card summary pipeline
+
+- Single `POST /api/abonent_summary/rebuild` теперь сохраняет нормализованный summary: invalid `fresh` без обязательных nested `totals.debt/penalty/accrued/paid` превращается в `error` без fake totals.
+- Frontend save path после ручного пересчёта логирует `[summary][save-ok]` с UID, status и ключами `summary.totals`; карточка показывает понятное сообщение, если расчёт выполнен, но summary для главной страницы не сохранён.
+- Кнопка index batch переименована в проверку summary, чтобы не маскировать validator как пересчёт карточек.
+- Не менялись `web/calc_engine.js`, формулы/FIFO/пени, backend financial logic, чтение `payments_<uid>` на index, hidden rebuild и storage keys.
+
+## 2026-05-22 — Stage 13.4A — summary pipeline audit diagnostics
+
+- Уточнён контракт rebuild без body: он остаётся controlled missing rebuild и не притворяется финансовым пересчётом totals.
+- Frontend save path логирует `[summary][build-payload]`, `[summary][save-ok]`, `[summary][save-failed]` с UID, status, reason и `summary.totals` keys.
+- Добавлена regression-проверка, что rebuild без body не исправляет invalid fresh финансовыми totals и не подставляет fake totals.
+- Index по-прежнему не читает `payments_<uid>` и batch остаётся validator, не пересчётом карточек.
+
+## 2026-05-22 — Stage 13.4B — abonent card calc-period canonical key resolution
+
+- `abonent_card.html` и `payment_table.js` теперь резолвят calc period keys через `Data.resolveCalcPeriodStorageKey(...)` / `Data.resolveCalcPeriodActiveStorageKey(...)` даже когда локальный объект абонента ещё не готов, используя requested id как вход в canonical resolver.
+- Добавлена диагностика `[calc-period][canonical-key-used]` с `requestedId`, `resolvedUid`, `storageKey`, `activeStorageKey`, `ownerId`.
+- Сохранение периода остаётся view-only: без `CALC_PERIOD_CHANGED` dirty, без legacy `calc_period_<ЛС>` writes, без hidden rebuild и без изменений `web/calc_engine.js`.
+
+## 2026-05-22 — Stage 13.4B — separate full summary from period calculation
+
+- Period/report calculation in `fullRecalcForCurrentAbonent` no longer saves its selected-period result as the main `AbonentSummary` for index; it returns period summary for card display and logs `[summary][skip-save-period-summary]`.
+- Full/canonical summary saves are logged as `[summary][save-full-summary]`; only non-period recalculation may write the main summary cache.
+- Backend transport ignores `summary_scope=period` / `report_scope=period` summaries for index by mapping them to `missing/PERIOD_SUMMARY_IGNORED` and stripping totals.
+- No `web/calc_engine.js`, FIFO, penalty formula, index ledger read, hidden rebuild, or `CALC_PERIOD_CHANGED` financial dirty changes.
+
+## 2026-05-22 — Stage 13.4B — protect index summary from period/report saves
+
+- `Data.saveAbonentSummaryAfterRecalc(...)` now hard-skips `summary_scope=period/report` before POST and logs `[summary][skip-save-period-summary]`.
+- Backend `POST /api/abonent_summary/rebuild` rejects period/report summaries with `period_summary_not_allowed`.
+- Reports-period save path ensures canonical UID before writing calc-period keys, preserving UID-only `calc_period_uid_*` / `calc_period_active_uid_*`.
+- No calc engine, FIFO, penalty, index ledger read, hidden rebuild, or fake summary changes were added.
+
+## 2026-05-22 - Stage 13.4G - calc period reset persistence
+
+- Reset in abonent card now clears canonical `calc_period_uid_*`, sets `calc_period_active_uid_*` to inactive, removes canonical report period, and verifies readback before updating the UI.
+- Added reset diagnostics: `[calc-period][reset-start]`, `[calc-period][reset-saved]`, `[calc-period][reset-readback-ok]`, and `[calc-period][reset-readback-failed]`.
+- If canonical reset readback fails, the card shows `Период не сброшен на сервере` and does not silently present a successful reset.
+- No financial dirty, summary save, hidden rebuild, index ledger read, `calc_engine.js`, FIFO, penalty, or formula changes were added.
+
+## 2026-05-23 - Stage 13.4G - reset restore race guard
+
+- Added the global `window.__periodResetInProgress` guard so card reset blocks late restore from URL, `report_period_uid_*`, `calc_period_uid_*`, and async bootstrap writes until the user manually enters/saves a new period.
+- Reset now logs `[period][reset]`, `[period][restore-blocked-after-reset]`, `[period][async-override-blocked]`, `[period][manual-period-input-after-reset]`, `[period][reset-readback-ok]`, and `[period][reset-readback-failed]`; normal restore logs `[period][restore-source]`.
+- Payment table reset now clears its in-memory calc-period meta cache together with rendered signatures and memoized totals.
+- No `calc_engine.js`, backend financial logic, FIFO, penalty, formulas, summary dirty, server-first, or ledger behavior changes were added.
+
+## 2026-05-25 - Stage 13.4H - server-first period reset persistence
+
+- Added `Data.resetCalcPeriodKeysForAbonent(...)` to remove canonical calc/report period keys through `DELETE /api/store`, set `calc_period_active_uid_*` to `"0"` through `POST /api/store`, and cleanup legacy account-number period keys as delete-only compatibility cleanup.
+- Reset now performs local and server readback with `[period][reset-local-readback-ok]`, `[period][reset-server-persist-ok]`, `[period][server-reset-readback-ok]`, and failed counterparts; `value:null` is not used because backend `POST /api/store` stores it as an empty string.
+- Added `window.JKH_debugCalcPeriodKeys()` and expanded `[period][restore-source]` diagnostics with key/raw/source/from/to/owner/uid/requestedId.
+- Summary snapshots remain read-only diagnostics for this flow and are not used to restore UI period state.
+- No `web/calc_engine.js`, backend financial logic, FIFO, penalty, formulas, index ledger read, summary save, or canonical write-path legacy fallback changes were added.
+
+## 2026-05-22 - Stage 13.4F - legacy period summary read masking
+
+- Added read-only backend masking for legacy fresh summaries without `summary_scope` whose stored `period.from/to` conflicts with known canonical abonent boundaries.
+- Contaminated legacy summaries are transported as `missing` / `PERIOD_SUMMARY_LEGACY` with totals aliases removed; the database row is not updated.
+- Unknown canonical boundaries are diagnostic-only and are not aggressively masked.
+- No SQL cleanup, hidden rebuild, backend recalculation, index ledger read, `calc_engine.js`, FIFO, penalty, or formula changes were added.
+
+## 2026-05-22 - Stage 13.4E - reports button without card recalculation
+
+- Reports button in abonent card is kept as a navigation/report-period action only: UID ensure, calc/report period save, and transition to reports page.
+- Added `[reports][open-with-period]` diagnostics and a `[reports][blocked-card-recalc]` guard marker for accidental card recalculation attempts from the reports path.
+- Added source-level regression that the reports button handler does not call card recalculation, summary save/rebuild, or autoaccrual heavy path.
+- No `calc_engine.js`, FIFO, penalty, index ledger read, hidden rebuild, or period-summary-as-main-summary changes were added.
+
+## 2026-05-22 - Stage 13.4C - period summary guard and canonical calc-period keys
+
+- Fixed `Data.saveAbonentSummaryAfterRecalc(...)` period/report guard so it runs only after the real summary payload object is defined and returns `PERIOD_SUMMARY_NOT_SAVED` without a JS exception.
+- Fixed calc-period legacy-key detection: `calc_period_uid_...` and `calc_period_active_uid_...` are canonical and no longer blocked as legacy writes; account-number keys remain blocked.
+- Kept server-first/index constraints unchanged: no hidden rebuild, no index ledger read, no fake totals, no `calc_engine.js` changes.

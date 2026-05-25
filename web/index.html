@@ -235,7 +235,7 @@ Doc: docs/LOGIC_SPEC_v1.5.3.md
 
 <div id="summaryBatchPanel" class="summary-batch-panel" style="display:none;">
     <button id="summaryBatchSelectStaleBtn" type="button">Выбрать устаревшие на странице</button>
-    <button id="summaryBatchRunBtn" type="button">Пересчитать выбранные/устаревшие</button>
+    <button id="summaryBatchRunBtn" type="button" title="Проверяет summary, не пересчитывает карточки">Проверить выбранные summary</button>
     <span id="summaryBatchCount">Нет выбранных UID</span>
     <div id="summaryBatchProgress" class="summary-batch-progress"></div>
 </div>
@@ -822,6 +822,12 @@ function summaryNumberToDisplay(value){
     return Number.isFinite(n) ? n.toFixed(2) : "";
 }
 
+function summaryFiniteNumber(value){
+    if (value === null || value === undefined || value === "") return { finite: false, missing: true, value: value };
+    const n = Number(String(value).replace(",", "."));
+    return { finite: Number.isFinite(n), missing: false, value: value, number: n };
+}
+
 function pickSummaryValue(summary, keys){
     for (let i = 0; i < keys.length; i++) {
         const key = String(keys[i] || "");
@@ -844,6 +850,77 @@ function pickSummaryValueWithSource(summary, keys){
         if (v !== null && v !== undefined && v !== "") return { value: v, source: key };
     }
     return { value: "", source: "" };
+}
+
+const INDEX_SUMMARY_TOTAL_KEYS = {
+    debt: ["totals.debt", "totals.total", "totals.total_debt", "total_debt", "totalDebt", "debt_total", "total"],
+    penalty: ["totals.penalty", "totals.total_penalty", "total_penalty", "penalty", "pay_penalty", "penalty_debt", "penaltyDebt"],
+    accrued: ["totals.accrued", "totals.total_accrued", "total_accrued", "nachisleno", "accrued", "accrued_total", "accruedTotal"],
+    paid: ["totals.paid", "totals.total_paid", "total_paid", "oplacheno", "paid", "paid_total", "paidTotal"]
+};
+
+function validateIndexSummaryTotals(summary, status){
+    const totalsObj = summary && summary.totals && typeof summary.totals === "object" && !Array.isArray(summary.totals) ? summary.totals : null;
+    const fields = {};
+    let totalsFinite = true;
+    let missingAny = false;
+    let invalidAny = false;
+    Object.keys(INDEX_SUMMARY_TOTAL_KEYS).forEach(function(name){
+        const picked = pickSummaryValueWithSource(summary, INDEX_SUMMARY_TOTAL_KEYS[name]);
+        const finite = summaryFiniteNumber(picked.value);
+        fields[name] = {
+            value: picked.value,
+            source: picked.source,
+            missing: finite.missing,
+            finite: finite.finite
+        };
+        if (finite.missing) missingAny = true;
+        if (!finite.missing && !finite.finite) invalidAny = true;
+        if (!finite.finite) totalsFinite = false;
+    });
+
+    let whyEmptyTotals = "";
+    let exactGuard = "";
+    let displayStatus = status;
+    let displayReason = "";
+    if (status === "fresh") {
+        if (!totalsObj) {
+            displayStatus = "error";
+            displayReason = "FRESH_TOTALS_MISSING";
+            whyEmptyTotals = "missing totals";
+            exactGuard = "summary.totals missing";
+        } else if (missingAny) {
+            displayStatus = "error";
+            displayReason = "FRESH_TOTALS_MISSING";
+            whyEmptyTotals = "missing required totals fields";
+            exactGuard = "debt/accrued/paid/penalty missing";
+        } else if (invalidAny || !totalsFinite) {
+            displayStatus = "error";
+            displayReason = "FRESH_TOTALS_INVALID";
+            whyEmptyTotals = "invalid totals";
+            exactGuard = "totals not finite";
+        }
+    } else if (status === "dirty") {
+        whyEmptyTotals = "dirty summary";
+        exactGuard = "summary_status dirty";
+    } else if (status === "missing") {
+        whyEmptyTotals = "summary missing";
+        exactGuard = "summary_status missing";
+    } else if (status === "error") {
+        whyEmptyTotals = "summary error";
+        exactGuard = "summary_status error";
+    }
+
+    return {
+        hasTotalsObject: !!totalsObj,
+        totalsFinite: !!totalsFinite,
+        fields: fields,
+        validFreshTotals: status === "fresh" && !!totalsObj && !missingAny && !invalidAny && !!totalsFinite,
+        displayStatus: displayStatus,
+        displayReason: displayReason,
+        whyEmptyTotals: whyEmptyTotals,
+        exactGuard: exactGuard
+    };
 }
 
 function formatSummaryDate(value){
@@ -873,8 +950,12 @@ function buildIndexRowFromSummaryItem(item){
     const summary = (item && item.summary && typeof item.summary === "object") ? item.summary : {};
     const abonent = (summary.abonent && typeof summary.abonent === "object") ? summary.abonent : {};
     const status = normalizeSummaryStatus(summary.summary_status || summary.status || item && item.summary_status);
-    const reason = String(summary.summary_reason || summary.reason || "").trim();
-    const isFresh = status === "fresh";
+    const rawReason = String(summary.summary_reason || summary.reason || "").trim();
+    const totalsValidation = validateIndexSummaryTotals(summary, status);
+    const viewOnlyLegacyReason = status === "dirty" && rawReason === "CALC_PERIOD_CHANGED";
+    const displayStatus = viewOnlyLegacyReason ? "legacy" : totalsValidation.displayStatus;
+    const reason = viewOnlyLegacyReason ? "CALC_PERIOD_CHANGED_VIEW_ONLY_LEGACY" : (totalsValidation.displayReason || rawReason);
+    const isFresh = status === "fresh" && totalsValidation.validFreshTotals;
     const fioText = String(
         summary.fio || summary.full_name || summary.abonent_name || summary.name_full || summary.display_name || abonent.fio || ""
     ).trim();
@@ -884,10 +965,10 @@ function buildIndexRowFromSummaryItem(item){
     const otch = summary.otch || summary.middle_name || abonent.otch || abonent.middle_name || fio.slice(2).join(" ") || "";
 
     const period = (summary.period && typeof summary.period === "object") ? summary.period : {};
-    const debtValue = isFresh ? pickSummaryValueWithSource(summary, ["totals.debt", "totals.total", "totals.total_debt", "total_debt", "totalDebt", "debt_total", "total"]) : { value: "", source: "" };
-    const penaltyValue = isFresh ? pickSummaryValueWithSource(summary, ["totals.penalty", "totals.total_penalty", "total_penalty", "penalty", "pay_penalty", "penalty_debt", "penaltyDebt"]) : { value: "", source: "" };
-    const accruedValue = isFresh ? pickSummaryValueWithSource(summary, ["totals.accrued", "totals.total_accrued", "total_accrued", "nachisleno", "accrued", "accrued_total", "accruedTotal"]) : { value: "", source: "" };
-    const paidValue = isFresh ? pickSummaryValueWithSource(summary, ["totals.paid", "totals.total_paid", "total_paid", "oplacheno", "paid", "paid_total", "paidTotal"]) : { value: "", source: "" };
+    const debtValue = isFresh ? pickSummaryValueWithSource(summary, INDEX_SUMMARY_TOTAL_KEYS.debt) : { value: "", source: "" };
+    const penaltyValue = isFresh ? pickSummaryValueWithSource(summary, INDEX_SUMMARY_TOTAL_KEYS.penalty) : { value: "", source: "" };
+    const accruedValue = isFresh ? pickSummaryValueWithSource(summary, INDEX_SUMMARY_TOTAL_KEYS.accrued) : { value: "", source: "" };
+    const paidValue = isFresh ? pickSummaryValueWithSource(summary, INDEX_SUMMARY_TOTAL_KEYS.paid) : { value: "", source: "" };
     const renderedValues = {
         debt: summaryNumberToDisplay(debtValue.value),
         penalty: summaryNumberToDisplay(penaltyValue.value),
@@ -910,17 +991,27 @@ function buildIndexRowFromSummaryItem(item){
         note: String(summary.note || summary.defaultNote || ""),
         flatReg: String(summary.flat_reg || summary.regnum || summary.premise_regnum || summary.premiseRegnum || abonent.flat_reg || abonent.regnum || abonent.premise_regnum || abonent.premiseRegnum || ""),
         rowStatusMark: "",
-        summaryStatus: status,
+        summaryStatus: displayStatus,
         summaryReason: reason,
+        rawSummaryStatus: status,
+        rawSummaryReason: rawReason,
         __totalsRenderDebug: {
             uid: String(item && item.account_uid || summary.account_uid || summary.accountUid || abonent.account_uid || abonent.accountUid || ""),
-            summaryStatus: status,
+            summaryStatus: displayStatus,
+            rawSummaryStatus: status,
+            summaryReason: reason,
+            rawSummaryReason: rawReason,
+            hasTotalsObject: totalsValidation.hasTotalsObject,
+            totalsFinite: totalsValidation.totalsFinite,
+            whyEmptyTotals: viewOnlyLegacyReason ? "view/report period changed" : totalsValidation.whyEmptyTotals,
+            exactGuard: viewOnlyLegacyReason ? "CALC_PERIOD_CHANGED is view-only legacy reason" : totalsValidation.exactGuard,
             totalsSource: {
                 debt: debtValue.source,
                 penalty: penaltyValue.source,
                 accrued: accruedValue.source,
                 paid: paidValue.source
             },
+            totalsFields: totalsValidation.fields,
             totalsObject: summary && summary.totals && typeof summary.totals === "object" ? summary.totals : null,
             renderedValues: renderedValues
         }
@@ -1279,6 +1370,7 @@ function initSorting() {
 
 
 function isSummaryBatchStatus(status){
+    if (String(status || "").trim().toLowerCase() === "legacy") return false;
     const s = normalizeSummaryStatus(status);
     return s === "dirty" || s === "missing" || s === "error";
 }
@@ -1543,6 +1635,12 @@ function render() {
         `;
         if (summaryMode && r.__totalsRenderDebug) {
             try { console.log("[index][totals-render]", r.__totalsRenderDebug); } catch(e) {}
+            if (!r.totalDebt && !r.penalty && !r.nachisleno && !r.oplacheno) {
+                try { console.warn("[index][summary-row-empty]", r.__totalsRenderDebug); } catch(e) {}
+            }
+            if (r.rawSummaryStatus === "fresh" && r.summaryStatus === "error") {
+                try { console.warn("[index][summary-row-invalid-fresh]", r.__totalsRenderDebug); } catch(e) {}
+            }
         }
         writeIndexTotalsCell(tr, r.accountUid, "debt", r.totalDebt);
         writeIndexTotalsCell(tr, r.accountUid, "penalty", r.penalty);
@@ -1672,6 +1770,44 @@ function renderPagination(total, from, to) {
     btn("▶", currentPage + 1, currentPage === totalPages);
     btn("⏭", totalPages, currentPage === totalPages);
 }
+
+function getCurrentIndexSummaryDebugRows(){
+    const summaryMode = indexPassiveSummaryMode && indexSummaryState.mode === "summary";
+    const rows = Array.isArray(filteredRows) && filteredRows.length ? filteredRows : (Array.isArray(allRows) ? allRows : []);
+    if (summaryMode) return rows.slice();
+    const totalPages = Math.max(1, Math.ceil(rows.length / pageSize));
+    const page = Math.min(Math.max(1, currentPage), totalPages);
+    const start = (page - 1) * pageSize;
+    return rows.slice(start, start + pageSize);
+}
+
+window.JKH_debugIndexSummaryRows = function() {
+    const rows = getCurrentIndexSummaryDebugRows();
+    const report = rows.map(function(row){
+        const debug = row && row.__totalsRenderDebug || {};
+        return {
+            account: String(row && row.id || ""),
+            uid: String(row && row.accountUid || debug.uid || ""),
+            summary_status: String(row && row.summaryStatus || ""),
+            summary_reason: String(row && row.summaryReason || ""),
+            raw_summary_status: String(row && row.rawSummaryStatus || debug.rawSummaryStatus || ""),
+            raw_summary_reason: String(row && row.rawSummaryReason || debug.rawSummaryReason || ""),
+            hasTotalsObject: !!debug.hasTotalsObject,
+            totalsFinite: !!debug.totalsFinite,
+            renderedValues: debug.renderedValues || {
+                debt: String(row && row.totalDebt || ""),
+                penalty: String(row && row.penalty || ""),
+                accrued: String(row && row.nachisleno || ""),
+                paid: String(row && row.oplacheno || "")
+            },
+            whyEmptyTotals: String(debug.whyEmptyTotals || ""),
+            exactGuard: String(debug.exactGuard || "")
+        };
+    });
+    try { console.table(report); } catch(e) {}
+    try { console.log("[index][summary-rows-debug]", report); } catch(e) {}
+    return report;
+};
 
 window.JKH_getIndexRenderDebugState = function(abonentIdOrUid) {
     const needle = String(abonentIdOrUid || "").trim();
