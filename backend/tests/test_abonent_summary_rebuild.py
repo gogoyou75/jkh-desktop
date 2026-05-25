@@ -782,6 +782,38 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         with app_module.app.app_context():
             self.assertEqual(app_module.AbonentSummary.query.count(), 0)
 
+    def test_rebuild_masks_full_summary_payload_with_report_period(self):
+        with app_module.app.app_context():
+            self._add_user("owner-full-summary-report-period")
+            self._put_abonents("owner-full-summary-report-period", {
+                "1001": {
+                    "uid": "uid_full_summary_report_period_1001",
+                    "id": "1001",
+                    "calcStartDate": "2020-01-01",
+                    "calcEndDate": "2026-05-22",
+                },
+            })
+            app_module.db.session.commit()
+        self._login("owner-full-summary-report-period")
+
+        summary = self._fresh_summary(100, 5, 105)
+        summary["summary_scope"] = "full"
+        summary["calculation_mode"] = "FULL_SUMMARY_REBUILD"
+        summary["period"] = {"from": "2026-01-01", "to": "2026-01-31"}
+        response = self.client.post("/api/abonent_summary/rebuild", json={
+            "account_uid": "uid_full_summary_report_period_1001",
+            "summary": summary,
+        })
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["summary_status"], "missing")
+        self.assertEqual(response.get_json()["summary_reason"], "PERIOD_SUMMARY_LEGACY")
+        with app_module.app.app_context():
+            stored = json.loads(app_module.AbonentSummary.query.one().summary_json)
+            self.assertEqual(stored["summary_status"], "missing")
+            self.assertEqual(stored["summary_reason"], "PERIOD_SUMMARY_LEGACY")
+            self.assertNotIn("totals", stored)
+
     def test_fresh_with_required_totals_stays_fresh_for_index_and_batch_job(self):
         with app_module.app.app_context():
             self._add_user("owner-valid-fresh-batch")
@@ -889,6 +921,23 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
             stored = json.loads(row.summary_json)
             self.assertEqual(stored["summary_status"], "fresh")
             self.assertIn("totals", stored)
+
+        create_response = self.client.post("/api/abonent_summary/recalc_batch_job", json={
+            "uids": ["uid_legacy_period_mask_1007"],
+            "reason": "MANUAL_RECALC",
+        })
+        self.assertEqual(create_response.status_code, 200)
+        job_id = create_response.get_json()["job_id"]
+
+        run_response = self.client.post(f"/api/abonent_summary/recalc_batch_job/{job_id}/run")
+
+        self.assertEqual(run_response.status_code, 200)
+        payload = run_response.get_json()
+        self.assertEqual(payload["processed"], 1)
+        self.assertEqual(payload["fresh"], 0)
+        self.assertEqual(payload["error"], 1)
+        self.assertEqual(payload["items"][0]["summary_status"], "missing")
+        self.assertEqual(payload["items"][0]["summary_reason"], "PERIOD_SUMMARY_LEGACY")
 
     def test_legacy_summary_with_canonical_full_period_stays_fresh(self):
         with app_module.app.app_context():
@@ -1487,11 +1536,45 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         self.assertIn("summary: summaryPayload", save_body)
         self.assertIn('summary.summary_scope = "period"', recalc_body)
         self.assertIn('summary.summary_scope = "full"', recalc_body)
-        self.assertIn("!!opts.period && opts.saveSummary !== true", recalc_body)
+        self.assertIn('mode === SUMMARY_RECALC_MODE_REPORT', recalc_body)
         self.assertIn("saveSummary: !(periodActive && selectedPeriod)", full_recalc_body)
         self.assertIn('summaryScope: (periodActive && selectedPeriod) ? "period" : "full"', full_recalc_body)
         self.assertIn("periodActive: !!(periodActive && selectedPeriod)", full_recalc_body)
         self.assertIn("FRESH_TOTALS_MISSING", index_source)
+
+        calc_after = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
+        self.assertEqual(calc_before, calc_after)
+
+    def test_stage_13_5_full_summary_uses_canonical_period_not_report_period(self):
+        data_path = self._find_repo_file("web", "data.js")
+        backend_path = self._find_repo_file("backend", "app.py")
+        calc_engine_path = self._find_repo_file("web", "calc_engine.js")
+        self.assertIsNotNone(data_path)
+        self.assertIsNotNone(backend_path)
+        self.assertIsNotNone(calc_engine_path)
+        data_source = data_path.read_text(encoding="utf-8")
+        backend_source = backend_path.read_text(encoding="utf-8")
+        calc_before = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
+
+        resolver_body = data_source.split("async function _resolveAbonentSummaryRecalcPeriod", 1)[1].split("function resolveAbonentRegnumForSummary", 1)[0]
+        recalc_body = data_source.split("async function recalcAbonentSummaryExplicit", 1)[1].split("async function recalculateAbonentCard", 1)[0]
+        save_body = backend_source.split("@app.post(\"/api/abonent_summary/rebuild\")", 1)[1].split("@app.post(\"/api/auth/register\")", 1)[0]
+
+        self.assertIn("FULL_SUMMARY_REBUILD", data_source)
+        self.assertIn("REPORT_PERIOD_CALCULATION", data_source)
+        self.assertIn("mode === SUMMARY_RECALC_MODE_REPORT && explicitPeriod", resolver_body)
+        self.assertIn("mode === SUMMARY_RECALC_MODE_FULL", resolver_body)
+        self.assertIn("RESPONSIBILITY_DATE_MISSING", resolver_body)
+        self.assertIn("source = \"canonical_full_period\"", resolver_body)
+        self.assertIn('summary.calculation_mode = SUMMARY_RECALC_MODE_FULL', recalc_body)
+        self.assertIn('summary.calculation_mode = SUMMARY_RECALC_MODE_REPORT', recalc_body)
+        self.assertNotIn("await _readCurrentAbonentSummaryPeriod", resolver_body.split("if (mode === SUMMARY_RECALC_MODE_FULL)", 1)[0])
+        self.assertIn("_summary_without_stale_totals(summary, target, owner)", save_body)
+        self.assertIn("targets_by_uid", backend_source)
+        self.assertIn("_summary_from_row_or_missing(row, target)", backend_source)
+        self.assertIn("PERIOD_SUMMARY_LEGACY", backend_source)
+        self.assertIn('if (msg.indexOf("RATES_JSON_INVALID") >= 0) return "RATES_JSON_INVALID";', data_source)
+        self.assertIn('if (msg.indexOf("EXCLUDES_JSON_INVALID") >= 0) return "EXCLUDES_JSON_INVALID";', data_source)
 
         calc_after = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
         self.assertEqual(calc_before, calc_after)

@@ -69,7 +69,7 @@
 | payments_<uid>      | LOGIC_SPEC | calc_engine.js | ⚫      |             |
 | server-first        | LOGIC_SPEC | storage.js     | ⚫      |             |
 | owner-scoped данные | LOGIC_SPEC | storage.js     | ⚫      |             |
-| Period keys are view/report state, not financial dirty | LOGIC_SPEC 2.0.1 | abonent_card.html / app.py / data.js / index.html | ✅ OK | Stage 13.1: `CALC_PERIOD_CHANGED` is skipped by backend mark_dirty; card period save/toggle does not call summary dirty, ledger cache invalidation, autoaccrual or recalc. |
+| Period keys are view/report state, not financial dirty | LOGIC_SPEC 2.0.1 | abonent_card.html / app.py / data.js / index.html | ✅ OK | Stage 13.5: `CALC_PERIOD_CHANGED` is skipped by backend mark_dirty; full `abonent_summary` rebuild ignores `calc_period` / `report_period` and uses canonical responsibility period only. |
 
 ---
 
@@ -319,7 +319,7 @@
 | `readCalcSummary` возвращает structured state | Задание 3 → п.3; Задание 4 → п.3; Задание 12 → п.3–4 | `web/data.js` | ✅ OK | Статусы: `fresh`, `missing`, `dirty`, `checkpoint_mismatch`, `engine_version_mismatch`, `summary_version_mismatch`, `invalid_json`, `invalid_structure`. |
 | Dirty/mismatch/version mismatch/invalid блокируют старые totals | Задание 3 → п.4–5, п.7; Задание 4 → п.4; Задание 12 → п.4 | `web/payment_table.js`, `web/index.html`, `web/abonent_card.html` | ✅ OK | UI показывает «Требуется пересчёт», reason «Изменена версия расчёта» для version mismatch и не делает silent fallback. |
 | Пересчёт summary выполняется только по явному действию пользователя | Задание 12 → п.5, п.8–9 | `web/abonent_card.html`, `web/payment_table.js` | ✅ OK | Read-only открытие страниц и prepare accruals не создают summary; `prepare-and-recalc` является явной пользовательской командой. |
-| Выбранный calc period строго ограничивает summary | Задание 12 → п.6 | `web/data.js`, `web/abonent_card.html` | ✅ OK | Fresh summary фиксирует `periodFrom`/`periodTo`; изменение `calc_period_<uid>` делает прежний summary not-fresh. |
+| `FULL_SUMMARY_REBUILD` отделён от `REPORT_PERIOD_CALCULATION` | Stage 13.5 | `web/data.js`, `web/abonent_card.html`, `backend/app.py` | ✅ OK | Full `abonent_summary` строится по canonical responsibility period; selected `calc_period_<uid>` / `report_period_<uid>` используются только для временного report/view расчёта и не dirty-т summary. |
 | Missing accruals блокируют fresh summary | Задание 12 → п.7 | `web/abonent_card.html`, `web/autoaccrual_engine.js` | ✅ OK | При отсутствующих начислениях UI показывает «Требуется пересчёт» / «Подготовить начисления», но не пишет fresh summary. |
 | Изменения ledger/tariffs/rates/excludes/moratorium/responsibility/calc period инвалидируют актуальность summary | Задание 3 → п.6; Задание 12 → п.2, п.4 | `web/data.js` | ✅ OK | Dirty ставится через storage hooks и сохранение responsibility snapshot. |
 | `calc_summary_<uid>` зависит от данных, версии финансовой логики и версии формата summary | Задание 4 → п.1–3, п.5–6; Задание 12 → п.1–4 | `web/data.js`, `docs/CORE/LOGIC_SPEC.md` | ✅ OK | Версии заданы ручными константами; silent upgrade/patch старого checkpoint запрещён. |
@@ -337,7 +337,7 @@
 | Summary/cache не являются вторым financial engine | LOGIC_SPEC → CalcEngine Freeze Boundary; Calc summary integrity | `web/data.js`, `web/payment_table.js`, `docs/CORE/LOGIC_SPEC.md` | ✅ OK | `calc_summary_<uid>` является derived cache only и используется только при `fresh`. |
 | Dangerous commits `d535dba` и `6780a25` не портируются | LOGIC_SPEC → Architecture Port Audit | `docs/CORE/CHANGELOG.md`, `docs/CORE/CRITICAL_INDEX.md` | ✅ OK | DO NOT PORT: `prepareLedgerState`, precompute/perf CalcEngine pipelines, alternate totals, optimized penalty/FIFO. |
 | Server Summary Layer ограничен foundation/contract | LOGIC_SPEC → Server Summary Layer — foundation only | `docs/CORE/LOGIC_SPEC.md` | 🟡 PARTIAL | Разрешены interface/contract/data boundaries; runtime engine не реализован. |
-| Canonical calc period keys ограничивают summary | LOGIC_SPEC → Calc summary integrity | `web/storage.js`, `web/data.js`, `web/payment_table.js` | ✅ OK | `calc_period_<uid>` / `calc_period_active_<uid>` входят в checkpoint; изменение периода делает summary not-fresh. |
+| Canonical full summary ignores view period keys | LOGIC_SPEC 2.0.1 / Stage 13.5 | `web/data.js`, `backend/app.py`, `web/payment_table.js` | ✅ OK | `calc_period_<uid>` / `calc_period_active_<uid>` / `report_period_<uid>` не входят в full `abonent_summary` boundaries; backend masks legacy short-period full summary contamination as missing without totals. |
 | Import strict contract and audit remain safe hardening | LOGIC_SPEC → Import contract/audit; CHANGELOG import sections | `web/import_xls.html`, backend import flow, `docs/CORE/CHANGELOG.md` | ✅ OK | Strict template/upload_rows, audit log, rollback and no silent date fallback are safe to keep. |
 | Read-back validation required before legacy cleanup | LOGIC_SPEC → Architecture Port Audit | `web/storage.js`, `web/data.js` | ✅ OK | Legacy cleanup must follow successful canonical read-back, especially UID and calc-period migration. |
 

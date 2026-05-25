@@ -1401,6 +1401,8 @@ def _recalc_batch_process_job(owner_id: str, job: RecalcBatchJob, step_limit: in
                 job.finished_at = datetime.utcnow()
             db.session.commit()
         return
+    targets = _owner_abonent_summary_targets(owner_id)
+    targets_by_uid = {_norm_text(t.get("account_uid")): t for t in targets if _norm_text(t.get("account_uid"))}
     for item in items:
         item.status = "running"
         if not item.started_at:
@@ -1408,7 +1410,8 @@ def _recalc_batch_process_job(owner_id: str, job: RecalcBatchJob, step_limit: in
         db.session.commit()
         try:
             row = AbonentSummary.query.filter_by(owner_id=owner_id, account_uid=item.account_uid).order_by(AbonentSummary.id.asc()).first()
-            summary = _summary_from_row_or_missing(row, {"account_uid": item.account_uid, "abonent_id": "", "account_number": "", "identity": {}})
+            target = targets_by_uid.get(_norm_text(item.account_uid)) or {"account_uid": item.account_uid, "abonent_id": "", "account_number": "", "identity": {}}
+            summary = _summary_from_row_or_missing(row, target)
             summary = _summary_with_validated_fresh_totals(summary)
             s_status = _summary_status_from_payload(summary)
             s_reason = _norm_text(summary.get("summary_reason") or summary.get("reason") or "")
@@ -1994,12 +1997,12 @@ def abonent_summary_rebuild():
             summary_scope = _norm_text(summary.get("summary_scope") or summary.get("report_scope")).lower()
             if summary_scope in {"period", "report"}:
                 return jsonify(ok=False, error="period_summary_not_allowed", counters=counters), 400
-            summary = _summary_without_stale_totals(summary)
 
             targets = _owner_abonent_summary_targets(owner)
             target = next((t for t in targets if _norm_text(t.get("account_uid")) == account_uid), None)
             if not target:
                 return jsonify(ok=False, error="uid_not_found", counters=counters), 404
+            summary = _summary_without_stale_totals(summary, target, owner)
 
             abonent_id = _norm_text(body.get("abonent_id")) or _norm_text(target.get("abonent_id"))
             account_number = _norm_text(body.get("account_number")) or _norm_text(target.get("account_number"))

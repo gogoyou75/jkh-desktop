@@ -2241,9 +2241,9 @@
     if (e && e.code) return String(e.code);
     var msg = String(e && e.message || e || "CALC_FAILED");
     if (msg.indexOf("MISSING_REQUIRED_RATE") >= 0) return "MISSING_REQUIRED_RATE";
-    if (msg.indexOf("RATES_JSON_INVALID") >= 0) return "RATES_MISSING";
+    if (msg.indexOf("RATES_JSON_INVALID") >= 0) return "RATES_JSON_INVALID";
     if (msg.indexOf("RATES_MISSING") >= 0) return "RATES_MISSING";
-    if (msg.indexOf("EXCLUDES_JSON_INVALID") >= 0) return "EXCLUDES_INVALID";
+    if (msg.indexOf("EXCLUDES_JSON_INVALID") >= 0) return "EXCLUDES_JSON_INVALID";
     if (msg.indexOf("EXCLUDES_INVALID") >= 0) return "EXCLUDES_INVALID";
     if (msg.indexOf("LEDGER_JSON_INVALID") >= 0) return "LEDGER_JSON_INVALID";
     if (msg.indexOf("START_DATE_MISSING") >= 0) return "START_DATE_MISSING";
@@ -2372,19 +2372,55 @@
     return null;
   }
 
-  async function _resolveAbonentSummaryRecalcPeriod(abonentOrId, explicitPeriod) {
-    if (explicitPeriod && typeof explicitPeriod === "object") {
-      return { ok: _isValidIsoPeriod(explicitPeriod.from, explicitPeriod.to), from: String(explicitPeriod.from || ""), to: String(explicitPeriod.to || ""), error: "PERIOD_INVALID" };
+  var SUMMARY_RECALC_MODE_FULL = "FULL_SUMMARY_REBUILD";
+  var SUMMARY_RECALC_MODE_REPORT = "REPORT_PERIOD_CALCULATION";
+
+  function _normalizeSummaryRecalcMode(options) {
+    var opts = options || {};
+    var raw = String(opts.mode || opts.recalcMode || opts.summaryMode || "").trim().toUpperCase();
+    if (raw === SUMMARY_RECALC_MODE_FULL || raw === "FULL") return SUMMARY_RECALC_MODE_FULL;
+    if (raw === SUMMARY_RECALC_MODE_REPORT || raw === "REPORT" || raw === "PERIOD") return SUMMARY_RECALC_MODE_REPORT;
+    var scope = String(opts.summaryScope || opts.summary_scope || "").trim().toLowerCase();
+    if (opts.saveSummary === false || scope === "period" || scope === "report") return SUMMARY_RECALC_MODE_REPORT;
+    return SUMMARY_RECALC_MODE_FULL;
+  }
+
+  async function _resolveAbonentSummaryRecalcPeriod(abonentOrId, explicitPeriod, options) {
+    var mode = _normalizeSummaryRecalcMode(options || {});
+
+    if (mode === SUMMARY_RECALC_MODE_REPORT && explicitPeriod && typeof explicitPeriod === "object") {
+      return { ok: _isValidIsoPeriod(explicitPeriod.from, explicitPeriod.to), from: String(explicitPeriod.from || ""), to: String(explicitPeriod.to || ""), error: "PERIOD_INVALID", mode: mode };
     }
+
+    if (mode === SUMMARY_RECALC_MODE_FULL) {
+      var fullResponsibilityPeriod = _readActiveResponsibilityPeriod(abonentOrId);
+      if (fullResponsibilityPeriod) {
+        fullResponsibilityPeriod.mode = mode;
+        fullResponsibilityPeriod.source = "canonical_full_period";
+        return fullResponsibilityPeriod;
+      }
+      return { ok: false, error: "RESPONSIBILITY_DATE_MISSING", from: "", to: "", mode: mode };
+    }
+
     var period = _readAbonentCalcPeriod(abonentOrId);
-    if (period.ok || period.error !== "PERIOD_REQUIRED") return period;
+    if (period.ok || period.error !== "PERIOD_REQUIRED") {
+      period.mode = mode;
+      return period;
+    }
 
     var summaryPeriod = await _readCurrentAbonentSummaryPeriod(abonentOrId);
-    if (summaryPeriod) return summaryPeriod;
+    if (summaryPeriod) {
+      summaryPeriod.mode = mode;
+      return summaryPeriod;
+    }
 
     var responsibilityPeriod = _readActiveResponsibilityPeriod(abonentOrId);
-    if (responsibilityPeriod) return responsibilityPeriod;
+    if (responsibilityPeriod) {
+      responsibilityPeriod.mode = mode;
+      return responsibilityPeriod;
+    }
 
+    period.mode = mode;
     return period;
   }
 
@@ -2660,7 +2696,7 @@
     var abonentsApiPayload = null;
     var abonentApiRow = null;
 
-    try { period = await _resolveAbonentSummaryRecalcPeriod(abonent || id, null); } catch (ePeriod) { period = { ok: false, error: String(ePeriod && ePeriod.message || ePeriod) }; }
+    try { period = await _resolveAbonentSummaryRecalcPeriod(abonent || id, null, { mode: SUMMARY_RECALC_MODE_FULL }); } catch (ePeriod) { period = { ok: false, error: String(ePeriod && ePeriod.message || ePeriod) }; }
     try { responsibility = _readActiveResponsibilityPeriod(abonent || id); } catch (eResp) { responsibility = { ok: false, error: String(eResp && eResp.message || eResp) }; }
 
     try {
@@ -2924,10 +2960,10 @@
 
   async function recalcAbonentSummaryExplicit(abonentOrId, options) {
     var opts = options || {};
-    var period = await _resolveAbonentSummaryRecalcPeriod(abonentOrId, opts.period);
     var summary = null;
-    var scopeOpt = String(opts.summaryScope || opts.summary_scope || "").toLowerCase();
-    var periodActive = opts.saveSummary === false || scopeOpt === "period" || (!!opts.period && opts.saveSummary !== true && scopeOpt !== "full");
+    var mode = _normalizeSummaryRecalcMode(opts);
+    var period = await _resolveAbonentSummaryRecalcPeriod(abonentOrId, opts.period, { mode: mode, summaryScope: opts.summaryScope || opts.summary_scope, saveSummary: opts.saveSummary });
+    var periodActive = mode === SUMMARY_RECALC_MODE_REPORT;
 
     try {
       if (!period.ok) throw new Error(period.error || "PERIOD_INVALID");
@@ -2935,8 +2971,10 @@
       if (periodActive) {
         summary.summary_scope = "period";
         summary.report_scope = "period";
+        summary.calculation_mode = SUMMARY_RECALC_MODE_REPORT;
       } else {
         summary.summary_scope = "full";
+        summary.calculation_mode = SUMMARY_RECALC_MODE_FULL;
       }
     } catch (e) {
       var reason = _summaryCalcErrorCode(e);
@@ -2944,8 +2982,10 @@
       if (periodActive) {
         summary.summary_scope = "period";
         summary.report_scope = "period";
+        summary.calculation_mode = SUMMARY_RECALC_MODE_REPORT;
       } else {
         summary.summary_scope = "full";
+        summary.calculation_mode = SUMMARY_RECALC_MODE_FULL;
       }
     }
 
@@ -3039,13 +3079,18 @@
       if (raw !== null && raw !== undefined) _parseLedgerRows(raw, ledgerKey);
     } catch (e) {
       var ledgerReason = _summaryCalcErrorCode(e);
-      var periodForError = await _resolveAbonentSummaryRecalcPeriod(abonentOrId, opts.period);
-      var errorSummary = buildAbonentSummaryErrorAfterExplicitRecalc(abonentOrId, periodForError, ledgerReason);
       var errorScopeOpt = String(opts.summaryScope || opts.summary_scope || "").toLowerCase();
-      var periodErrorScope = opts.saveSummary === false || errorScopeOpt === "period" || (!!opts.period && opts.saveSummary !== true && errorScopeOpt !== "full");
+      var periodErrorScope = opts.saveSummary === false || errorScopeOpt === "period" || errorScopeOpt === "report";
+      var periodForError = await _resolveAbonentSummaryRecalcPeriod(abonentOrId, opts.period, {
+        mode: periodErrorScope ? SUMMARY_RECALC_MODE_REPORT : SUMMARY_RECALC_MODE_FULL,
+        summaryScope: opts.summaryScope || opts.summary_scope,
+        saveSummary: opts.saveSummary
+      });
+      var errorSummary = buildAbonentSummaryErrorAfterExplicitRecalc(abonentOrId, periodForError, ledgerReason);
       if (periodErrorScope) {
         errorSummary.summary_scope = "period";
         errorSummary.report_scope = "period";
+        errorSummary.calculation_mode = SUMMARY_RECALC_MODE_REPORT;
         try {
           console.log("[summary][skip-save-period-summary]", {
             uid: uid,
@@ -3054,6 +3099,10 @@
             periodTo: String(periodForError && periodForError.to || "")
           });
         } catch (eSkipErrLog) {}
+      }
+      if (!periodErrorScope) {
+        errorSummary.summary_scope = "full";
+        errorSummary.calculation_mode = SUMMARY_RECALC_MODE_FULL;
       }
       var errorSave = periodErrorScope
         ? { ok: true, skipped: true, reason: "PERIOD_SUMMARY_NOT_SAVED", summary_status: errorSummary.summary_status || errorSummary.status || "error", summary_reason: errorSummary.summary_reason || errorSummary.reason || ledgerReason, summary_scope: "period" }

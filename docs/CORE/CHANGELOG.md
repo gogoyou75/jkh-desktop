@@ -5,6 +5,14 @@
 - Ошибки dirty endpoint логируются как `[summary][mark-dirty-failed]` и не блокируют основное сохранение.
 - Зафиксировано, что `abonent_summary` имеет состояния `fresh` / `dirty` / `missing` / `error`; `dirty` не запускает пересчёт, а `fresh` появляется только после явного UID-пересчёта и single upsert.
 
+## 2026-05-25 - Stage 13.5 canonical full summary rebuild stabilization
+
+- `FULL_SUMMARY_REBUILD` now resolves `abonent_summary` period from canonical responsibility boundaries, not from `calc_period_<uid>` / `report_period_<uid>`.
+- `REPORT_PERIOD_CALCULATION` is separated as a temporary view/report calculation and is not saved as full summary totals.
+- Backend single summary upsert now validates stored full-summary payloads against canonical period boundaries and masks legacy short-period contamination as missing without totals.
+- Fatal reasons such as `RATES_JSON_INVALID` and `EXCLUDES_JSON_INVALID` are preserved instead of being collapsed into broader fallback reasons.
+- `web/calc_engine.js` was not changed.
+
 # CHANGELOG
 
 ## 2026-05-17 — Abonent summary single UID integration
