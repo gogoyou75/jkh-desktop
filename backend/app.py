@@ -1206,7 +1206,8 @@ def _is_legacy_period_summary_contamination(summary: dict | None, target: dict |
     status = _norm_text(summary.get("summary_status") or summary.get("status")).lower()
     if status != "fresh":
         return False
-    if _norm_text(summary.get("summary_scope") or summary.get("report_scope")):
+    scope = _norm_text(summary.get("summary_scope") or summary.get("report_scope")).lower()
+    if scope in {"period", "report"}:
         return False
     period = summary.get("period")
     if not isinstance(period, dict):

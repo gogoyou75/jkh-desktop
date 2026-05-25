@@ -58,4 +58,8 @@ def find_repo_file(*parts):
     candidate = root.joinpath(*parts)
     if candidate.exists():
         return candidate
+    if parts and parts[0] == "backend":
+        container_candidate = root.joinpath(*parts[1:])
+        if container_candidate.exists():
+            return container_candidate
     return None
