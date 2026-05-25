@@ -2238,7 +2238,47 @@ function __readActiveKey(key, ownerId){
     return { key: key || "", raw: raw };
 }
 
-function resetCalcPeriodCanonicalState(meta, source){
+window.JKH_debugCalcPeriodKeys = function(){
+    const meta = getCalcPeriodStorageMeta();
+    const reportKey = getReportPeriodStorageKey(meta);
+    const legacyCalcKey = meta.requestedId ? ("calc_period_" + meta.requestedId) : "";
+    const legacyReportKey = meta.requestedId ? ("report_period_" + meta.requestedId) : "";
+    let urlFrom = "";
+    let urlTo = "";
+    try {
+        const params = new URLSearchParams(window.location.search || "");
+        urlFrom = String(params.get("from") || "");
+        urlTo = String(params.get("to") || "");
+    } catch (eUrl) {}
+    const summary = window.__lastCardSummaryForDebug && typeof window.__lastCardSummaryForDebug === "object" ? window.__lastCardSummaryForDebug : null;
+    const result = {
+        ownerId: meta.ownerId,
+        requestedId: meta.requestedId,
+        uid: meta.resolvedUid,
+        calc_period_uid: __readPeriodKey(meta.storageKey, meta.ownerId),
+        calc_period_active_uid: __readActiveKey(meta.activeStorageKey, meta.ownerId),
+        report_period_uid: __readPeriodKey(reportKey, meta.ownerId),
+        legacy_calc_period: __readPeriodKey(legacyCalcKey, meta.ownerId),
+        legacy_report_period: __readPeriodKey(legacyReportKey, meta.ownerId),
+        url: { from: urlFrom, to: urlTo },
+        summary_period: summary && summary.period ? summary.period : null
+    };
+    try {
+        console.table([
+            { name: "calc_period_uid", key: result.calc_period_uid.key, raw: result.calc_period_uid.raw, value: JSON.stringify(result.calc_period_uid.value || null) },
+            { name: "calc_period_active_uid", key: result.calc_period_active_uid.key, raw: result.calc_period_active_uid.raw, value: result.calc_period_active_uid.raw },
+            { name: "report_period_uid", key: result.report_period_uid.key, raw: result.report_period_uid.raw, value: JSON.stringify(result.report_period_uid.value || null) },
+            { name: "legacy_calc_period", key: result.legacy_calc_period.key, raw: result.legacy_calc_period.raw, value: JSON.stringify(result.legacy_calc_period.value || null) },
+            { name: "legacy_report_period", key: result.legacy_report_period.key, raw: result.legacy_report_period.raw, value: JSON.stringify(result.legacy_report_period.value || null) },
+            { name: "url", key: "location.search", raw: window.location.search || "", value: JSON.stringify(result.url) },
+            { name: "summary.period", key: "summary.period", raw: JSON.stringify(result.summary_period || null), value: JSON.stringify(result.summary_period || null) }
+        ]);
+        console.log("[period][debug-keys]", result);
+    } catch (eLog) {}
+    return result;
+};
+
+async function resetCalcPeriodCanonicalState(meta, source){
     const m = meta || getCalcPeriodStorageMeta();
     const reportKey = getReportPeriodStorageKey(m);
     const result = {
@@ -2262,6 +2302,27 @@ function resetCalcPeriodCanonicalState(meta, source){
         result.reason = "CANONICAL_CALC_PERIOD_KEY_REQUIRED";
         try { console.warn("[period][reset-readback-failed]", result); } catch (ePeriodKeyLog) {}
         try { console.warn("[calc-period][reset-readback-failed]", result); } catch (eKeyLog) {}
+        return result;
+    }
+
+    if (window.Data && typeof Data.resetCalcPeriodKeysForAbonent === "function") {
+        const serverResult = await Data.resetCalcPeriodKeysForAbonent(m.requestedId, { source: String(source || "abonent_card.reset") });
+        result.serverResult = serverResult;
+        result.periodReadback = serverResult && serverResult.localReadback && serverResult.localReadback.calc || __readPeriodKey(m.storageKey, m.ownerId);
+        result.activeReadback = serverResult && serverResult.localReadback && serverResult.localReadback.active || __readActiveKey(m.activeStorageKey, m.ownerId);
+        result.reportReadback = serverResult && serverResult.localReadback && serverResult.localReadback.report || (__isCanonicalReportPeriodKey(reportKey) ? __readPeriodKey(reportKey, m.ownerId) : { key: reportKey, raw: null, value: null });
+        result.ok = !!(serverResult && serverResult.ok === true);
+        result.reason = result.ok ? "" : String(serverResult && serverResult.reason || "SERVER_RESET_FAILED");
+        try {
+            if (result.ok) {
+                console.log("[calc-period][reset-saved]", result);
+                console.log("[period][reset-readback-ok]", result);
+                console.log("[calc-period][reset-readback-ok]", result);
+            } else {
+                console.warn("[period][reset-readback-failed]", result);
+                console.warn("[calc-period][reset-readback-failed]", result);
+            }
+        } catch (eServerResetLog) {}
         return result;
     }
 
@@ -2650,7 +2711,7 @@ function loadCalcPeriodUI(){
             if (isValidPeriod(urlFrom, urlTo)) {
                 fromEl.value = urlFrom;
                 toEl.value = urlTo;
-                try { console.log("[period][restore-source]", { source: "url", from: urlFrom, to: urlTo, requestedId: meta.requestedId, resolvedUid: meta.resolvedUid, ownerId: meta.ownerId }); } catch (eRestoreUrlLog) {}
+                try { console.log("[period][restore-source]", { source: "url", key: "location.search", raw: window.location.search || "", from: urlFrom, to: urlTo, requestedId: meta.requestedId, uid: meta.resolvedUid, ownerId: meta.ownerId }); } catch (eRestoreUrlLog) {}
                 bootstrapActiveCalcPeriod(meta, urlFrom, urlTo, "url");
                 __safeLoadPaymentTableOnce("calc-period-bootstrap-url", { force: true });
                 try {
@@ -2687,7 +2748,8 @@ function loadCalcPeriodUI(){
         if (selected) {
             fromEl.value = selected.from || "";
             toEl.value = selected.to || "";
-            try { console.log("[period][restore-source]", { source: source, from: fromEl.value || "", to: toEl.value || "", requestedId: meta.requestedId, resolvedUid: meta.resolvedUid, ownerId: meta.ownerId, reportKey: reportKey, periodKey: meta.storageKey }); } catch (eRestoreKeyLog) {}
+            const selectedReadback = reportReadback.value ? reportReadback : calcReadback;
+            try { console.log("[period][restore-source]", { source: source, key: selectedReadback.key || "", raw: selectedReadback.raw, from: fromEl.value || "", to: toEl.value || "", requestedId: meta.requestedId, uid: meta.resolvedUid, ownerId: meta.ownerId }); } catch (eRestoreKeyLog) {}
             bootstrapActiveCalcPeriod(meta, fromEl.value, toEl.value, source);
             __safeLoadPaymentTableOnce("calc-period-bootstrap-" + source, { force: true });
         } else {
@@ -2988,6 +3050,7 @@ async function loadAbonentSummaryStatus(){
         const payload = await Data.loadAbonentSummaryPage({ page: 1, per_page: 1, account_uid: uid });
         const item = payload && Array.isArray(payload.items) && payload.items.length ? payload.items[0] : null;
         const summary = item && item.summary && typeof item.summary === "object" ? item.summary : null;
+        window.__lastCardSummaryForDebug = summary || null;
         if (!summary) {
             renderAbonentSummaryStatus("missing", "SUMMARY_NOT_BUILT");
             return;
@@ -3207,7 +3270,7 @@ function bindCalcButtons(){
         }
     });
 
-    resetBtn.addEventListener("click", () => {
+    resetBtn.addEventListener("click", async () => {
         if (!canWriteOrExplainLocal()) return;
         const id = getAbonentIdFromURL();
         const meta = getCalcPeriodStorageMeta();
@@ -3223,7 +3286,7 @@ function bindCalcButtons(){
             urlAfter = u.toString();
             window.history.replaceState({}, "", urlAfter);
         } catch(eUrl) {}
-        const resetResult = resetCalcPeriodCanonicalState(meta, "abonent_card.reset-button");
+        const resetResult = await resetCalcPeriodCanonicalState(meta, "abonent_card.reset-button");
         if (!resetResult.ok) {
             alert("Период не сброшен на сервере/в хранилище");
             return;

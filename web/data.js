@@ -552,6 +552,161 @@
     return resolveCalcPeriodStorageKey(abonentOrId, { suffix: "_active" });
   }
 
+  function _resolveReportPeriodStorageKey(abonentOrId) {
+    var found = _findAbonentByIdOrUid(abonentOrId);
+    var abonent = found && found.abonent ? found.abonent : null;
+    var uid = String(abonent && abonent.uid || "").trim();
+    if (!isValidUid(uid)) return "";
+    return "report_period_" + uid;
+  }
+
+  async function _serverStoreDelete(ownerId, key) {
+    var res = await fetch("/api/store", {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify({ owner: ownerId, key: key })
+    });
+    var txt = await res.text();
+    var data = null;
+    try { data = JSON.parse(txt); } catch (e) {}
+    return { ok: !!(res.ok && data && data.ok === true), status: res.status, data: data, text: txt, key: key };
+  }
+
+  async function _serverStoreSet(ownerId, key, value) {
+    var res = await fetch("/api/store", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify({ owner: ownerId, key: key, value: String(value == null ? "" : value) })
+    });
+    var txt = await res.text();
+    var data = null;
+    try { data = JSON.parse(txt); } catch (e) {}
+    return { ok: !!(res.ok && data && data.ok === true), status: res.status, data: data, text: txt, key: key };
+  }
+
+  async function _serverStoreGet(ownerId, key) {
+    var url = "/api/store?owner=" + encodeURIComponent(ownerId) + "&key=" + encodeURIComponent(key);
+    var res = await fetch(url, { method: "GET", credentials: "include" });
+    var txt = await res.text();
+    var data = null;
+    try { data = JSON.parse(txt); } catch (e) {}
+    return { ok: !!(res.ok && data && data.ok === true), missing: res.status === 404, status: res.status, data: data, text: txt, key: key, raw: data && data.value };
+  }
+
+  function _readPeriodResetLocal(keys, ownerId) {
+    return {
+      calc: { key: keys.calcKey, raw: keys.calcKey ? _getRawScoped(keys.calcKey, ownerId) : null },
+      active: { key: keys.activeKey, raw: keys.activeKey ? _getRawScoped(keys.activeKey, ownerId) : null },
+      report: { key: keys.reportKey, raw: keys.reportKey ? _getRawScoped(keys.reportKey, ownerId) : null },
+      legacyCalc: { key: keys.legacyCalcKey, raw: keys.legacyCalcKey ? _getRawScoped(keys.legacyCalcKey, ownerId) : null },
+      legacyReport: { key: keys.legacyReportKey, raw: keys.legacyReportKey ? _getRawScoped(keys.legacyReportKey, ownerId) : null }
+    };
+  }
+
+  function _isResetLocalReadbackOk(readback) {
+    return !!readback &&
+      !readback.calc.raw &&
+      String(readback.active.raw) === "0" &&
+      !readback.report.raw &&
+      !readback.legacyCalc.raw &&
+      !readback.legacyReport.raw;
+  }
+
+  async function resetCalcPeriodKeysForAbonent(abonentOrId, options) {
+    var opts = options || {};
+    var found = _findAbonentByIdOrUid(abonentOrId);
+    var requestedId = String(found && found.id || (abonentOrId && typeof abonentOrId === "object" ? abonentOrId.id : abonentOrId) || "").trim();
+    var abonent = found && found.abonent ? found.abonent : null;
+    var uid = String(abonent && abonent.uid || "").trim();
+    var ownerId = String(opts.ownerId || _ownerId() || "").trim();
+    var keys = {
+      calcKey: resolveCalcPeriodStorageKey(abonent || requestedId),
+      activeKey: resolveCalcPeriodActiveStorageKey(abonent || requestedId),
+      reportKey: _resolveReportPeriodStorageKey(abonent || requestedId),
+      legacyCalcKey: requestedId ? "calc_period_" + requestedId : "",
+      legacyReportKey: requestedId ? "report_period_" + requestedId : ""
+    };
+    var result = {
+      ok: false,
+      requestedId: requestedId,
+      uid: uid,
+      ownerId: ownerId,
+      keys: keys,
+      source: String(opts.source || "Data.resetCalcPeriodKeysForAbonent"),
+      localReadback: null,
+      serverPersist: [],
+      serverReadback: [],
+      reason: ""
+    };
+
+    if (!ownerId || !uid || !keys.calcKey || !keys.activeKey || !keys.reportKey) {
+      result.reason = "CANONICAL_PERIOD_KEYS_REQUIRED";
+      return result;
+    }
+
+    _removeRawScoped(keys.calcKey, ownerId);
+    _setRawScoped(keys.activeKey, "0", ownerId);
+    _removeRawScoped(keys.reportKey, ownerId);
+    if (keys.legacyCalcKey) _removeRawScoped(keys.legacyCalcKey, ownerId);
+    if (keys.legacyReportKey) _removeRawScoped(keys.legacyReportKey, ownerId);
+
+    result.localReadback = _readPeriodResetLocal(keys, ownerId);
+    if (_isResetLocalReadbackOk(result.localReadback)) {
+      try { console.log("[period][reset-local-readback-ok]", result); } catch (eLocalOk) {}
+    } else {
+      result.reason = "LOCAL_RESET_READBACK_FAILED";
+      try { console.warn("[period][reset-local-readback-failed]", result); } catch (eLocalFail) {}
+      return result;
+    }
+
+    try {
+      result.serverPersist.push(await _serverStoreDelete(ownerId, keys.calcKey));
+      result.serverPersist.push(await _serverStoreDelete(ownerId, keys.reportKey));
+      result.serverPersist.push(await _serverStoreSet(ownerId, keys.activeKey, "0"));
+      if (keys.legacyCalcKey) result.serverPersist.push(await _serverStoreDelete(ownerId, keys.legacyCalcKey));
+      if (keys.legacyReportKey) result.serverPersist.push(await _serverStoreDelete(ownerId, keys.legacyReportKey));
+    } catch (ePersist) {
+      result.reason = String(ePersist && ePersist.message || ePersist || "SERVER_RESET_PERSIST_FAILED");
+      try { console.warn("[period][reset-server-persist-failed]", result); } catch (ePersistLog) {}
+      return result;
+    }
+
+    var persistOk = result.serverPersist.every(function (item) { return item && item.ok === true; });
+    if (!persistOk) {
+      result.reason = "SERVER_RESET_PERSIST_FAILED";
+      try { console.warn("[period][reset-server-persist-failed]", result); } catch (ePersistFailLog) {}
+      return result;
+    }
+    try { console.log("[period][reset-server-persist-ok]", result); } catch (ePersistOkLog) {}
+
+    try {
+      result.serverReadback.push(await _serverStoreGet(ownerId, keys.calcKey));
+      result.serverReadback.push(await _serverStoreGet(ownerId, keys.reportKey));
+      result.serverReadback.push(await _serverStoreGet(ownerId, keys.activeKey));
+      if (keys.legacyCalcKey) result.serverReadback.push(await _serverStoreGet(ownerId, keys.legacyCalcKey));
+      if (keys.legacyReportKey) result.serverReadback.push(await _serverStoreGet(ownerId, keys.legacyReportKey));
+    } catch (eReadback) {
+      result.reason = String(eReadback && eReadback.message || eReadback || "SERVER_RESET_READBACK_FAILED");
+      try { console.warn("[period][server-reset-readback-failed]", result); } catch (eReadbackLog) {}
+      return result;
+    }
+
+    var serverOk = result.serverReadback.every(function (item) {
+      if (!item) return false;
+      if (item.key === keys.activeKey) return item.ok === true && String(item.raw) === "0";
+      return item.missing === true || item.raw === null || item.raw === undefined || String(item.raw) === "";
+    });
+    result.ok = serverOk;
+    result.reason = serverOk ? "" : "SERVER_RESET_READBACK_FAILED";
+    try {
+      if (serverOk) console.log("[period][server-reset-readback-ok]", result);
+      else console.warn("[period][server-reset-readback-failed]", result);
+    } catch (eServerReadLog) {}
+    return result;
+  }
+
   function resolvePaymentLedgerKey(abonentOrId, options) {
     var opts = options || {};
     var found = _findAbonentByIdOrUid(abonentOrId);
@@ -2956,6 +3111,7 @@
     ensureAbonentUid: ensureAbonentUid,
     resolveCalcPeriodStorageKey: resolveCalcPeriodStorageKey,
     resolveCalcPeriodActiveStorageKey: resolveCalcPeriodActiveStorageKey,
+    resetCalcPeriodKeysForAbonent: resetCalcPeriodKeysForAbonent,
     resolvePaymentLedgerKey: resolvePaymentLedgerKey,
     getRuntimeCacheKey: getRuntimeCacheKey,
     resolveRuntimeCacheKey: resolveRuntimeCacheKey,

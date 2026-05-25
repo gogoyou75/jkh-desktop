@@ -661,6 +661,14 @@ rg -n "splitPremise|premise-transform\]\[split|type: ['\"]split" web LOGIC_SPEC.
 - Payment table reset now clears its in-memory calc-period meta cache together with rendered signatures and memoized totals.
 - No `calc_engine.js`, backend financial logic, FIFO, penalty, formulas, summary dirty, server-first, or ledger behavior changes were added.
 
+## 2026-05-25 - Stage 13.4H - server-first period reset persistence
+
+- Added `Data.resetCalcPeriodKeysForAbonent(...)` to remove canonical calc/report period keys through `DELETE /api/store`, set `calc_period_active_uid_*` to `"0"` through `POST /api/store`, and cleanup legacy account-number period keys as delete-only compatibility cleanup.
+- Reset now performs local and server readback with `[period][reset-local-readback-ok]`, `[period][reset-server-persist-ok]`, `[period][server-reset-readback-ok]`, and failed counterparts; `value:null` is not used because backend `POST /api/store` stores it as an empty string.
+- Added `window.JKH_debugCalcPeriodKeys()` and expanded `[period][restore-source]` diagnostics with key/raw/source/from/to/owner/uid/requestedId.
+- Summary snapshots remain read-only diagnostics for this flow and are not used to restore UI period state.
+- No `web/calc_engine.js`, backend financial logic, FIFO, penalty, formulas, index ledger read, summary save, or canonical write-path legacy fallback changes were added.
+
 ## 2026-05-22 - Stage 13.4F - legacy period summary read masking
 
 - Added read-only backend masking for legacy fresh summaries without `summary_scope` whose stored `period.from/to` conflicts with known canonical abonent boundaries.
