@@ -137,6 +137,8 @@
     const cache = (typeof Data.readLedgerRuntimeCache === "function") ? Data.readLedgerRuntimeCache(id) : null;
     const cacheVersion = cache && typeof cache === "object" ? String(cache.ledgerVersion || "") : "";
     const map = cache && cache.rowsById && typeof cache.rowsById === "object" ? cache.rowsById : null;
+    const validity = (typeof Data.isLedgerRuntimeCacheValid === "function") ? Data.isLedgerRuntimeCacheValid(id, cache) : null;
+    if (validity && validity.valid !== true) { out.reason = validity.reason || "stale_or_missing"; return out; }
     if (!version || !cache || !map || !cacheVersion || cacheVersion !== version) { out.reason = "stale_or_missing"; return out; }
     out.periodMatches = runtimeCachePeriodMatches(cache, version, periodActive, selectedPeriod);
     if (!out.periodMatches) { out.reason = "period_mismatch"; return out; }
@@ -2524,6 +2526,15 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
         baseRowsSource = runtimeCacheUsed ? "runtime_cache" : "full_view";
       }
       try {
+        if (isReadonlyNoRecalcMode()) {
+          console.log("[payment-table][readonly-no-recalc]", {
+            abonentId: String(getAbonentId() || ""),
+            cacheValid: !!__runtimeCacheState.valid,
+            reason: String(__runtimeCacheState.reason || ""),
+            periodActive: !!periodActive,
+            rowsView: Array.isArray(view) ? view.length : 0
+          });
+        }
         console.log("[payment-table][period-runtime-source]", {
           abonentId: String(getAbonentId() || ""),
           periodActive: !!periodActive,
@@ -2549,6 +2560,9 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
       const statusBox = qs("#paymentTableStatus") || qs("#paymentStatus") || qs("#paymentsStatus");
       if (isReadonlyNoRecalcMode() && statusBox) {
         statusBox.textContent = __runtimeCacheState.valid ? "" : "Для актуальных сумм нажмите Пересчитать";
+      }
+      if (isReadonlyNoRecalcMode() && statusBox && !__runtimeCacheState.valid) {
+        statusBox.textContent = "Требуется пересчёт: runtime cache отсутствует или устарел";
       }
       view.sort((a, b) => {
         const ay = Number(a.year) || 0;
@@ -3182,8 +3196,10 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
     const opts = options && typeof options === "object" ? options : {};
     const id = String(getAbonentId() || "");
     if (!id) return { ok:false, reason:"ABONENT_REQUIRED" };
+    try { console.log("[payment-table][recalc-explicit]", { abonentId: id, stage: "start" }); } catch(eLogStart) {}
     const autoResult = await applyControlledAutoAccrualForManualRecalc(id, opts);
     if (!autoResult || autoResult.ok !== true) {
+      try { console.log("[payment-table][recalc-explicit]", { abonentId: id, stage: "autoaccrual_failed", reason: normalizeManualRecalcReason(autoResult && autoResult.reason) }); } catch(eLogAuto) {}
       return { ok:false, reason:normalizeManualRecalcReason(autoResult && autoResult.reason), autoaccrual:autoResult, autoaccrual_changed:!!(autoResult && autoResult.changed) };
     }
     const arr = getPayments();
@@ -3229,6 +3245,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
     const freshPayload = { ledgerVersion: freshLedgerVersion, runtimeSignature: runtimeCacheSignature(freshLedgerVersion, freshPeriodActive, freshSelectedPeriod), periodActive: !!freshPeriodActive, period: freshPeriodActive && freshSelectedPeriod ? { from: freshSelectedPeriod.from || "", to: freshSelectedPeriod.to || "" } : null, rowsById: freshRowsById, updatedAt: (new Date()).toISOString() };
     if (window.Data && typeof Data.writeLedgerRuntimeCache === "function") Data.writeLedgerRuntimeCache(id, freshPayload);
     const summary = summaryResult && summaryResult.summary && typeof summaryResult.summary === "object" ? summaryResult.summary : null;
+    try { console.log("[payment-table][recalc-explicit]", { abonentId: id, stage: "done", ok: !!(summaryResult && summaryResult.ok === true), summary_status: summaryResult && (summaryResult.summary_status || summaryResult.status) || "error" }); } catch(eLogDone) {}
     return {
       ok:!!(summaryResult && summaryResult.ok === true),
       reason: summaryResult && (summaryResult.summary_reason || summaryResult.reason) || "",

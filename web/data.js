@@ -732,11 +732,21 @@
     return resolveRuntimeCacheKey(abonentOrId);
   }
 
+  function _runtimeHashString(raw) {
+    var s = String(raw === null || raw === undefined ? "" : raw);
+    var h = 2166136261;
+    for (var i = 0; i < s.length; i++) {
+      h ^= s.charCodeAt(i);
+      h = Math.imul(h, 16777619);
+    }
+    return ("00000000" + (h >>> 0).toString(16)).slice(-8) + ":" + s.length;
+  }
+
   function computeLedgerRuntimeVersion(abonentOrId) {
     var ledgerKey = resolvePaymentLedgerKey(abonentOrId);
     if (!ledgerKey) return "";
     var raw = _getProjectRaw(ledgerKey);
-    return String(raw === null || raw === undefined ? "" : raw);
+    return _runtimeHashString(raw);
   }
 
   function computeLedgerVersion(abonentOrId) {
@@ -745,10 +755,25 @@
 
   function readLedgerRuntimeCache(abonentOrId) {
     var key = resolveRuntimeCacheKey(abonentOrId);
-    if (!key) return null;
+    var version = computeLedgerRuntimeVersion(abonentOrId);
+    if (!key) {
+      try { console.log("[runtime-cache][read]", { key: "", valid: false, reason: "UID_REQUIRED" }); } catch (eLog0) {}
+      return null;
+    }
     var raw = _getProjectRaw(key);
-    if (raw === null || raw === undefined || raw === "") return null;
-    try { return JSON.parse(String(raw)); } catch (e) { return null; }
+    if (raw === null || raw === undefined || raw === "") {
+      try { console.log("[runtime-cache][read]", { key: key, valid: false, reason: "missing", ledgerVersion: version }); } catch (eLog1) {}
+      return null;
+    }
+    try {
+      var parsed = JSON.parse(String(raw));
+      var valid = isLedgerRuntimeCacheValid(abonentOrId, parsed);
+      try { console.log("[runtime-cache][read]", { key: key, valid: !!valid.valid, reason: valid.reason || "", ledgerVersion: version }); } catch (eLog2) {}
+      return parsed;
+    } catch (e) {
+      try { console.log("[runtime-cache][read]", { key: key, valid: false, reason: "json_invalid", ledgerVersion: version }); } catch (eLog3) {}
+      return null;
+    }
   }
 
   function getRuntimeCache(abonentOrId) {
@@ -760,7 +785,13 @@
     var key = resolveRuntimeCacheKey(abonentOrId);
     if (!key) return false;
     var data = payload && typeof payload === "object" ? payload : {};
-    return _setProjectRaw(key, JSON.stringify(data));
+    var version = computeLedgerRuntimeVersion(abonentOrId);
+    data.ledgerVersion = version;
+    data.ledgerHash = version;
+    data.cacheSchema = "ledger_runtime_cache_v1";
+    var ok = _setProjectRaw(key, JSON.stringify(data));
+    try { console.log("[runtime-cache][write]", { key: key, ok: ok !== false, ledgerVersion: version }); } catch (eLog) {}
+    return ok;
   }
 
   function setRuntimeCache(abonentOrId, payload) {
@@ -769,12 +800,34 @@
 
   function invalidateLedgerRuntimeCache(abonentOrId) {
     var key = resolveRuntimeCacheKey(abonentOrId);
-    if (!key) return false;
-    return _removeProjectRaw(key);
+    if (!key) {
+      try { console.log("[runtime-cache][invalidate]", { key: "", ok: false, reason: "UID_REQUIRED" }); } catch (eLog0) {}
+      return false;
+    }
+    var ok = _removeProjectRaw(key);
+    try { console.log("[runtime-cache][invalidate]", { key: key, ok: ok !== false }); } catch (eLog) {}
+    return ok;
   }
 
   function invalidateRuntimeCache(abonentOrId) {
     return invalidateLedgerRuntimeCache(abonentOrId);
+  }
+
+  function isLedgerRuntimeCacheValid(abonentOrId, cache) {
+    var key = resolveRuntimeCacheKey(abonentOrId);
+    if (!key) return { valid: false, reason: "UID_REQUIRED", ledgerVersion: "" };
+    if (!cache || typeof cache !== "object" || Array.isArray(cache)) {
+      return { valid: false, reason: "missing", ledgerVersion: computeLedgerRuntimeVersion(abonentOrId) };
+    }
+    var version = computeLedgerRuntimeVersion(abonentOrId);
+    var cacheVersion = String(cache.ledgerVersion || cache.ledgerHash || "");
+    if (!version || !cacheVersion || cacheVersion !== version) {
+      return { valid: false, reason: "stale", ledgerVersion: version, cacheVersion: cacheVersion };
+    }
+    if (!cache.rowsById || typeof cache.rowsById !== "object" || Array.isArray(cache.rowsById)) {
+      return { valid: false, reason: "rows_missing", ledgerVersion: version, cacheVersion: cacheVersion };
+    }
+    return { valid: true, reason: "", ledgerVersion: version, cacheVersion: cacheVersion };
   }
 
   function readPaymentLedger(abonentOrId) {
@@ -786,7 +839,11 @@
       if (raw !== null && raw !== undefined) return _cloneLedgerRows(_parseLedgerRows(raw, canonicalKey));
     }
 
-    // Legacy read-only fallback: payments_<LS> may still exist for old localStorage data.
+    if (found && found.abonent && isValidUid(String(found.abonent.uid || "").trim())) {
+      return [];
+    }
+
+    // Legacy read-only fallback: only for old data without a valid UID.
     var legacyKey = _legacyLedgerKeyForAbonent(id, found && found.abonent);
     if (legacyKey && legacyKey !== canonicalKey) {
       var legacyRaw = _getProjectRaw(legacyKey);
@@ -3172,6 +3229,7 @@
     setRuntimeCache: setRuntimeCache,
     invalidateLedgerRuntimeCache: invalidateLedgerRuntimeCache,
     invalidateRuntimeCache: invalidateRuntimeCache,
+    isLedgerRuntimeCacheValid: isLedgerRuntimeCacheValid,
     readPaymentLedger: readPaymentLedger,
     loadAbonentSummaryPage: loadAbonentSummaryPage,
     validateAbonentSummaryRecalcBatch: validateAbonentSummaryRecalcBatch,

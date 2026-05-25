@@ -631,6 +631,9 @@ function markImportedPaymentSummariesDirty(affectedUids){
     const uid = normStr(value);
     if (!uid || seen[uid]) return;
     seen[uid] = true;
+    if (window.Data && typeof window.Data.invalidateLedgerRuntimeCache === 'function') {
+      window.Data.invalidateLedgerRuntimeCache(uid);
+    }
     window.Data.markAbonentSummaryDirty(uid, 'IMPORT_PAYMENTS_APPLIED');
   });
 }

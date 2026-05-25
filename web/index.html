@@ -804,8 +804,7 @@ let indexTableInitDone = false;
 function shouldUsePassiveSummaryMode(){
     try {
         if (!(window.Data && typeof window.Data.loadAbonentSummaryPage === "function")) return false;
-        if (window.Auth && typeof Auth.isGuest === "function" && Auth.isGuest()) return false;
-        return !!(window.Auth && typeof Auth.getCurrentUser === "function" && Auth.getCurrentUser());
+        return true;
     } catch(e) {
         return false;
     }
@@ -1072,6 +1071,7 @@ function getIndexServerQueryFilter(){
 
 async function loadPassiveSummaryPage(page){
     indexPassiveSummaryMode = true;
+    try { console.log("[index][summary-only]", { page: Math.max(1, Number(page) || 1), reason: "loadPassiveSummaryPage" }); } catch(eLog) {}
     currentPage = Math.max(1, Number(page) || 1);
     indexSummaryState = Object.assign({}, indexSummaryState, {
         mode: "summary",
@@ -1218,15 +1218,8 @@ async function repairIndexEmptyExcludeKeysOnce(){
         var ownerKey = String((st && (st.ownerId || st.owner)) || __indexOwnerId() || "local");
         var repairKey = String((st && st.status) || "local") + "|" + ownerKey + "|" + String((st && (st.loadedAt || st.updatedAt)) || "") + "|" + String(Object.keys((window.AbonentsDB && window.AbonentsDB.abonents) || {}).length);
         if (repairKey === __indexExcludeRepairOwnerKey) return { ready: true, repairedCount: 0 };
-        var repairedCount = countIndexEmptyExcludePeriodKeys();
-        console.log("[index][excludes-repair-before-calc]", { repairedCount: repairedCount });
-        if (window.Data && typeof window.Data.repairEmptyExcludePeriodsKeys === "function") {
-            var actual = window.Data.repairEmptyExcludePeriodsKeys();
-            if (actual && typeof actual.then === "function") {
-                actual = await actual;
-            }
-            if (typeof actual === "number") repairedCount = actual;
-        }
+        var repairedCount = 0;
+        console.log("[index][summary-only]", { reason: "skip-open-repair", repairKey: repairKey });
         __indexExcludeRepairOwnerKey = repairKey;
         return { ready: true, repairedCount: repairedCount };
     } catch (e) {
@@ -1280,9 +1273,7 @@ function showIndexAccrualsReadonlyStatus(){
         const db = window.AbonentsDB?.abonents || {};
         const ids = Object.keys(db);
         if (!ids.length) return;
-        const missing = ids.filter(id => !hasUsablePaymentLedger(id)).length;
-        if (!missing) return;
-        console.warn('[readonly][blocked-write-path]', { page: 'index', reason: 'ACCRUALS_NOT_READY', missing, total: ids.length });
+        console.warn('[index][summary-only]', { page: 'index', reason: 'ledger-scan-blocked', total: ids.length });
         let box = document.getElementById('indexAccrualsReadonlyWarning');
         if (!box) {
             box = document.createElement('div');
@@ -1292,7 +1283,7 @@ function showIndexAccrualsReadonlyStatus(){
             if (anchor && anchor.parentNode) anchor.parentNode.insertBefore(box, anchor.nextSibling);
             else document.body.appendChild(box);
         }
-        box.textContent = 'Начисления подготовлены не для всех абонентов. Выполните пересчёт начислений вручную.';
+        box.textContent = 'Index открыт в режиме summary-only. Массовый пересчёт и чтение всех ledger при открытии заблокированы.';
     } catch(e) {
         console.warn('[index][readonly-status] failed', e);
     }
