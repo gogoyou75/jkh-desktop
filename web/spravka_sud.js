@@ -537,28 +537,26 @@
     }
 
     const raw = JSON.stringify(payload);
-    storeSet(reportKey, raw, ownerId);
-    storeSet(periodKey, raw, ownerId);
-    storeSet(activeKey, "1", ownerId);
     let reportReadback = null;
     let periodReadback = null;
     let activeReadback = null;
-    try { reportReadback = storeGet(reportKey, ownerId); } catch(eReport) {}
-    try { periodReadback = storeGet(periodKey, ownerId); } catch(ePeriod) {}
-    try { activeReadback = storeGet(activeKey, ownerId); } catch(eActive) {}
+    reportReadback = raw;
+    periodReadback = raw;
+    activeReadback = "1";
     result.reportReadback = reportReadback;
     result.periodReadback = periodReadback;
     result.activeReadback = activeReadback;
     result.ok = reportReadback === raw && periodReadback === raw && activeReadback === "1";
     result.reason = result.ok ? "" : "RETURN_CARD_PERIOD_READBACK_FAILED";
-    try { console.log("[spravka][return-card-period-save]", result); } catch(eLog) {}
+    result.readonly = true;
+    try { console.log("[reports][readonly-open]", { page: "spravka_sud", source: "return-card-period", writes: false, abonentId: id, uid: uid }); } catch(eLog) {}
     return result;
   }
 
   function configureBackToCardPeriod(ctx, abonent, period){
     const back = $("backToCard");
     const href = buildCardReturnUrl(ctx, abonent, period);
-    const saveResult = saveReturnCardPeriod(ctx, abonent, period);
+    const saveResult = { ok: true, readonly: true };
     __spravkaReturnCardPeriodContext = { ctx: ctx, abonent: abonent, period: period };
     if (back) back.href = href;
     try {
@@ -568,7 +566,8 @@
         uid: String(abonent && abonent.uid || ""),
         from: period && period.from || "",
         to: period && period.to || "",
-        saveOk: !!(saveResult && saveResult.ok)
+        saveOk: !!(saveResult && saveResult.ok),
+        readonly: true
       });
     } catch(eLog) {}
     return href;
@@ -582,7 +581,7 @@
     back.addEventListener("click", function(ev){
       if (__spravkaReturnCardPeriodContext) {
         const c = __spravkaReturnCardPeriodContext;
-        const saveResult = saveReturnCardPeriod(c.ctx, c.abonent, c.period);
+        const saveResult = { ok: true, readonly: true };
         const href = buildCardReturnUrl(c.ctx, c.abonent, c.period);
         back.href = href;
         try {
@@ -593,6 +592,7 @@
             from: c.period && c.period.from || "",
             to: c.period && c.period.to || "",
             saveOk: !!(saveResult && saveResult.ok),
+            readonly: true,
             source: "click"
           });
         } catch(eClickLog) {}
@@ -755,25 +755,7 @@
         return false;
       }
 
-      if (window.JKHAutoAccrual && typeof window.JKHAutoAccrual.recalcForAbonent === "function") {
-        let recalcResult = null;
-        try {
-          recalcResult = window.JKHAutoAccrual.recalcForAbonent(ctx.abonentId);
-        } catch (e) {
-          if (isLedgerJsonInvalidError(e)) {
-            showFatal(LEDGER_FATAL_MESSAGE, { abonentId: ctx.abonentId, error: e });
-            return;
-          }
-          throw e;
-        }
-        if (isLedgerJsonInvalidResult(recalcResult)) {
-          showFatal((recalcResult && recalcResult.message) || LEDGER_FATAL_MESSAGE, { abonentId: ctx.abonentId, result: recalcResult });
-          return;
-        }
-        if (recalcResult && recalcResult.ok && recalcResult.changed && window.Data && typeof window.Data.flushDbToServer === "function") {
-          await window.Data.flushDbToServer();
-        }
-      }
+      try { console.log("[reports][readonly-open]", { page: "spravka_sud", source: "skip-autoaccrual", abonentId: ctx.abonentId, writes: false }); } catch(eReadonlyOpen) {}
 
       let allRowsRaw;
       try {

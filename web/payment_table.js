@@ -1464,6 +1464,9 @@ if (parts.length) {
   }
 
   function normalizeDraftPaymentRowForSave(row){
+    if (row && String(row.paid_date || "").trim()) {
+      syncYearMonthFromPaidDate(row);
+    }
     var copy = Object.assign({}, row || {});
     delete copy.__draft;
     delete copy.__draftStatus;
@@ -1472,10 +1475,43 @@ if (parts.length) {
     return copy;
   }
 
+  function markPaymentRuntimeStaleUI(tr){
+    const statusBox = qs("#paymentTableStatus") || qs("#paymentStatus") || qs("#paymentsStatus");
+    if (statusBox) statusBox.textContent = "Итог устарел — нажмите Пересчитать.";
+    try {
+      console.log("[payment-save][skip-full-recalc]", {
+        abonentId: String(getAbonentId() || ""),
+        reason: "ledger_mutation_runtime_cache_invalidated"
+      });
+    } catch(eLog) {}
+    if (tr) {
+      qsa(".ro", tr).forEach(function(cell){ cell.textContent = "—"; });
+      showRowSoftMessage(tr, "Оплата сохранена. Итог устарел — нажмите Пересчитать.", "ok");
+    }
+  }
+
+  function replaceRowWithPersisted(row, oldTr){
+    if (!oldTr || !oldTr.parentNode) return null;
+    var nextRow = Object.assign({}, row || {});
+    nextRow.pay_main = "";
+    nextRow.pay_penalty = "";
+    nextRow.total = "";
+    nextRow.total_debt = "";
+    var newTr = makeRow(nextRow);
+    oldTr.parentNode.replaceChild(newTr, oldTr);
+    return newTr;
+  }
+
+  function oldTrRemoveNoRecalc(tr){
+    if (tr && tr.parentNode) tr.parentNode.removeChild(tr);
+    markPaymentRuntimeStaleUI(null);
+  }
+
   async function trySaveDraftRowIfValid(tr, rowId){
     const edit = readPaymentRowForEdit(rowId);
     const row = edit.row;
     if (!row || !edit.draft) return false;
+    try { console.log("[payment-save][draft]", { abonentId: String(getAbonentId() || ""), rowId: String(rowId || ""), paid: row.paid, paid_date: String(row.paid_date || "") }); } catch(eDraftLog) {}
     const paid = r2(Math.max(0, toNum(row.paid)));
     if (paid <= 0.0000001) {
       showRowSoftMessage(tr, "Черновик: укажите сумму оплаты.", "warn");
@@ -1494,9 +1530,10 @@ if (parts.length) {
       showRowSoftMessage(tr, "Сохранение оплаты...", "warn");
       await savePaymentsAndFlush(next);
       setPaymentDraftRows(getPaymentDraftRows().filter(x => String(x.id) !== String(rowId)));
-      showRowSoftMessage(tr, "Оплата сохранена", "ok");
       setLastAddedPaymentId(persisted.id);
-      loadPaymentTable();
+      var newTr = replaceRowWithPersisted(persisted, tr);
+      markPaymentRuntimeStaleUI(newTr || tr);
+      try { console.log("[payment-save][persisted]", { abonentId: String(getAbonentId() || ""), rowId: String(persisted.id || ""), cacheInvalidated: true, summaryDirty: true }); } catch(ePersistedLog) {}
       return true;
     } catch(e) {
       showRowSoftMessage(tr, "Ошибка сохранения оплаты.", "warn");
@@ -2614,7 +2651,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
       let runtimeCacheUsed = false;
       let runtimeCachePeriodMatches = false;
       let baseRowsSource = periodActive && selectedPeriod ? "filtered" : "runtime_cache";
-      if (periodActive && selectedPeriod) {
+      if (periodActive && selectedPeriod && !isReadonlyNoRecalcMode()) {
         runtimeCachePeriodMatches = inspectRuntimeCachePeriodMatch(true, selectedPeriod);
         const periodRowsById = runtimeRowsByIdFromRows(view, baseRows, effectiveSignature);
         applyRuntimeRowsById(view, periodRowsById);
@@ -2623,7 +2660,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
         __runtimeCacheState = applyRuntimeCacheToRows(view, periodActive, selectedPeriod);
         runtimeCacheUsed = !!__runtimeCacheState.valid;
         runtimeCachePeriodMatches = !!__runtimeCacheState.periodMatches;
-        baseRowsSource = runtimeCacheUsed ? "runtime_cache" : "full_view";
+        baseRowsSource = runtimeCacheUsed ? "runtime_cache" : "stale_no_recalc";
       }
       try {
         if (isReadonlyNoRecalcMode()) {
@@ -2696,7 +2733,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
       __paymentTableRenderedSignature = signature;
       // Тяжёлый расчёт пени/долга не блокирует открытие карточки: строки сначала
       // рисуются с уже сохранёнными значениями, затем ro-ячейки обновляются чанками.
-      if (!isReadonlyNoRecalcMode() || (periodActive && selectedPeriod)) {
+      if (!isReadonlyNoRecalcMode()) {
         scheduleRunningTotalsUpdate(view, baseRows, tbody, effectiveSignature);
       }
       clearLastAddedPaymentId();
@@ -2841,6 +2878,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
       if (!row) return;
       row.note = value || "";
       await savePaymentsAndFlush(arr);
+      markPaymentRuntimeStaleUI(null);
     }, 250);
     noteTimers.set(rowId, t);
   }
@@ -2861,7 +2899,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
     async function saveEditable(arr, edit){
       if (edit && edit.draft) return trySaveDraftRowIfValid(tr, rowId);
       await savePaymentsAndFlush(arr);
-      showRowSoftMessage(tr, "Оплата сохранена", "ok");
+      markPaymentRuntimeStaleUI(tr);
       return true;
     }
 
@@ -2879,7 +2917,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
           enforcePeriodSameAsYm(row);
           normalizePeriod(row);
           await saveEditable(arr, edit);
-          loadPaymentTable();
+          if (!edit.draft) loadPaymentTable();
           return;
         }
 
@@ -2891,7 +2929,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
             normalizePeriod(row);
           }
           await saveEditable(arr, edit);
-          loadPaymentTable();
+          if (!edit.draft) loadPaymentTable();
         }
       });
     }
@@ -2913,7 +2951,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
           normalizePeriod(row);
 
           await saveEditable(arr, edit);
-          loadPaymentTable();
+          if (!edit.draft) loadPaymentTable();
         });
         return;
       }
@@ -2932,7 +2970,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
           await saveEditable(arr, edit);
 
           // Перерисовываем ТОЛЬКО после выбора даты
-          loadPaymentTable();
+          if (!edit.draft) loadPaymentTable();
         });
         return;
       }
@@ -2967,7 +3005,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
             }
           } else {
             await savePaymentsAndFlush(arr);
-            refreshRunningTotalsInDOM();
+            markPaymentRuntimeStaleUI(tr);
           }
           return;
         }
@@ -2997,7 +3035,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
         await trySaveDraftRowIfValid(tr, rowId);
       } else {
         await saveEditable(arr, edit);
-        refreshRunningTotalsInDOM();
+        if (!edit.draft) markPaymentRuntimeStaleUI(tr);
       }
     });
 
@@ -3034,7 +3072,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
         }
         row.source = n;
         await saveEditable(arr, edit);
-        loadPaymentTable();
+        if (!edit.draft) loadPaymentTable();
         return;
       }
 
@@ -3072,13 +3110,13 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
         if (!confirm("Удалить оплату?")) return;
         if (isPaymentDraftRow(rowSnapshot)) {
           setPaymentDraftRows(getPaymentDraftRows().filter(x => String(x.id) !== String(rowId)));
-          loadPaymentTable();
+          if (tr && tr.parentNode) tr.parentNode.removeChild(tr);
           return;
         }
         let arr = getPayments();
         arr = arr.filter(x => String(x.id) !== String(rowId));
         await savePaymentsAndFlush(arr);
-        loadPaymentTable();
+        oldTrRemoveNoRecalc(tr);
       });
     }
   }
@@ -3456,7 +3494,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
   document.addEventListener("DOMContentLoaded", async () => {
     JKH_RenameDebtPenaltyHeaders();
 // ✅ важно: повесить обработчик сворачивания месяцев сразу, не дожидаясь редактирования полей
-    try { refreshRunningTotalsInDOM(); } catch(e) {}
+    try { console.log("[payment-table][readonly-no-recalc]", { reason: "DOMContentLoaded-skip-runtime-refresh" }); } catch(e) {}
   });
 // =========================
   // Модалка «Справочник источников»

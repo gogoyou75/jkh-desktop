@@ -1976,6 +1976,7 @@
         account_uid: uid,
         reason: reasonCode
       };
+      try { console.log("[summary][mark-dirty]", { account_uid: uid, abonentId: abonentId, reason: reasonCode }); } catch (eLogDirty) {}
 
       var res = await fetch("/api/abonent_summary/mark_dirty", {
         method: "POST",

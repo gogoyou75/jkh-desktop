@@ -338,12 +338,6 @@ function getCanonicalAbonent(id){
 
 async function ensureCanonicalAbonent(id){
     let abonent = getCanonicalAbonent(id);
-    if (abonent && !String(abonent.uid || "").trim()) {
-        if (window.Data && typeof Data.ensureAbonentUid === "function") {
-            await Data.ensureAbonentUid(id, { source: "reports" });
-            abonent = getCanonicalAbonent(id);
-        }
-    }
     return abonent;
 }
 
@@ -405,7 +399,7 @@ function fillAbonentCardHeader(id, a) {
 function autoAcceptReportsPeriod(abonent, from, to, source) {
     const fromValue = String(from || "").trim();
     const toValue = String(to || "").trim();
-    const ok = isValidPeriod(fromValue, toValue) && saveCanonicalPeriod(abonent, fromValue, toValue, { silent: true, source: "auto-accept:" + String(source || "unknown") });
+    const ok = isValidPeriod(fromValue, toValue);
     const openBtn = document.getElementById("openReport01");
     const chooseBtn = document.getElementById("repChooseBtn");
     if (openBtn) openBtn.disabled = !ok;
@@ -424,6 +418,7 @@ function autoAcceptReportsPeriod(abonent, from, to, source) {
             from: fromValue,
             to: toValue
         });
+        console.log("[reports][readonly-open]", { source: String(source || "unknown"), from: fromValue, to: toValue, writes: false });
     } catch(eAutoAcceptLog) {}
     return !!ok;
 }
@@ -588,13 +583,9 @@ function saveCanonicalPeriod(abonent, from, to, options){
     } catch(e) {}
 
     const payload = JSON.stringify({ from: fromValue, to: toValue });
-    storeSetCanonical(meta.periodKey, payload, meta.ownerId);
-    storeSetCanonical(meta.activeKey, "1", meta.ownerId);
-    storeSetCanonical(meta.reportKey, payload, meta.ownerId);
-
-    const periodRaw = storeGetCanonical(meta.periodKey, meta.ownerId);
-    const activeRaw = storeGetCanonical(meta.activeKey, meta.ownerId);
-    const reportRaw = storeGetCanonical(meta.reportKey, meta.ownerId);
+    const periodRaw = payload;
+    const activeRaw = "1";
+    const reportRaw = payload;
     let parsedPeriod = null;
     let parsedReportPeriod = null;
     try { parsedPeriod = periodRaw ? JSON.parse(periodRaw) : null; } catch(e) { parsedPeriod = null; }
@@ -613,7 +604,8 @@ function saveCanonicalPeriod(abonent, from, to, options){
             reportRaw: reportRaw,
             parsedPeriod: parsedPeriod,
             parsedReportPeriod: parsedReportPeriod,
-            ok: !!(parsedPeriod && parsedPeriod.from === fromValue && parsedPeriod.to === toValue && parsedReportPeriod && parsedReportPeriod.from === fromValue && parsedReportPeriod.to === toValue && activeRaw === "1")
+            ok: !!(parsedPeriod && parsedPeriod.from === fromValue && parsedPeriod.to === toValue && parsedReportPeriod && parsedReportPeriod.from === fromValue && parsedReportPeriod.to === toValue && activeRaw === "1"),
+            readonly: true
         });
     } catch(e) {}
     try {
@@ -628,7 +620,8 @@ function saveCanonicalPeriod(abonent, from, to, options){
             activeReadback: activeRaw,
             reportReadback: parsedReportPeriod,
             ok: !!(parsedPeriod && parsedPeriod.from === fromValue && parsedPeriod.to === toValue && parsedReportPeriod && parsedReportPeriod.from === fromValue && parsedReportPeriod.to === toValue && activeRaw === "1"),
-            source: String(opts.source || "manual")
+            source: String(opts.source || "manual"),
+            readonly: true
         });
     } catch(eReadbackLog) {}
 
@@ -637,6 +630,7 @@ function saveCanonicalPeriod(abonent, from, to, options){
         return false;
     }
 
+    try { console.log("[reports][readonly-open]", { source: String(opts.source || "manual"), from: fromValue, to: toValue, writes: false }); } catch(eReadonlyLog) {}
     return true;
 }
 

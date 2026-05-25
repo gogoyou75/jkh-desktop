@@ -3329,13 +3329,13 @@ function bindCalcButtons(){
         }
         if (from || to) {
             if (isValidPeriod(from, to)) {
-                const uidResult = await ensureCurrentAbonentUidForCalcPeriod("abonent_card.reports");
-                if (!uidResult || uidResult.ok !== true || !uidResult.uid) {
+                const readonlyMeta = getCalcPeriodStorageMeta();
+                if (!readonlyMeta || !readonlyMeta.resolvedUid) {
                     alert("Период расчёта не сохранён: не найден canonical UID key.");
                     return;
                 }
-                reportPeriodResult = { ok: true, reportKey: getReportPeriodStorageKey(getCalcPeriodStorageMeta()), reason: "URL_ONLY" };
-                __logCardPeriodSaved(getCalcPeriodStorageMeta(), reportPeriodResult);
+                reportPeriodResult = { ok: true, reportKey: getReportPeriodStorageKey(readonlyMeta), reason: "URL_ONLY" };
+                __logCardPeriodSaved(readonlyMeta, reportPeriodResult);
                 if (!reportPeriodResult.ok) {
                     alert("РџРµСЂРёРѕРґ РґР»СЏ СЃРїСЂР°РІРєРё РЅРµ СЃРѕС…СЂР°РЅС‘РЅ: " + String(reportPeriodResult.reason || "REPORT_PERIOD_READBACK_FAILED") + " (" + String(reportPeriodResult.reportKey || "report_period_uid_<uid>") + ").");
                     return;
