@@ -847,12 +847,11 @@
     }
   }
 
-  function saveCardSnapshot(abonentOrId, snapshot) {
-    if (!Data.ensureWriteOrExplain()) return false;
+  function _prepareCardSnapshotForSave(abonentOrId, snapshot) {
     var key = resolveCardSnapshotKey(abonentOrId);
-    if (!key) return false;
+    if (!key) return { ok: false, key: "", ownerId: "", reason: "SNAPSHOT_KEY_REQUIRED" };
     var normalized = _normalizeCardSnapshot(abonentOrId, snapshot);
-    if (!normalized) return false;
+    if (!normalized) return { ok: false, key: key, ownerId: "", reason: "SNAPSHOT_INVALID" };
     var ownerId = String(_ownerId() || "").trim();
     normalized.dirty = false;
     normalized.dirtyReason = "";
@@ -860,9 +859,19 @@
     if (rowsByIdCount <= 0) {
       var stats = _cardSnapshotLedgerStats(normalized.rows);
       try { console.warn("[card-snapshot][save-blocked-empty-rowsById]", { key: key, uid: normalized.uid, abonentId: normalized.abonentId, rowsCount: stats.rowsCount, rowsByIdCount: rowsByIdCount, ledgerVersion: normalized.ledgerVersion, hasAccruals: stats.hasAccruals, hasPayments: stats.hasPayments }); } catch (eBlockLog) {}
-      return false;
+      return { ok: false, key: key, ownerId: ownerId, reason: "EMPTY_ROWS_BY_ID" };
     }
-    var serialized = JSON.stringify(normalized);
+    return { ok: true, key: key, ownerId: ownerId, normalized: normalized, serialized: JSON.stringify(normalized) };
+  }
+
+  function saveCardSnapshot(abonentOrId, snapshot) {
+    if (!Data.ensureWriteOrExplain()) return false;
+    var prepared = _prepareCardSnapshotForSave(abonentOrId, snapshot);
+    if (!prepared.ok) return false;
+    var key = prepared.key;
+    var ownerId = prepared.ownerId;
+    var normalized = prepared.normalized;
+    var serialized = prepared.serialized;
     var ok = _setProjectRaw(key, serialized);
     try { console.log("[card-snapshot][save]", { key: key, ok: ok !== false, rows: normalized.rows.length, ledgerVersion: normalized.ledgerVersion }); } catch (eLog) {}
     if (ok !== false && ownerId && ownerId !== "guest" && ownerId !== "ALL") {
@@ -879,6 +888,62 @@
       try { console.warn("[card-snapshot][server-save-failed]", { ownerId: ownerId, key: key, reason: "OWNER_SCOPE_UNAVAILABLE" }); } catch (eOwnerLog) {}
     }
     return ok;
+  }
+
+  async function saveCardSnapshotAndWait(abonentOrId, snapshot) {
+    var result = { ok: false, localOk: false, serverOk: false, key: "", ownerId: "", status: 0, reason: "" };
+    try {
+      if (!Data.ensureWriteOrExplain()) {
+        result.reason = "WRITE_BLOCKED";
+        try { console.warn("[card-snapshot][save-and-wait-failed]", result); } catch (eWriteLog) {}
+        return result;
+      }
+      var prepared = _prepareCardSnapshotForSave(abonentOrId, snapshot);
+      result.key = prepared.key || "";
+      result.ownerId = prepared.ownerId || "";
+      if (!prepared.ok) {
+        result.reason = prepared.reason || "SNAPSHOT_INVALID";
+        try { console.warn("[card-snapshot][save-and-wait-failed]", result); } catch (ePreparedLog) {}
+        return result;
+      }
+      var key = prepared.key;
+      var ownerId = prepared.ownerId;
+      var normalized = prepared.normalized;
+      var serialized = prepared.serialized;
+      var localOk = _setProjectRaw(key, serialized);
+      result.localOk = localOk !== false;
+      try { console.log("[card-snapshot][save]", { key: key, ok: result.localOk, rows: normalized.rows.length, ledgerVersion: normalized.ledgerVersion }); } catch (eSaveLog) {}
+      if (!result.localOk) {
+        result.reason = "LOCAL_SAVE_FAILED";
+        try { console.warn("[card-snapshot][save-and-wait-failed]", result); } catch (eLocalLog) {}
+        return result;
+      }
+      if (!ownerId || ownerId === "guest" || ownerId === "ALL") {
+        result.reason = "OWNER_SCOPE_UNAVAILABLE";
+        try { console.warn("[card-snapshot][server-save-failed]", { ownerId: ownerId, key: key, reason: result.reason }); } catch (eOwnerLog) {}
+        try { console.warn("[card-snapshot][save-and-wait-failed]", result); } catch (eOwnerWaitLog) {}
+        return result;
+      }
+      var serverResult = await _serverStoreSet(ownerId, key, serialized);
+      result.status = Number(serverResult && serverResult.status || 0);
+      result.serverOk = !!(serverResult && serverResult.ok === true);
+      if (!result.serverOk) {
+        result.reason = serverResult && (serverResult.text || serverResult.data && serverResult.data.error) || "SERVER_STORE_FAILED";
+        try { console.warn("[card-snapshot][server-save-failed]", { ownerId: ownerId, key: key, status: result.status, reason: result.reason }); } catch (eServerFailLog) {}
+        try { console.warn("[card-snapshot][save-and-wait-failed]", result); } catch (eWaitFailLog) {}
+        return result;
+      }
+      result.ok = true;
+      result.reason = "";
+      try { console.log("[card-snapshot][server-save-ok]", { ownerId: ownerId, key: key, status: result.status }); } catch (eServerOkLog) {}
+      try { console.log("[card-snapshot][save-and-wait-ok]", result); } catch (eWaitOkLog) {}
+      return result;
+    } catch (e) {
+      result.reason = String(e && e.message || e || "CARD_SNAPSHOT_SAVE_FAILED");
+      try { console.warn("[card-snapshot][server-save-failed]", { ownerId: result.ownerId, key: result.key, status: result.status, reason: result.reason }); } catch (eCatchServerLog) {}
+      try { console.warn("[card-snapshot][save-and-wait-failed]", result); } catch (eCatchWaitLog) {}
+      return result;
+    }
   }
 
   function invalidateCardSnapshot(abonentOrId, reason) {
@@ -3572,6 +3637,7 @@
     computeLedgerVersion: computeLedgerVersion,
     readCardSnapshot: readCardSnapshot,
     saveCardSnapshot: saveCardSnapshot,
+    saveCardSnapshotAndWait: saveCardSnapshotAndWait,
     invalidateCardSnapshot: invalidateCardSnapshot,
     buildCardSnapshotFromCurrentResult: buildCardSnapshotFromCurrentResult,
     readLedgerRuntimeCache: readLedgerRuntimeCache,

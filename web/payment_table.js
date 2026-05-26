@@ -226,7 +226,7 @@
     }
     const map = snapshot.rowsById && typeof snapshot.rowsById === "object" && !Array.isArray(snapshot.rowsById) ? snapshot.rowsById : {};
     const mapKeys = Object.keys(map);
-    if (!mapKeys.length) return dispatchInvalid("CARD_SNAPSHOT_ROWS_MISSING");
+    if (!mapKeys.length) return dispatchInvalid("CARD_SNAPSHOT_ROWS_MISSING", { rowsByIdCount: 0 });
     applyRuntimeRowsById(rows, map);
     const visibleFinancialRows = window.Data && typeof Data.getVisibleFinancialRowsForCacheValidation === "function"
       ? Data.getVisibleFinancialRowsForCacheValidation(rows, { periodActive: !!periodActive, selectedPeriod: selectedPeriod })
@@ -251,9 +251,9 @@
         if (Math.abs(pm) > 0.0000001 || Math.abs(pp) > 0.0000001 || Math.abs(total) > 0.0000001) nonZeroComputedCount++;
       }
     });
-    if (visibleFinancialRows.length && missingIds.length) return dispatchInvalid("CARD_SNAPSHOT_ROWS_NOT_APPLIED", { missingRowsCount: missingIds.length, missingRows: missingIds.slice(0, 20) });
-    if (visibleFinancialRows.length && (!appliedCount || !finiteComputedCount)) return dispatchInvalid("CARD_SNAPSHOT_ROWS_NOT_APPLIED", { visibleFinancialRowsCount: visibleFinancialRows.length, appliedCount: appliedCount, finiteComputedCount: finiteComputedCount });
-    if (visibleFinancialRows.length && nonZeroComputedCount <= 0) return dispatchInvalid("CARD_SNAPSHOT_ROWS_NOT_APPLIED", { visibleFinancialRowsCount: visibleFinancialRows.length, appliedCount: appliedCount, finiteComputedCount: finiteComputedCount, nonZeroComputedCount: nonZeroComputedCount });
+    if (visibleFinancialRows.length && missingIds.length) return dispatchInvalid("CARD_SNAPSHOT_ROWS_NOT_APPLIED", { rowsByIdCount: mapKeys.length, visibleFinancialRowsCount: visibleFinancialRows.length, missingRowsCount: missingIds.length, missingRows: missingIds.slice(0, 20) });
+    if (visibleFinancialRows.length && (!appliedCount || !finiteComputedCount)) return dispatchInvalid("CARD_SNAPSHOT_ROWS_NOT_APPLIED", { rowsByIdCount: mapKeys.length, visibleFinancialRowsCount: visibleFinancialRows.length, appliedCount: appliedCount, finiteComputedCount: finiteComputedCount });
+    if (visibleFinancialRows.length && nonZeroComputedCount <= 0) return dispatchInvalid("CARD_SNAPSHOT_ROWS_NOT_APPLIED", { rowsByIdCount: mapKeys.length, visibleFinancialRowsCount: visibleFinancialRows.length, appliedCount: appliedCount, finiteComputedCount: finiteComputedCount, nonZeroComputedCount: nonZeroComputedCount });
     out.valid = true;
     out.reason = "";
     out.dataById = map;

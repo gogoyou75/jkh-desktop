@@ -3576,7 +3576,7 @@ function bindCalcButtons(){
                 const summaryStatus = recalcResult && (recalcResult.summary_status || recalcResult.status) || summary && (summary.summary_status || summary.status) || "";
                 const summaryReason = recalcResult && (recalcResult.summary_reason || recalcResult.reason) || summary && (summary.summary_reason || summary.reason) || "";
                 if (__normalizeSummaryStatus(summaryStatus) === "fresh") {
-                    if (!window.Data || typeof Data.buildCardSnapshotFromCurrentResult !== "function" || typeof Data.saveCardSnapshot !== "function") {
+                    if (!window.Data || typeof Data.buildCardSnapshotFromCurrentResult !== "function" || typeof Data.saveCardSnapshotAndWait !== "function") {
                         renderAbonentSummaryStatus("error", "CARD_SNAPSHOT_API_UNAVAILABLE");
                         alert("Snapshot карточки не сохранён: API snapshot недоступен.");
                         return;
@@ -3588,14 +3588,22 @@ function bindCalcButtons(){
                         alert("Snapshot карточки пуст — пересчёт не дал строк с computed totals");
                         return;
                     }
-                    const snapshotSaved = snapshot && Data.saveCardSnapshot(currentAbonentId, snapshot);
-                    if (snapshotSaved === false || !snapshot) {
+                    const snapshotSaveResult = await Data.saveCardSnapshotAndWait(currentAbonentId, snapshot);
+                    if (!snapshotSaveResult || snapshotSaveResult.localOk !== true) {
                         renderAbonentSummaryStatus("error", "CARD_SNAPSHOT_SAVE_FAILED");
                         alert("Snapshot карточки не сохранён. Итог не будет отмечен fresh.");
                         return;
                     }
+                    if (snapshotSaveResult.serverOk !== true) {
+                        renderAbonentSummaryStatus("error", "CARD_SNAPSHOT_SERVER_SAVE_FAILED");
+                        alert("Snapshot карточки не сохранён на сервер. Итог не будет отмечен fresh.");
+                        return;
+                    }
+                    __cardSnapshotFreshValidated = true;
+                    __lastCardSnapshotValidation = { valid: true, reason: "", detail: { key: snapshotSaveResult.key, ownerId: snapshotSaveResult.ownerId, status: snapshotSaveResult.status } };
+                    __runtimeCacheFreshBlocked = false;
                 }
-                if (summaryStatus) renderAbonentSummaryStatus(summaryStatus, summaryReason);
+                if (summaryStatus) renderAbonentSummaryStatus(summaryStatus, __normalizeSummaryStatus(summaryStatus) === "fresh" ? "OK" : summaryReason);
                 if (__normalizeSummaryStatus(summaryStatus) === "fresh" && summary) {
                     __renderAbonentTotalsFromFreshSummary(summary);
                 }
