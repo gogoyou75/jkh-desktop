@@ -3245,6 +3245,7 @@ window.addEventListener("jkh:runtime-cache-valid", function(event){
     const detail = event && event.detail ? event.detail : {};
     __runtimeCacheFreshBlocked = false;
     __lastRuntimeCacheValidation = { valid: true, reason: "", detail: detail };
+    try { console.log("[summary][runtime-cache-validated]", detail); } catch(eLog) {}
     const summary = window.__lastCardSummaryForDebug && typeof window.__lastCardSummaryForDebug === "object" ? window.__lastCardSummaryForDebug : null;
     if (__normalizeSummaryStatus(summary && (summary.summary_status || summary.status)) === "fresh" && __lastRenderedSummaryStatusLocal !== "fresh") {
         renderAbonentSummaryStatus("fresh", summary.summary_reason || summary.reason || "");

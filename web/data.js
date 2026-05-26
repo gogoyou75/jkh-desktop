@@ -790,7 +790,18 @@
     data.ledgerHash = version;
     data.cacheSchema = "ledger_runtime_cache_v1";
     var ok = _setProjectRaw(key, JSON.stringify(data));
-    try { console.log("[runtime-cache][write]", { key: key, ok: ok !== false, ledgerVersion: version }); } catch (eLog) {}
+    try {
+      var rowsById = data.rowsById && typeof data.rowsById === "object" && !Array.isArray(data.rowsById) ? data.rowsById : {};
+      console.log("[runtime-cache][write]", {
+        key: key,
+        ok: ok !== false,
+        ledgerVersion: version,
+        runtimeSignature: String(data.runtimeSignature || ""),
+        periodActive: data.periodActive === true,
+        selectedPeriod: data.period || null,
+        rowsByIdCount: Object.keys(rowsById).length
+      });
+    } catch (eLog) {}
     return ok;
   }
 
@@ -874,7 +885,7 @@
     var key = resolveRuntimeCacheKey(abonentOrId);
     if (!key) return { valid: false, reason: "UID_REQUIRED", ledgerVersion: "" };
     if (!cache || typeof cache !== "object" || Array.isArray(cache)) {
-      return { valid: false, reason: "missing", ledgerVersion: computeLedgerRuntimeVersion(abonentOrId) };
+      return { valid: false, reason: "RUNTIME_CACHE_MISSING", ledgerVersion: computeLedgerRuntimeVersion(abonentOrId) };
     }
     var version = computeLedgerRuntimeVersion(abonentOrId);
     var cacheVersion = String(cache.ledgerVersion || cache.ledgerHash || "");
@@ -920,6 +931,13 @@
       var row = visibleRows[j] || {};
       var id = String(row.id || "").trim();
       if (id && !rowsById[id]) missing.push(id);
+      if (id && rowsById[id]) {
+        var itemForRow = rowsById[id];
+        var pm = Number(itemForRow.pay_main);
+        var pp = Number(itemForRow.pay_penalty);
+        var total = Number(itemForRow.total);
+        if (!isFinite(pm) || !isFinite(pp) || !isFinite(total)) missing.push(id);
+      }
     }
     if (missing.length) {
       return { valid: false, reason: "RUNTIME_CACHE_INCOMPLETE", ledgerVersion: version, cacheVersion: cacheVersion, missingRows: missing.slice(0, 50) };
