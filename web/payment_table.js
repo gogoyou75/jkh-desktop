@@ -1335,14 +1335,15 @@ if (parts.length) {
   }
 
   function isCalcPeriodActive() {
-    const key = calcPeriodActiveKey();
-    const canonicalActive = !!(key && storeGetRaw(key) === "1");
-    if (canonicalActive) return true;
     const urlPeriod = getPeriodFromURL();
     if (urlPeriod) {
       logPeriodUrlFallbackOnce(urlPeriod);
       return true;
     }
+    if (window.JKH_CARD_PERIOD_MODE_ACTIVE !== true) return false;
+    const key = calcPeriodActiveKey();
+    const canonicalActive = !!(key && storeGetRaw(key) === "1");
+    if (canonicalActive) return true;
     return false;
   }
 

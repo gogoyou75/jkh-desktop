@@ -2829,10 +2829,12 @@ function loadCalcPeriodUI(){
         const params = new URLSearchParams(window.location.search || "");
         const urlFrom = String(params.get("from") || "").trim();
         const urlTo = String(params.get("to") || "").trim();
+        const hasUrlPeriod = !!(urlFrom || urlTo);
         if (urlFrom || urlTo) {
             if (isValidPeriod(urlFrom, urlTo)) {
                 fromEl.value = urlFrom;
                 toEl.value = urlTo;
+                window.JKH_CARD_PERIOD_MODE_ACTIVE = true;
                 try { console.log("[card-return][from-spravka]", { from: urlFrom, to: urlTo, requestedId: meta.requestedId, uid: meta.resolvedUid, ownerId: meta.ownerId, writes: false }); } catch(eReturnLog) {}
                 try { console.log("[period][restore-source]", { source: "url", key: "location.search", raw: window.location.search || "", from: urlFrom, to: urlTo, requestedId: meta.requestedId, uid: meta.resolvedUid, ownerId: meta.ownerId }); } catch (eRestoreUrlLog) {}
                 __safeLoadPaymentTableOnce("calc-period-bootstrap-url", { force: true });
@@ -2859,6 +2861,22 @@ function loadCalcPeriodUI(){
                     reason: "INVALID_URL_PERIOD"
                 });
             } catch (eUrlWarn) {}
+        }
+
+        if (!hasUrlPeriod) {
+            fromEl.value = "";
+            toEl.value = "";
+            window.JKH_CARD_PERIOD_MODE_ACTIVE = false;
+            try {
+                console.log("[card-period][full-summary-mode]", {
+                    requestedId: meta.requestedId,
+                    resolvedUid: meta.resolvedUid,
+                    ownerId: meta.ownerId,
+                    reason: "no-url-period",
+                    writes: false
+                });
+            } catch(eFullModeLog) {}
+            return;
         }
 
         const reportKey = getReportPeriodStorageKey(meta);
@@ -3454,7 +3472,8 @@ function bindCalcButtons(){
                 hasValidPeriodInput = isValidPeriod(from, to);
             }
 
-            if (hasValidPeriodInput) {
+            if (recalcForReportPeriod && hasValidPeriodInput) {
+                window.JKH_CARD_PERIOD_MODE_ACTIVE = true;
                 if (!saveCalcPeriod(from, to)) {
                     __logCardPeriodSaved(getCalcPeriodStorageMeta(), { ok: false, reason: saveCalcPeriod.lastError || "CALC_PERIOD_SAVE_FAILED", reportReadback: null });
                     if (saveCalcPeriod.lastError !== "PERIOD_REQUIRED") {
@@ -3475,7 +3494,7 @@ function bindCalcButtons(){
             if (typeof window.fullRecalcForCurrentAbonent === "function") {
                 const recalcResult = await window.fullRecalcForCurrentAbonent(recalcForReportPeriod
                     ? { period: { from: from, to: to }, runtimePeriod: { from: from, to: to }, applyAutoAccrual: true, recalcMode: "REPORT_PERIOD_CALCULATION", summaryScope: "period" }
-                    : { runtimePeriod: { from: from, to: to }, applyAutoAccrual: true, recalcMode: "FULL_SUMMARY_REBUILD", summaryScope: "full" });
+                    : { applyAutoAccrual: true, recalcMode: "FULL_SUMMARY_REBUILD", summaryScope: "full" });
                 __logCardRecalcResult(recalcResult, currentAbonentId);
                 if (!recalcResult || recalcResult.ok !== true) {
                     const reason = String(recalcResult && (recalcResult.reason || recalcResult.summary_reason) || "CALC_FAILED");
@@ -3514,6 +3533,7 @@ function bindCalcButtons(){
         window.__periodResetInProgress = true;
         fromEl.value = "";
         toEl.value = "";
+        window.JKH_CARD_PERIOD_MODE_ACTIVE = false;
         let urlAfter = urlBefore;
         try {
             const u = new URL(window.location.href);
