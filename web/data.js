@@ -915,8 +915,29 @@
     if (!isValidUid(uid)) return null;
     var summary = result && result.summary && typeof result.summary === "object" ? result.summary : null;
     var runtimeCache = readLedgerRuntimeCache(abonent || uid) || {};
-    var rowsById = runtimeCache.rowsById && typeof runtimeCache.rowsById === "object" && !Array.isArray(runtimeCache.rowsById) ? runtimeCache.rowsById : {};
-    var ledgerRows = readPaymentLedger(abonent || uid);
+    var ledgerVersion = computeLedgerRuntimeVersion(abonent || uid);
+    var runtimeCacheVersion = String(runtimeCache.ledgerVersion || runtimeCache.ledgerHash || "");
+    var rowsById = runtimeCacheVersion === ledgerVersion && runtimeCache.rowsById && typeof runtimeCache.rowsById === "object" && !Array.isArray(runtimeCache.rowsById) ? runtimeCache.rowsById : {};
+    var fallback = null;
+    if (_cardSnapshotRowsByIdCount(rowsById) <= 0) {
+      try {
+        fallback = typeof window.__getPaymentTableComputedRowsSnapshot === "function" ? window.__getPaymentTableComputedRowsSnapshot() : null;
+      } catch (eFallback) {
+        fallback = null;
+      }
+      var fallbackRowsById = fallback && fallback.rowsById && typeof fallback.rowsById === "object" && !Array.isArray(fallback.rowsById) ? fallback.rowsById : {};
+      if (_cardSnapshotRowsByIdCount(fallbackRowsById) > 0 && String(fallback.ledgerVersion || "") === ledgerVersion) {
+        rowsById = fallbackRowsById;
+        runtimeCache = {
+          ledgerVersion: String(fallback.ledgerVersion || ""),
+          runtimeSignature: String(fallback.runtimeSignature || ""),
+          periodActive: fallback.periodActive === true,
+          period: fallback.period && typeof fallback.period === "object" ? fallback.period : null
+        };
+        try { console.log("[card-snapshot][build-from-payment-table]", { uid: uid, abonentId: abonentId, rowsByIdCount: _cardSnapshotRowsByIdCount(rowsById), ledgerVersion: ledgerVersion }); } catch (eFallbackLog) {}
+      }
+    }
+    var ledgerRows = fallback && Array.isArray(fallback.rows) && _cardSnapshotRowsByIdCount(rowsById) > 0 ? fallback.rows : readPaymentLedger(abonent || uid);
     var rows = (Array.isArray(ledgerRows) ? ledgerRows : []).map(function(row) {
       var copy = deepClone(row || {});
       var item = rowsById[String(copy.id || "")];
@@ -930,7 +951,6 @@
     var snapshotRowsById = _cardSnapshotRowsById(rows);
     var stats = _cardSnapshotLedgerStats(rows);
     var rowsByIdCount = _cardSnapshotRowsByIdCount(snapshotRowsById);
-    var ledgerVersion = computeLedgerRuntimeVersion(abonent || uid);
     if (rowsByIdCount <= 0) {
       try {
         console.warn("[card-snapshot][build-blocked-empty-rowsById]", {

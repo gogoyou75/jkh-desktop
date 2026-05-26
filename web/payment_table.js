@@ -126,6 +126,63 @@
     });
   }
 
+  let __paymentTableComputedRowsSnapshot = null;
+
+  function clonePaymentRowsForSnapshot(rows, rowsById){
+    const map = rowsById && typeof rowsById === "object" && !Array.isArray(rowsById) ? rowsById : {};
+    return (Array.isArray(rows) ? rows : []).map(function(row){
+      const copy = Object.assign({}, row || {});
+      const item = map[String(copy.id || "")] || null;
+      if (item && typeof item === "object") {
+        copy.pay_main = item.pay_main;
+        copy.pay_penalty = item.pay_penalty;
+        copy.total = item.total;
+      }
+      return copy;
+    });
+  }
+
+  function normalizeComputedRowsByIdForSnapshot(rows, rowsById){
+    const out = {};
+    const map = rowsById && typeof rowsById === "object" && !Array.isArray(rowsById) ? rowsById : {};
+    (Array.isArray(rows) ? rows : []).forEach(function(row){
+      const id = String(row && row.id || "").trim();
+      if (!id) return;
+      const item = map[id] || row || {};
+      const pm = Number(item.pay_main);
+      const pp = Number(item.pay_penalty);
+      const total = Number(item.total);
+      if (!Number.isFinite(pm) || !Number.isFinite(pp) || !Number.isFinite(total)) return;
+      out[id] = { pay_main: pm, pay_penalty: pp, total: total };
+    });
+    return out;
+  }
+
+  function capturePaymentTableComputedRowsSnapshot(rows, rowsById, periodActive, selectedPeriod, runtimeSignatureValue, ledgerVersionValue){
+    const normalizedRowsById = normalizeComputedRowsByIdForSnapshot(rows, rowsById);
+    __paymentTableComputedRowsSnapshot = {
+      rows: clonePaymentRowsForSnapshot(rows, normalizedRowsById),
+      rowsById: normalizedRowsById,
+      periodActive: !!periodActive,
+      period: periodActive && selectedPeriod ? { from: String(selectedPeriod.from || ""), to: String(selectedPeriod.to || "") } : null,
+      runtimeSignature: String(runtimeSignatureValue || ""),
+      ledgerVersion: String(ledgerVersionValue || "")
+    };
+    return __paymentTableComputedRowsSnapshot;
+  }
+
+  window.__getPaymentTableComputedRowsSnapshot = function(){
+    if (!__paymentTableComputedRowsSnapshot || typeof __paymentTableComputedRowsSnapshot !== "object") return null;
+    return {
+      rows: clonePaymentRowsForSnapshot(__paymentTableComputedRowsSnapshot.rows, __paymentTableComputedRowsSnapshot.rowsById),
+      rowsById: Object.assign({}, __paymentTableComputedRowsSnapshot.rowsById || {}),
+      periodActive: __paymentTableComputedRowsSnapshot.periodActive === true,
+      period: __paymentTableComputedRowsSnapshot.period ? Object.assign({}, __paymentTableComputedRowsSnapshot.period) : null,
+      runtimeSignature: String(__paymentTableComputedRowsSnapshot.runtimeSignature || ""),
+      ledgerVersion: String(__paymentTableComputedRowsSnapshot.ledgerVersion || "")
+    };
+  };
+
   function tryApplyCardSnapshotToRows(rows, expectedLedgerVersion, periodActive, selectedPeriod, expectedSignature){
     const out = { valid: false, reason: "CARD_SNAPSHOT_MISSING", dataById: {}, periodMatches: false, missingRows: [] };
     function dispatchInvalid(reason, extra){
@@ -2917,6 +2974,16 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
         runtimeCachePeriodMatches = !!__runtimeCacheState.periodMatches;
         baseRowsSource = runtimeCacheUsed ? "runtime_cache" : "stale_no_recalc";
       }
+      if (__runtimeCacheState && __runtimeCacheState.valid === true) {
+        capturePaymentTableComputedRowsSnapshot(
+          view,
+          __runtimeCacheState.dataById || {},
+          periodActive,
+          selectedPeriod,
+          runtimeCacheSignature(runtimeLedgerVersion, periodActive, selectedPeriod),
+          runtimeLedgerVersion
+        );
+      }
       notifyRuntimeCacheSummaryState(__runtimeCacheState, periodActive, selectedPeriod);
       try {
         if (isReadonlyNoRecalcMode()) {
@@ -3704,6 +3771,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
       freshRowsById[String(r.id)] = { pay_main: t.principal, pay_penalty: t.penalty, total: t.total };
     });
     const freshPayload = { ledgerVersion: freshLedgerVersion, runtimeSignature: runtimeCacheSignature(freshLedgerVersion, freshPeriodActive, freshSelectedPeriod), periodActive: !!freshPeriodActive, period: freshPeriodActive && freshSelectedPeriod ? { from: freshSelectedPeriod.from || "", to: freshSelectedPeriod.to || "" } : null, rowsById: freshRowsById, updatedAt: (new Date()).toISOString() };
+    capturePaymentTableComputedRowsSnapshot(freshRuntimeRows, freshRowsById, freshPeriodActive, freshSelectedPeriod, freshPayload.runtimeSignature, freshLedgerVersion);
     if (window.Data && typeof Data.writeLedgerRuntimeCache === "function") Data.writeLedgerRuntimeCache(id, freshPayload);
     const summary = summaryResult && summaryResult.summary && typeof summaryResult.summary === "object" ? summaryResult.summary : null;
     try { console.log("[payment-table][recalc-explicit]", { abonentId: id, stage: "done", recalcMode: recalcMode, ok: !!(summaryResult && summaryResult.ok === true), summary_status: summaryResult && (summaryResult.summary_status || summaryResult.status) || "error" }); } catch(eLogDone) {}
