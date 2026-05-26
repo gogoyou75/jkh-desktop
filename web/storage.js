@@ -1095,6 +1095,15 @@
       var baseKey = sk.indexOf(pref) === 0 ? sk.slice(pref.length) : sk;
       if (!_isProjectDataKeyLocal(baseKey)) continue;
       if (keep[baseKey]) continue;
+      if (baseKey.indexOf("card_snapshot_") === 0) {
+        try {
+          console.log("[store-dump][preserve-local-card-snapshot]", {
+            ownerId: ownerId,
+            key: baseKey
+          });
+        } catch (ePreserve) {}
+        continue;
+      }
       try {
         window.JKHStore.removeRaw(baseKey, ownerId);
         removed++;

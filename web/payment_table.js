@@ -185,16 +185,28 @@
 
   function tryApplyCardSnapshotToRows(rows, expectedLedgerVersion, periodActive, selectedPeriod, expectedSignature){
     const out = { valid: false, reason: "CARD_SNAPSHOT_MISSING", dataById: {}, periodMatches: false, missingRows: [] };
+    let snapshotForDiagnostics = null;
     function dispatchInvalid(reason, extra){
       out.valid = false;
       out.reason = reason || "CARD_SNAPSHOT_ROWS_NOT_APPLIED";
+      const snapshotRowsById = snapshotForDiagnostics && snapshotForDiagnostics.rowsById && typeof snapshotForDiagnostics.rowsById === "object" && !Array.isArray(snapshotForDiagnostics.rowsById) ? snapshotForDiagnostics.rowsById : {};
+      const snapshotPeriod = snapshotForDiagnostics && snapshotForDiagnostics.period && typeof snapshotForDiagnostics.period === "object" ? snapshotForDiagnostics.period : null;
+      const visibleFinancialRowsCount = Array.isArray(rows)
+        ? rows.filter(function(r){ return Math.abs(toNum(r && r.accrued || 0)) > 0.0000001 || Math.abs(toNum(r && r.paid || 0)) > 0.0000001; }).length
+        : 0;
       try {
         console.warn("[card-snapshot][apply-failed]", Object.assign({
           uid: String(getAbonentId() || ""),
           reason: out.reason,
-          ledgerVersion: expectedLedgerVersion,
-          runtimeSignature: expectedSignature,
+          rowsByIdCount: Object.keys(snapshotRowsById).length,
+          visibleFinancialRowsCount: visibleFinancialRowsCount,
+          snapshotLedgerVersion: snapshotForDiagnostics ? String(snapshotForDiagnostics.ledgerVersion || "") : "",
+          expectedLedgerVersion: expectedLedgerVersion,
+          runtimeSignature: snapshotForDiagnostics ? String(snapshotForDiagnostics.runtimeSignature || "") : "",
+          expectedSignature: expectedSignature,
           periodActive: !!periodActive,
+          snapshotPeriodActive: snapshotForDiagnostics ? snapshotForDiagnostics.periodActive === true : false,
+          snapshotPeriod: snapshotPeriod,
           selectedPeriod: selectedPeriod || null
         }, extra || {}));
       } catch(eFailLog) {}
@@ -206,6 +218,7 @@
     if (!window.Data || typeof Data.readCardSnapshot !== "function") return dispatchInvalid("CARD_SNAPSHOT_MISSING");
     const id = String(getAbonentId() || "");
     const snapshot = Data.readCardSnapshot(id);
+    snapshotForDiagnostics = snapshot;
     if (!snapshot) return dispatchInvalid("CARD_SNAPSHOT_MISSING");
     if (snapshot.dirty === true) {
       return dispatchInvalid(snapshot.dirtyReason || "CARD_SNAPSHOT_DIRTY");

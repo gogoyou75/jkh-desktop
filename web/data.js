@@ -835,11 +835,14 @@
       var snapshot = _normalizeCardSnapshot(abonentOrId, parsed);
       if (!snapshot) return null;
       var currentLedgerVersion = computeLedgerRuntimeVersion(abonentOrId);
+      var snapshotLedgerVersion = String(snapshot.ledgerVersion || "");
+      var rowsByIdCount = _cardSnapshotRowsByIdCount(snapshot.rowsById);
       if (!snapshot.ledgerVersion || snapshot.ledgerVersion !== currentLedgerVersion) {
         snapshot.dirty = true;
         snapshot.dirtyReason = "LEDGER_VERSION_CHANGED";
+        try { console.warn("[card-snapshot][read-stale]", { key: key, dirty: true, dirtyReason: snapshot.dirtyReason, snapshotLedgerVersion: snapshotLedgerVersion, currentLedgerVersion: currentLedgerVersion, rowsByIdCount: rowsByIdCount }); } catch (eStaleLog) {}
       }
-      try { console.log("[card-snapshot][read]", { key: key, dirty: !!snapshot.dirty, reason: snapshot.dirtyReason || "", ledgerVersion: currentLedgerVersion }); } catch (eLog) {}
+      try { console.log("[card-snapshot][read]", { key: key, dirty: !!snapshot.dirty, dirtyReason: snapshot.dirtyReason || "", snapshotLedgerVersion: snapshotLedgerVersion, currentLedgerVersion: currentLedgerVersion, rowsByIdCount: rowsByIdCount }); } catch (eLog) {}
       return snapshot;
     } catch (e) {
       try { console.warn("[card-snapshot][read-failed]", { key: key, reason: "JSON_INVALID" }); } catch (eWarn) {}
