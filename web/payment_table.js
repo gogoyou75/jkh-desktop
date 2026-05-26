@@ -174,6 +174,18 @@
         rowsByIdCount: Object.keys(map).length
       });
     } catch(eLog) {}
+    try {
+      window.dispatchEvent(new CustomEvent("jkh:card-snapshot-valid", {
+        detail: {
+          uid: id,
+          ledgerVersion: expectedLedgerVersion,
+          runtimeSignature: expectedSignature,
+          periodActive: !!periodActive,
+          selectedPeriod: selectedPeriod || null,
+          rowsByIdCount: Object.keys(map).length
+        }
+      }));
+    } catch(eEvent) {}
     return out;
   }
 

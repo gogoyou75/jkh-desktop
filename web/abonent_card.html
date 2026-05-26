@@ -3142,6 +3142,8 @@ let __lastRenderedSummaryStatusLocal = "missing";
 let __lastRenderedSummaryReasonLocal = "";
 let __runtimeCacheFreshBlocked = false;
 let __lastRuntimeCacheValidation = { valid: false, reason: "RUNTIME_CACHE_NOT_VALIDATED" };
+let __cardSnapshotFreshValidated = false;
+let __lastCardSnapshotValidation = { valid: false, reason: "CARD_SNAPSHOT_NOT_VALIDATED" };
 
 function __summaryTotalsAreFinite(summary){
     const s = summary && typeof summary === "object" ? summary : null;
@@ -3163,6 +3165,10 @@ function __summaryTotalsAreFinite(summary){
 }
 
 function __freshSummaryVisibleGuard(){
+    if (__cardSnapshotFreshValidated && __lastCardSnapshotValidation.valid) {
+        if (!__summaryTotalsAreFinite(window.__lastCardSummaryForDebug)) return { ok: false, reason: "SUMMARY_TOTALS_MISSING" };
+        return { ok: true, reason: "" };
+    }
     if (__runtimeCacheFreshBlocked) return { ok: false, reason: __lastRuntimeCacheValidation.reason || "RUNTIME_CACHE_INVALID" };
     if (!__lastRuntimeCacheValidation.valid) return { ok: false, reason: __lastRuntimeCacheValidation.reason || "RUNTIME_CACHE_NOT_VALIDATED" };
     if (!__summaryTotalsAreFinite(window.__lastCardSummaryForDebug)) return { ok: false, reason: "SUMMARY_TOTALS_MISSING" };
@@ -3237,6 +3243,7 @@ window.addEventListener("jkh:runtime-cache-invalid", function(event){
     __runtimeCacheFreshBlocked = true;
     __lastRuntimeCacheValidation = { valid: false, reason: reason, detail: detail };
     try { console.warn("[summary][runtime-cache-downgrade]", detail); } catch(eLog) {}
+    if (__cardSnapshotFreshValidated && __lastCardSnapshotValidation.valid) return;
     if (__lastRenderedSummaryStatusLocal === "fresh") {
         renderAbonentSummaryStatus("dirty", reason === "RUNTIME_CACHE_PERIOD_MISMATCH" ? "Требуется пересчёт таблицы для выбранного периода" : reason);
     }
@@ -3252,6 +3259,28 @@ window.addEventListener("jkh:runtime-cache-valid", function(event){
         renderAbonentSummaryStatus("fresh", summary.summary_reason || summary.reason || "");
     }
 });
+
+window.addEventListener("jkh:card-snapshot-valid", function(event){
+    const detail = event && event.detail ? event.detail : {};
+    __cardSnapshotFreshValidated = true;
+    __lastCardSnapshotValidation = { valid: true, reason: "", detail: detail };
+    __runtimeCacheFreshBlocked = false;
+    try { console.log("[summary][card-snapshot-validated]", detail); } catch(eLog) {}
+    const summary = window.__lastCardSummaryForDebug && typeof window.__lastCardSummaryForDebug === "object" ? window.__lastCardSummaryForDebug : null;
+    if (__normalizeSummaryStatus(summary && (summary.summary_status || summary.status)) === "fresh") {
+        renderAbonentSummaryStatus("fresh", summary.summary_reason || summary.reason || "");
+    }
+});
+
+function __isFreshCardSnapshotUsable(uid, snapshot){
+    if (!snapshot || typeof snapshot !== "object") return false;
+    if (snapshot.dirty === true) return false;
+    if (__normalizeSummaryStatus(snapshot.summary_status) !== "fresh") return false;
+    if (!snapshot.rowsById || typeof snapshot.rowsById !== "object" || Array.isArray(snapshot.rowsById)) return false;
+    if (!Object.keys(snapshot.rowsById).length) return false;
+    const currentLedgerVersion = window.Data && typeof Data.computeLedgerRuntimeVersion === "function" ? String(Data.computeLedgerRuntimeVersion(uid) || "") : "";
+    return !!currentLedgerVersion && String(snapshot.ledgerVersion || "") === currentLedgerVersion;
+}
 
 async function loadAbonentSummaryStatus(){
     const { id, a } = getCurrentAbonent();
@@ -3273,8 +3302,17 @@ async function loadAbonentSummaryStatus(){
             return;
         }
         if (snapshot.dirty === true) {
+            __cardSnapshotFreshValidated = false;
+            __lastCardSnapshotValidation = { valid: false, reason: snapshot.dirtyReason || "CARD_SNAPSHOT_DIRTY" };
             window.__lastCardSummaryForDebug = null;
             renderAbonentSummaryStatus("dirty", snapshot.dirtyReason || "Требуется пересчёт");
+            return;
+        }
+        if (!__isFreshCardSnapshotUsable(uid, snapshot)) {
+            window.__lastCardSummaryForDebug = null;
+            __cardSnapshotFreshValidated = false;
+            __lastCardSnapshotValidation = { valid: false, reason: "CARD_SNAPSHOT_INVALID" };
+            renderAbonentSummaryStatus("dirty", "CARD_SNAPSHOT_INVALID");
             return;
         }
         const summary = {
@@ -3283,6 +3321,9 @@ async function loadAbonentSummaryStatus(){
             totals: snapshot.totals || {}
         };
         window.__lastCardSummaryForDebug = summary;
+        __cardSnapshotFreshValidated = true;
+        __lastCardSnapshotValidation = { valid: true, reason: "", detail: { uid: uid, ledgerVersion: snapshot.ledgerVersion, rowsByIdCount: Object.keys(snapshot.rowsById).length } };
+        __runtimeCacheFreshBlocked = false;
         renderAbonentSummaryStatus(summary.summary_status || summary.status || "missing", summary.summary_reason || summary.reason || "");
         __renderAbonentTotalsFromFreshSummary(summary);
     } catch (e) {
