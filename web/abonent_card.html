@@ -1172,10 +1172,44 @@ function __safeLoadPaymentTableOnce(reason, options){
 function __isCardReturnFromSpravkaUrl(){
     try {
         const params = new URLSearchParams(window.location.search || "");
-        return !!(params.get("from") || params.get("to"));
+        return !!(params.get("from") || params.get("to") || (params.get("uid") && (params.get("db") || params.get("owner"))));
     } catch(e) {
         return false;
     }
+}
+
+function __logCardReturnFromSpravkaContext(source){
+    try {
+        if (!__isCardReturnFromSpravkaUrl()) return;
+        const params = new URLSearchParams(window.location.search || "");
+        console.log("[card-return][from-spravka]", {
+            source: String(source || ""),
+            abonentId: String(getAbonentIdFromURL() || ""),
+            uid: String(params.get("uid") || ""),
+            from: String(params.get("from") || ""),
+            to: String(params.get("to") || ""),
+            db: String(params.get("db") || ""),
+            owner: String(params.get("owner") || ""),
+            writes: false
+        });
+    } catch(eLog) {}
+}
+
+async function __retryCardInitAfterReturn(){
+    const box = document.getElementById("cardInitTimeoutAfterReturn");
+    if (box) box.innerHTML = 'Загрузка данных карточки…';
+    try {
+        if (window.JKHDataLoader && typeof window.JKHDataLoader.loadFromServer === "function") {
+            await window.JKHDataLoader.loadFromServer({ force: true, reason: "card_return_refresh" });
+        }
+    } catch(e) {
+        try { console.warn("[card-init][return-refresh-failed]", e); } catch(_) {}
+    }
+    __abonentCardInitStarted = false;
+    __abonentCardServerRepairDone = false;
+    __waitForAbonentCardDataReady(() => {
+        __initAbonentCardSafe();
+    });
 }
 
 function __showCardInitTimeoutAfterReturn(){
@@ -1188,9 +1222,9 @@ function __showCardInitTimeoutAfterReturn(){
         if (anchor && anchor.parentNode) anchor.parentNode.insertBefore(box, anchor);
         else document.body.appendChild(box);
     }
-    box.innerHTML = 'Данные карточки не загрузились после возврата из справки. <button type="button" id="cardInitRefreshBtn">Обновить данные</button>';
+    box.innerHTML = 'Данные карточки не загрузились. Нажмите Обновить данные. <button type="button" id="cardInitRefreshBtn">Обновить данные</button>';
     const btn = document.getElementById("cardInitRefreshBtn");
-    if (btn) btn.onclick = function(){ location.reload(); };
+    if (btn) btn.onclick = function(){ __retryCardInitAfterReturn(); };
 }
 
 function __runAutoAccrualRepairOnce(){
@@ -1267,6 +1301,7 @@ async function __repairEmptyExcludePeriodsKeysAfterServerLoad(){
 
 async function __initAbonentCardSafe(){
     if (__abonentCardInitStarted) return;
+    __logCardReturnFromSpravkaContext("init");
     if (!hasExplicitAbonentCardContext()) {
         __abonentCardInitStarted = true;
         showAbonentCardContextError("missing_abonent");
@@ -1286,6 +1321,7 @@ async function __initAbonentCardSafe(){
         if (fromSpravka) {
             try { console.log("[card-init][ready-after-return]", { reason: "server-first-ready", force: true }); } catch(eReturnReady) {}
         }
+        try { console.log("[card-init][force-payment-table-load]", { reason: fromSpravka ? "return-from-spravka" : "DOMContentLoaded", force: !!fromSpravka }); } catch(eForceLog) {}
         __safeLoadPaymentTableOnce(fromSpravka ? 'return-from-spravka' : 'DOMContentLoaded', { force: fromSpravka });
     }, 0);
 }
@@ -1340,6 +1376,13 @@ function __waitForAbonentCardDataReady(cb) {
         const status = String((st && st.status) || "");
         const serverReady = __isAbonentCardServerFirstReady();
         const abonentReady = __isAbonentCardDataReady();
+        const returnFromSpravka = __isCardReturnFromSpravkaUrl();
+
+        if (returnFromSpravka && abonentReady) {
+            try { console.log("[card-init][data-already-ready]", { reason: reason, status: status }); } catch(eReadyLog) {}
+            finish("data-already-ready");
+            return;
+        }
 
         if (serverReady && (status === "empty" || abonentReady)) {
             finish(reason);
@@ -2515,7 +2558,25 @@ function buildDefaultReportPeriodForCard(abonentId){
             break;
         }
     }
-    const to = __todayISOForCardPeriod();
+    const toCandidates = [
+        { source: "responsibility.dateTo", value: activeLink && activeLink.dateTo },
+        { source: "abonent.calcEndDate", value: abonent && abonent.calcEndDate },
+        { source: "abonent.calc_end_date", value: abonent && abonent.calc_end_date },
+        { source: "abonent.dateTo", value: abonent && (abonent.dateTo || abonent.date_to) }
+    ];
+    let to = "";
+    let toSource = "";
+    for (let j = 0; j < toCandidates.length; j++) {
+        to = __toISODateForCardPeriod(toCandidates[j].value);
+        if (to) {
+            toSource = toCandidates[j].source;
+            break;
+        }
+    }
+    if (!to) {
+        to = __todayISOForCardPeriod();
+        toSource = "today";
+    }
     const result = {
         ok: !!(from && to && isValidPeriod(from, to)),
         abonentId: id,
@@ -2523,11 +2584,35 @@ function buildDefaultReportPeriodForCard(abonentId){
         from: from,
         to: to,
         source: source || "missing",
+        toSource: toSource,
         reason: ""
     };
     if (!result.ok) result.reason = from ? "DEFAULT_PERIOD_INVALID" : "DEFAULT_PERIOD_FROM_MISSING";
     try { console.log("[report-period][default-created]", result); } catch (eLog) {}
     return result;
+}
+
+function autofillFullCardPeriodUI(reason){
+    const fromEl = document.getElementById("calcFrom");
+    const toEl = document.getElementById("calcTo");
+    if (!fromEl || !toEl) return { ok: false, reason: "PERIOD_INPUTS_MISSING" };
+    if (String(fromEl.value || "").trim() || String(toEl.value || "").trim()) return { ok: true, skipped: true, reason: "PERIOD_INPUTS_ALREADY_FILLED" };
+    const period = buildDefaultReportPeriodForCard(getAbonentIdFromURL());
+    if (!period.ok) return period;
+    fromEl.value = period.from;
+    toEl.value = period.to;
+    const hint = document.getElementById("calcRunHint");
+    if (hint) hint.textContent = "Период заполнен по полной карточке.";
+    try {
+        console.log("[card-period][full-autofill]", {
+            reason: String(reason || ""),
+            from: period.from,
+            to: period.to,
+            source: period.source,
+            toSource: period.toSource || ""
+        });
+    } catch(eLog) {}
+    return period;
 }
 
 function saveReportPeriodForSpravka(from, to, options){
@@ -3329,6 +3414,7 @@ function bindCalcButtons(){
                 if (__normalizeSummaryStatus(summaryStatus) === "fresh") {
                     const statusBox = document.getElementById("paymentTableStatus") || document.getElementById("paymentStatus") || document.getElementById("paymentsStatus");
                     if (statusBox) statusBox.textContent = "Итог обновлён.";
+                    if (!hasValidPeriodInput) autofillFullCardPeriodUI("full-summary-recalc-fresh");
                 }
                 recalcHandled = true;
             }
@@ -3390,13 +3476,15 @@ function bindCalcButtons(){
         if (!from && !to) {
             const defaultPeriod = buildDefaultReportPeriodForCard(id);
             if (!defaultPeriod.ok) {
-                alert("РџРµСЂРёРѕРґ РґР»СЏ СЃРїСЂР°РІРєРё РЅРµ СЃРѕР·РґР°РЅ: " + String(defaultPeriod.reason || "DEFAULT_PERIOD_FROM_MISSING"));
+                alert("Не удалось определить полный период карточки. Выберите период вручную.");
                 return;
             }
             from = defaultPeriod.from;
             to = defaultPeriod.to;
             fromEl.value = from;
             toEl.value = to;
+            const hint = document.getElementById("calcRunHint");
+            if (hint) hint.textContent = "Период заполнен по полной карточке.";
         }
         if (from || to) {
             if (isValidPeriod(from, to)) {
