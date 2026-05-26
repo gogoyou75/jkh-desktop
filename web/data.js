@@ -833,10 +833,25 @@
     if (!key) return false;
     var normalized = _normalizeCardSnapshot(abonentOrId, snapshot);
     if (!normalized) return false;
+    var ownerId = String(_ownerId() || "").trim();
     normalized.dirty = false;
     normalized.dirtyReason = "";
-    var ok = _setProjectRaw(key, JSON.stringify(normalized));
+    var serialized = JSON.stringify(normalized);
+    var ok = _setProjectRaw(key, serialized);
     try { console.log("[card-snapshot][save]", { key: key, ok: ok !== false, rows: normalized.rows.length, ledgerVersion: normalized.ledgerVersion }); } catch (eLog) {}
+    if (ok !== false && ownerId && ownerId !== "guest" && ownerId !== "ALL") {
+      _fireAndForget(_serverStoreSet(ownerId, key, serialized).then(function(result) {
+        if (result && result.ok === true) {
+          try { console.log("[card-snapshot][server-save-ok]", { ownerId: ownerId, key: key, status: result.status }); } catch (eOkLog) {}
+        } else {
+          try { console.warn("[card-snapshot][server-save-failed]", { ownerId: ownerId, key: key, status: result && result.status, reason: result && (result.text || result.data && result.data.error) || "SERVER_STORE_FAILED" }); } catch (eFailLog) {}
+        }
+      }).catch(function(e) {
+        try { console.warn("[card-snapshot][server-save-failed]", { ownerId: ownerId, key: key, reason: String(e && e.message || e) }); } catch (eCatchLog) {}
+      }));
+    } else if (ok !== false) {
+      try { console.warn("[card-snapshot][server-save-failed]", { ownerId: ownerId, key: key, reason: "OWNER_SCOPE_UNAVAILABLE" }); } catch (eOwnerLog) {}
+    }
     return ok;
   }
 
