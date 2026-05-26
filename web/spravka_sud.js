@@ -118,9 +118,17 @@
         return { from: String(o.from), to: String(o.to) };
       } catch (e) { return null; }
     }
+    function validPeriod(from, to){
+      const eng = window.JKHCalcEngine;
+      const fromD = eng && typeof eng.parseDateAnyToDate === "function" ? eng.parseDateAnyToDate(from) : new Date(from);
+      const toD = eng && typeof eng.parseDateAnyToDate === "function" ? eng.parseDateAnyToDate(to) : new Date(to);
+      return !!(from && to && fromD && toD && fromD.toString() !== "Invalid Date" && toD.toString() !== "Invalid Date" && fromD <= toD);
+    }
 
     const requestedId = String(ctx && ctx.abonentId || '').trim();
     const readOwner = String(ctx && ctx.readOwner || '').trim();
+    const urlFrom = String(ctx && ctx.from || "").trim();
+    const urlTo = String(ctx && ctx.to || "").trim();
     const storageKey = (window.Data && typeof window.Data.resolveCalcPeriodStorageKey === "function")
       ? String(window.Data.resolveCalcPeriodStorageKey(abonent || requestedId) || '').trim()
       : '';
@@ -134,8 +142,10 @@
     const activeRaw = activeStorageKey ? storeGet(activeStorageKey, readOwner) : null;
     const raw = storageKey ? storeGet(storageKey, readOwner) : null;
     const calcPeriod = raw ? parsePeriod(raw) : null;
-    const selectedPeriod = reportPeriod || calcPeriod;
-    const selectedSource = reportPeriod ? "canonical-report-period" : (calcPeriod ? "canonical-calc-period" : "");
+    const urlPeriod = validPeriod(urlFrom, urlTo) ? { from: urlFrom, to: urlTo } : null;
+    const selectedPeriod = urlPeriod || reportPeriod || (activeRaw === "1" ? calcPeriod : null);
+    const selectedSource = urlPeriod ? "url" : (reportPeriod ? "report_period_uid" : (activeRaw === "1" && calcPeriod ? "calc_period_uid" : ""));
+    if (selectedPeriod) selectedPeriod.__source = selectedSource;
     try {
       console.log("[spravka][bootstrap-period]", {
         abonentId: requestedId,
@@ -149,6 +159,21 @@
         to: selectedPeriod ? selectedPeriod.to : "",
         ok: !!selectedPeriod
       });
+      console.log("[spravka][period-source]", {
+        source: selectedSource || "missing",
+        abonentId: requestedId,
+        uid: uid,
+        from: selectedPeriod ? selectedPeriod.from : "",
+        to: selectedPeriod ? selectedPeriod.to : ""
+      });
+      if (urlPeriod) {
+        console.log("[spravka][url-period-accepted]", {
+          abonentId: requestedId,
+          uid: uid,
+          from: urlPeriod.from,
+          to: urlPeriod.to
+        });
+      }
     } catch (eBootstrapLog) {}
 
     try {
@@ -169,7 +194,7 @@
       });
     } catch (e) {}
 
-    if (!reportStorageKey && !storageKey) {
+    if (!urlPeriod && !reportStorageKey && !storageKey) {
       console.warn("[spravka][calc-period-read][missing-canonical-key]", {
         abonentId: requestedId,
         readOwner: readOwner,
@@ -222,6 +247,8 @@
   function getContext(){
     const p = getUrlParams();
     const abonentId = String(p.get("abonent") || "").trim();
+    const from = String(p.get("from") || "").trim();
+    const to = String(p.get("to") || "").trim();
     const dbKey = getDbKeyFromURL();
     const ownerParam = String(p.get("owner") || "").trim();
     const forcedOwner = extractOwnerFromScopedDbKey(dbKey) || ownerParam;
@@ -234,7 +261,9 @@
       ownerParam: ownerParam,
       forcedOwner: forcedOwner,
       currentOwner: currentOwner,
-      readOwner: readOwner
+      readOwner: readOwner,
+      from: from,
+      to: to
     };
   }
 
@@ -722,11 +751,13 @@
       }
 
       let period = loadSelectedPeriod(ctx, abonent);
-      let periodSource = period ? "stored canonical calc period" : "missing canonical calc period";
+      let periodSource = period ? String(period.__source || "stored canonical calc period") : "missing period";
       if (!period) {
-        showFatal("Период расчёта не найден в canonical UID key. Откройте карточку/расчёт и сохраните период расчёта.");
+        try { console.warn("[spravka][blocked-empty-period]", { abonentId: ctx.abonentId, from: ctx.from || "", to: ctx.to || "" }); } catch(eBlockedPeriod) {}
+        showFatal("Выберите период в карточке или на странице справок.");
         return;
       }
+      try { console.log("[spravka][readonly-derived-calc]", { abonentId: ctx.abonentId, source: periodSource, writes: false }); } catch(eReadonlyDerived) {}
 
       const pFrom = eng.parseDateAnyToDate(period.from);
       if (pFrom && eng.startOfDay(pFrom) < abonentStart) {

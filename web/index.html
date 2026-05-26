@@ -235,7 +235,7 @@ Doc: docs/LOGIC_SPEC_v1.5.3.md
 
 <div id="summaryBatchPanel" class="summary-batch-panel" style="display:none;">
     <button id="summaryBatchSelectStaleBtn" type="button">Выбрать устаревшие на странице</button>
-    <button id="summaryBatchRunBtn" type="button" title="Проверяет summary, не пересчитывает карточки">Проверить выбранные summary</button>
+    <button id="summaryBatchRunBtn" type="button" title="Batch-пересчёт выбранных абонентов">Пересчитать выбранных абонентов</button>
     <span id="summaryBatchCount">Нет выбранных UID</span>
     <div id="summaryBatchProgress" class="summary-batch-progress"></div>
 </div>
@@ -1453,6 +1453,7 @@ async function runSelectedSummaryBatch(){
     }
     selected = Array.from(new Set(selected));
     if (!selected.length) return;
+    try { console.log("[recalc][explicit-batch]", { uidCount: selected.length }); } catch(eBatchLog) {}
 
     const progress = document.getElementById("summaryBatchProgress");
     if (summaryBatchJobState.timer) {

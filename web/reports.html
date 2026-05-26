@@ -420,6 +420,15 @@ function autoAcceptReportsPeriod(abonent, from, to, source) {
             from: fromValue,
             to: toValue
         });
+        if (String(source || "") === "url") {
+            console.log("[reports][url-period-accepted]", {
+                ok: !!ok,
+                abonentId: meta.abonentId,
+                uid: meta.uid,
+                from: fromValue,
+                to: toValue
+            });
+        }
         console.log("[reports][readonly-open]", { source: String(source || "unknown"), from: fromValue, to: toValue, writes: false });
     } catch(eAutoAcceptLog) {}
     return !!ok;
@@ -636,6 +645,15 @@ function saveCanonicalPeriod(abonent, from, to, options){
     return true;
 }
 
+function requireValidReportPeriod(from, to){
+    const fromValue = String(from || "").trim();
+    const toValue = String(to || "").trim();
+    if (isValidPeriod(fromValue, toValue)) return { ok: true, from: fromValue, to: toValue };
+    try { console.warn("[reports][blocked-empty-period]", { from: fromValue, to: toValue }); } catch(e) {}
+    alert("Сначала выберите корректный период.");
+    return { ok: false, from: fromValue, to: toValue };
+}
+
 async function initReportsPage() {
     const id = getAbonentIdFromURL();
     if (!id) { showMissingAbonentError(); return; }
@@ -650,7 +668,9 @@ async function initReportsPage() {
         const from = document.getElementById("repFrom").value;
         const to   = document.getElementById("repTo").value;
 
-        if (!saveCanonicalPeriod(abonent, from, to)) return;
+        const period = requireValidReportPeriod(from, to);
+        if (!period.ok) return;
+        try { console.log("[reports][readonly-open]", { source: "choose", from: period.from, to: period.to, writes: false }); } catch(eReadonlyLog) {}
         alert("Период для справки выбран: " + from + " — " + to);
     });
 
@@ -661,10 +681,12 @@ async function initReportsPage() {
         const from = document.getElementById("repFrom").value;
         const to   = document.getElementById("repTo").value;
 
-        if (!saveCanonicalPeriod(abonent, from, to)) return;
+        const period = requireValidReportPeriod(from, to);
+        if (!period.ok) return;
 
-        try { console.log("[reports][derived-calc-start]", { page: "reports", target: "spravka_sud", abonentId: currentId, from: from || "", to: to || "" }); } catch(eStartLog) {}
-        let href = "spravka_sud.html?abonent=" + encodeURIComponent(currentId) + "&from=" + encodeURIComponent(from || "") + "&to=" + encodeURIComponent(to || "");
+        try { console.log("[reports][readonly-open]", { source: "open", from: period.from, to: period.to, writes: false }); } catch(eReadonlyLog) {}
+        try { console.log("[reports][derived-calc-start]", { page: "reports", target: "spravka_sud", abonentId: currentId, from: period.from, to: period.to }); } catch(eStartLog) {}
+        let href = "spravka_sud.html?abonent=" + encodeURIComponent(currentId) + "&from=" + encodeURIComponent(period.from) + "&to=" + encodeURIComponent(period.to);
         href = appendReportsContextToHref(href);
         try { console.log("[reports][derived-calc-done]", { page: "reports", target: "navigation", href: href }); } catch(eDoneLog) {}
         location.href = href;

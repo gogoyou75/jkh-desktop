@@ -183,6 +183,7 @@ Doc: docs/LOGIC_SPEC_v1.5.3.md
         .summary-status-badge { display:inline-block; padding:2px 6px; border-radius:999px; font-size:11px; font-weight:700; }
         .summary-status-fresh { background:#e7f6e7; color:#116611; }
         .summary-status-dirty { background:#fff3cd; color:#7a5300; }
+        .summary-status-calculating { background:#d9ecff; color:#064f8f; }
         .summary-status-missing { background:#f1f1f1; color:#555; }
         .summary-status-error { background:#fde2e2; color:#9b0015; }
         .summary-reason { display:block; margin-top:3px; font-size:11px; color:#666; }
@@ -2998,17 +2999,17 @@ function __normalizeSummaryStatus(status){
 }
 
 function __summaryStatusText(status){
-    if (status === "calculating") return "calculating - расчет выполняется";
-    if (status === "fresh") return "fresh — итог актуален";
-    if (status === "dirty") return "dirty — требуется пересчёт";
-    if (status === "missing") return "missing — итог ещё не создан";
-    if (status === "error") return "error — расчёт невозможен";
+    if (status === "calculating") return "🔵 Выполняется пересчёт";
+    if (status === "fresh") return "🟢 Актуально";
+    if (status === "dirty") return "🟡 Требуется пересчёт";
+    if (status === "missing") return "⚪ Нет расчёта";
+    if (status === "error") return "🔴 Ошибка расчёта";
     return status || "missing";
 }
 
 function __summaryWarningText(status){
-    if (status === "calculating") return "Идет расчет. При ошибке итоги не заменяются нулевыми значениями.";
-    if (status === "dirty") return "Итог устарел после изменений. Старые totals не показываются как свежие. Нажмите «Пересчитать», чтобы обновить summary.";
+    if (status === "calculating") return "Выполняется пересчёт…";
+    if (status === "dirty") return "Итог устарел — нажмите «Пересчитать». Старые totals не считаются актуальными.";
     if (status === "missing") return "Итог ещё не создан. Старые totals не подставляются. Нажмите «Пересчитать», чтобы создать summary.";
     if (status === "error") return "Расчёт summary невозможен. Проверьте причину ошибки и выполните «Пересчитать» после исправления данных.";
     return "";
@@ -3034,8 +3035,12 @@ function renderAbonentSummaryStatus(status, reason){
         warningEl.style.display = text ? "block" : "none";
         warningEl.className = "summary-warning" + (normalized === "error" ? " summary-error" : "");
     }
+    const runBtn = document.getElementById("calcRunBtn");
+    if (runBtn) runBtn.disabled = normalized === "calculating";
     try {
+        console.log("[summary][visible-status]", { status: normalized, reason: String(reason || "") });
         console.log("[summary][status-set]", { status: normalized, reason: String(reason || "") });
+        if (normalized === "dirty") console.log("[summary][dirty]", { reason: String(reason || "") });
         if (normalized === "calculating") console.log("[summary][calculating]", { reason: String(reason || "") });
         if (normalized === "fresh") console.log("[summary][fresh]", { reason: String(reason || "") });
         if (normalized === "error") console.log("[summary][error]", { reason: String(reason || "") });
@@ -3204,6 +3209,12 @@ function bindCalcButtons(){
                 toInput: to || "",
                 periodBefore: __readPeriodKey(clickMeta.storageKey, clickMeta.ownerId),
                 activeBefore: __readActiveKey(clickMeta.activeStorageKey, clickMeta.ownerId)
+            });
+            console.log("[recalc][explicit-single]", {
+                abonentId: String(currentAbonentId || ""),
+                uid: clickMeta.resolvedUid,
+                from: from || "",
+                to: to || ""
             });
         } catch (e) {}
 

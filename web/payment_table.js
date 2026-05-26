@@ -1477,10 +1477,11 @@ if (parts.length) {
 
   function markPaymentRuntimeStaleUI(tr){
     const statusBox = qs("#paymentTableStatus") || qs("#paymentStatus") || qs("#paymentsStatus");
-    if (statusBox) statusBox.textContent = "Итог устарел — нажмите Пересчитать.";
+    if (statusBox) statusBox.textContent = "Оплата сохранена. Итог устарел — нажмите «Пересчитать».";
     try {
       if (window.JKHSetSummaryStatus) window.JKHSetSummaryStatus((window.JKH_SUMMARY_STATUS && window.JKH_SUMMARY_STATUS.DIRTY) || "dirty", "PAYMENTS_CHANGED");
     } catch(eSummaryDirty) {}
+    try { console.log("[summary][dirty]", { abonentId: String(getAbonentId() || ""), reason: "PAYMENTS_CHANGED" }); } catch(eDirtyLog) {}
     try {
       console.log("[payment-save][skip-full-recalc]", {
         abonentId: String(getAbonentId() || ""),
@@ -1490,6 +1491,19 @@ if (parts.length) {
     if (tr) {
       qsa(".ro", tr).forEach(function(cell){ cell.textContent = "—"; });
       showRowSoftMessage(tr, "Оплата сохранена. Итог устарел — нажмите Пересчитать.", "ok");
+    }
+  }
+
+  function reloadPaymentTableReadonlyNoRecalc(reason){
+    try {
+      requestLoadPaymentTable({
+        mode: "readonly_no_recalc",
+        reason: reason || "ledger-mutation-no-recalc",
+        force: true
+      });
+    } catch(e) {
+      console.error(e);
+      throw e;
     }
   }
 
@@ -2933,7 +2947,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
           enforcePeriodSameAsYm(row);
           normalizePeriod(row);
           await saveEditable(arr, edit);
-          if (!edit.draft) loadPaymentTable();
+          if (!edit.draft) reloadPaymentTableReadonlyNoRecalc("toggle-period-no-recalc");
           return;
         }
 
@@ -2945,7 +2959,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
             normalizePeriod(row);
           }
           await saveEditable(arr, edit);
-          if (!edit.draft) loadPaymentTable();
+          if (!edit.draft) reloadPaymentTableReadonlyNoRecalc("toggle-period-no-recalc");
         }
       });
     }
@@ -2967,7 +2981,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
           normalizePeriod(row);
 
           await saveEditable(arr, edit);
-          if (!edit.draft) loadPaymentTable();
+          if (!edit.draft) reloadPaymentTableReadonlyNoRecalc("period-edit-no-recalc");
         });
         return;
       }
@@ -2986,7 +3000,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
           await saveEditable(arr, edit);
 
           // Перерисовываем ТОЛЬКО после выбора даты
-          if (!edit.draft) loadPaymentTable();
+          if (!edit.draft) reloadPaymentTableReadonlyNoRecalc("payment-date-no-recalc");
         });
         return;
       }
@@ -3088,7 +3102,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
         }
         row.source = n;
         await saveEditable(arr, edit);
-        if (!edit.draft) loadPaymentTable();
+        if (!edit.draft) reloadPaymentTableReadonlyNoRecalc("payment-source-no-recalc");
         return;
       }
 
@@ -3571,7 +3585,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
         } catch(e) { console.error(e); throw e; }
 
         renderSourcesModalList();
-        try { loadPaymentTable(); } catch(e) { console.error(e); throw e; }
+        reloadPaymentTableReadonlyNoRecalc("payment-source-modal-no-recalc");
       };
 
       btnDel.onclick = async () => {
@@ -3619,7 +3633,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
           savePaymentSources(next);
 
           renderSourcesModalList();
-          try { loadPaymentTable(); } catch(e) { console.error(e); throw e; }
+          reloadPaymentTableReadonlyNoRecalc("payment-source-modal-no-recalc");
           return;
         }
 
@@ -3632,7 +3646,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
         }
         savePaymentSources(next);
         renderSourcesModalList();
-        try { loadPaymentTable(); } catch(e) { console.error(e); throw e; }
+        reloadPaymentTableReadonlyNoRecalc("payment-source-modal-no-recalc");
       };
 
       row.appendChild(inp);
@@ -3668,7 +3682,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
     }
     if (inp) inp.value = '';
     renderSourcesModalList();
-    try { loadPaymentTable(); } catch(e) { console.error(e); throw e; }
+    reloadPaymentTableReadonlyNoRecalc("payment-source-modal-no-recalc");
   };
 
 
