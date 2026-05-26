@@ -159,6 +159,26 @@
     return runtimeCachePeriodMatches(cache, version, periodActive, selectedPeriod);
   }
 
+  function notifyRuntimeCacheSummaryState(state, periodActive, selectedPeriod){
+    const s = state && typeof state === "object" ? state : {};
+    try {
+      window.JKHPaymentRuntimeCacheState = {
+        valid: !!s.valid,
+        reason: String(s.reason || ""),
+        periodMatches: !!s.periodMatches,
+        periodActive: !!periodActive,
+        selectedPeriod: selectedPeriod || null
+      };
+    } catch(eState) {}
+    if (!isReadonlyNoRecalcMode() || s.valid) return;
+    try {
+      const lastStatus = String(window.__lastRenderedSummaryStatus || "").toLowerCase();
+      if (lastStatus === "fresh" && typeof window.JKHSetSummaryStatus === "function") {
+        window.JKHSetSummaryStatus("dirty", "Требуется пересчёт таблицы для выбранного периода");
+      }
+    } catch(eNotify) {}
+  }
+
   // Read-only ledger cache: parsed rows are reused while storage raw value is unchanged.
   // Corrupted ledgers are never cached as valid. Explicit writes/reloads clear the cache.
   const __ledgerReadCache = new Map();
@@ -2712,6 +2732,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
         runtimeCachePeriodMatches = !!__runtimeCacheState.periodMatches;
         baseRowsSource = runtimeCacheUsed ? "runtime_cache" : "stale_no_recalc";
       }
+      notifyRuntimeCacheSummaryState(__runtimeCacheState, periodActive, selectedPeriod);
       try {
         if (isReadonlyNoRecalcMode()) {
           console.log("[payment-table][readonly-no-recalc]", {
@@ -2749,7 +2770,9 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
         statusBox.textContent = __runtimeCacheState.valid ? "" : "Для актуальных сумм нажмите Пересчитать";
       }
       if (isReadonlyNoRecalcMode() && statusBox && !__runtimeCacheState.valid) {
-        statusBox.textContent = "Требуется пересчёт: runtime cache отсутствует или устарел";
+        statusBox.textContent = __runtimeCacheState.reason === "period_mismatch"
+          ? "Требуется пересчёт таблицы для выбранного периода"
+          : "Требуется пересчёт: runtime cache отсутствует или устарел";
       }
       view.sort((a, b) => {
         const ay = Number(a.year) || 0;
@@ -3445,6 +3468,9 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
     const explicitReportPeriod = (mode === "REPORT_PERIOD_CALCULATION" || mode === "REPORT" || mode === "PERIOD" || String(opts.summaryScope || opts.summary_scope || "").toLowerCase() === "period")
       && opts.period && isManualRecalcPeriodValid(opts.period);
     const recalcMode = explicitReportPeriod ? "REPORT_PERIOD_CALCULATION" : "FULL_SUMMARY_REBUILD";
+    const explicitRuntimePeriod = opts.runtimePeriod && isManualRecalcPeriodValid(opts.runtimePeriod)
+      ? { from: String(opts.runtimePeriod.from || ""), to: String(opts.runtimePeriod.to || "") }
+      : null;
     try { console.log("[payment-table][recalc-explicit]", { abonentId: id, stage: "start", recalcMode: recalcMode }); } catch(eLogStart) {}
     const autoResult = await applyControlledAutoAccrualForManualRecalc(id, opts);
     if (!autoResult || autoResult.ok !== true) {
@@ -3452,8 +3478,8 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
       return { ok:false, reason:normalizeManualRecalcReason(autoResult && autoResult.reason), autoaccrual:autoResult, autoaccrual_changed:!!(autoResult && autoResult.changed) };
     }
     const arr = getPayments();
-    const periodActive = !!explicitReportPeriod;
-    const selectedPeriod = periodActive ? { from: String(opts.period.from || ""), to: String(opts.period.to || "") } : null;
+    const periodActive = !!(explicitReportPeriod || explicitRuntimePeriod);
+    const selectedPeriod = explicitReportPeriod ? { from: String(opts.period.from || ""), to: String(opts.period.to || "") } : explicitRuntimePeriod;
     const runtimeRows = periodActive && selectedPeriod ? applyResponsibilityRangeToView(applyCalcFilter(arr, true, selectedPeriod)).slice() : arr;
     const baseRows = runningTotalsBaseRows(runtimeRows);
     const ledgerVersion = (window.Data && Data.computeLedgerRuntimeVersion) ? String(Data.computeLedgerRuntimeVersion(id) || "") : "";
@@ -3474,9 +3500,9 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
     }
     const summaryResult = await Data.recalculateAbonentCard(id, {
       period: periodActive && selectedPeriod ? selectedPeriod : undefined,
-      saveSummary: !periodActive,
-      summaryScope: periodActive ? "period" : "full",
-      periodActive: periodActive,
+      saveSummary: !explicitReportPeriod,
+      summaryScope: explicitReportPeriod ? "period" : "full",
+      periodActive: !!explicitReportPeriod,
       recalcMode: recalcMode
     });
     const freshArr = getPayments();

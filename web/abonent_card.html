@@ -3138,6 +3138,8 @@ function __summaryWarningText(status){
 
 function renderAbonentSummaryStatus(status, reason){
     const normalized = __normalizeSummaryStatus(status);
+    window.__lastRenderedSummaryStatus = normalized;
+    window.__lastRenderedSummaryReason = String(reason || "");
     const badge = document.getElementById("summaryStatusBadge");
     const reasonEl = document.getElementById("summaryStatusReason");
     const warningEl = document.getElementById("summaryStatusWarning");
@@ -3318,10 +3320,11 @@ function bindCalcButtons(){
         if (runBtn.disabled) return;
         if (!canWriteOrExplainLocal()) return;
         const currentAbonentId = getAbonentIdFromURL();
-        const from = String(fromEl.value || "").trim();
-        const to   = String(toEl.value || "").trim();
-        const hasAnyPeriodInput = !!(from || to);
-        const hasValidPeriodInput = isValidPeriod(from, to);
+        let from = String(fromEl.value || "").trim();
+        let to   = String(toEl.value || "").trim();
+        let hasAnyPeriodInput = !!(from || to);
+        let hasValidPeriodInput = isValidPeriod(from, to);
+        const recalcForReportPeriod = hasAnyPeriodInput;
         const prevText = runBtn.textContent;
         const clickMeta = getCalcPeriodStorageMeta();
         try {
@@ -3375,6 +3378,19 @@ function bindCalcButtons(){
                 return;
             }
 
+            if (!hasAnyPeriodInput) {
+                const fullPeriod = autofillFullCardPeriodUI("full-summary-recalc-before-run");
+                if (!fullPeriod || fullPeriod.ok !== true) {
+                    renderAbonentSummaryStatus("error", String(fullPeriod && fullPeriod.reason || "FULL_PERIOD_REQUIRED"));
+                    alert("Не удалось определить полный период карточки. Выберите период вручную.");
+                    return;
+                }
+                from = fullPeriod.from;
+                to = fullPeriod.to;
+                hasAnyPeriodInput = true;
+                hasValidPeriodInput = isValidPeriod(from, to);
+            }
+
             if (hasValidPeriodInput) {
                 if (!saveCalcPeriod(from, to)) {
                     __logCardPeriodSaved(getCalcPeriodStorageMeta(), { ok: false, reason: saveCalcPeriod.lastError || "CALC_PERIOD_SAVE_FAILED", reportReadback: null });
@@ -3394,9 +3410,9 @@ function bindCalcButtons(){
 
             let recalcHandled = false;
             if (typeof window.fullRecalcForCurrentAbonent === "function") {
-                const recalcResult = await window.fullRecalcForCurrentAbonent(hasValidPeriodInput
-                    ? { period: { from: from, to: to }, applyAutoAccrual: true, recalcMode: "REPORT_PERIOD_CALCULATION", summaryScope: "period" }
-                    : { applyAutoAccrual: true, recalcMode: "FULL_SUMMARY_REBUILD", summaryScope: "full" });
+                const recalcResult = await window.fullRecalcForCurrentAbonent(recalcForReportPeriod
+                    ? { period: { from: from, to: to }, runtimePeriod: { from: from, to: to }, applyAutoAccrual: true, recalcMode: "REPORT_PERIOD_CALCULATION", summaryScope: "period" }
+                    : { runtimePeriod: { from: from, to: to }, applyAutoAccrual: true, recalcMode: "FULL_SUMMARY_REBUILD", summaryScope: "full" });
                 __logCardRecalcResult(recalcResult, currentAbonentId);
                 if (!recalcResult || recalcResult.ok !== true) {
                     const reason = String(recalcResult && (recalcResult.reason || recalcResult.summary_reason) || "CALC_FAILED");
@@ -3414,7 +3430,6 @@ function bindCalcButtons(){
                 if (__normalizeSummaryStatus(summaryStatus) === "fresh") {
                     const statusBox = document.getElementById("paymentTableStatus") || document.getElementById("paymentStatus") || document.getElementById("paymentsStatus");
                     if (statusBox) statusBox.textContent = "Итог обновлён.";
-                    if (!hasValidPeriodInput) autofillFullCardPeriodUI("full-summary-recalc-fresh");
                 }
                 recalcHandled = true;
             }
