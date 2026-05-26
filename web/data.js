@@ -169,6 +169,7 @@
     "calc_period_",
     "calc_period_active_",
     "report_period_",
+    "card_snapshot_",
     "payments_ui_collapsed_",
     "jkh_transfer_v1:",
     "jkh_transfer_to_v1:",
@@ -753,6 +754,156 @@
     return computeLedgerRuntimeVersion(abonentOrId);
   }
 
+  function resolveCardSnapshotKey(abonentOrId) {
+    var found = _findAbonentByIdOrUid(abonentOrId);
+    var abonent = found && found.abonent ? found.abonent : null;
+    var uid = String(abonent && abonent.uid || (typeof abonentOrId === "object" ? abonentOrId && abonentOrId.uid : abonentOrId) || "").trim();
+    if (!isValidUid(uid)) return "";
+    return "card_snapshot_" + uid;
+  }
+
+  function _cardSnapshotRowsById(rows) {
+    var out = {};
+    (Array.isArray(rows) ? rows : []).forEach(function(row) {
+      if (!row || typeof row !== "object") return;
+      var id = String(row.id || "").trim();
+      if (!id) return;
+      out[id] = {
+        pay_main: row.pay_main,
+        pay_penalty: row.pay_penalty,
+        total: row.total
+      };
+    });
+    return out;
+  }
+
+  function _normalizeCardSnapshot(abonentOrId, snapshot) {
+    var found = _findAbonentByIdOrUid(abonentOrId);
+    var abonent = found && found.abonent ? found.abonent : null;
+    var abonentId = String(found && found.id || (abonent && abonent.id) || (typeof abonentOrId === "object" ? abonentOrId && abonentOrId.id : abonentOrId) || "").trim();
+    var uid = String(abonent && abonent.uid || (typeof abonentOrId === "object" ? abonentOrId && abonentOrId.uid : abonentOrId) || "").trim();
+    if (!isValidUid(uid)) return null;
+    var src = snapshot && typeof snapshot === "object" ? snapshot : {};
+    var rows = Array.isArray(src.rows) ? deepClone(src.rows) : [];
+    var totals = src.totals && typeof src.totals === "object" && !Array.isArray(src.totals) ? deepClone(src.totals) : {};
+    return {
+      snapshotVersion: Number(src.snapshotVersion || 1),
+      uid: uid,
+      abonentId: String(src.abonentId || abonentId || ""),
+      computedAt: String(src.computedAt || (new Date()).toISOString()),
+      ledgerVersion: String(src.ledgerVersion || computeLedgerRuntimeVersion(abonent || uid) || ""),
+      rows: rows,
+      totals: totals,
+      summary_status: String(src.summary_status || src.status || "missing"),
+      summary_reason: String(src.summary_reason || src.reason || ""),
+      periodActive: src.periodActive === true,
+      period: src.period && typeof src.period === "object" ? { from: String(src.period.from || ""), to: String(src.period.to || "") } : null,
+      runtimeSignature: String(src.runtimeSignature || ""),
+      rowsById: src.rowsById && typeof src.rowsById === "object" && !Array.isArray(src.rowsById) ? deepClone(src.rowsById) : _cardSnapshotRowsById(rows),
+      dirty: src.dirty === true,
+      dirtyReason: String(src.dirtyReason || "")
+    };
+  }
+
+  function readCardSnapshot(abonentOrId) {
+    var key = resolveCardSnapshotKey(abonentOrId);
+    if (!key) return null;
+    var raw = _getProjectRaw(key);
+    if (raw === null || raw === undefined || raw === "") return null;
+    try {
+      var parsed = JSON.parse(String(raw));
+      var snapshot = _normalizeCardSnapshot(abonentOrId, parsed);
+      if (!snapshot) return null;
+      var currentLedgerVersion = computeLedgerRuntimeVersion(abonentOrId);
+      if (!snapshot.ledgerVersion || snapshot.ledgerVersion !== currentLedgerVersion) {
+        snapshot.dirty = true;
+        snapshot.dirtyReason = "LEDGER_VERSION_CHANGED";
+      }
+      try { console.log("[card-snapshot][read]", { key: key, dirty: !!snapshot.dirty, reason: snapshot.dirtyReason || "", ledgerVersion: currentLedgerVersion }); } catch (eLog) {}
+      return snapshot;
+    } catch (e) {
+      try { console.warn("[card-snapshot][read-failed]", { key: key, reason: "JSON_INVALID" }); } catch (eWarn) {}
+      return null;
+    }
+  }
+
+  function saveCardSnapshot(abonentOrId, snapshot) {
+    if (!Data.ensureWriteOrExplain()) return false;
+    var key = resolveCardSnapshotKey(abonentOrId);
+    if (!key) return false;
+    var normalized = _normalizeCardSnapshot(abonentOrId, snapshot);
+    if (!normalized) return false;
+    normalized.dirty = false;
+    normalized.dirtyReason = "";
+    var ok = _setProjectRaw(key, JSON.stringify(normalized));
+    try { console.log("[card-snapshot][save]", { key: key, ok: ok !== false, rows: normalized.rows.length, ledgerVersion: normalized.ledgerVersion }); } catch (eLog) {}
+    return ok;
+  }
+
+  function invalidateCardSnapshot(abonentOrId, reason) {
+    var key = resolveCardSnapshotKey(abonentOrId);
+    if (!key) return false;
+    var raw = _getProjectRaw(key);
+    if (raw === null || raw === undefined || raw === "") {
+      try { console.log("[card-snapshot][invalidate]", { key: key, ok: true, reason: String(reason || "SNAPSHOT_MISSING"), skipped: true }); } catch (eLog0) {}
+      return true;
+    }
+    try {
+      var parsed = JSON.parse(String(raw));
+      var snapshot = _normalizeCardSnapshot(abonentOrId, parsed);
+      if (!snapshot) return false;
+      snapshot.dirty = true;
+      snapshot.dirtyReason = String(reason || "UNKNOWN_CHANGE");
+      snapshot.summary_status = "dirty";
+      snapshot.summary_reason = snapshot.dirtyReason;
+      var ok = _setProjectRaw(key, JSON.stringify(snapshot));
+      try { console.log("[card-snapshot][invalidate]", { key: key, ok: ok !== false, reason: snapshot.dirtyReason }); } catch (eLog) {}
+      return ok;
+    } catch (e) {
+      var removed = _removeProjectRaw(key);
+      try { console.warn("[card-snapshot][invalidate]", { key: key, ok: removed !== false, reason: "JSON_INVALID_REMOVED" }); } catch (eWarn) {}
+      return removed;
+    }
+  }
+
+  function buildCardSnapshotFromCurrentResult(abonentOrId, result) {
+    var found = _findAbonentByIdOrUid(abonentOrId);
+    var abonent = found && found.abonent ? found.abonent : null;
+    var abonentId = String(found && found.id || (abonent && abonent.id) || (typeof abonentOrId === "object" ? abonentOrId && abonentOrId.id : abonentOrId) || "").trim();
+    var uid = String(abonent && abonent.uid || (typeof abonentOrId === "object" ? abonentOrId && abonentOrId.uid : abonentOrId) || "").trim();
+    if (!isValidUid(uid)) return null;
+    var summary = result && result.summary && typeof result.summary === "object" ? result.summary : null;
+    var runtimeCache = readLedgerRuntimeCache(abonent || uid) || {};
+    var rowsById = runtimeCache.rowsById && typeof runtimeCache.rowsById === "object" && !Array.isArray(runtimeCache.rowsById) ? runtimeCache.rowsById : {};
+    var ledgerRows = readPaymentLedger(abonent || uid);
+    var rows = (Array.isArray(ledgerRows) ? ledgerRows : []).map(function(row) {
+      var copy = deepClone(row || {});
+      var item = rowsById[String(copy.id || "")];
+      if (item && typeof item === "object") {
+        copy.pay_main = item.pay_main;
+        copy.pay_penalty = item.pay_penalty;
+        copy.total = item.total;
+      }
+      return copy;
+    });
+    var totals = summary && summary.totals && typeof summary.totals === "object" ? deepClone(summary.totals) : {};
+    return _normalizeCardSnapshot(abonent || uid, {
+      snapshotVersion: 1,
+      uid: uid,
+      abonentId: abonentId,
+      computedAt: (new Date()).toISOString(),
+      ledgerVersion: computeLedgerRuntimeVersion(abonent || uid),
+      rows: rows,
+      rowsById: _cardSnapshotRowsById(rows),
+      totals: totals,
+      summary_status: result && (result.summary_status || result.status) || summary && (summary.summary_status || summary.status) || "missing",
+      summary_reason: result && (result.summary_reason || result.reason) || summary && (summary.summary_reason || summary.reason) || "",
+      periodActive: runtimeCache.periodActive === true,
+      period: runtimeCache.period && typeof runtimeCache.period === "object" ? runtimeCache.period : null,
+      runtimeSignature: String(runtimeCache.runtimeSignature || "")
+    });
+  }
+
   function readLedgerRuntimeCache(abonentOrId, options) {
     var key = resolveRuntimeCacheKey(abonentOrId);
     var version = computeLedgerRuntimeVersion(abonentOrId);
@@ -1022,6 +1173,7 @@
     }
     if (ok !== false) {
       invalidateLedgerRuntimeCache(abonentOrId);
+      invalidateCardSnapshot(abonentOrId, opts.summaryDirtyReason || "LEDGER_WRITE");
       if (opts.summaryDirtyReason !== false) {
         markAbonentSummaryDirtyLater(abonent || id, opts.summaryDirtyReason || "LEDGER_WRITE");
       }
@@ -3339,6 +3491,10 @@
     resolveRuntimeCacheKey: resolveRuntimeCacheKey,
     computeLedgerRuntimeVersion: computeLedgerRuntimeVersion,
     computeLedgerVersion: computeLedgerVersion,
+    readCardSnapshot: readCardSnapshot,
+    saveCardSnapshot: saveCardSnapshot,
+    invalidateCardSnapshot: invalidateCardSnapshot,
+    buildCardSnapshotFromCurrentResult: buildCardSnapshotFromCurrentResult,
     readLedgerRuntimeCache: readLedgerRuntimeCache,
     getRuntimeCache: getRuntimeCache,
     writeLedgerRuntimeCache: writeLedgerRuntimeCache,

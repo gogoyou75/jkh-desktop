@@ -126,6 +126,57 @@
     });
   }
 
+  function tryApplyCardSnapshotToRows(rows, expectedLedgerVersion, periodActive, selectedPeriod, expectedSignature){
+    const out = { valid: false, reason: "CARD_SNAPSHOT_MISSING", dataById: {}, periodMatches: false, missingRows: [] };
+    if (!window.Data || typeof Data.readCardSnapshot !== "function") return out;
+    const id = String(getAbonentId() || "");
+    const snapshot = Data.readCardSnapshot(id);
+    if (!snapshot) return out;
+    if (snapshot.dirty === true) {
+      out.reason = snapshot.dirtyReason || "CARD_SNAPSHOT_DIRTY";
+      return out;
+    }
+    if (String(snapshot.ledgerVersion || "") !== String(expectedLedgerVersion || "")) {
+      out.reason = "CARD_SNAPSHOT_STALE";
+      return out;
+    }
+    if (!!snapshot.periodActive !== !!periodActive) {
+      out.reason = "CARD_SNAPSHOT_PERIOD_MISMATCH";
+      return out;
+    }
+    const expectedPeriod = periodActive && selectedPeriod ? selectedPeriod : null;
+    const snapshotPeriod = snapshot.period && typeof snapshot.period === "object" ? snapshot.period : null;
+    if (periodActive && (!snapshotPeriod || String(snapshotPeriod.from || "") !== String(expectedPeriod && expectedPeriod.from || "") || String(snapshotPeriod.to || "") !== String(expectedPeriod && expectedPeriod.to || ""))) {
+      out.reason = "CARD_SNAPSHOT_PERIOD_MISMATCH";
+      return out;
+    }
+    if (expectedSignature && snapshot.runtimeSignature && String(snapshot.runtimeSignature) !== String(expectedSignature)) {
+      out.reason = "CARD_SNAPSHOT_SIGNATURE_MISMATCH";
+      return out;
+    }
+    const map = snapshot.rowsById && typeof snapshot.rowsById === "object" && !Array.isArray(snapshot.rowsById) ? snapshot.rowsById : {};
+    if ((Array.isArray(rows) ? rows.length : 0) > 0 && !Object.keys(map).length) {
+      out.reason = "CARD_SNAPSHOT_ROWS_MISSING";
+      return out;
+    }
+    applyRuntimeRowsById(rows, map);
+    out.valid = true;
+    out.reason = "";
+    out.dataById = map;
+    out.periodMatches = true;
+    try {
+      console.log("[card-snapshot][applied]", {
+        uid: id,
+        ledgerVersion: expectedLedgerVersion,
+        runtimeSignature: expectedSignature,
+        periodActive: !!periodActive,
+        selectedPeriod: selectedPeriod || null,
+        rowsByIdCount: Object.keys(map).length
+      });
+    } catch(eLog) {}
+    return out;
+  }
+
   function applyRuntimeCacheToRows(rows, periodActiveOverride, selectedPeriodOverride){
     const out = { valid: false, reason: "", dataById: {}, periodMatches: false, missingRows: [] };
     if (!isReadonlyNoRecalcMode()) return out;
@@ -164,6 +215,8 @@
           missingRows: out.missingRows.slice(0, 20)
         });
       } catch(eInvalidLog) {}
+      const snapshotState = tryApplyCardSnapshotToRows(rows, version, periodActive, selectedPeriod, expectedSignature);
+      if (snapshotState.valid) return snapshotState;
       return out;
     }
     if (!version || !cache || !map || !cacheVersion || cacheVersion !== version) {
@@ -179,6 +232,8 @@
           missingRowsCount: 0
         });
       } catch(eFallbackInvalidLog) {}
+      const snapshotState = tryApplyCardSnapshotToRows(rows, version, periodActive, selectedPeriod, expectedSignature);
+      if (snapshotState.valid) return snapshotState;
       return out;
     }
     out.periodMatches = runtimeCachePeriodMatches(cache, version, periodActive, selectedPeriod);
@@ -195,6 +250,8 @@
           missingRowsCount: 0
         });
       } catch(ePeriodInvalidLog) {}
+      const snapshotState = tryApplyCardSnapshotToRows(rows, version, periodActive, selectedPeriod, expectedSignature);
+      if (snapshotState.valid) return snapshotState;
       return out;
     }
     out.valid = true;

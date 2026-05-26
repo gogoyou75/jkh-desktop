@@ -1975,6 +1975,7 @@ function __collectAbonentScopedKeysForDelete(abonentId, uid, account){
             matchesSuffix(baseKey, 'calc_period_') ||
             matchesSuffix(baseKey, 'calc_period_active_') ||
             matchesSuffix(baseKey, 'report_period_') ||
+            matchesSuffix(baseKey, 'card_snapshot_') ||
             matchesSuffix(baseKey, 'moratorium_')) {
             add(baseKey);
             continue;
@@ -3259,23 +3260,33 @@ async function loadAbonentSummaryStatus(){
         renderAbonentSummaryStatus("missing", "UID_REQUIRED");
         return;
     }
-    if (!window.Data || typeof Data.loadAbonentSummaryPage !== "function") {
-        renderAbonentSummaryStatus("missing", "SUMMARY_API_UNAVAILABLE");
+    if (!window.Data || typeof Data.readCardSnapshot !== "function") {
+        renderAbonentSummaryStatus("missing", "CARD_SNAPSHOT_API_UNAVAILABLE");
         return;
     }
 
     try {
-        const payload = await Data.loadAbonentSummaryPage({ page: 1, per_page: 1, account_uid: uid });
-        const item = payload && Array.isArray(payload.items) && payload.items.length ? payload.items[0] : null;
-        const summary = item && item.summary && typeof item.summary === "object" ? item.summary : null;
-        window.__lastCardSummaryForDebug = summary || null;
-        if (!summary) {
-            renderAbonentSummaryStatus("missing", "SUMMARY_NOT_BUILT");
+        const snapshot = Data.readCardSnapshot(uid);
+        if (!snapshot) {
+            window.__lastCardSummaryForDebug = null;
+            renderAbonentSummaryStatus("missing", "Требуется пересчёт");
             return;
         }
+        if (snapshot.dirty === true) {
+            window.__lastCardSummaryForDebug = null;
+            renderAbonentSummaryStatus("dirty", snapshot.dirtyReason || "Требуется пересчёт");
+            return;
+        }
+        const summary = {
+            summary_status: snapshot.summary_status || "fresh",
+            summary_reason: snapshot.summary_reason || "",
+            totals: snapshot.totals || {}
+        };
+        window.__lastCardSummaryForDebug = summary;
         renderAbonentSummaryStatus(summary.summary_status || summary.status || "missing", summary.summary_reason || summary.reason || "");
+        __renderAbonentTotalsFromFreshSummary(summary);
     } catch (e) {
-        renderAbonentSummaryStatus("error", String(e && e.message || e || "SUMMARY_API_ERROR"));
+        renderAbonentSummaryStatus("error", String(e && e.message || e || "CARD_SNAPSHOT_READ_ERROR"));
     }
 }
 
@@ -3507,6 +3518,20 @@ function bindCalcButtons(){
                 window.__lastCardSummaryForDebug = summary || null;
                 const summaryStatus = recalcResult && (recalcResult.summary_status || recalcResult.status) || summary && (summary.summary_status || summary.status) || "";
                 const summaryReason = recalcResult && (recalcResult.summary_reason || recalcResult.reason) || summary && (summary.summary_reason || summary.reason) || "";
+                if (__normalizeSummaryStatus(summaryStatus) === "fresh") {
+                    if (!window.Data || typeof Data.buildCardSnapshotFromCurrentResult !== "function" || typeof Data.saveCardSnapshot !== "function") {
+                        renderAbonentSummaryStatus("error", "CARD_SNAPSHOT_API_UNAVAILABLE");
+                        alert("Snapshot карточки не сохранён: API snapshot недоступен.");
+                        return;
+                    }
+                    const snapshot = Data.buildCardSnapshotFromCurrentResult(currentAbonentId, recalcResult);
+                    const snapshotSaved = snapshot && Data.saveCardSnapshot(currentAbonentId, snapshot);
+                    if (snapshotSaved === false || !snapshot) {
+                        renderAbonentSummaryStatus("error", "CARD_SNAPSHOT_SAVE_FAILED");
+                        alert("Snapshot карточки не сохранён. Итог не будет отмечен fresh.");
+                        return;
+                    }
+                }
                 if (summaryStatus) renderAbonentSummaryStatus(summaryStatus, summaryReason);
                 if (__normalizeSummaryStatus(summaryStatus) === "fresh" && summary) {
                     __renderAbonentTotalsFromFreshSummary(summary);
