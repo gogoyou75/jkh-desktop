@@ -128,38 +128,75 @@
 
   function tryApplyCardSnapshotToRows(rows, expectedLedgerVersion, periodActive, selectedPeriod, expectedSignature){
     const out = { valid: false, reason: "CARD_SNAPSHOT_MISSING", dataById: {}, periodMatches: false, missingRows: [] };
-    if (!window.Data || typeof Data.readCardSnapshot !== "function") return out;
+    function dispatchInvalid(reason, extra){
+      out.valid = false;
+      out.reason = reason || "CARD_SNAPSHOT_ROWS_NOT_APPLIED";
+      try {
+        console.warn("[card-snapshot][apply-failed]", Object.assign({
+          uid: String(getAbonentId() || ""),
+          reason: out.reason,
+          ledgerVersion: expectedLedgerVersion,
+          runtimeSignature: expectedSignature,
+          periodActive: !!periodActive,
+          selectedPeriod: selectedPeriod || null
+        }, extra || {}));
+      } catch(eFailLog) {}
+      try {
+        window.dispatchEvent(new CustomEvent("jkh:card-snapshot-invalid", { detail: Object.assign({ reason: out.reason }, extra || {}) }));
+      } catch(eEvent) {}
+      return out;
+    }
+    if (!window.Data || typeof Data.readCardSnapshot !== "function") return dispatchInvalid("CARD_SNAPSHOT_MISSING");
     const id = String(getAbonentId() || "");
     const snapshot = Data.readCardSnapshot(id);
-    if (!snapshot) return out;
+    if (!snapshot) return dispatchInvalid("CARD_SNAPSHOT_MISSING");
     if (snapshot.dirty === true) {
-      out.reason = snapshot.dirtyReason || "CARD_SNAPSHOT_DIRTY";
-      return out;
+      return dispatchInvalid(snapshot.dirtyReason || "CARD_SNAPSHOT_DIRTY");
     }
     if (String(snapshot.ledgerVersion || "") !== String(expectedLedgerVersion || "")) {
-      out.reason = "CARD_SNAPSHOT_STALE";
-      return out;
+      return dispatchInvalid("CARD_SNAPSHOT_STALE", { snapshotLedgerVersion: String(snapshot.ledgerVersion || "") });
     }
     if (!!snapshot.periodActive !== !!periodActive) {
-      out.reason = "CARD_SNAPSHOT_PERIOD_MISMATCH";
-      return out;
+      return dispatchInvalid("CARD_SNAPSHOT_PERIOD_MISMATCH");
     }
     const expectedPeriod = periodActive && selectedPeriod ? selectedPeriod : null;
     const snapshotPeriod = snapshot.period && typeof snapshot.period === "object" ? snapshot.period : null;
     if (periodActive && (!snapshotPeriod || String(snapshotPeriod.from || "") !== String(expectedPeriod && expectedPeriod.from || "") || String(snapshotPeriod.to || "") !== String(expectedPeriod && expectedPeriod.to || ""))) {
-      out.reason = "CARD_SNAPSHOT_PERIOD_MISMATCH";
-      return out;
+      return dispatchInvalid("CARD_SNAPSHOT_PERIOD_MISMATCH");
     }
     if (expectedSignature && snapshot.runtimeSignature && String(snapshot.runtimeSignature) !== String(expectedSignature)) {
-      out.reason = "CARD_SNAPSHOT_SIGNATURE_MISMATCH";
-      return out;
+      return dispatchInvalid("CARD_SNAPSHOT_STALE", { reasonDetail: "CARD_SNAPSHOT_SIGNATURE_MISMATCH" });
     }
     const map = snapshot.rowsById && typeof snapshot.rowsById === "object" && !Array.isArray(snapshot.rowsById) ? snapshot.rowsById : {};
-    if ((Array.isArray(rows) ? rows.length : 0) > 0 && !Object.keys(map).length) {
-      out.reason = "CARD_SNAPSHOT_ROWS_MISSING";
-      return out;
-    }
+    const mapKeys = Object.keys(map);
+    if (!mapKeys.length) return dispatchInvalid("CARD_SNAPSHOT_ROWS_MISSING");
     applyRuntimeRowsById(rows, map);
+    const visibleFinancialRows = window.Data && typeof Data.getVisibleFinancialRowsForCacheValidation === "function"
+      ? Data.getVisibleFinancialRowsForCacheValidation(rows, { periodActive: !!periodActive, selectedPeriod: selectedPeriod })
+      : (Array.isArray(rows) ? rows : []).filter(function(r){ return Math.abs(toNum(r && r.accrued || 0)) > 0.0000001 || Math.abs(toNum(r && r.paid || 0)) > 0.0000001; });
+    let appliedCount = 0;
+    let finiteComputedCount = 0;
+    let nonZeroComputedCount = 0;
+    const missingIds = [];
+    visibleFinancialRows.forEach(function(r){
+      const rowId = String(r && r.id || "");
+      const item = map[rowId] || null;
+      if (!rowId || !item) {
+        if (rowId) missingIds.push(rowId);
+        return;
+      }
+      appliedCount++;
+      const pm = Number(r.pay_main);
+      const pp = Number(r.pay_penalty);
+      const total = Number(r.total);
+      if (Number.isFinite(pm) && Number.isFinite(pp) && Number.isFinite(total)) {
+        finiteComputedCount++;
+        if (Math.abs(pm) > 0.0000001 || Math.abs(pp) > 0.0000001 || Math.abs(total) > 0.0000001) nonZeroComputedCount++;
+      }
+    });
+    if (visibleFinancialRows.length && missingIds.length) return dispatchInvalid("CARD_SNAPSHOT_ROWS_NOT_APPLIED", { missingRowsCount: missingIds.length, missingRows: missingIds.slice(0, 20) });
+    if (visibleFinancialRows.length && (!appliedCount || !finiteComputedCount)) return dispatchInvalid("CARD_SNAPSHOT_ROWS_NOT_APPLIED", { visibleFinancialRowsCount: visibleFinancialRows.length, appliedCount: appliedCount, finiteComputedCount: finiteComputedCount });
+    if (visibleFinancialRows.length && nonZeroComputedCount <= 0) return dispatchInvalid("CARD_SNAPSHOT_ROWS_NOT_APPLIED", { visibleFinancialRowsCount: visibleFinancialRows.length, appliedCount: appliedCount, finiteComputedCount: finiteComputedCount, nonZeroComputedCount: nonZeroComputedCount });
     out.valid = true;
     out.reason = "";
     out.dataById = map;

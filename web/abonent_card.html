@@ -3170,7 +3170,7 @@ function __freshSummaryVisibleGuard(){
         return { ok: true, reason: "" };
     }
     if (__runtimeCacheFreshBlocked) return { ok: false, reason: __lastRuntimeCacheValidation.reason || "RUNTIME_CACHE_INVALID" };
-    if (!__lastRuntimeCacheValidation.valid) return { ok: false, reason: __lastRuntimeCacheValidation.reason || "RUNTIME_CACHE_NOT_VALIDATED" };
+    if (!__lastRuntimeCacheValidation.valid) return { ok: false, reason: "CARD_ROWS_NOT_RESTORED" };
     if (!__summaryTotalsAreFinite(window.__lastCardSummaryForDebug)) return { ok: false, reason: "SUMMARY_TOTALS_MISSING" };
     return { ok: true, reason: "" };
 }
@@ -3218,7 +3218,9 @@ function renderAbonentSummaryStatus(status, reason){
         reasonEl.textContent = r ? ("Причина: " + r) : "";
     }
     if (warningEl) {
-        const text = __summaryWarningText(normalized);
+        const text = visibleReason === "CARD_ROWS_NOT_RESTORED"
+            ? "Итоги есть, но строки карточки не восстановлены. Нажмите «Пересчитать»."
+            : __summaryWarningText(normalized);
         warningEl.textContent = text;
         warningEl.style.display = text ? "block" : "none";
         warningEl.className = "summary-warning" + (normalized === "error" ? " summary-error" : "");
@@ -3244,6 +3246,10 @@ window.addEventListener("jkh:runtime-cache-invalid", function(event){
     __lastRuntimeCacheValidation = { valid: false, reason: reason, detail: detail };
     try { console.warn("[summary][runtime-cache-downgrade]", detail); } catch(eLog) {}
     if (__cardSnapshotFreshValidated && __lastCardSnapshotValidation.valid) return;
+    if (__lastRenderedSummaryStatusLocal === "fresh" && __lastCardSnapshotValidation && __lastCardSnapshotValidation.valid === false && __lastCardSnapshotValidation.reason) {
+        renderAbonentSummaryStatus("dirty", __lastCardSnapshotValidation.reason);
+        return;
+    }
     if (__lastRenderedSummaryStatusLocal === "fresh") {
         renderAbonentSummaryStatus("dirty", reason === "RUNTIME_CACHE_PERIOD_MISMATCH" ? "Требуется пересчёт таблицы для выбранного периода" : reason);
     }
@@ -3256,7 +3262,7 @@ window.addEventListener("jkh:runtime-cache-valid", function(event){
     try { console.log("[summary][runtime-cache-validated]", detail); } catch(eLog) {}
     const summary = window.__lastCardSummaryForDebug && typeof window.__lastCardSummaryForDebug === "object" ? window.__lastCardSummaryForDebug : null;
     if (__normalizeSummaryStatus(summary && (summary.summary_status || summary.status)) === "fresh" && __lastRenderedSummaryStatusLocal !== "fresh") {
-        renderAbonentSummaryStatus("fresh", summary.summary_reason || summary.reason || "");
+        renderAbonentSummaryStatus("fresh", "OK");
     }
 });
 
@@ -3268,7 +3274,18 @@ window.addEventListener("jkh:card-snapshot-valid", function(event){
     try { console.log("[summary][card-snapshot-validated]", detail); } catch(eLog) {}
     const summary = window.__lastCardSummaryForDebug && typeof window.__lastCardSummaryForDebug === "object" ? window.__lastCardSummaryForDebug : null;
     if (__normalizeSummaryStatus(summary && (summary.summary_status || summary.status)) === "fresh") {
-        renderAbonentSummaryStatus("fresh", summary.summary_reason || summary.reason || "");
+        renderAbonentSummaryStatus("fresh", "OK");
+    }
+});
+
+window.addEventListener("jkh:card-snapshot-invalid", function(event){
+    const detail = event && event.detail ? event.detail : {};
+    const reason = String(detail.reason || "CARD_ROWS_NOT_RESTORED");
+    __cardSnapshotFreshValidated = false;
+    __lastCardSnapshotValidation = { valid: false, reason: reason, detail: detail };
+    try { console.warn("[summary][card-snapshot-invalid]", detail); } catch(eLog) {}
+    if (__lastRenderedSummaryStatusLocal === "fresh" || __normalizeSummaryStatus(window.__lastCardSummaryForDebug && window.__lastCardSummaryForDebug.summary_status) === "fresh") {
+        renderAbonentSummaryStatus("dirty", reason);
     }
 });
 
@@ -3311,8 +3328,8 @@ async function loadAbonentSummaryStatus(){
         if (!__isFreshCardSnapshotUsable(uid, snapshot)) {
             window.__lastCardSummaryForDebug = null;
             __cardSnapshotFreshValidated = false;
-            __lastCardSnapshotValidation = { valid: false, reason: "CARD_SNAPSHOT_INVALID" };
-            renderAbonentSummaryStatus("dirty", "CARD_SNAPSHOT_INVALID");
+            __lastCardSnapshotValidation = { valid: false, reason: "CARD_ROWS_NOT_RESTORED" };
+            renderAbonentSummaryStatus("dirty", "CARD_ROWS_NOT_RESTORED");
             return;
         }
         const summary = {
@@ -3321,10 +3338,9 @@ async function loadAbonentSummaryStatus(){
             totals: snapshot.totals || {}
         };
         window.__lastCardSummaryForDebug = summary;
-        __cardSnapshotFreshValidated = true;
-        __lastCardSnapshotValidation = { valid: true, reason: "", detail: { uid: uid, ledgerVersion: snapshot.ledgerVersion, rowsByIdCount: Object.keys(snapshot.rowsById).length } };
-        __runtimeCacheFreshBlocked = false;
-        renderAbonentSummaryStatus(summary.summary_status || summary.status || "missing", summary.summary_reason || summary.reason || "");
+        __cardSnapshotFreshValidated = false;
+        __lastCardSnapshotValidation = { valid: false, reason: "CARD_ROWS_NOT_RESTORED", detail: { uid: uid, ledgerVersion: snapshot.ledgerVersion, rowsByIdCount: Object.keys(snapshot.rowsById).length } };
+        renderAbonentSummaryStatus("dirty", "CARD_ROWS_NOT_RESTORED");
         __renderAbonentTotalsFromFreshSummary(summary);
     } catch (e) {
         renderAbonentSummaryStatus("error", String(e && e.message || e || "CARD_SNAPSHOT_READ_ERROR"));
@@ -3566,6 +3582,12 @@ function bindCalcButtons(){
                         return;
                     }
                     const snapshot = Data.buildCardSnapshotFromCurrentResult(currentAbonentId, recalcResult);
+                    const snapshotRowsById = snapshot && snapshot.rowsById && typeof snapshot.rowsById === "object" && !Array.isArray(snapshot.rowsById) ? snapshot.rowsById : null;
+                    if (!snapshot || !snapshotRowsById || !Object.keys(snapshotRowsById).length) {
+                        renderAbonentSummaryStatus("error", "EMPTY_ROWS_BY_ID");
+                        alert("Snapshot карточки пуст — пересчёт не дал строк с computed totals");
+                        return;
+                    }
                     const snapshotSaved = snapshot && Data.saveCardSnapshot(currentAbonentId, snapshot);
                     if (snapshotSaved === false || !snapshot) {
                         renderAbonentSummaryStatus("error", "CARD_SNAPSHOT_SAVE_FAILED");

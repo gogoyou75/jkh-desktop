@@ -768,13 +768,33 @@
       if (!row || typeof row !== "object") return;
       var id = String(row.id || "").trim();
       if (!id) return;
+      var pm = Number(row.pay_main);
+      var pp = Number(row.pay_penalty);
+      var total = Number(row.total);
+      if (!isFinite(pm) || !isFinite(pp) || !isFinite(total)) return;
       out[id] = {
-        pay_main: row.pay_main,
-        pay_penalty: row.pay_penalty,
-        total: row.total
+        pay_main: pm,
+        pay_penalty: pp,
+        total: total
       };
     });
     return out;
+  }
+
+  function _cardSnapshotRowsByIdCount(rowsById) {
+    return rowsById && typeof rowsById === "object" && !Array.isArray(rowsById) ? Object.keys(rowsById).length : 0;
+  }
+
+  function _cardSnapshotLedgerStats(rows) {
+    var list = Array.isArray(rows) ? rows : [];
+    var hasAccruals = false;
+    var hasPayments = false;
+    for (var i = 0; i < list.length; i++) {
+      var row = list[i] || {};
+      if (Math.abs(Number(row.accrued || 0)) > 0.0000001) hasAccruals = true;
+      if (Math.abs(Number(row.paid || 0)) > 0.0000001) hasPayments = true;
+    }
+    return { rowsCount: list.length, hasAccruals: hasAccruals, hasPayments: hasPayments };
   }
 
   function _normalizeCardSnapshot(abonentOrId, snapshot) {
@@ -836,6 +856,12 @@
     var ownerId = String(_ownerId() || "").trim();
     normalized.dirty = false;
     normalized.dirtyReason = "";
+    var rowsByIdCount = _cardSnapshotRowsByIdCount(normalized.rowsById);
+    if (rowsByIdCount <= 0) {
+      var stats = _cardSnapshotLedgerStats(normalized.rows);
+      try { console.warn("[card-snapshot][save-blocked-empty-rowsById]", { key: key, uid: normalized.uid, abonentId: normalized.abonentId, rowsCount: stats.rowsCount, rowsByIdCount: rowsByIdCount, ledgerVersion: normalized.ledgerVersion, hasAccruals: stats.hasAccruals, hasPayments: stats.hasPayments }); } catch (eBlockLog) {}
+      return false;
+    }
     var serialized = JSON.stringify(normalized);
     var ok = _setProjectRaw(key, serialized);
     try { console.log("[card-snapshot][save]", { key: key, ok: ok !== false, rows: normalized.rows.length, ledgerVersion: normalized.ledgerVersion }); } catch (eLog) {}
@@ -901,15 +927,33 @@
       }
       return copy;
     });
+    var snapshotRowsById = _cardSnapshotRowsById(rows);
+    var stats = _cardSnapshotLedgerStats(rows);
+    var rowsByIdCount = _cardSnapshotRowsByIdCount(snapshotRowsById);
+    var ledgerVersion = computeLedgerRuntimeVersion(abonent || uid);
+    if (rowsByIdCount <= 0) {
+      try {
+        console.warn("[card-snapshot][build-blocked-empty-rowsById]", {
+          uid: uid,
+          abonentId: abonentId,
+          rowsCount: stats.rowsCount,
+          rowsByIdCount: rowsByIdCount,
+          ledgerVersion: ledgerVersion,
+          hasAccruals: stats.hasAccruals,
+          hasPayments: stats.hasPayments
+        });
+      } catch (eBuildLog) {}
+      return null;
+    }
     var totals = summary && summary.totals && typeof summary.totals === "object" ? deepClone(summary.totals) : {};
     return _normalizeCardSnapshot(abonent || uid, {
       snapshotVersion: 1,
       uid: uid,
       abonentId: abonentId,
       computedAt: (new Date()).toISOString(),
-      ledgerVersion: computeLedgerRuntimeVersion(abonent || uid),
+      ledgerVersion: ledgerVersion,
       rows: rows,
-      rowsById: _cardSnapshotRowsById(rows),
+      rowsById: snapshotRowsById,
       totals: totals,
       summary_status: result && (result.summary_status || result.status) || summary && (summary.summary_status || summary.status) || "missing",
       summary_reason: result && (result.summary_reason || result.reason) || summary && (summary.summary_reason || summary.reason) || "",
