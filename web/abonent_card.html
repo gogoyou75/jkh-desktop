@@ -496,6 +496,9 @@ Doc: docs/LOGIC_SPEC_v1.5.3.md
         <button class="calc-btn" id="calcReportsBtn" type="button">справки</button>
         <button class="calc-btn" id="calcResetBtn" type="button">сбросить</button>
     </div>
+    <div class="calc-inline-sub" id="calcRunHint">
+        Без дат — пересчитать всю карточку. С датами — пересчитать выбранный период для справки.
+    </div>
 </div>
 
 <div id="abonentSummaryStatusCard" class="summary-status-card">
@@ -1166,6 +1169,30 @@ function __safeLoadPaymentTableOnce(reason, options){
     }, 0);
 }
 
+function __isCardReturnFromSpravkaUrl(){
+    try {
+        const params = new URLSearchParams(window.location.search || "");
+        return !!(params.get("from") || params.get("to"));
+    } catch(e) {
+        return false;
+    }
+}
+
+function __showCardInitTimeoutAfterReturn(){
+    let box = document.getElementById("cardInitTimeoutAfterReturn");
+    if (!box) {
+        box = document.createElement("div");
+        box.id = "cardInitTimeoutAfterReturn";
+        box.style.cssText = "margin:10px 0;padding:10px 12px;border:1px solid #f0c36d;background:#fff8e1;color:#7a5300;font-size:13px;";
+        const anchor = document.getElementById("abonentSummaryStatusCard") || document.body.firstChild;
+        if (anchor && anchor.parentNode) anchor.parentNode.insertBefore(box, anchor);
+        else document.body.appendChild(box);
+    }
+    box.innerHTML = 'Данные карточки не загрузились после возврата из справки. <button type="button" id="cardInitRefreshBtn">Обновить данные</button>';
+    const btn = document.getElementById("cardInitRefreshBtn");
+    if (btn) btn.onclick = function(){ location.reload(); };
+}
+
 function __runAutoAccrualRepairOnce(){
     try {
         if (!__abonentCardServerRepairDone) {
@@ -1249,12 +1276,17 @@ async function __initAbonentCardSafe(){
 
     await __repairEmptyExcludePeriodsKeysAfterServerLoad();
 
+    try { loadCalcPeriodUI(); } catch(e) { try { console.warn('[card-period][load-after-ready-failed]', e); } catch(_){} }
     try { fillAbonentCard(); } catch(e) { try { console.error('[abonent_card] fill failed', e); } catch(_){} }
     try { loadAbonentSummaryStatus(); } catch(e) { try { console.warn('[summary][status-load-failed]', e); } catch(_){} }
 
     setTimeout(() => {
         // Opening the card is read-only for summary/accrual state: no auto-recalc here.
-        __safeLoadPaymentTableOnce('DOMContentLoaded');
+        const fromSpravka = __isCardReturnFromSpravkaUrl();
+        if (fromSpravka) {
+            try { console.log("[card-init][ready-after-return]", { reason: "server-first-ready", force: true }); } catch(eReturnReady) {}
+        }
+        __safeLoadPaymentTableOnce(fromSpravka ? 'return-from-spravka' : 'DOMContentLoaded', { force: fromSpravka });
     }, 0);
 }
 
@@ -1317,6 +1349,10 @@ function __waitForAbonentCardDataReady(cb) {
         tries++;
         if (tries > 80) {
             console.warn("[abonent_card] server data not ready after wait, init blocked");
+            if (__isCardReturnFromSpravkaUrl()) {
+                try { console.warn("[card-init][timeout-after-return]", { tries: tries, timeoutMs: 8000 }); } catch(eTimeoutLog) {}
+                __showCardInitTimeoutAfterReturn();
+            }
             return;
         }
 
@@ -2712,8 +2748,8 @@ function loadCalcPeriodUI(){
             if (isValidPeriod(urlFrom, urlTo)) {
                 fromEl.value = urlFrom;
                 toEl.value = urlTo;
+                try { console.log("[card-return][from-spravka]", { from: urlFrom, to: urlTo, requestedId: meta.requestedId, uid: meta.resolvedUid, ownerId: meta.ownerId, writes: false }); } catch(eReturnLog) {}
                 try { console.log("[period][restore-source]", { source: "url", key: "location.search", raw: window.location.search || "", from: urlFrom, to: urlTo, requestedId: meta.requestedId, uid: meta.resolvedUid, ownerId: meta.ownerId }); } catch (eRestoreUrlLog) {}
-                bootstrapActiveCalcPeriod(meta, urlFrom, urlTo, "url");
                 __safeLoadPaymentTableOnce("calc-period-bootstrap-url", { force: true });
                 try {
                     console.log("[card-period][bootstrap-inputs-from-url]", {
@@ -3197,8 +3233,10 @@ function bindCalcButtons(){
         if (runBtn.disabled) return;
         if (!canWriteOrExplainLocal()) return;
         const currentAbonentId = getAbonentIdFromURL();
-        const from = fromEl.value;
-        const to   = toEl.value;
+        const from = String(fromEl.value || "").trim();
+        const to   = String(toEl.value || "").trim();
+        const hasAnyPeriodInput = !!(from || to);
+        const hasValidPeriodInput = isValidPeriod(from, to);
         const prevText = runBtn.textContent;
         const clickMeta = getCalcPeriodStorageMeta();
         try {
@@ -3216,14 +3254,16 @@ function bindCalcButtons(){
                 from: from || "",
                 to: to || ""
             });
+            console.log(hasValidPeriodInput ? "[recalc][explicit-single-period]" : "[recalc][explicit-single-full]", {
+                abonentId: String(currentAbonentId || ""),
+                uid: clickMeta.resolvedUid,
+                from: from || "",
+                to: to || ""
+            });
         } catch (e) {}
 
-        if (!isValidPeriod(from, to)) {
-            if (!from || !to) {
-                alert("Укажите дату начала и дату окончания периода расчёта.");
-            } else {
-                alert("Такой период невозможен: дата начала не может быть позже даты окончания.");
-            }
+        if (hasAnyPeriodInput && !hasValidPeriodInput) {
+            alert("Такой период невозможен: укажите корректные даты начала и окончания.");
             return;
         }
 
@@ -3250,24 +3290,28 @@ function bindCalcButtons(){
                 return;
             }
 
-            if (!saveCalcPeriod(from, to)) {
-                __logCardPeriodSaved(getCalcPeriodStorageMeta(), { ok: false, reason: saveCalcPeriod.lastError || "CALC_PERIOD_SAVE_FAILED", reportReadback: null });
-                if (saveCalcPeriod.lastError !== "PERIOD_REQUIRED") {
-                    alert("Период расчёта не сохранён: не найден canonical UID key.");
+            if (hasValidPeriodInput) {
+                if (!saveCalcPeriod(from, to)) {
+                    __logCardPeriodSaved(getCalcPeriodStorageMeta(), { ok: false, reason: saveCalcPeriod.lastError || "CALC_PERIOD_SAVE_FAILED", reportReadback: null });
+                    if (saveCalcPeriod.lastError !== "PERIOD_REQUIRED") {
+                        alert("Период расчёта не сохранён: не найден canonical UID key.");
+                    }
+                    return;
                 }
-                return;
+                const reportPeriodResult = saveReportPeriodForSpravka(from, to, { source: "abonent_card.recalc" });
+                __logCardPeriodSaved(getCalcPeriodStorageMeta(), reportPeriodResult);
+                if (!reportPeriodResult.ok) {
+                    alert("Период для справки не сохранён: " + String(reportPeriodResult.reason || "REPORT_PERIOD_READBACK_FAILED") + " (" + String(reportPeriodResult.reportKey || "report_period_uid_<uid>") + ").");
+                    return;
+                }
+                if (!confirmCalcPeriodSaved()) return;
             }
-            const reportPeriodResult = saveReportPeriodForSpravka(from, to, { source: "abonent_card.recalc" });
-            __logCardPeriodSaved(getCalcPeriodStorageMeta(), reportPeriodResult);
-            if (!reportPeriodResult.ok) {
-                alert("РџРµСЂРёРѕРґ РґР»СЏ СЃРїСЂР°РІРєРё РЅРµ СЃРѕС…СЂР°РЅС‘РЅ: " + String(reportPeriodResult.reason || "REPORT_PERIOD_READBACK_FAILED") + " (" + String(reportPeriodResult.reportKey || "report_period_uid_<uid>") + ").");
-                return;
-            }
-            if (!confirmCalcPeriodSaved()) return;
 
             let recalcHandled = false;
             if (typeof window.fullRecalcForCurrentAbonent === "function") {
-                const recalcResult = await window.fullRecalcForCurrentAbonent({ period: { from: from, to: to }, applyAutoAccrual: true });
+                const recalcResult = await window.fullRecalcForCurrentAbonent(hasValidPeriodInput
+                    ? { period: { from: from, to: to }, applyAutoAccrual: true, recalcMode: "REPORT_PERIOD_CALCULATION", summaryScope: "period" }
+                    : { applyAutoAccrual: true, recalcMode: "FULL_SUMMARY_REBUILD", summaryScope: "full" });
                 __logCardRecalcResult(recalcResult, currentAbonentId);
                 if (!recalcResult || recalcResult.ok !== true) {
                     const reason = String(recalcResult && (recalcResult.reason || recalcResult.summary_reason) || "CALC_FAILED");
@@ -3281,6 +3325,10 @@ function bindCalcButtons(){
                 if (summaryStatus) renderAbonentSummaryStatus(summaryStatus, summaryReason);
                 if (__normalizeSummaryStatus(summaryStatus) === "fresh" && summary) {
                     __renderAbonentTotalsFromFreshSummary(summary);
+                }
+                if (__normalizeSummaryStatus(summaryStatus) === "fresh") {
+                    const statusBox = document.getElementById("paymentTableStatus") || document.getElementById("paymentStatus") || document.getElementById("paymentsStatus");
+                    if (statusBox) statusBox.textContent = "Итог обновлён.";
                 }
                 recalcHandled = true;
             }

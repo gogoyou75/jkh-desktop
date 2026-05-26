@@ -1539,11 +1539,12 @@ if (parts.length) {
     if (!row || !edit.draft) return false;
     try { console.log("[payment-save][draft]", { abonentId: String(getAbonentId() || ""), rowId: String(rowId || ""), paid: row.paid, paid_date: String(row.paid_date || "") }); } catch(eDraftLog) {}
     const paid = r2(Math.max(0, toNum(row.paid)));
+    syncYearMonthFromPaidDate(row);
     if (paid <= 0.0000001) {
       showRowSoftMessage(tr, "Черновик: укажите сумму оплаты.", "warn");
       return false;
     }
-    if (!String(row.paid_date || "").trim()) {
+    if (!parseDateAnyToDate(row.paid_date)) {
       showRowSoftMessage(tr, "Черновик: дата оплаты нужна для сохранения.", "warn");
       return false;
     }
@@ -1658,8 +1659,31 @@ if (parts.length) {
 
   function normalizePaymentRows(arr){
     if (!Array.isArray(arr)) return arr;
-    for (const r of arr) normalizePaymentRow(r);
+    for (const r of arr) {
+      syncYearMonthFromPaidDate(r);
+      normalizePaymentRow(r);
+    }
     return arr;
+  }
+
+  function validateEditablePaymentBeforeSave(row, tr){
+    if (!row || typeof row !== "object") return true;
+    syncYearMonthFromPaidDate(row);
+    const paid = r2(Math.max(0, toNum(row.paid)));
+    const accrued = r2(toNum(row.accrued));
+    if (paid > 0.0000001 && accrued <= 0.0000001 && !parseDateAnyToDate(row.paid_date)) {
+      showRowSoftMessage(tr, "Дата оплаты нужна для сохранения.", "warn");
+      try {
+        console.warn("[payment-save][blocked-invalid-paid-date]", {
+          abonentId: String(getAbonentId() || ""),
+          rowId: String(row.id || ""),
+          paid: paid,
+          paid_date: String(row.paid_date || "")
+        });
+      } catch(eWarn) {}
+      return false;
+    }
+    return true;
   }
 
   async function savePaymentsAndFlush(arr){
@@ -2928,6 +2952,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
 
     async function saveEditable(arr, edit){
       if (edit && edit.draft) return trySaveDraftRowIfValid(tr, rowId);
+      if (edit && edit.row && !validateEditablePaymentBeforeSave(edit.row, tr)) return false;
       await savePaymentsAndFlush(arr);
       markPaymentRuntimeStaleUI(tr);
       return true;
@@ -3028,12 +3053,13 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
 }
 // ✅ ВОТ ТУТ ИСПРАВЛЕНИЕ: больше НЕ loadPaymentTable() на каждый символ
           if (edit.draft) {
-            if (toNum(row.paid) > 0.0000001 && !String(row.paid_date || "").trim()) {
+            if (toNum(row.paid) > 0.0000001 && !parseDateAnyToDate(row.paid_date)) {
               showRowSoftMessage(tr, "Черновик: дата оплаты нужна для сохранения.", "warn");
             } else {
               showRowSoftMessage(tr, "Черновик не сохранён", "warn");
             }
           } else {
+            if (!validateEditablePaymentBeforeSave(row, tr)) return;
             await savePaymentsAndFlush(arr);
             markPaymentRuntimeStaleUI(tr);
           }
@@ -3344,6 +3370,12 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
     return false;
   }
 
+  function isManualRecalcPeriodValid(period){
+    const fromD = parseDateAnyToDate(period && period.from);
+    const toD = parseDateAnyToDate(period && period.to);
+    return !!(fromD && toD && startOfDay(fromD) <= startOfDay(toD));
+  }
+
   async function applyControlledAutoAccrualForManualRecalc(abonentId, options){
     const opts = options || {};
     if (opts.applyAutoAccrual !== true) return { ok:true, changed:false, reason:"SKIPPED" };
@@ -3409,15 +3441,19 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
     const opts = options && typeof options === "object" ? options : {};
     const id = String(getAbonentId() || "");
     if (!id) return { ok:false, reason:"ABONENT_REQUIRED" };
-    try { console.log("[payment-table][recalc-explicit]", { abonentId: id, stage: "start" }); } catch(eLogStart) {}
+    const mode = String(opts.recalcMode || opts.mode || "").trim().toUpperCase();
+    const explicitReportPeriod = (mode === "REPORT_PERIOD_CALCULATION" || mode === "REPORT" || mode === "PERIOD" || String(opts.summaryScope || opts.summary_scope || "").toLowerCase() === "period")
+      && opts.period && isManualRecalcPeriodValid(opts.period);
+    const recalcMode = explicitReportPeriod ? "REPORT_PERIOD_CALCULATION" : "FULL_SUMMARY_REBUILD";
+    try { console.log("[payment-table][recalc-explicit]", { abonentId: id, stage: "start", recalcMode: recalcMode }); } catch(eLogStart) {}
     const autoResult = await applyControlledAutoAccrualForManualRecalc(id, opts);
     if (!autoResult || autoResult.ok !== true) {
       try { console.log("[payment-table][recalc-explicit]", { abonentId: id, stage: "autoaccrual_failed", reason: normalizeManualRecalcReason(autoResult && autoResult.reason) }); } catch(eLogAuto) {}
       return { ok:false, reason:normalizeManualRecalcReason(autoResult && autoResult.reason), autoaccrual:autoResult, autoaccrual_changed:!!(autoResult && autoResult.changed) };
     }
     const arr = getPayments();
-    const periodActive = isCalcPeriodActive();
-    const selectedPeriod = periodActive ? getCalcPeriod() : null;
+    const periodActive = !!explicitReportPeriod;
+    const selectedPeriod = periodActive ? { from: String(opts.period.from || ""), to: String(opts.period.to || "") } : null;
     const runtimeRows = periodActive && selectedPeriod ? applyResponsibilityRangeToView(applyCalcFilter(arr, true, selectedPeriod)).slice() : arr;
     const baseRows = runningTotalsBaseRows(runtimeRows);
     const ledgerVersion = (window.Data && Data.computeLedgerRuntimeVersion) ? String(Data.computeLedgerRuntimeVersion(id) || "") : "";
@@ -3437,14 +3473,15 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
       return { ok:false, reason:"SUMMARY_RECALC_UNAVAILABLE", autoaccrual_changed:!!autoResult.changed, summary_status:"error", summary_reason:"SUMMARY_RECALC_UNAVAILABLE", summary:null, summary_save:{ ok:false, reason:"SUMMARY_RECALC_UNAVAILABLE" } };
     }
     const summaryResult = await Data.recalculateAbonentCard(id, {
-      period: opts.period,
-      saveSummary: !(periodActive && selectedPeriod),
-      summaryScope: (periodActive && selectedPeriod) ? "period" : "full",
-      periodActive: !!(periodActive && selectedPeriod)
+      period: periodActive && selectedPeriod ? selectedPeriod : undefined,
+      saveSummary: !periodActive,
+      summaryScope: periodActive ? "period" : "full",
+      periodActive: periodActive,
+      recalcMode: recalcMode
     });
     const freshArr = getPayments();
-    const freshPeriodActive = isCalcPeriodActive();
-    const freshSelectedPeriod = freshPeriodActive ? getCalcPeriod() : null;
+    const freshPeriodActive = periodActive;
+    const freshSelectedPeriod = selectedPeriod;
     const freshRuntimeRows = freshPeriodActive && freshSelectedPeriod ? applyResponsibilityRangeToView(applyCalcFilter(freshArr, true, freshSelectedPeriod)).slice() : freshArr;
     const freshBaseRows = runningTotalsBaseRows(freshRuntimeRows);
     const freshLedgerVersion = (window.Data && Data.computeLedgerRuntimeVersion) ? String(Data.computeLedgerRuntimeVersion(id) || "") : "";
@@ -3458,7 +3495,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
     const freshPayload = { ledgerVersion: freshLedgerVersion, runtimeSignature: runtimeCacheSignature(freshLedgerVersion, freshPeriodActive, freshSelectedPeriod), periodActive: !!freshPeriodActive, period: freshPeriodActive && freshSelectedPeriod ? { from: freshSelectedPeriod.from || "", to: freshSelectedPeriod.to || "" } : null, rowsById: freshRowsById, updatedAt: (new Date()).toISOString() };
     if (window.Data && typeof Data.writeLedgerRuntimeCache === "function") Data.writeLedgerRuntimeCache(id, freshPayload);
     const summary = summaryResult && summaryResult.summary && typeof summaryResult.summary === "object" ? summaryResult.summary : null;
-    try { console.log("[payment-table][recalc-explicit]", { abonentId: id, stage: "done", ok: !!(summaryResult && summaryResult.ok === true), summary_status: summaryResult && (summaryResult.summary_status || summaryResult.status) || "error" }); } catch(eLogDone) {}
+    try { console.log("[payment-table][recalc-explicit]", { abonentId: id, stage: "done", recalcMode: recalcMode, ok: !!(summaryResult && summaryResult.ok === true), summary_status: summaryResult && (summaryResult.summary_status || summaryResult.status) || "error" }); } catch(eLogDone) {}
     return {
       ok:!!(summaryResult && summaryResult.ok === true),
       reason: summaryResult && (summaryResult.summary_reason || summaryResult.reason) || "",
