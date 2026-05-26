@@ -3121,6 +3121,34 @@ function __normalizeSummaryStatus(status){
 
 let __lastRenderedSummaryStatusLocal = "missing";
 let __lastRenderedSummaryReasonLocal = "";
+let __runtimeCacheFreshBlocked = false;
+let __lastRuntimeCacheValidation = { valid: false, reason: "RUNTIME_CACHE_NOT_VALIDATED" };
+
+function __summaryTotalsAreFinite(summary){
+    const s = summary && typeof summary === "object" ? summary : null;
+    const t = s && s.totals && typeof s.totals === "object" ? s.totals : null;
+    if (!s && !t) return false;
+    function finite(v){
+        const n = Number(v);
+        return Number.isFinite(n);
+    }
+    const candidates = [
+        t && (t.total != null ? t.total : t.total_debt),
+        t && (t.principal != null ? t.principal : t.total_principal),
+        t && (t.penalty != null ? t.penalty : t.total_penalty),
+        s && (s.total_debt != null ? s.total_debt : s.total),
+        s && (s.total_principal != null ? s.total_principal : s.principal),
+        s && (s.total_penalty != null ? s.total_penalty : s.penalty)
+    ];
+    return candidates.some(finite);
+}
+
+function __freshSummaryVisibleGuard(){
+    if (__runtimeCacheFreshBlocked) return { ok: false, reason: __lastRuntimeCacheValidation.reason || "RUNTIME_CACHE_INVALID" };
+    if (!__lastRuntimeCacheValidation.valid) return { ok: false, reason: __lastRuntimeCacheValidation.reason || "RUNTIME_CACHE_NOT_VALIDATED" };
+    if (!__summaryTotalsAreFinite(window.__lastCardSummaryForDebug)) return { ok: false, reason: "SUMMARY_TOTALS_MISSING" };
+    return { ok: true, reason: "" };
+}
 
 function __summaryStatusText(status){
     if (status === "calculating") return "🔵 Выполняется пересчёт";
@@ -3140,9 +3168,18 @@ function __summaryWarningText(status){
 }
 
 function renderAbonentSummaryStatus(status, reason){
-    const normalized = __normalizeSummaryStatus(status);
+    let normalized = __normalizeSummaryStatus(status);
+    let visibleReason = String(reason || "");
+    if (normalized === "fresh") {
+        const guard = __freshSummaryVisibleGuard();
+        if (!guard.ok) {
+            try { console.warn("[summary][fresh-blocked-runtime-cache]", { requestedStatus: "fresh", reason: guard.reason }); } catch(eGuardLog) {}
+            normalized = "dirty";
+            visibleReason = guard.reason === "RUNTIME_CACHE_PERIOD_MISMATCH" ? "Требуется пересчёт таблицы для выбранного периода" : guard.reason;
+        }
+    }
     __lastRenderedSummaryStatusLocal = normalized;
-    __lastRenderedSummaryReasonLocal = String(reason || "");
+    __lastRenderedSummaryReasonLocal = visibleReason;
     const badge = document.getElementById("summaryStatusBadge");
     const reasonEl = document.getElementById("summaryStatusReason");
     const warningEl = document.getElementById("summaryStatusWarning");
@@ -3152,7 +3189,7 @@ function renderAbonentSummaryStatus(status, reason){
         badge.textContent = __summaryStatusText(normalized);
     }
     if (reasonEl) {
-        const r = String(reason || "").trim();
+        const r = String(visibleReason || "").trim();
         reasonEl.textContent = r ? ("Причина: " + r) : "";
     }
     if (warningEl) {
@@ -3164,12 +3201,12 @@ function renderAbonentSummaryStatus(status, reason){
     const runBtn = document.getElementById("calcRunBtn");
     if (runBtn) runBtn.disabled = normalized === "calculating";
     try {
-        console.log("[summary][visible-status]", { status: normalized, reason: String(reason || "") });
-        console.log("[summary][status-set]", { status: normalized, reason: String(reason || "") });
-        if (normalized === "dirty") console.log("[summary][dirty]", { reason: String(reason || "") });
-        if (normalized === "calculating") console.log("[summary][calculating]", { reason: String(reason || "") });
-        if (normalized === "fresh") console.log("[summary][fresh]", { reason: String(reason || "") });
-        if (normalized === "error") console.log("[summary][error]", { reason: String(reason || "") });
+        console.log("[summary][visible-status]", { status: normalized, reason: visibleReason });
+        console.log("[summary][status-set]", { status: normalized, reason: visibleReason });
+        if (normalized === "dirty") console.log("[summary][dirty]", { reason: visibleReason });
+        if (normalized === "calculating") console.log("[summary][calculating]", { reason: visibleReason });
+        if (normalized === "fresh") console.log("[summary][fresh]", { reason: visibleReason });
+        if (normalized === "error") console.log("[summary][error]", { reason: visibleReason });
     } catch(eStatusLog) {}
 }
 
@@ -3178,9 +3215,21 @@ window.JKHSetSummaryStatus = renderAbonentSummaryStatus;
 window.addEventListener("jkh:runtime-cache-invalid", function(event){
     const detail = event && event.detail ? event.detail : {};
     const reason = String(detail.reason || "RUNTIME_CACHE_INVALID");
+    __runtimeCacheFreshBlocked = true;
+    __lastRuntimeCacheValidation = { valid: false, reason: reason, detail: detail };
     try { console.warn("[summary][runtime-cache-downgrade]", detail); } catch(eLog) {}
     if (__lastRenderedSummaryStatusLocal === "fresh") {
         renderAbonentSummaryStatus("dirty", reason === "RUNTIME_CACHE_PERIOD_MISMATCH" ? "Требуется пересчёт таблицы для выбранного периода" : reason);
+    }
+});
+
+window.addEventListener("jkh:runtime-cache-valid", function(event){
+    const detail = event && event.detail ? event.detail : {};
+    __runtimeCacheFreshBlocked = false;
+    __lastRuntimeCacheValidation = { valid: true, reason: "", detail: detail };
+    const summary = window.__lastCardSummaryForDebug && typeof window.__lastCardSummaryForDebug === "object" ? window.__lastCardSummaryForDebug : null;
+    if (__normalizeSummaryStatus(summary && (summary.summary_status || summary.status)) === "fresh" && __lastRenderedSummaryStatusLocal !== "fresh") {
+        renderAbonentSummaryStatus("fresh", summary.summary_reason || summary.reason || "");
     }
 });
 
@@ -3225,6 +3274,7 @@ function __summaryCalcErrorCode(e){
 function __renderAbonentTotalsFromFreshSummary(summary){
     const status = __normalizeSummaryStatus(summary && (summary.summary_status || summary.status));
     if (status !== "fresh") return;
+    if (!__freshSummaryVisibleGuard().ok) return;
     const totals = summary && summary.totals && typeof summary.totals === "object" ? summary.totals : null;
     if (!totals) return;
 
@@ -3253,6 +3303,7 @@ async function __saveAbonentSummaryAfterUidRecalc(abonentId, from, to){
     }
     const result = await Data.recalculateAbonentCard(abonentId, { period: { from: from, to: to }, saveSummary: false, summaryScope: "period", periodActive: true });
     const summary = result && result.summary && typeof result.summary === "object" ? result.summary : null;
+    window.__lastCardSummaryForDebug = summary || null;
     const status = result && (result.summary_status || result.status) || summary && (summary.summary_status || summary.status) || "error";
     const reason = result && (result.summary_reason || result.reason) || summary && (summary.summary_reason || summary.reason) || "SUMMARY_SAVE_FAILED";
     renderAbonentSummaryStatus(status, reason);
@@ -3433,6 +3484,7 @@ function bindCalcButtons(){
                     return;
                 }
                 const summary = recalcResult && recalcResult.summary && typeof recalcResult.summary === "object" ? recalcResult.summary : null;
+                window.__lastCardSummaryForDebug = summary || null;
                 const summaryStatus = recalcResult && (recalcResult.summary_status || recalcResult.status) || summary && (summary.summary_status || summary.status) || "";
                 const summaryReason = recalcResult && (recalcResult.summary_reason || recalcResult.reason) || summary && (summary.summary_reason || summary.reason) || "";
                 if (summaryStatus) renderAbonentSummaryStatus(summaryStatus, summaryReason);
