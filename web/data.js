@@ -806,8 +806,16 @@
     var src = snapshot && typeof snapshot === "object" ? snapshot : {};
     var rows = Array.isArray(src.rows) ? deepClone(src.rows) : [];
     var totals = src.totals && typeof src.totals === "object" && !Array.isArray(src.totals) ? deepClone(src.totals) : {};
+    var sourcePeriodActive = src.sourcePeriodActive === true || src.periodActive === true;
+    var sourcePeriod = sourcePeriodActive && src.sourcePeriod && typeof src.sourcePeriod === "object"
+      ? { from: String(src.sourcePeriod.from || ""), to: String(src.sourcePeriod.to || "") }
+      : (sourcePeriodActive && src.period && typeof src.period === "object" ? { from: String(src.period.from || ""), to: String(src.period.to || "") } : null);
+    var snapshotMode = String(src.snapshotMode || "").trim().toLowerCase();
+    if (snapshotMode !== "full" && snapshotMode !== "period") snapshotMode = "";
     return {
       snapshotVersion: Number(src.snapshotVersion || 1),
+      snapshotMode: snapshotMode,
+      validationScope: String(src.validationScope || snapshotMode || "legacy"),
       uid: uid,
       abonentId: String(src.abonentId || abonentId || ""),
       computedAt: String(src.computedAt || (new Date()).toISOString()),
@@ -816,8 +824,10 @@
       totals: totals,
       summary_status: String(src.summary_status || src.status || "missing"),
       summary_reason: String(src.summary_reason || src.reason || ""),
-      periodActive: src.periodActive === true,
-      period: src.period && typeof src.period === "object" ? { from: String(src.period.from || ""), to: String(src.period.to || "") } : null,
+      periodActive: sourcePeriodActive,
+      period: sourcePeriod,
+      sourcePeriodActive: sourcePeriodActive,
+      sourcePeriod: sourcePeriod,
       runtimeSignature: String(src.runtimeSignature || ""),
       rowsById: src.rowsById && typeof src.rowsById === "object" && !Array.isArray(src.rowsById) ? deepClone(src.rowsById) : _cardSnapshotRowsById(rows),
       dirty: src.dirty === true,
@@ -1128,8 +1138,15 @@
       return null;
     }
     var totals = summary && summary.totals && typeof summary.totals === "object" ? deepClone(summary.totals) : {};
+    var snapshotPeriodActive = runtimeCache.periodActive === true;
+    var snapshotPeriod = snapshotPeriodActive && runtimeCache.period && typeof runtimeCache.period === "object"
+      ? { from: String(runtimeCache.period.from || ""), to: String(runtimeCache.period.to || "") }
+      : null;
+    var snapshotMode = snapshotPeriodActive ? "period" : "full";
     return _normalizeCardSnapshot(abonent || uid, {
       snapshotVersion: 1,
+      snapshotMode: snapshotMode,
+      validationScope: snapshotMode,
       uid: uid,
       abonentId: abonentId,
       computedAt: (new Date()).toISOString(),
@@ -1139,8 +1156,10 @@
       totals: totals,
       summary_status: result && (result.summary_status || result.status) || summary && (summary.summary_status || summary.status) || "missing",
       summary_reason: result && (result.summary_reason || result.reason) || summary && (summary.summary_reason || summary.reason) || "",
-      periodActive: runtimeCache.periodActive === true,
-      period: runtimeCache.period && typeof runtimeCache.period === "object" ? runtimeCache.period : null,
+      periodActive: snapshotPeriodActive,
+      period: snapshotPeriod,
+      sourcePeriodActive: snapshotPeriodActive,
+      sourcePeriod: snapshotPeriod,
       runtimeSignature: String(runtimeCache.runtimeSignature || "")
     });
   }

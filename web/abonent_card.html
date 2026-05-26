@@ -3218,7 +3218,8 @@ function renderAbonentSummaryStatus(status, reason){
         reasonEl.textContent = r ? ("Причина: " + r) : "";
     }
     if (warningEl) {
-        const text = visibleReason === "CARD_ROWS_NOT_RESTORED"
+        const modeMismatchReason = visibleReason === "CARD_SNAPSHOT_MODE_MISMATCH_FULL_VS_PERIOD" || visibleReason === "CARD_SNAPSHOT_PERIOD_MISMATCH" || visibleReason === "CARD_SNAPSHOT_LEGACY_MODE_AMBIGUOUS";
+        const text = modeMismatchReason ? "Сохранённый snapshot не соответствует текущему режиму расчёта. Нажмите «Пересчитать» для этого режима." : visibleReason === "CARD_ROWS_NOT_RESTORED"
             ? "Итоги есть, но строки карточки не восстановлены. Нажмите «Пересчитать»."
             : __summaryWarningText(normalized);
         warningEl.textContent = text;

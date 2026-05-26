@@ -212,6 +212,15 @@
         }, extra || {}));
       } catch(eFailLog) {}
       try {
+        console.warn("[card-snapshot][validation-failed]", Object.assign({
+          reason: out.reason,
+          snapshotMode: snapshotForDiagnostics ? String(snapshotForDiagnostics.snapshotMode || "legacy") : "",
+          currentPeriodActive: !!periodActive,
+          currentPeriod: periodActive && selectedPeriod ? { from: String(selectedPeriod.from || ""), to: String(selectedPeriod.to || "") } : null,
+          snapshotPeriod: snapshotForDiagnostics && snapshotForDiagnostics.period && typeof snapshotForDiagnostics.period === "object" ? snapshotForDiagnostics.period : null
+        }, extra || {}));
+      } catch(eValidationFailLog) {}
+      try {
         window.dispatchEvent(new CustomEvent("jkh:card-snapshot-invalid", { detail: Object.assign({ reason: out.reason }, extra || {}) }));
       } catch(eEvent) {}
       return out;
@@ -221,19 +230,45 @@
     const snapshot = Data.readCardSnapshot(id);
     snapshotForDiagnostics = snapshot;
     if (!snapshot) return dispatchInvalid("CARD_SNAPSHOT_MISSING");
+    const snapshotModeRaw = String(snapshot.snapshotMode || "").trim().toLowerCase();
+    const snapshotMode = snapshotModeRaw === "full" || snapshotModeRaw === "period" ? snapshotModeRaw : "legacy";
+    const snapshotPeriod = snapshot.period && typeof snapshot.period === "object" ? { from: String(snapshot.period.from || ""), to: String(snapshot.period.to || "") } : null;
+    const currentPeriod = periodActive && selectedPeriod ? { from: String(selectedPeriod.from || ""), to: String(selectedPeriod.to || "") } : null;
+    try {
+      console.log("[card-snapshot][contract]", {
+        snapshotMode: snapshotMode,
+        snapshotPeriodActive: snapshot.periodActive === true,
+        snapshotPeriod: snapshotPeriod,
+        currentPeriodActive: !!periodActive,
+        currentPeriod: currentPeriod,
+        ledgerVersion: expectedLedgerVersion,
+        snapshotLedgerVersion: String(snapshot.ledgerVersion || "")
+      });
+    } catch(eContractLog) {}
     if (snapshot.dirty === true) {
       return dispatchInvalid(snapshot.dirtyReason || "CARD_SNAPSHOT_DIRTY");
     }
     if (String(snapshot.ledgerVersion || "") !== String(expectedLedgerVersion || "")) {
       return dispatchInvalid("CARD_SNAPSHOT_STALE", { snapshotLedgerVersion: String(snapshot.ledgerVersion || "") });
     }
-    if (!!snapshot.periodActive !== !!periodActive) {
-      return dispatchInvalid("CARD_SNAPSHOT_PERIOD_MISMATCH");
+    if (snapshotMode === "full" && periodActive) {
+      return dispatchInvalid("CARD_SNAPSHOT_MODE_MISMATCH_FULL_VS_PERIOD", { snapshotMode: snapshotMode, currentPeriodActive: !!periodActive, currentPeriod: currentPeriod, snapshotPeriod: snapshotPeriod });
+    }
+    if (snapshotMode === "period" && !periodActive) {
+      return dispatchInvalid("CARD_SNAPSHOT_PERIOD_MISMATCH", { snapshotMode: snapshotMode, currentPeriodActive: !!periodActive, currentPeriod: currentPeriod, snapshotPeriod: snapshotPeriod });
+    }
+    if (snapshotMode === "legacy" && periodActive) {
+      return dispatchInvalid("CARD_SNAPSHOT_LEGACY_MODE_AMBIGUOUS", { snapshotMode: snapshotMode, currentPeriodActive: !!periodActive, currentPeriod: currentPeriod, snapshotPeriod: snapshotPeriod });
+    }
+    if (snapshotMode === "period" && snapshot.periodActive !== true) {
+      return dispatchInvalid("CARD_SNAPSHOT_PERIOD_MISMATCH", { snapshotMode: snapshotMode, currentPeriodActive: !!periodActive, currentPeriod: currentPeriod, snapshotPeriod: snapshotPeriod });
+    }
+    if (snapshotMode === "full" && snapshot.periodActive === true) {
+      return dispatchInvalid("CARD_SNAPSHOT_MODE_MISMATCH_FULL_VS_PERIOD", { snapshotMode: snapshotMode, currentPeriodActive: !!periodActive, currentPeriod: currentPeriod, snapshotPeriod: snapshotPeriod });
     }
     const expectedPeriod = periodActive && selectedPeriod ? selectedPeriod : null;
-    const snapshotPeriod = snapshot.period && typeof snapshot.period === "object" ? snapshot.period : null;
-    if (periodActive && (!snapshotPeriod || String(snapshotPeriod.from || "") !== String(expectedPeriod && expectedPeriod.from || "") || String(snapshotPeriod.to || "") !== String(expectedPeriod && expectedPeriod.to || ""))) {
-      return dispatchInvalid("CARD_SNAPSHOT_PERIOD_MISMATCH");
+    if (snapshotMode === "period" && (!snapshotPeriod || String(snapshotPeriod.from || "") !== String(expectedPeriod && expectedPeriod.from || "") || String(snapshotPeriod.to || "") !== String(expectedPeriod && expectedPeriod.to || ""))) {
+      return dispatchInvalid("CARD_SNAPSHOT_PERIOD_MISMATCH", { snapshotMode: snapshotMode, currentPeriodActive: !!periodActive, currentPeriod: currentPeriod, snapshotPeriod: snapshotPeriod });
     }
     if (expectedSignature && snapshot.runtimeSignature && String(snapshot.runtimeSignature) !== String(expectedSignature)) {
       return dispatchInvalid("CARD_SNAPSHOT_STALE", { reasonDetail: "CARD_SNAPSHOT_SIGNATURE_MISMATCH" });
@@ -282,6 +317,7 @@
         rowsByIdCount: Object.keys(map).length
       });
     } catch(eLog) {}
+    try { console.log("[card-snapshot][validation-ok]", { snapshotMode: snapshotMode, rowsByIdCount: Object.keys(map).length }); } catch(eValidationOkLog) {}
     try {
       window.dispatchEvent(new CustomEvent("jkh:card-snapshot-valid", {
         detail: {
