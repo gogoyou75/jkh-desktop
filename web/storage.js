@@ -1088,6 +1088,28 @@
 
     var pref = window.JKHStore.scopePrefixFor(ownerId) || "";
     var scoped = window.JKHStore.keysForOwner(ownerId) || [];
+    function _cardSnapshotBaseKeysFromScoped(keys) {
+      var out = [];
+      for (var ci = 0; ci < (keys || []).length; ci++) {
+        var csk = String(keys[ci] || "");
+        if (!csk) continue;
+        var cbase = csk.indexOf(pref) === 0 ? csk.slice(pref.length) : csk;
+        if (cbase.indexOf("card_snapshot_") === 0) out.push(cbase);
+      }
+      return out;
+    }
+    var dumpCardSnapshotKeys = [];
+    for (i = 0; i < dumpKeys.length; i++) {
+      if (String(dumpKeys[i] || "").indexOf("card_snapshot_") === 0) dumpCardSnapshotKeys.push(dumpKeys[i]);
+    }
+    try {
+      console.log("[store-dump][card-snapshot-dump-check]", {
+        ownerId: ownerId,
+        dumpHasCardSnapshots: dumpCardSnapshotKeys.length > 0,
+        dumpCardSnapshotKeys: dumpCardSnapshotKeys,
+        localCardSnapshotKeysBefore: _cardSnapshotBaseKeysFromScoped(scoped)
+      });
+    } catch (eDumpCheck) {}
     var removed = 0;
     for (i = 0; i < scoped.length; i++) {
       var sk = String(scoped[i] || "");
@@ -1109,6 +1131,12 @@
         removed++;
       } catch (eRem) {}
     }
+    try {
+      console.log("[store-dump][card-snapshot-local-after]", {
+        ownerId: ownerId,
+        localCardSnapshotKeysAfter: _cardSnapshotBaseKeysFromScoped(window.JKHStore.keysForOwner(ownerId) || [])
+      });
+    } catch (eAfter) {}
 
     var written = 0;
     var invalidAbonentsDb = false;

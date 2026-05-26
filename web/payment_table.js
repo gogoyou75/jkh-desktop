@@ -200,6 +200,7 @@
           reason: out.reason,
           rowsByIdCount: Object.keys(snapshotRowsById).length,
           visibleFinancialRowsCount: visibleFinancialRowsCount,
+          missingRowsCount: 0,
           snapshotLedgerVersion: snapshotForDiagnostics ? String(snapshotForDiagnostics.ledgerVersion || "") : "",
           expectedLedgerVersion: expectedLedgerVersion,
           runtimeSignature: snapshotForDiagnostics ? String(snapshotForDiagnostics.runtimeSignature || "") : "",

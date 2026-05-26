@@ -3278,12 +3278,24 @@ window.addEventListener("jkh:card-snapshot-valid", function(event){
     }
 });
 
+function __debugCurrentCardSnapshotLifecycle(reason){
+    try {
+        if (!window.Data || typeof Data.debugCardSnapshotLifecycle !== "function") return;
+        const id = getAbonentIdFromURL();
+        const p = Data.debugCardSnapshotLifecycle(id);
+        if (p && typeof p.catch === "function") p.catch(function(e){ try { console.warn("[card-snapshot][debug-lifecycle-failed]", { reason: reason || "", error: String(e && e.message || e) }); } catch (_) {} });
+    } catch(e) {
+        try { console.warn("[card-snapshot][debug-lifecycle-failed]", { reason: reason || "", error: String(e && e.message || e) }); } catch (_) {}
+    }
+}
+
 window.addEventListener("jkh:card-snapshot-invalid", function(event){
     const detail = event && event.detail ? event.detail : {};
     const reason = String(detail.reason || "CARD_ROWS_NOT_RESTORED");
     __cardSnapshotFreshValidated = false;
     __lastCardSnapshotValidation = { valid: false, reason: reason, detail: detail };
     try { console.warn("[summary][card-snapshot-invalid]", detail); } catch(eLog) {}
+    __debugCurrentCardSnapshotLifecycle(reason);
     if (__lastRenderedSummaryStatusLocal === "fresh" || __normalizeSummaryStatus(window.__lastCardSummaryForDebug && window.__lastCardSummaryForDebug.summary_status) === "fresh") {
         renderAbonentSummaryStatus("dirty", reason);
     }
@@ -3314,11 +3326,13 @@ async function loadAbonentSummaryStatus(){
     try {
         const snapshot = Data.readCardSnapshot(uid);
         if (!snapshot) {
+            __debugCurrentCardSnapshotLifecycle("CARD_SNAPSHOT_MISSING");
             window.__lastCardSummaryForDebug = null;
             renderAbonentSummaryStatus("missing", "Требуется пересчёт");
             return;
         }
         if (snapshot.dirty === true) {
+            __debugCurrentCardSnapshotLifecycle(snapshot.dirtyReason || "CARD_SNAPSHOT_DIRTY");
             __cardSnapshotFreshValidated = false;
             __lastCardSnapshotValidation = { valid: false, reason: snapshot.dirtyReason || "CARD_SNAPSHOT_DIRTY" };
             window.__lastCardSummaryForDebug = null;
@@ -3326,6 +3340,7 @@ async function loadAbonentSummaryStatus(){
             return;
         }
         if (!__isFreshCardSnapshotUsable(uid, snapshot)) {
+            __debugCurrentCardSnapshotLifecycle("CARD_ROWS_NOT_RESTORED");
             window.__lastCardSummaryForDebug = null;
             __cardSnapshotFreshValidated = false;
             __lastCardSnapshotValidation = { valid: false, reason: "CARD_ROWS_NOT_RESTORED" };
@@ -3597,6 +3612,11 @@ function bindCalcButtons(){
                     if (snapshotSaveResult.serverOk !== true) {
                         renderAbonentSummaryStatus("error", "CARD_SNAPSHOT_SERVER_SAVE_FAILED");
                         alert("Snapshot карточки не сохранён на сервер. Итог не будет отмечен fresh.");
+                        return;
+                    }
+                    if (snapshotSaveResult.serverReadbackOk !== true) {
+                        renderAbonentSummaryStatus("error", "CARD_SNAPSHOT_SERVER_READBACK_FAILED");
+                        alert("Snapshot карточки не подтверждён сервером. Итог не будет отмечен fresh.");
                         return;
                     }
                     __cardSnapshotFreshValidated = true;

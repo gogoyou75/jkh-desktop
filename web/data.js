@@ -850,6 +850,27 @@
     }
   }
 
+  function _parseCardSnapshotRawForDiagnostics(raw) {
+    var out = { ok: false, rowsByIdCount: 0, ledgerVersion: "", snapshot: null, reason: "" };
+    try {
+      if (raw === null || raw === undefined || String(raw) === "") {
+        out.reason = "SNAPSHOT_RAW_EMPTY";
+        return out;
+      }
+      var parsed = JSON.parse(String(raw));
+      var rowsById = parsed && parsed.rowsById && typeof parsed.rowsById === "object" && !Array.isArray(parsed.rowsById) ? parsed.rowsById : {};
+      out.rowsByIdCount = Object.keys(rowsById).length;
+      out.ledgerVersion = String(parsed && parsed.ledgerVersion || "");
+      out.snapshot = parsed;
+      out.ok = out.rowsByIdCount > 0;
+      out.reason = out.ok ? "" : "ROWS_BY_ID_EMPTY";
+      return out;
+    } catch (e) {
+      out.reason = "SNAPSHOT_JSON_INVALID";
+      return out;
+    }
+  }
+
   function _prepareCardSnapshotForSave(abonentOrId, snapshot) {
     var key = resolveCardSnapshotKey(abonentOrId);
     if (!key) return { ok: false, key: "", ownerId: "", reason: "SNAPSHOT_KEY_REQUIRED" };
@@ -894,7 +915,7 @@
   }
 
   async function saveCardSnapshotAndWait(abonentOrId, snapshot) {
-    var result = { ok: false, localOk: false, serverOk: false, key: "", ownerId: "", status: 0, reason: "" };
+    var result = { ok: false, localOk: false, serverOk: false, serverReadbackOk: false, key: "", ownerId: "", status: 0, reason: "", rowsByIdCount: 0, ledgerVersion: "" };
     try {
       if (!Data.ensureWriteOrExplain()) {
         result.reason = "WRITE_BLOCKED";
@@ -913,6 +934,8 @@
       var ownerId = prepared.ownerId;
       var normalized = prepared.normalized;
       var serialized = prepared.serialized;
+      result.rowsByIdCount = _cardSnapshotRowsByIdCount(normalized.rowsById);
+      result.ledgerVersion = String(normalized.ledgerVersion || "");
       var localOk = _setProjectRaw(key, serialized);
       result.localOk = localOk !== false;
       try { console.log("[card-snapshot][save]", { key: key, ok: result.localOk, rows: normalized.rows.length, ledgerVersion: normalized.ledgerVersion }); } catch (eSaveLog) {}
@@ -939,6 +962,28 @@
       result.ok = true;
       result.reason = "";
       try { console.log("[card-snapshot][server-save-ok]", { ownerId: ownerId, key: key, status: result.status }); } catch (eServerOkLog) {}
+      var readback = await _serverStoreGet(ownerId, key);
+      var readbackParsed = _parseCardSnapshotRawForDiagnostics(readback && readback.raw);
+      result.serverReadbackOk = !!(readback && readback.ok === true && readbackParsed.ok === true && readbackParsed.ledgerVersion === result.ledgerVersion);
+      if (!result.serverReadbackOk) {
+        result.ok = false;
+        result.reason = "CARD_SNAPSHOT_SERVER_READBACK_FAILED";
+        try {
+          console.warn("[card-snapshot][server-readback-failed]", {
+            ownerId: ownerId,
+            key: key,
+            status: readback && readback.status,
+            readbackOk: !!(readback && readback.ok === true),
+            parseReason: readbackParsed.reason,
+            rowsByIdCount: readbackParsed.rowsByIdCount,
+            readbackLedgerVersion: readbackParsed.ledgerVersion,
+            ledgerVersion: result.ledgerVersion
+          });
+        } catch (eReadbackFailLog) {}
+        try { console.warn("[card-snapshot][save-and-wait-failed]", result); } catch (eReadbackWaitLog) {}
+        return result;
+      }
+      try { console.log("[card-snapshot][server-readback-ok]", { ownerId: ownerId, key: key, status: readback && readback.status, rowsByIdCount: readbackParsed.rowsByIdCount, ledgerVersion: readbackParsed.ledgerVersion }); } catch (eReadbackOkLog) {}
       try { console.log("[card-snapshot][save-and-wait-ok]", result); } catch (eWaitOkLog) {}
       return result;
     } catch (e) {
@@ -947,6 +992,55 @@
       try { console.warn("[card-snapshot][save-and-wait-failed]", result); } catch (eCatchWaitLog) {}
       return result;
     }
+  }
+
+  async function debugCardSnapshotLifecycle(abonentOrId) {
+    var found = _findAbonentByIdOrUid(abonentOrId);
+    var abonent = found && found.abonent ? found.abonent : null;
+    var abonentId = String(found && found.id || (abonent && abonent.id) || (typeof abonentOrId === "object" ? abonentOrId && abonentOrId.id : abonentOrId) || "").trim();
+    var uid = String(abonent && abonent.uid || (typeof abonentOrId === "object" ? abonentOrId && abonentOrId.uid : abonentOrId) || "").trim();
+    var ownerId = String(_ownerId() || "").trim();
+    var key = resolveCardSnapshotKey(abonent || abonentOrId);
+    var currentLedgerVersion = computeLedgerRuntimeVersion(abonent || abonentOrId);
+    var localRaw = key ? _getProjectRaw(key) : null;
+    var localParsed = _parseCardSnapshotRawForDiagnostics(localRaw);
+    var serverReadback = null;
+    var serverParsed = { ok: false, rowsByIdCount: 0, ledgerVersion: "", reason: "SERVER_READBACK_SKIPPED" };
+    var serverReadbackOk = false;
+    try {
+      if (ownerId && ownerId !== "guest" && ownerId !== "ALL" && key) {
+        serverReadback = await _serverStoreGet(ownerId, key);
+        serverParsed = _parseCardSnapshotRawForDiagnostics(serverReadback && serverReadback.raw);
+        serverReadbackOk = !!(serverReadback && serverReadback.ok === true && serverParsed.ok === true);
+      }
+    } catch (eServer) {
+      serverParsed.reason = String(eServer && eServer.message || eServer || "SERVER_READBACK_FAILED");
+    }
+    var out = {
+      ownerId: ownerId,
+      abonentId: abonentId,
+      uid: uid,
+      key: key,
+      localExists: localRaw !== null && localRaw !== undefined && String(localRaw) !== "",
+      localRowsByIdCount: localParsed.rowsByIdCount,
+      localLedgerVersion: localParsed.ledgerVersion,
+      currentLedgerVersion: currentLedgerVersion,
+      dirtyByLedgerVersion: !!(localParsed.ledgerVersion && currentLedgerVersion && localParsed.ledgerVersion !== currentLedgerVersion),
+      serverReadbackOk: serverReadbackOk,
+      serverRowsByIdCount: serverParsed.rowsByIdCount,
+      serverLedgerVersion: serverParsed.ledgerVersion,
+      serverMatchesLocal: !!(localParsed.ledgerVersion && serverParsed.ledgerVersion && localParsed.ledgerVersion === serverParsed.ledgerVersion && localParsed.rowsByIdCount === serverParsed.rowsByIdCount),
+      reason: ""
+    };
+    if (!out.key) out.reason = "SNAPSHOT_KEY_REQUIRED";
+    else if (!out.localExists) out.reason = "SNAPSHOT_MISSING_LOCAL";
+    else if (!localParsed.ok) out.reason = localParsed.reason || "LOCAL_SNAPSHOT_INVALID";
+    else if (out.dirtyByLedgerVersion) out.reason = "LEDGER_VERSION_CHANGED";
+    else if (!serverReadbackOk) out.reason = serverParsed.reason || "SNAPSHOT_MISSING_SERVER";
+    else if (!out.serverMatchesLocal) out.reason = "SERVER_LOCAL_MISMATCH";
+    else out.reason = "OK";
+    try { console.log("[card-snapshot][debug-lifecycle]", out); } catch (eLog) {}
+    return out;
   }
 
   function invalidateCardSnapshot(abonentOrId, reason) {
@@ -1319,6 +1413,7 @@
       }, opts.event || {}));
     }
     if (ok !== false) {
+      try { console.warn("[ledger][write-invalidates-card-snapshot]", { abonentId: id, uid: uid, eventType: opts.eventType || "LEDGER_WRITE", summaryDirtyReason: opts.summaryDirtyReason, source: opts.source || "" }); } catch (eInvLog) {}
       invalidateLedgerRuntimeCache(abonentOrId);
       invalidateCardSnapshot(abonentOrId, opts.summaryDirtyReason || "LEDGER_WRITE");
       if (opts.summaryDirtyReason !== false) {
@@ -3641,6 +3736,7 @@
     readCardSnapshot: readCardSnapshot,
     saveCardSnapshot: saveCardSnapshot,
     saveCardSnapshotAndWait: saveCardSnapshotAndWait,
+    debugCardSnapshotLifecycle: debugCardSnapshotLifecycle,
     invalidateCardSnapshot: invalidateCardSnapshot,
     buildCardSnapshotFromCurrentResult: buildCardSnapshotFromCurrentResult,
     readLedgerRuntimeCache: readLedgerRuntimeCache,
