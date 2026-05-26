@@ -3119,6 +3119,9 @@ function __normalizeSummaryStatus(status){
     return (s === "fresh" || s === "dirty" || s === "missing" || s === "error" || s === "calculating") ? s : "error";
 }
 
+let __lastRenderedSummaryStatusLocal = "missing";
+let __lastRenderedSummaryReasonLocal = "";
+
 function __summaryStatusText(status){
     if (status === "calculating") return "🔵 Выполняется пересчёт";
     if (status === "fresh") return "🟢 Актуально";
@@ -3138,8 +3141,8 @@ function __summaryWarningText(status){
 
 function renderAbonentSummaryStatus(status, reason){
     const normalized = __normalizeSummaryStatus(status);
-    window.__lastRenderedSummaryStatus = normalized;
-    window.__lastRenderedSummaryReason = String(reason || "");
+    __lastRenderedSummaryStatusLocal = normalized;
+    __lastRenderedSummaryReasonLocal = String(reason || "");
     const badge = document.getElementById("summaryStatusBadge");
     const reasonEl = document.getElementById("summaryStatusReason");
     const warningEl = document.getElementById("summaryStatusWarning");
@@ -3171,6 +3174,15 @@ function renderAbonentSummaryStatus(status, reason){
 }
 
 window.JKHSetSummaryStatus = renderAbonentSummaryStatus;
+
+window.addEventListener("jkh:runtime-cache-invalid", function(event){
+    const detail = event && event.detail ? event.detail : {};
+    const reason = String(detail.reason || "RUNTIME_CACHE_INVALID");
+    try { console.warn("[summary][runtime-cache-downgrade]", detail); } catch(eLog) {}
+    if (__lastRenderedSummaryStatusLocal === "fresh") {
+        renderAbonentSummaryStatus("dirty", reason === "RUNTIME_CACHE_PERIOD_MISMATCH" ? "Требуется пересчёт таблицы для выбранного периода" : reason);
+    }
+});
 
 async function loadAbonentSummaryStatus(){
     const { id, a } = getCurrentAbonent();

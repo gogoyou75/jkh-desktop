@@ -753,7 +753,7 @@
     return computeLedgerRuntimeVersion(abonentOrId);
   }
 
-  function readLedgerRuntimeCache(abonentOrId) {
+  function readLedgerRuntimeCache(abonentOrId, options) {
     var key = resolveRuntimeCacheKey(abonentOrId);
     var version = computeLedgerRuntimeVersion(abonentOrId);
     if (!key) {
@@ -767,7 +767,7 @@
     }
     try {
       var parsed = JSON.parse(String(raw));
-      var valid = isLedgerRuntimeCacheValid(abonentOrId, parsed);
+      var valid = isLedgerRuntimeCacheValid(abonentOrId, parsed, options || {});
       try { console.log("[runtime-cache][read]", { key: key, valid: !!valid.valid, reason: valid.reason || "", ledgerVersion: version }); } catch (eLog2) {}
       return parsed;
     } catch (e) {
@@ -813,7 +813,64 @@
     return invalidateLedgerRuntimeCache(abonentOrId);
   }
 
-  function isLedgerRuntimeCacheValid(abonentOrId, cache) {
+  function _runtimePeriodDescriptor(periodActive, selectedPeriod) {
+    var active = !!periodActive;
+    var p = selectedPeriod && typeof selectedPeriod === "object" ? selectedPeriod : null;
+    return {
+      active: active,
+      from: active && p ? String(p.from || "") : "",
+      to: active && p ? String(p.to || "") : ""
+    };
+  }
+
+  function _runtimeCacheSignature(ledgerVersion, periodActive, selectedPeriod) {
+    var p = _runtimePeriodDescriptor(periodActive, selectedPeriod);
+    return String(ledgerVersion || "") + "::period:" + (p.active ? "1" : "0") + ":" + p.from + ":" + p.to;
+  }
+
+  function _rowMonthKeyForCacheValidation(row) {
+    var y = parseInt(row && row.year, 10);
+    var m = parseInt(row && row.month, 10);
+    if (!(isFinite(y) && isFinite(m) && y > 0 && m >= 1 && m <= 12)) {
+      var raw = String(row && row.paid_date || "").trim();
+      var d = raw ? new Date(raw) : null;
+      if (d && d.toString() !== "Invalid Date") {
+        y = d.getFullYear();
+        m = d.getMonth() + 1;
+      }
+    }
+    if (!(isFinite(y) && isFinite(m) && y > 0 && m >= 1 && m <= 12)) return "";
+    return String(y).padStart(4, "0") + "-" + String(m).padStart(2, "0");
+  }
+
+  function _isFinancialRowForCacheValidation(row) {
+    if (!row || typeof row !== "object") return false;
+    var accrued = Number(row.accrued || 0);
+    var paid = Number(row.paid || 0);
+    return Math.abs(accrued) > 0.0000001 || Math.abs(paid) > 0.0000001;
+  }
+
+  function getVisibleFinancialRowsForCacheValidation(abonentOrRows, options) {
+    var opts = options || {};
+    var rows = Array.isArray(abonentOrRows) ? abonentOrRows : (Array.isArray(opts.rows) ? opts.rows : readPaymentLedger(abonentOrRows));
+    var periodActive = !!opts.periodActive;
+    var selectedPeriod = opts.selectedPeriod && typeof opts.selectedPeriod === "object" ? opts.selectedPeriod : null;
+    var fromKey = "";
+    var toKey = "";
+    if (periodActive && selectedPeriod) {
+      fromKey = String(selectedPeriod.from || "").slice(0, 7);
+      toKey = String(selectedPeriod.to || "").slice(0, 7);
+    }
+    return (Array.isArray(rows) ? rows : []).filter(function(row) {
+      if (!_isFinancialRowForCacheValidation(row)) return false;
+      if (!periodActive || !selectedPeriod) return true;
+      var key = _rowMonthKeyForCacheValidation(row);
+      return !!(key && key >= fromKey && key <= toKey);
+    });
+  }
+
+  function isLedgerRuntimeCacheValid(abonentOrId, cache, options) {
+    var opts = options || {};
     var key = resolveRuntimeCacheKey(abonentOrId);
     if (!key) return { valid: false, reason: "UID_REQUIRED", ledgerVersion: "" };
     if (!cache || typeof cache !== "object" || Array.isArray(cache)) {
@@ -822,10 +879,50 @@
     var version = computeLedgerRuntimeVersion(abonentOrId);
     var cacheVersion = String(cache.ledgerVersion || cache.ledgerHash || "");
     if (!version || !cacheVersion || cacheVersion !== version) {
-      return { valid: false, reason: "stale", ledgerVersion: version, cacheVersion: cacheVersion };
+      return { valid: false, reason: "RUNTIME_CACHE_STALE", ledgerVersion: version, cacheVersion: cacheVersion };
     }
     if (!cache.rowsById || typeof cache.rowsById !== "object" || Array.isArray(cache.rowsById)) {
-      return { valid: false, reason: "rows_missing", ledgerVersion: version, cacheVersion: cacheVersion };
+      return { valid: false, reason: "RUNTIME_CACHE_ROWS_MISSING", ledgerVersion: version, cacheVersion: cacheVersion };
+    }
+    var rowsById = cache.rowsById;
+    var ids = Object.keys(rowsById);
+    for (var i = 0; i < ids.length; i++) {
+      var item = rowsById[ids[i]];
+      if (!item || typeof item !== "object" || Array.isArray(item)) {
+        return { valid: false, reason: "RUNTIME_CACHE_ROWS_INVALID", ledgerVersion: version, cacheVersion: cacheVersion };
+      }
+    }
+    if (Object.prototype.hasOwnProperty.call(opts, "periodActive")) {
+      var expectedActive = !!opts.periodActive;
+      if (!!cache.periodActive !== expectedActive) {
+        return { valid: false, reason: "RUNTIME_CACHE_PERIOD_MISMATCH", ledgerVersion: version, cacheVersion: cacheVersion };
+      }
+      var expectedPeriod = opts.selectedPeriod && typeof opts.selectedPeriod === "object" ? opts.selectedPeriod : null;
+      var cachePeriod = cache.period && typeof cache.period === "object" ? cache.period : null;
+      var expectedFrom = expectedActive && expectedPeriod ? String(expectedPeriod.from || "") : "";
+      var expectedTo = expectedActive && expectedPeriod ? String(expectedPeriod.to || "") : "";
+      var cacheFrom = cachePeriod ? String(cachePeriod.from || "") : "";
+      var cacheTo = cachePeriod ? String(cachePeriod.to || "") : "";
+      if (expectedActive && (!cachePeriod || cacheFrom !== expectedFrom || cacheTo !== expectedTo)) {
+        return { valid: false, reason: "RUNTIME_CACHE_PERIOD_MISMATCH", ledgerVersion: version, cacheVersion: cacheVersion };
+      }
+      var expectedSignature = String(opts.runtimeSignature || _runtimeCacheSignature(version, expectedActive, expectedPeriod));
+      var cacheSignature = String(cache.runtimeSignature || "");
+      if (!cacheSignature || cacheSignature !== expectedSignature) {
+        return { valid: false, reason: "RUNTIME_CACHE_SIGNATURE_MISMATCH", ledgerVersion: version, cacheVersion: cacheVersion, runtimeSignature: cacheSignature, expectedRuntimeSignature: expectedSignature };
+      }
+    }
+    var visibleRows = Array.isArray(opts.visibleRows)
+      ? opts.visibleRows
+      : getVisibleFinancialRowsForCacheValidation(abonentOrId, { rows: opts.rows, periodActive: !!opts.periodActive, selectedPeriod: opts.selectedPeriod });
+    var missing = [];
+    for (var j = 0; j < visibleRows.length; j++) {
+      var row = visibleRows[j] || {};
+      var id = String(row.id || "").trim();
+      if (id && !rowsById[id]) missing.push(id);
+    }
+    if (missing.length) {
+      return { valid: false, reason: "RUNTIME_CACHE_INCOMPLETE", ledgerVersion: version, cacheVersion: cacheVersion, missingRows: missing.slice(0, 50) };
     }
     return { valid: true, reason: "", ledgerVersion: version, cacheVersion: cacheVersion };
   }
@@ -3231,6 +3328,7 @@
     invalidateLedgerRuntimeCache: invalidateLedgerRuntimeCache,
     invalidateRuntimeCache: invalidateRuntimeCache,
     isLedgerRuntimeCacheValid: isLedgerRuntimeCacheValid,
+    getVisibleFinancialRowsForCacheValidation: getVisibleFinancialRowsForCacheValidation,
     readPaymentLedger: readPaymentLedger,
     loadAbonentSummaryPage: loadAbonentSummaryPage,
     validateAbonentSummaryRecalcBatch: validateAbonentSummaryRecalcBatch,

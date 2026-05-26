@@ -127,21 +127,36 @@
   }
 
   function applyRuntimeCacheToRows(rows, periodActiveOverride, selectedPeriodOverride){
-    const out = { valid: false, reason: "", dataById: {}, periodMatches: false };
+    const out = { valid: false, reason: "", dataById: {}, periodMatches: false, missingRows: [] };
     if (!isReadonlyNoRecalcMode()) return out;
     const id = String(getAbonentId() || "");
     if (!id || !window.Data) { out.reason = "no-abonent"; return out; }
     const periodActive = (typeof periodActiveOverride === "boolean") ? periodActiveOverride : isCalcPeriodActive();
     const selectedPeriod = selectedPeriodOverride || (periodActive ? getCalcPeriod() : null);
     const version = (typeof Data.computeLedgerRuntimeVersion === "function") ? String(Data.computeLedgerRuntimeVersion(id) || "") : "";
-    const cache = (typeof Data.readLedgerRuntimeCache === "function") ? Data.readLedgerRuntimeCache(id) : null;
+    const expectedSignature = runtimeCacheSignature(version, periodActive, selectedPeriod);
+    const validationOptions = {
+      rows: Array.isArray(rows) ? rows : [],
+      visibleRows: Array.isArray(rows) && Data.getVisibleFinancialRowsForCacheValidation
+        ? Data.getVisibleFinancialRowsForCacheValidation(rows, { periodActive: periodActive, selectedPeriod: selectedPeriod })
+        : undefined,
+      periodActive: periodActive,
+      selectedPeriod: selectedPeriod,
+      runtimeSignature: expectedSignature
+    };
+    const cache = (typeof Data.readLedgerRuntimeCache === "function") ? Data.readLedgerRuntimeCache(id, validationOptions) : null;
     const cacheVersion = cache && typeof cache === "object" ? String(cache.ledgerVersion || "") : "";
     const map = cache && cache.rowsById && typeof cache.rowsById === "object" ? cache.rowsById : null;
-    const validity = (typeof Data.isLedgerRuntimeCacheValid === "function") ? Data.isLedgerRuntimeCacheValid(id, cache) : null;
-    if (validity && validity.valid !== true) { out.reason = validity.reason || "stale_or_missing"; return out; }
-    if (!version || !cache || !map || !cacheVersion || cacheVersion !== version) { out.reason = "stale_or_missing"; return out; }
+    const validity = (typeof Data.isLedgerRuntimeCacheValid === "function") ? Data.isLedgerRuntimeCacheValid(id, cache, validationOptions) : null;
+    if (validity && validity.valid !== true) {
+      const rawReason = String(validity.reason || "");
+      out.reason = rawReason === "missing" ? "RUNTIME_CACHE_ROWS_MISSING" : (rawReason || "RUNTIME_CACHE_STALE");
+      out.missingRows = Array.isArray(validity.missingRows) ? validity.missingRows : [];
+      return out;
+    }
+    if (!version || !cache || !map || !cacheVersion || cacheVersion !== version) { out.reason = "RUNTIME_CACHE_STALE"; return out; }
     out.periodMatches = runtimeCachePeriodMatches(cache, version, periodActive, selectedPeriod);
-    if (!out.periodMatches) { out.reason = "period_mismatch"; return out; }
+    if (!out.periodMatches) { out.reason = "RUNTIME_CACHE_PERIOD_MISMATCH"; return out; }
     out.valid = true;
     out.dataById = map;
     applyRuntimeRowsById(rows, map);
@@ -161,22 +176,24 @@
 
   function notifyRuntimeCacheSummaryState(state, periodActive, selectedPeriod){
     const s = state && typeof state === "object" ? state : {};
+    const detail = {
+      valid: !!s.valid,
+      reason: String(s.reason || ""),
+      uid: String(getAbonentId() || ""),
+      ledgerVersion: "",
+      runtimeSignature: "",
+      periodActive: !!periodActive,
+      selectedPeriod: selectedPeriod || null,
+      missingRows: Array.isArray(s.missingRows) ? s.missingRows : []
+    };
     try {
-      window.JKHPaymentRuntimeCacheState = {
-        valid: !!s.valid,
-        reason: String(s.reason || ""),
-        periodMatches: !!s.periodMatches,
-        periodActive: !!periodActive,
-        selectedPeriod: selectedPeriod || null
-      };
+      if (window.Data && typeof Data.computeLedgerRuntimeVersion === "function") {
+        detail.ledgerVersion = String(Data.computeLedgerRuntimeVersion(getAbonentId()) || "");
+        detail.runtimeSignature = runtimeCacheSignature(detail.ledgerVersion, periodActive, selectedPeriod);
+      }
+      window.dispatchEvent(new CustomEvent(s.valid ? "jkh:runtime-cache-valid" : "jkh:runtime-cache-invalid", { detail: detail }));
     } catch(eState) {}
     if (!isReadonlyNoRecalcMode() || s.valid) return;
-    try {
-      const lastStatus = String(window.__lastRenderedSummaryStatus || "").toLowerCase();
-      if (lastStatus === "fresh" && typeof window.JKHSetSummaryStatus === "function") {
-        window.JKHSetSummaryStatus("dirty", "Требуется пересчёт таблицы для выбранного периода");
-      }
-    } catch(eNotify) {}
   }
 
   // Read-only ledger cache: parsed rows are reused while storage raw value is unchanged.
@@ -2770,7 +2787,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
         statusBox.textContent = __runtimeCacheState.valid ? "" : "Для актуальных сумм нажмите Пересчитать";
       }
       if (isReadonlyNoRecalcMode() && statusBox && !__runtimeCacheState.valid) {
-        statusBox.textContent = __runtimeCacheState.reason === "period_mismatch"
+        statusBox.textContent = __runtimeCacheState.reason === "RUNTIME_CACHE_PERIOD_MISMATCH"
           ? "Требуется пересчёт таблицы для выбранного периода"
           : "Требуется пересчёт: runtime cache отсутствует или устарел";
       }
