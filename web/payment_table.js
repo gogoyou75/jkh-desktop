@@ -3013,12 +3013,51 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
       let runtimeCacheUsed = false;
       let runtimeCachePeriodMatches = false;
       let baseRowsSource = periodActive && selectedPeriod ? "filtered" : "runtime_cache";
-      if (periodActive && selectedPeriod && !isReadonlyNoRecalcMode()) {
+      let skipRunningTotalsUpdate = false;
+      let restoredFromCardSnapshot = false;
+      let normalSnapshotState = { valid: false, reason: "NOT_ATTEMPTED" };
+      if (!isReadonlyNoRecalcMode()) {
+        try {
+          console.log("[card-snapshot][normal-load-restore-attempt]", {
+            abonentId: String(getAbonentId() || ""),
+            periodActive: !!periodActive,
+            selectedPeriod: selectedPeriod || null,
+            ledgerVersion: runtimeLedgerVersion,
+            runtimeSignature: runtimeCacheSignature(runtimeLedgerVersion, periodActive, selectedPeriod)
+          });
+        } catch(eSnapshotAttemptLog) {}
+        normalSnapshotState = tryApplyCardSnapshotToRows(view, runtimeLedgerVersion, periodActive, selectedPeriod, runtimeCacheSignature(runtimeLedgerVersion, periodActive, selectedPeriod));
+        if (normalSnapshotState && normalSnapshotState.valid === true) {
+          __runtimeCacheState = normalSnapshotState;
+          runtimeCacheUsed = true;
+          runtimeCachePeriodMatches = true;
+          baseRowsSource = "card_snapshot";
+          restoredFromCardSnapshot = true;
+          skipRunningTotalsUpdate = true;
+          capturePaymentTableComputedRowsSnapshot(
+            view,
+            normalSnapshotState.dataById || {},
+            periodActive,
+            selectedPeriod,
+            runtimeCacheSignature(runtimeLedgerVersion, periodActive, selectedPeriod),
+            runtimeLedgerVersion
+          );
+          try {
+            console.log("[card-snapshot][normal-load-restored]", {
+              abonentId: String(getAbonentId() || ""),
+              rowsByIdCount: normalSnapshotState.dataById && typeof normalSnapshotState.dataById === "object" ? Object.keys(normalSnapshotState.dataById).length : 0,
+              periodActive: !!periodActive,
+              selectedPeriod: selectedPeriod || null
+            });
+          } catch(eSnapshotRestoredLog) {}
+        }
+      }
+      if (!restoredFromCardSnapshot && periodActive && selectedPeriod && !isReadonlyNoRecalcMode()) {
         runtimeCachePeriodMatches = inspectRuntimeCachePeriodMatch(true, selectedPeriod);
         const periodRowsById = runtimeRowsByIdFromRows(view, baseRows, effectiveSignature);
         applyRuntimeRowsById(view, periodRowsById);
         __runtimeCacheState = { valid: true, reason: "", dataById: periodRowsById, periodMatches: runtimeCachePeriodMatches, builtForPeriod: true };
-      } else {
+      } else if (!restoredFromCardSnapshot) {
         __runtimeCacheState = applyRuntimeCacheToRows(view, periodActive, selectedPeriod);
         runtimeCacheUsed = !!__runtimeCacheState.valid;
         runtimeCachePeriodMatches = !!__runtimeCacheState.periodMatches;
@@ -3034,7 +3073,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
           runtimeLedgerVersion
         );
       }
-      notifyRuntimeCacheSummaryState(__runtimeCacheState, periodActive, selectedPeriod);
+      if (!restoredFromCardSnapshot) notifyRuntimeCacheSummaryState(__runtimeCacheState, periodActive, selectedPeriod);
       try {
         if (isReadonlyNoRecalcMode()) {
           console.log("[payment-table][readonly-no-recalc]", {
@@ -3053,6 +3092,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
           rowsView: Array.isArray(view) ? view.length : 0,
           runtimeCacheUsed: runtimeCacheUsed,
           runtimeCachePeriodMatches: runtimeCachePeriodMatches,
+          restoredFromCardSnapshot: restoredFromCardSnapshot,
           baseRowsSource: baseRowsSource,
           effectiveSignature: effectiveSignature
         });
@@ -3108,7 +3148,16 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
       __paymentTableRenderedSignature = signature;
       // Тяжёлый расчёт пени/долга не блокирует открытие карточки: строки сначала
       // рисуются с уже сохранёнными значениями, затем ro-ячейки обновляются чанками.
-      if (!isReadonlyNoRecalcMode()) {
+      if (skipRunningTotalsUpdate) {
+        try {
+          console.log("[card-snapshot][normal-load-skip-running-totals]", {
+            abonentId: String(getAbonentId() || ""),
+            periodActive: !!periodActive,
+            selectedPeriod: selectedPeriod || null
+          });
+        } catch(eSkipSnapshotLog) {}
+      }
+      if (!skipRunningTotalsUpdate && !isReadonlyNoRecalcMode()) {
         scheduleRunningTotalsUpdate(view, baseRows, tbody, effectiveSignature);
       }
       clearLastAddedPaymentId();
