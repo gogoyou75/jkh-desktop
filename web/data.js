@@ -743,11 +743,72 @@
     return ("00000000" + (h >>> 0).toString(16)).slice(-8) + ":" + s.length;
   }
 
+  function _rawForFingerprint(key) {
+    if (!key) return "";
+    var raw = _getProjectRaw(key);
+    return raw === null || raw === undefined ? "" : String(raw);
+  }
+
+  function _stableFinancialJson(value) {
+    if (value === null || value === undefined) return "";
+    if (typeof value !== "object") return JSON.stringify(value);
+    if (Array.isArray(value)) return "[" + value.map(_stableFinancialJson).join(",") + "]";
+    var keys = Object.keys(value).sort();
+    return "{" + keys.map(function(key) {
+      return JSON.stringify(key) + ":" + _stableFinancialJson(value[key]);
+    }).join(",") + "}";
+  }
+
+  function _financialInputFingerprintRaw(abonentOrId) {
+    var found = _findAbonentByIdOrUid(abonentOrId);
+    var id = String(found && found.id || (typeof abonentOrId === "object" ? abonentOrId && abonentOrId.id : abonentOrId) || "").trim();
+    var abonent = found && found.abonent ? found.abonent : null;
+    var uid = String(abonent && abonent.uid || (typeof abonentOrId === "object" ? abonentOrId && abonentOrId.uid : abonentOrId) || "").trim();
+    var db = window.AbonentsDB || {};
+    var regnum = resolveAbonentRegnumForSummary(id, abonent || {});
+    var premise = regnum && db.premises && db.premises[regnum] ? db.premises[regnum] : null;
+    var links = Array.isArray(db.links) ? db.links.filter(function(link) {
+      var linkId = String(link && (link.abonentId || link.abonent_id || link.abonent || link.accountId || link.ls || link.personalAccount) || "").trim();
+      return linkId && linkId === id;
+    }) : [];
+    var ownerId = String(_ownerId() || "").trim();
+    var technicalIds = [];
+    if (uid) technicalIds.push(uid);
+    if (id && id !== uid) technicalIds.push(id);
+    var scopedRaw = {};
+    technicalIds.forEach(function(technicalId) {
+      scopedRaw["exclude_periods_" + technicalId] = _rawForFingerprint("exclude_periods_" + technicalId);
+      scopedRaw["moratorium_" + technicalId] = _rawForFingerprint("moratorium_" + technicalId);
+    });
+    return _stableFinancialJson({
+      ledger: _rawForFingerprint(resolvePaymentLedgerKey(abonentOrId)),
+      account: {
+        id: id,
+        uid: uid,
+        calcStartDate: abonent && (abonent.calcStartDate || abonent.calc_start_date || abonent.dateFrom || abonent.date_from || ""),
+        calcEndDate: abonent && (abonent.calcEndDate || abonent.calc_end_date || abonent.dateTo || abonent.date_to || ""),
+        premiseRegnum: regnum,
+        square: abonent && (abonent.square !== undefined ? abonent.square : "")
+      },
+      premise: premise ? {
+        regnum: regnum,
+        square: premise.square !== undefined ? premise.square : "",
+        createdAt: premise.createdAt || "",
+        closedAt: premise.closedAt || "",
+        status: premise.status || ""
+      } : null,
+      responsibilityLinks: links,
+      scopedRaw: scopedRaw,
+      tariffs: ownerId ? _rawForFingerprint("tariffs_" + ownerId) : "",
+      refinancingNormal: _rawForFingerprint("refinancing_rates_normal_v1"),
+      refinancingMoratorium: _rawForFingerprint("refinancing_rates_moratorium_v1")
+    });
+  }
+
   function computeLedgerRuntimeVersion(abonentOrId) {
     var ledgerKey = resolvePaymentLedgerKey(abonentOrId);
     if (!ledgerKey) return "";
-    var raw = _getProjectRaw(ledgerKey);
-    return _runtimeHashString(raw);
+    return _runtimeHashString(_financialInputFingerprintRaw(abonentOrId));
   }
 
   function computeLedgerVersion(abonentOrId) {
@@ -2498,6 +2559,13 @@
       if (!isValidUid(uid)) {
         try { console.warn("[summary][mark-dirty-failed]", { reason: "INVALID_UID", abonentId: abonentId, uid: uid }); } catch (eWarn) {}
         return { ok: false, skipped: true, reason: "INVALID_UID" };
+      }
+
+      try {
+        invalidateLedgerRuntimeCache(abonent || uid);
+        invalidateCardSnapshot(abonent || uid, reasonCode);
+      } catch (eInvalidate) {
+        try { console.warn("[summary][dirty-local-invalidate-failed]", { abonentId: abonentId, uid: uid, reason: reasonCode, error: String(eInvalidate && eInvalidate.message || eInvalidate) }); } catch (eWarnInvalidate) {}
       }
 
       var payload = {

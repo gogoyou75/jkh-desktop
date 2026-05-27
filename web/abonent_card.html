@@ -3302,6 +3302,57 @@ window.addEventListener("jkh:card-snapshot-invalid", function(event){
     }
 });
 
+function __baseStorageKeyForCurrentOwner(storageKey){
+    const key = String(storageKey || "");
+    if (!key) return "";
+    try {
+        if (window.JKHStore && typeof JKHStore.scopePrefixFor === "function" && typeof JKHStore.getOwnerId === "function") {
+            const pref = String(JKHStore.scopePrefixFor(JKHStore.getOwnerId()) || "");
+            if (pref && key.indexOf(pref) === 0) return key.slice(pref.length);
+        }
+    } catch(e) {}
+    return key;
+}
+
+function __isPossiblyCurrentCardFinancialStorageKey(baseKey){
+    const key = String(baseKey || "");
+    if (!key) return false;
+    const id = String(getAbonentIdFromURL() || "");
+    const uid = String(getAbonentTechnicalIdFromURL() || "");
+    if (key === "abonents_db_v1") return true;
+    if (key === "refinancing_rates_normal_v1" || key === "refinancing_rates_moratorium_v1") return true;
+    try {
+        const ownerId = window.JKHStore && typeof JKHStore.getOwnerId === "function" ? String(JKHStore.getOwnerId() || "") : "";
+        if (ownerId && key === "tariffs_" + ownerId) return true;
+    } catch(e) {}
+    return [id, uid].some(function(x) {
+        return x && (
+            key === "payments_" + x ||
+            key === "exclude_periods_" + x ||
+            key === "moratorium_" + x
+        );
+    });
+}
+
+let __cardSnapshotStorageRecheckTimer = null;
+window.addEventListener("storage", function(event){
+    const baseKey = __baseStorageKeyForCurrentOwner(event && event.key);
+    if (!__isPossiblyCurrentCardFinancialStorageKey(baseKey)) return;
+    if (__cardSnapshotStorageRecheckTimer) clearTimeout(__cardSnapshotStorageRecheckTimer);
+    __cardSnapshotStorageRecheckTimer = setTimeout(function(){
+        try {
+            const uid = getAbonentTechnicalIdFromURL();
+            if (!window.Data || typeof Data.readCardSnapshot !== "function" || !uid) return;
+            const snapshot = Data.readCardSnapshot(uid);
+            if (snapshot && snapshot.dirty === true) {
+                window.dispatchEvent(new CustomEvent("jkh:card-snapshot-invalid", { detail: { reason: snapshot.dirtyReason || "FINANCIAL_INPUT_CHANGED", source: "storage", key: baseKey } }));
+            }
+        } catch(e) {
+            try { console.warn("[card-snapshot][storage-recheck-failed]", e); } catch(_) {}
+        }
+    }, 50);
+});
+
 function __isFreshCardSnapshotUsable(uid, snapshot){
     if (!snapshot || typeof snapshot !== "object") return false;
     if (snapshot.dirty === true) return false;

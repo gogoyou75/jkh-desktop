@@ -199,8 +199,18 @@ function writePeriods(list, opts){
 
     const finalList = cleaned.filter(p => p && typeof p === "object" && (p.from || p.to || p.reason));
     __periodsDraftOverride = keepEmpty ? cleaned : null;
-    storeSet(periodsKey(getAbonentId()), JSON.stringify(finalList));
+    const key = periodsKey(getAbonentId());
+    const prevRaw = storeGet(key);
+    const nextRaw = JSON.stringify(finalList);
+    storeSet(key, nextRaw);
     writeLegacyMirror(finalList);
+    if (opts && opts.financialMutation === true && String(prevRaw === null || prevRaw === undefined ? "" : prevRaw) !== nextRaw) {
+        try {
+            if (window.Data && typeof window.Data.markAbonentSummaryDirty === "function") {
+                window.Data.markAbonentSummaryDirty(getAbonentId(), "EXCLUDES_CHANGED");
+            }
+        } catch(e) {}
+    }
 }
 
 function validatePeriods(list){
@@ -312,7 +322,7 @@ document.addEventListener("DOMContentLoaded", () => {
             return;
         }
 
-        writePeriods(cleaned, { keepEmpty: false });
+        writePeriods(cleaned, { keepEmpty: false, financialMutation: true });
         __periodsDraftOverride = null;
         alert("Сохранено");
         render();
@@ -333,14 +343,14 @@ document.addEventListener("DOMContentLoaded", () => {
         list.splice(idx, 1);
 
         // keepEmpty=true — чтобы пустая строка могла существовать
-        writePeriods(list, { keepEmpty: true });
+        writePeriods(list, { keepEmpty: true, financialMutation: true });
         render();
     });
 
     // автосохранение при вводе (в оба места), без чистки
     document.getElementById("periodsBody")?.addEventListener("input", () => {
         const list = collectFromUI();
-        writePeriods(list, { keepEmpty: true });
+        writePeriods(list, { keepEmpty: true, financialMutation: true });
     });
 });
 </script>
