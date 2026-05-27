@@ -2584,12 +2584,16 @@
       var data = null;
       try { data = text ? JSON.parse(text) : null; } catch (eParse) { data = null; }
       if (!res.ok || !data || data.ok === false) {
-        throw new Error((data && data.error) || ("HTTP_" + res.status));
+        var err = new Error((data && data.error) || ("HTTP_" + res.status));
+        err.status = res.status;
+        err.payload = data;
+        err.responseText = text;
+        throw err;
       }
       return data;
     } catch (e) {
-      try { console.warn("[summary][mark-dirty-failed]", { reason: String(e && e.message || e) }); } catch (eLog) {}
-      return { ok: false, error: String(e && e.message || e) };
+      try { console.warn("[summary][mark-dirty-failed]", { reason: String(e && e.message || e), status: e && e.status, payload: e && e.payload }); } catch (eLog) {}
+      return { ok: false, error: String(e && e.message || e), status: e && e.status, payload: e && e.payload };
     }
   }
 

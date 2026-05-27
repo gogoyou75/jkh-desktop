@@ -680,15 +680,20 @@
     let ok = 0;
     let failed = 0;
     for (const item of affected){
+      const uid = String(item && item.abonent && item.abonent.uid || "").trim();
       try{
         if (window.Data && typeof Data.markAbonentSummaryDirty === "function"){
-          const res = await Data.markAbonentSummaryDirty(item.abonent || item.id, "TARIFFS_CHANGED");
-          if (res && res.ok === false && res.skipped !== true) failed++;
-          else ok++;
+          const res = await Data.markAbonentSummaryDirty(uid, "TARIFFS_CHANGED");
+          if (res && res.ok === false && res.skipped !== true) {
+            failed++;
+            console.warn("[tariffs][dirty] mark rejected", { abonentId: item && item.id, uid: uid, error: res.error || "", status: res.status || 0, payload: res.payload || null });
+          } else {
+            ok++;
+          }
         }
       }catch(e){
         failed++;
-        console.warn("[tariffs][dirty] mark failed", { abonentId: item && item.id, error: String(e && e.message || e) });
+        console.warn("[tariffs][dirty] mark failed", { abonentId: item && item.id, uid: uid, error: String(e && e.message || e), status: e && e.status, payload: e && e.payload });
       }
     }
     try { console.log("[tariffs][dirty]", { reason: "TARIFFS_CHANGED", affected: affected.length, ok: ok, failed: failed }); } catch(e) {}

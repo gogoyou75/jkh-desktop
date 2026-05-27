@@ -1816,7 +1816,7 @@ def abonent_summary_mark_dirty():
         return jsonify(ok=False, error="invalid_reason", counters=counters), 400
 
     try:
-        targets = _owner_abonents_db_v1_summary_targets(owner)
+        targets = _owner_abonent_summary_targets(owner)
         target = next((t for t in targets if _norm_text(t.get("account_uid")) == account_uid), None)
         if not target:
             return jsonify(ok=False, error="uid_not_found"), 404

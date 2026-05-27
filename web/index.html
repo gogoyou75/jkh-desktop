@@ -812,6 +812,7 @@ function shouldUsePassiveSummaryMode(){
 
 function normalizeSummaryStatus(value){
     const s = String(value || "missing").trim().toLowerCase();
+    if (s === "stale") return "dirty";
     return (s === "fresh" || s === "dirty" || s === "missing" || s === "error") ? s : "error";
 }
 
