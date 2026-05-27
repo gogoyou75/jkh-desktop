@@ -2780,7 +2780,13 @@
     var text = await res.text();
     var data = null;
     try { data = text ? JSON.parse(text) : null; } catch (e) { data = null; }
-    if (!res.ok || !data || data.ok === false) throw new Error((data && data.error) || ("HTTP_" + res.status));
+    if (!res.ok || !data || data.ok === false) {
+      var err = new Error((data && data.error) || ("HTTP_" + res.status));
+      err.status = res.status;
+      err.payload = data;
+      err.responseText = text;
+      throw err;
+    }
     return data;
   }
 
@@ -2792,7 +2798,13 @@
     var text = await res.text();
     var data = null;
     try { data = text ? JSON.parse(text) : null; } catch (e) { data = null; }
-    if (!res.ok || !data || data.ok === false) throw new Error((data && data.error) || ("HTTP_" + res.status));
+    if (!res.ok || !data || data.ok === false) {
+      var err = new Error((data && data.error) || ("HTTP_" + res.status));
+      err.status = res.status;
+      err.payload = data;
+      err.responseText = text;
+      throw err;
+    }
     return data;
   }
 
@@ -2804,7 +2816,13 @@
     var text = await res.text();
     var data = null;
     try { data = text ? JSON.parse(text) : null; } catch (e) { data = null; }
-    if (!res.ok || !data || data.ok === false) throw new Error((data && data.error) || ("HTTP_" + res.status));
+    if (!res.ok || !data || data.ok === false) {
+      var err = new Error((data && data.error) || ("HTTP_" + res.status));
+      err.status = res.status;
+      err.payload = data;
+      err.responseText = text;
+      throw err;
+    }
     return data;
   }
 
