@@ -1515,9 +1515,13 @@ async function pollSummaryBatchJobStatus(){
         const message = String((statusPayload && statusPayload.message) || job.message || "");
         if (progress) progress.textContent = "Статус: " + status + ". " + processed + "/" + total + " (" + pct + "%), fresh: " + fresh + ", error: " + errorCount + ", skipped: " + skipped + (message ? ". " + message : "");
         if (status === "completed") {
+            const completedText = "Задание завершено. Итог: total=" + total + ", processed=" + processed + ", fresh=" + fresh + ", error=" + errorCount + ", skipped=" + skipped + ".";
+            const completedWithoutResult = total > 0 && fresh === 0 && errorCount === 0;
             selectedUidsClear();
-            if (progress) progress.textContent = "Задание завершено. Обновление passive summary page...";
+            if (progress) progress.textContent = completedText + " Обновление passive summary page...";
             await loadPassiveSummaryPage(currentPage);
+            if (progress) progress.textContent = completedWithoutResult ? (completedText + " WARNING: job completed without recalculation result.") : completedText;
+            if (completedWithoutResult) alert("job completed without recalculation result");
             summaryBatchRunning = false;
             summaryBatchJobState.jobId = null;
             updateSummaryBatchPanel();

@@ -752,6 +752,52 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         self.assertEqual(payload["items"][0]["summary_status"], "error")
         self.assertEqual(payload["items"][0]["summary_reason"], "FRESH_TOTALS_MISSING")
 
+    def test_dirty_summary_batch_job_persists_error_result(self):
+        with app_module.app.app_context():
+            self._add_user("owner-dirty-batch-error")
+            self._put_abonents("owner-dirty-batch-error", {
+                "1001": {"uid": "uid_dirty_batch_error_1001", "id": "1001"},
+            })
+            app_module.db.session.add(app_module.AbonentSummary(
+                owner_id="owner-dirty-batch-error",
+                abonent_id="1001",
+                account_uid="uid_dirty_batch_error_1001",
+                account_number="1001",
+                summary_json=json.dumps({
+                    "summary_status": "dirty",
+                    "summary_reason": "TARIFFS_CHANGED",
+                    "status": "dirty",
+                    "reason": "TARIFFS_CHANGED",
+                    "totals": {"total": 999},
+                }, sort_keys=True),
+            ))
+            app_module.db.session.commit()
+        self._login("owner-dirty-batch-error")
+
+        create_response = self.client.post("/api/abonent_summary/recalc_batch_job", json={
+            "uids": ["uid_dirty_batch_error_1001"],
+            "reason": "MANUAL_RECALC",
+        })
+        self.assertEqual(create_response.status_code, 200)
+        job_id = create_response.get_json()["job_id"]
+
+        run_response = self.client.post(f"/api/abonent_summary/recalc_batch_job/{job_id}/run")
+
+        self.assertEqual(run_response.status_code, 200)
+        payload = run_response.get_json()
+        self.assertEqual(payload["status"], "completed")
+        self.assertEqual(payload["processed"], 1)
+        self.assertEqual(payload["fresh"], 0)
+        self.assertEqual(payload["error"], 1)
+        self.assertEqual(payload["items"][0]["summary_status"], "error")
+        self.assertEqual(payload["items"][0]["summary_reason"], "BATCH_RECALC_NOT_AVAILABLE:TARIFFS_CHANGED")
+        self.assertIn("uid_dirty_batch_error_1001", payload["errors_by_uid"])
+        with app_module.app.app_context():
+            stored = json.loads(app_module.AbonentSummary.query.one().summary_json)
+            self.assertEqual(stored["summary_status"], "error")
+            self.assertEqual(stored["summary_reason"], "BATCH_RECALC_NOT_AVAILABLE:TARIFFS_CHANGED")
+            self.assertNotIn("totals", stored)
+
     def test_rebuild_rejects_period_summary_payload(self):
         with app_module.app.app_context():
             self._add_user("owner-period-summary-reject")

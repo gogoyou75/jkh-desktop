@@ -1092,6 +1092,60 @@ def _build_missing_abonent_summary(target: dict):
         },
     }
 
+
+def _build_batch_recalc_error_summary(target: dict, existing_summary: dict | None, reason: str):
+    identity = target.get("identity") if isinstance(target.get("identity"), dict) else {}
+    existing = existing_summary if isinstance(existing_summary, dict) else {}
+    period = existing.get("period") if isinstance(existing.get("period"), dict) else {}
+    clean_reason = _norm_text(reason) or "BATCH_RECALC_FAILED"
+    return {
+        "status": "error",
+        "reason": clean_reason,
+        "summary_status": "error",
+        "summary_reason": clean_reason,
+        "abonent": {
+            "abonent_id": _norm_text(identity.get("abonent_id") or target.get("abonent_id") or existing.get("abonent_id")),
+            "account_uid": _norm_text(identity.get("account_uid") or target.get("account_uid") or existing.get("account_uid") or existing.get("uid")),
+            "account_number": _norm_text(identity.get("account_number") or target.get("account_number") or existing.get("account_number")),
+            "fio": _norm_text(identity.get("fio") or existing.get("fio")),
+            "address": _norm_text(identity.get("address") or existing.get("address")),
+        },
+        "account_uid": _norm_text(target.get("account_uid") or existing.get("account_uid") or existing.get("uid")),
+        "uid": _norm_text(target.get("account_uid") or existing.get("account_uid") or existing.get("uid")),
+        "account_number": _norm_text(target.get("account_number") or existing.get("account_number")),
+        "abonent_id": _norm_text(target.get("abonent_id") or existing.get("abonent_id") or existing.get("id")),
+        "period": {
+            "from": _norm_text(period.get("from")),
+            "to": _norm_text(period.get("to")),
+        },
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+    }
+
+
+def _upsert_abonent_summary_payload(owner_id: str, account_uid: str, target: dict, summary: dict):
+    account_uid = _norm_text(account_uid)
+    if not account_uid:
+        return None
+    abonent_id = _norm_text(target.get("abonent_id") if isinstance(target, dict) else "")
+    account_number = _norm_text(target.get("account_number") if isinstance(target, dict) else "")
+    summary_json = json.dumps(summary, ensure_ascii=False, sort_keys=True)
+    row = AbonentSummary.query.filter_by(owner_id=owner_id, account_uid=account_uid).order_by(AbonentSummary.id.asc()).first()
+    if row:
+        row.abonent_id = abonent_id or row.abonent_id
+        row.account_number = account_number or row.account_number
+        row.summary_json = summary_json
+    else:
+        row = AbonentSummary(
+            owner_id=owner_id,
+            abonent_id=abonent_id,
+            account_uid=account_uid,
+            account_number=account_number,
+            summary_json=summary_json,
+        )
+        db.session.add(row)
+    return row
+
+
 def _summary_status_from_payload(summary: dict | None):
     if not isinstance(summary, dict):
         return "missing"
@@ -1355,6 +1409,15 @@ def _batch_job_status_response(job: RecalcBatchJob):
     payload = _batch_job_payload(job)
     items = RecalcBatchJobItem.query.filter_by(job_id=job.id, owner_id=job.owner_id).order_by(RecalcBatchJobItem.id.asc()).all()
     affected_uids = [_norm_text(x.account_uid) for x in items if _norm_text(x.account_uid)]
+    errors_by_uid = {
+        _norm_text(x.account_uid): _norm_text(x.error_message) or _norm_text(x.summary_reason) or "UID_PROCESSING_FAILED"
+        for x in items
+        if _norm_text(x.account_uid) and (_norm_text(x.status) == "error" or _norm_text(x.error_message))
+    }
+    sample_errors = [
+        {"account_uid": uid, "error": error}
+        for uid, error in list(errors_by_uid.items())[:10]
+    ]
     return {
         "ok": True,
         "job": payload,
@@ -1369,11 +1432,14 @@ def _batch_job_status_response(job: RecalcBatchJob):
         "finished_at": payload["finished_at"],
         "message": _norm_text(job.error_message) or "",
         "affected_uids": affected_uids,
+        "errors_by_uid": errors_by_uid,
+        "sample_errors": sample_errors,
         "items": [{
             "account_uid": _norm_text(x.account_uid),
             "status": _norm_text(x.status),
             "summary_status": _norm_text(x.summary_status),
             "summary_reason": _norm_text(x.summary_reason),
+            "error_message": _norm_text(x.error_message),
         } for x in items],
     }
 
@@ -1397,8 +1463,15 @@ def _recalc_batch_process_job(owner_id: str, job: RecalcBatchJob, step_limit: in
         .all()
     )
     if not items:
-        if int(job.processed_count or 0) >= int(job.total_count or 0):
+        result_count = int(job.fresh_count or 0) + int(job.error_count or 0) + int(job.skipped_count or 0)
+        if int(job.processed_count or 0) >= int(job.total_count or 0) and result_count >= int(job.total_count or 0):
             job.status = "completed"
+            if not job.finished_at:
+                job.finished_at = datetime.utcnow()
+            db.session.commit()
+        elif int(job.processed_count or 0) >= int(job.total_count or 0):
+            job.status = "failed"
+            job.error_message = "BATCH_COUNTERS_INCONSISTENT"
             if not job.finished_at:
                 job.finished_at = datetime.utcnow()
             db.session.commit()
@@ -1421,8 +1494,15 @@ def _recalc_batch_process_job(owner_id: str, job: RecalcBatchJob, step_limit: in
                 item.status = "fresh"
                 job.fresh_count = int(job.fresh_count or 0) + 1
             else:
+                result_reason = s_reason or s_status or "SUMMARY_NOT_FRESH"
+                if s_status in {"dirty", "missing"}:
+                    result_reason = "BATCH_RECALC_NOT_AVAILABLE" + (":" + result_reason if result_reason else "")
+                error_summary = _build_batch_recalc_error_summary(target, summary, result_reason)
+                _upsert_abonent_summary_payload(owner_id, item.account_uid, target, error_summary)
                 item.status = "error"
-                item.error_message = s_reason or s_status or "SUMMARY_NOT_FRESH"
+                item.error_message = result_reason
+                s_status = "error"
+                s_reason = result_reason
                 job.error_count = int(job.error_count or 0) + 1
             item.summary_status = s_status
             item.summary_reason = s_reason
@@ -1435,9 +1515,15 @@ def _recalc_batch_process_job(owner_id: str, job: RecalcBatchJob, step_limit: in
         item.finished_at = datetime.utcnow()
         job.processed_count = int(job.processed_count or 0) + 1
         db.session.commit()
-    remaining = RecalcBatchJobItem.query.filter_by(job_id=job.id, owner_id=owner_id, status="queued").count()
-    if remaining == 0 and int(job.processed_count or 0) >= int(job.total_count or 0):
+    remaining = RecalcBatchJobItem.query.filter_by(job_id=job.id, owner_id=owner_id).filter(RecalcBatchJobItem.status.in_(["queued", "running"])).count()
+    result_count = int(job.fresh_count or 0) + int(job.error_count or 0) + int(job.skipped_count or 0)
+    if remaining == 0 and int(job.processed_count or 0) >= int(job.total_count or 0) and result_count >= int(job.total_count or 0):
         job.status = "completed"
+        job.finished_at = datetime.utcnow()
+        db.session.commit()
+    elif remaining == 0 and int(job.processed_count or 0) >= int(job.total_count or 0):
+        job.status = "failed"
+        job.error_message = "BATCH_COUNTERS_INCONSISTENT"
         job.finished_at = datetime.utcnow()
         db.session.commit()
 
