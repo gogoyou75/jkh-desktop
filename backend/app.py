@@ -2377,7 +2377,15 @@ def recalc_lock_begin(account_uid: str):
         existing.started_at = now
     else:
         db.session.add(RecalcUidLock(owner_id=user.id, abonent_uid=uid, lock_token=token, status="running", started_at=now))
-    db.session.commit()
+    try:
+        db.session.commit()
+    except IntegrityError:
+        db.session.rollback()
+        raced = RecalcUidLock.query.filter_by(owner_id=user.id, abonent_uid=uid).first()
+        if raced and raced.status == "running":
+            return jsonify(ok=True, status="already_running", account_uid=uid)
+        app.logger.exception("recalc lock duplicate race recovery failed owner=%s uid=%s", user.id, uid)
+        return jsonify(ok=False, error="recalc_lock_race_recovery_failed", account_uid=uid), 409
     return jsonify(ok=True, status="started", account_uid=uid, lock_token=token)
 
 
