@@ -3135,7 +3135,7 @@ function isValidPeriod(from, to){
 
 function __normalizeSummaryStatus(status){
     const s = String(status || "missing").trim().toLowerCase();
-    return (s === "fresh" || s === "dirty" || s === "missing" || s === "error" || s === "calculating") ? s : "error";
+    return (s === "fresh" || s === "dirty" || s === "missing" || s === "error" || s === "invalid" || s === "already_running" || s === "calculating") ? s : "error";
 }
 
 let __lastRenderedSummaryStatusLocal = "missing";

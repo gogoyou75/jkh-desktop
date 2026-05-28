@@ -8,6 +8,7 @@
   // CONFIG
   // ============================================================
   const KEY_DB = "abonents_db_v1";
+  const STAGE16_ENGINE_VERSION = "JKHCalcEngine:stage16-mvp";
 
   // ============================================================
   // ✅ JKH_REMOTE_DATA_SYNC v1 (2026-02-10)
@@ -448,8 +449,8 @@
   }
 
   function _legacyLedgerKeyForAbonent(abonentId, abonent) {
-    var accountNumber = _accountNumberForLedger(abonentId, abonent);
-    return accountNumber ? ("payments_" + accountNumber) : "";
+    var legacyNumber = _accountNumberForLedger(abonentId, abonent);
+    return legacyNumber ? ("payments_" + legacyNumber) : "";
   }
 
   function _hasLegacyLedgerRows(abonentId, abonent) {
@@ -815,6 +816,39 @@
     return computeLedgerRuntimeVersion(abonentOrId);
   }
 
+  function computeFinancialInputVersions(abonentOrId) {
+    var found = _findAbonentByIdOrUid(abonentOrId);
+    var abonent = found && found.abonent ? found.abonent : (abonentOrId && typeof abonentOrId === "object" ? abonentOrId : null);
+    var id = String(found && found.id || (abonent && abonent.id) || (typeof abonentOrId === "object" ? abonentOrId && abonentOrId.id : abonentOrId) || "").trim();
+    var uid = String(abonent && (abonent.uid || abonent.account_uid || abonent.accountUid) || (typeof abonentOrId === "object" ? abonentOrId && abonentOrId.uid : "") || "").trim();
+    var ownerId = String(_ownerId() || "").trim();
+    var ledgerKey = resolvePaymentLedgerKey(abonentOrId);
+    var db = window.AbonentsDB || {};
+    var links = Array.isArray(db.links) ? db.links : (Array.isArray(db.abonentPremiseLinks) ? db.abonentPremiseLinks : []);
+    var linked = links.filter(function(link) {
+      var linkAbonent = String(link && (link.abonentId || link.abonent_id || link.account_uid || link.accountUid || link.uid || link.ls) || "").trim();
+      return linkAbonent === id || linkAbonent === uid;
+    });
+    var excludeRaw = _rawForFingerprint("exclude_periods_" + uid) || _rawForFingerprint("exclude_periods_" + id) || _rawForFingerprint("exclude_periods_v1");
+    var versions = {
+      ledger_version: _runtimeHashString(ledgerKey ? _rawForFingerprint(ledgerKey) : ""),
+      tariff_version: _runtimeHashString((ownerId ? _rawForFingerprint("tariffs_" + ownerId) : "") + "|" + _rawForFingerprint("tariffs_v1")),
+      rate_version: _runtimeHashString(_rawForFingerprint("refinancing_rates_normal_v1") + "|" + _rawForFingerprint("refinancing_rates_moratorium_v1") + "|" + _rawForFingerprint("refinancing_v1")),
+      exclude_version: _runtimeHashString(excludeRaw || ""),
+      links_version: _runtimeHashString(_stableFinancialJson(linked)),
+      engine_version: STAGE16_ENGINE_VERSION
+    };
+    versions.input_hash = _runtimeHashString([
+      versions.ledger_version,
+      versions.tariff_version,
+      versions.rate_version,
+      versions.exclude_version,
+      versions.links_version,
+      versions.engine_version
+    ].join("|"));
+    return versions;
+  }
+
   function resolveCardSnapshotKey(abonentOrId) {
     var found = _findAbonentByIdOrUid(abonentOrId);
     var abonent = found && found.abonent ? found.abonent : null;
@@ -873,6 +907,7 @@
       : (sourcePeriodActive && src.period && typeof src.period === "object" ? { from: String(src.period.from || ""), to: String(src.period.to || "") } : null);
     var snapshotMode = String(src.snapshotMode || "").trim().toLowerCase();
     if (snapshotMode !== "full" && snapshotMode !== "period") snapshotMode = "";
+    var versions = computeFinancialInputVersions(abonent || uid);
     return {
       snapshotVersion: Number(src.snapshotVersion || 1),
       snapshotMode: snapshotMode,
@@ -880,7 +915,14 @@
       uid: uid,
       abonentId: String(src.abonentId || abonentId || ""),
       computedAt: String(src.computedAt || (new Date()).toISOString()),
-      ledgerVersion: String(src.ledgerVersion || computeLedgerRuntimeVersion(abonent || uid) || ""),
+      ledgerVersion: String(src.ledgerVersion || versions.ledger_version || computeLedgerRuntimeVersion(abonent || uid) || ""),
+      ledger_version: String(src.ledger_version || src.ledgerVersion || versions.ledger_version || ""),
+      tariff_version: String(src.tariff_version || versions.tariff_version || ""),
+      rate_version: String(src.rate_version || versions.rate_version || ""),
+      exclude_version: String(src.exclude_version || versions.exclude_version || ""),
+      links_version: String(src.links_version || versions.links_version || ""),
+      engine_version: String(src.engine_version || versions.engine_version || STAGE16_ENGINE_VERSION),
+      input_hash: String(src.input_hash || versions.input_hash || ""),
       rows: rows,
       totals: totals,
       summary_status: String(src.summary_status || src.status || "missing"),
@@ -905,10 +947,15 @@
       var parsed = JSON.parse(String(raw));
       var snapshot = _normalizeCardSnapshot(abonentOrId, parsed);
       if (!snapshot) return null;
-      var currentLedgerVersion = computeLedgerRuntimeVersion(abonentOrId);
+      var currentVersions = computeFinancialInputVersions(abonentOrId);
+      var currentLedgerVersion = String(currentVersions.ledger_version || computeLedgerRuntimeVersion(abonentOrId) || "");
       var snapshotLedgerVersion = String(snapshot.ledgerVersion || "");
       var rowsByIdCount = _cardSnapshotRowsByIdCount(snapshot.rowsById);
-      if (!snapshot.ledgerVersion || snapshot.ledgerVersion !== currentLedgerVersion) {
+      if (snapshot.input_hash && currentVersions.input_hash && snapshot.input_hash !== currentVersions.input_hash) {
+        snapshot.dirty = true;
+        snapshot.dirtyReason = "INPUT_HASH_CHANGED";
+        try { console.warn("[card-snapshot][read-stale]", { key: key, dirty: true, dirtyReason: snapshot.dirtyReason, snapshotInputHash: snapshot.input_hash, currentInputHash: currentVersions.input_hash, rowsByIdCount: rowsByIdCount }); } catch (eHashLog) {}
+      } else if (!snapshot.ledgerVersion || snapshot.ledgerVersion !== currentLedgerVersion) {
         snapshot.dirty = true;
         snapshot.dirtyReason = "LEDGER_VERSION_CHANGED";
         try { console.warn("[card-snapshot][read-stale]", { key: key, dirty: true, dirtyReason: snapshot.dirtyReason, snapshotLedgerVersion: snapshotLedgerVersion, currentLedgerVersion: currentLedgerVersion, rowsByIdCount: rowsByIdCount }); } catch (eStaleLog) {}
@@ -970,6 +1017,7 @@
     var ok = _setProjectRaw(key, serialized);
     try { console.log("[card-snapshot][save]", { key: key, ok: ok !== false, rows: normalized.rows.length, ledgerVersion: normalized.ledgerVersion }); } catch (eLog) {}
     if (ok !== false && ownerId && ownerId !== "guest" && ownerId !== "ALL") {
+      _fireAndForget(saveCardSnapshotToBackend(abonentOrId, normalized));
       _fireAndForget(_serverStoreSet(ownerId, key, serialized).then(function(result) {
         if (result && result.ok === true) {
           try { console.log("[card-snapshot][server-save-ok]", { ownerId: ownerId, key: key, status: result.status }); } catch (eOkLog) {}
@@ -983,6 +1031,24 @@
       try { console.warn("[card-snapshot][server-save-failed]", { ownerId: ownerId, key: key, reason: "OWNER_SCOPE_UNAVAILABLE" }); } catch (eOwnerLog) {}
     }
     return ok;
+  }
+
+  async function saveCardSnapshotToBackend(abonentOrId, snapshot) {
+    var found = _findAbonentByIdOrUid(abonentOrId);
+    var abonent = found && found.abonent ? found.abonent : null;
+    var uid = String(abonent && abonent.uid || snapshot && snapshot.uid || "").trim();
+    if (!isValidUid(uid)) return { ok: false, reason: "UID_REQUIRED" };
+    var res = await fetch("/api/card_snapshot/" + encodeURIComponent(uid), {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ snapshot: snapshot })
+    });
+    var text = await res.text();
+    var data = null;
+    try { data = text ? JSON.parse(text) : null; } catch (e) { data = null; }
+    if (!res.ok || !data || data.ok === false) throw new Error((data && data.error) || ("HTTP_" + res.status));
+    return data;
   }
 
   async function saveCardSnapshotAndWait(abonentOrId, snapshot) {
@@ -1028,6 +1094,14 @@
         result.reason = serverResult && (serverResult.text || serverResult.data && serverResult.data.error) || "SERVER_STORE_FAILED";
         try { console.warn("[card-snapshot][server-save-failed]", { ownerId: ownerId, key: key, status: result.status, reason: result.reason }); } catch (eServerFailLog) {}
         try { console.warn("[card-snapshot][save-and-wait-failed]", result); } catch (eWaitFailLog) {}
+        return result;
+      }
+      try {
+        await saveCardSnapshotToBackend(abonentOrId, normalized);
+      } catch (eTable) {
+        result.ok = false;
+        result.reason = "CARD_SNAPSHOT_TABLE_SAVE_FAILED:" + String(eTable && eTable.message || eTable);
+        try { console.warn("[card-snapshot][table-save-failed]", { ownerId: ownerId, key: key, reason: result.reason }); } catch (eTableLog) {}
         return result;
       }
       result.ok = true;
@@ -1884,12 +1958,13 @@
       if (item.account_uid && Object.prototype.hasOwnProperty.call(summaryByUid, item.account_uid)) {
         summaryByUid[item.account_uid] = item;
       } else {
+        var summaryUid = item.account_uid || "";
         orphanSummaries.push({
           abonentId: item.abonent_id || "",
           accountNumber: "",
-          uid: item.account_uid || "",
-          uidValid: item.account_uid ? isValidUid(item.account_uid) : false,
-          canonicalKey: item.account_uid ? ("payments_" + item.account_uid) : "",
+          uid: summaryUid,
+          uidValid: summaryUid ? isValidUid(summaryUid) : false,
+          canonicalKey: summaryUid ? ("payments_" + summaryUid) : "",
           hasCanonical: false,
           canonicalRowsCount: 0,
           legacyKey: "",
@@ -3164,6 +3239,7 @@
     var periodFrom = String(from || "");
     var periodTo = String(to || "");
     var accountUid = String(abonent && (abonent.uid || abonent.account_uid || abonent.accountUid) || "").trim();
+    var versions = computeFinancialInputVersions(abonent || accountUid);
     var accountNumber = String(abonent && (abonent.account_number || abonent.accountNumber || abonent.ls || abonent.id) || abonentId || "").trim();
     var fio = String(abonent && (abonent.fio || abonent.full_name || abonent.fullName || abonent.name_full || abonent.display_name) || "").trim();
     var fioParts = fio ? fio.split(/\s+/) : [];
@@ -3225,6 +3301,13 @@
         total_accrued: periodTotals.total_accrued,
         total_paid: periodTotals.total_paid
       },
+      ledger_version: versions.ledger_version,
+      tariff_version: versions.tariff_version,
+      rate_version: versions.rate_version,
+      exclude_version: versions.exclude_version,
+      links_version: versions.links_version,
+      engine_version: versions.engine_version,
+      input_hash: versions.input_hash,
       calc_engine_version: "JKHCalcEngine",
       generated_at: new Date().toISOString()
     };
@@ -3237,6 +3320,7 @@
     var periodFrom = String(period && period.from || "");
     var periodTo = String(period && period.to || "");
     var accountUid = String(abonent && (abonent.uid || abonent.account_uid || abonent.accountUid) || "").trim();
+    var versions = computeFinancialInputVersions(abonent || accountUid);
     var accountNumber = String(abonent && (abonent.account_number || abonent.accountNumber || abonent.ls || abonent.id) || abonentId || "").trim();
     var fio = String(abonent && (abonent.fio || abonent.full_name || abonent.fullName || abonent.name_full || abonent.display_name) || "").trim();
     var fioParts = fio ? fio.split(/\s+/) : [];
@@ -3280,6 +3364,13 @@
         premiseRegnum: regnum
       },
       period: { from: periodFrom, to: periodTo },
+      ledger_version: versions.ledger_version,
+      tariff_version: versions.tariff_version,
+      rate_version: versions.rate_version,
+      exclude_version: versions.exclude_version,
+      links_version: versions.links_version,
+      engine_version: versions.engine_version,
+      input_hash: versions.input_hash,
       calc_engine_version: "JKHCalcEngine",
       generated_at: new Date().toISOString()
     };
@@ -3701,6 +3792,42 @@
     };
   }
 
+  async function beginRecalcUidLock(uid) {
+    if (!isValidUid(uid)) return { ok: false, status: "error", reason: "UID_REQUIRED" };
+    var localKey = "stage16_recalc_lock_" + uid;
+    var now = Date.now();
+    try {
+      var raw = sessionStorage.getItem(localKey);
+      var local = raw ? JSON.parse(raw) : null;
+      if (local && local.running && now - Number(local.startedAt || 0) < 30 * 60 * 1000) {
+        return { ok: true, status: "already_running", account_uid: uid, local: true };
+      }
+      sessionStorage.setItem(localKey, JSON.stringify({ running: true, startedAt: now }));
+    } catch (eLocal) {}
+    try {
+      var res = await fetch("/api/recalc_lock/" + encodeURIComponent(uid) + "/begin", { method: "POST", credentials: "include" });
+      var text = await res.text();
+      var data = null;
+      try { data = text ? JSON.parse(text) : null; } catch (eParse) { data = null; }
+      if (res.ok && data && data.ok !== false) return data;
+    } catch (e) {
+      try { console.warn("[recalc-lock][begin-failed-local-only]", { uid: uid, reason: String(e && e.message || e) }); } catch (eLog) {}
+    }
+    return { ok: true, status: "started", account_uid: uid, local: true };
+  }
+
+  async function finishRecalcUidLock(uid, token) {
+    try { sessionStorage.removeItem("stage16_recalc_lock_" + uid); } catch (eLocal) {}
+    try {
+      await fetch("/api/recalc_lock/" + encodeURIComponent(uid) + "/finish", {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ lock_token: token || "" })
+      });
+    } catch (e) {}
+  }
+
   async function recalculateAbonentCard(abonentOrId, options) {
     var opts = options || {};
     var ready = await waitForServerFirstDataReady({ timeoutMs: opts.timeoutMs || opts.timeout || 8000 });
@@ -3725,9 +3852,22 @@
       return { ok: false, uid: uid, summary_status: "error", summary_reason: "UID_LEDGER_PATH_REQUIRED", summary: null };
     }
 
-    var canonicalRaw = _getProjectRaw(ledgerKey);
-    var legacyKey = _legacyLedgerKeyForAbonent(abonentId, abonent);
-    if ((canonicalRaw === null || canonicalRaw === undefined) && legacyKey && legacyKey !== ledgerKey) {
+    var lock = await beginRecalcUidLock(uid);
+    if (lock && lock.status === "already_running") {
+      return {
+        ok: false,
+        uid: uid,
+        summary_status: "already_running",
+        summary_reason: "RECALC_ALREADY_RUNNING",
+        status: "already_running",
+        reason: "RECALC_ALREADY_RUNNING"
+      };
+    }
+
+    try {
+      var canonicalRaw = _getProjectRaw(ledgerKey);
+      var legacyKey = _legacyLedgerKeyForAbonent(abonentId, abonent);
+      if ((canonicalRaw === null || canonicalRaw === undefined) && legacyKey && legacyKey !== ledgerKey) {
       var legacyInfo = _safeLedgerInfoForDiagnostic(legacyKey);
       if (legacyInfo.rowsCount > 0) {
         _logFreshBlockedLegacyLedger({
@@ -3750,10 +3890,10 @@
       }
     }
 
-    try {
-      var raw = canonicalRaw;
-      if (raw !== null && raw !== undefined) _parseLedgerRows(raw, ledgerKey);
-    } catch (e) {
+      try {
+        var raw = canonicalRaw;
+        if (raw !== null && raw !== undefined) _parseLedgerRows(raw, ledgerKey);
+      } catch (e) {
       var ledgerReason = _summaryCalcErrorCode(e);
       var errorScopeOpt = String(opts.summaryScope || opts.summary_scope || "").toLowerCase();
       var periodErrorScope = opts.saveSummary === false || errorScopeOpt === "period" || errorScopeOpt === "report";
@@ -3793,19 +3933,22 @@
         status: "error",
         reason: ledgerReason
       };
-    }
+      }
 
-    var result = await recalcAbonentSummaryExplicit(abonentOrId, opts);
-    return {
-      ok: !!(result && result.ok === true),
-      uid: uid,
-      summary_status: result && (result.summary_status || result.status) || "error",
-      summary_reason: result && (result.summary_reason || result.reason) || "",
-      summary: result && result.summary || null,
-      save: result && result.save,
-      status: result && (result.summary_status || result.status) || "error",
-      reason: result && (result.summary_reason || result.reason) || ""
-    };
+      var result = await recalcAbonentSummaryExplicit(abonentOrId, opts);
+      return {
+        ok: !!(result && result.ok === true),
+        uid: uid,
+        summary_status: result && (result.summary_status || result.status) || "error",
+        summary_reason: result && (result.summary_reason || result.reason) || "",
+        summary: result && result.summary || null,
+        save: result && result.save,
+        status: result && (result.summary_status || result.status) || "error",
+        reason: result && (result.summary_reason || result.reason) || ""
+      };
+    } finally {
+      await finishRecalcUidLock(uid, lock && lock.lock_token);
+    }
   }
 
 
@@ -3842,6 +3985,7 @@
     resolveRuntimeCacheKey: resolveRuntimeCacheKey,
     computeLedgerRuntimeVersion: computeLedgerRuntimeVersion,
     computeLedgerVersion: computeLedgerVersion,
+    computeFinancialInputVersions: computeFinancialInputVersions,
     readCardSnapshot: readCardSnapshot,
     saveCardSnapshot: saveCardSnapshot,
     saveCardSnapshotAndWait: saveCardSnapshotAndWait,
@@ -3867,6 +4011,8 @@
     buildAbonentSummaryAfterExplicitRecalc: buildAbonentSummaryAfterExplicitRecalc,
     recalcAbonentSummaryExplicit: recalcAbonentSummaryExplicit,
     recalculateAbonentCard: recalculateAbonentCard,
+    beginRecalcUidLock: beginRecalcUidLock,
+    finishRecalcUidLock: finishRecalcUidLock,
     waitForServerFirstDataReady: waitForServerFirstDataReady,
     saveAbonentSummaryAfterRecalc: saveAbonentSummaryAfterRecalc,
     markAbonentSummaryDirty: markAbonentSummaryDirty,

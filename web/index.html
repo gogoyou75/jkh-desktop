@@ -6,7 +6,7 @@ Doc: docs/LOGIC_SPEC_v1.5.3.md
 Эталон: jkh_site_full_v01.27.3.zip | SHA256: 6b4254a9b3b74327fe2d2c48c34e3e446ba9ae4e3369c6c554a683bde7b6ceec
 
 - ES-modules (type="module") запрещены в v1.5.x (должно работать file://)
-- Порядок подключений CRITICAL: calc_engine.js должен быть ДО payment_table.js / spravka_sud.js
+- Index is a readonly summary consumer; calculation scripts are not loaded here.
 - Карточка абонента = источник истины; справки/отчёты не ломают карточку
 ============================================================ -->
 
@@ -22,8 +22,6 @@ Doc: docs/LOGIC_SPEC_v1.5.3.md
 
     <!-- данные и лэйаут -->
     <script src="data.js"></script>
-    <script src="calc_engine.js"></script>
-<script src="autoaccrual_engine.js"></script>
 <script src="layout.js"></script>
 
     <style>
@@ -68,7 +66,7 @@ Doc: docs/LOGIC_SPEC_v1.5.3.md
         .summary-status-fresh { background:#e7f6e7; color:#116611; }
         .summary-status-dirty { background:#fff3cd; color:#7a5300; }
         .summary-status-missing { background:#f1f1f1; color:#555; }
-        .summary-status-error { background:#fde2e2; color:#9b0015; }
+        .summary-status-error, .summary-status-invalid { background:#fde2e2; color:#9b0015; }
         .summary-reason { display:block; margin-top:3px; font-size:11px; color:#666; }
         .summary-batch-panel { margin:10px 0 12px; padding:10px 12px; border:1px solid #d9e2ef; border-radius:8px; background:#f7fbff; font-size:13px; }
         .summary-batch-panel button { margin-right:8px; }
@@ -338,7 +336,7 @@ const filters = {};
 
 // CRITICAL: Index page is a read-only summary consumer.
 // Do not:
-// - read all payments_<uid>,
+// - read all canonical ledgers,
 // - trigger recalculation,
 // - auto-build summary,
 // - auto-repair ledger,
@@ -471,7 +469,7 @@ function parseDateForSort(str){
 }
 
 /* ============================================================
-     ✅ ЧТЕНИЕ ИТОГОВ И ДАТ ИЗ payments_<id>
+     Stage 16: legacy ledger-derived totals disabled on index
 ============================================================ */
 function toNum(v){
     const n = parseFloat(String(v ?? "").replace(",", ".").replace(/\s+/g,""));
@@ -496,9 +494,7 @@ function getAbonentNote(id, a){
 }
 
 function getPaymentsForAbonent(id){
-    if (window.Data && typeof window.Data.readPaymentLedger === "function") return window.Data.readPaymentLedger(id);
-    const key = ((typeof window.getPaymentsKeyForAbonent === "function") ? window.getPaymentsKeyForAbonent(id) : "");
-    return key ? getPaymentRowsByStorageKeyCached(key) : [];
+    return [];
 }
 
 function dateToISO(d){
@@ -641,49 +637,18 @@ function calcTotalsFromPayments(id, abonentObj){
     }
 
     // ✅ Итоговые "Всего задолженность" и "ПЕНЯ за период" должны совпадать с логикой карточки.
-    // Важно: в LS строки payments_<id> могут НЕ содержать актуальные total_debt/pay_penalty,
+    // Важно: legacy row totals may be stale and are ignored by summary-only mode,
     // потому что карточка пересчитывает это "на лету".
     // Поэтому:
-    //   1) если доступен calc_engine (JKHCalcEngine) — считаем итог прямо сейчас (это самый надёжный вариант)
+    //   1) прямой расчёт на index отключён; страница читает только abonent_summary
     //   2) иначе — fallback к данным из последней строки последнего месяца.
 
     let totalDebt = 0;
     let penalty = 0;
 
-    // (1) основной путь — через calc_engine
+    // (1) legacy direct calculation path is blocked on index
     try {
-        if (window.JKHCalcEngine) {
-            // ✅ ЕДИНЫЙ ДВИЖОК: для сводной главной используем тот же метод,
-            // что и карточка/справка: calcTotalsAsOfAdjusted() на дату окончания расчёта.
-            //
-            // ВАЖНО:
-            // - calcTotalsAsOfCore() отдаёт "начисленную пеню" (penaltyAccruedTotal) — это ДРУГОЕ.
-            // - нам нужна "пеня к взысканию / задолженность по пени" (penaltyDebt),
-            //   которая согласована с карточкой и справкой.
-            if (typeof window.JKHCalcEngine.calcTotalsAsOfAdjusted === 'function') {
-                const adj = window.JKHCalcEngine.calcTotalsAsOfAdjusted(
-                    viewRows,
-                    asOf,
-                    { abonentId: id, applyAdvanceOffset: true, allowNegativePrincipal: true }
-                );
-
-                const principal = Number(adj?.principal) || 0;       // может быть отрицательный (аванс)
-                const penDebt   = Number(adj?.penaltyDebt) || 0;
-                const total     = Number(adj?.total) || (principal + penDebt);
-
-                totalDebt = total;
-                // CRITICAL: пеня берётся напрямую из calc_engine (penaltyDebt).
-                // Запрещено обнулять её в index.html — это нарушает единый расчёт.
-                penalty = penDebt;
-
-                CRITICAL_ASSERT(Number.isFinite(totalDebt), "Index: totalDebt is not finite", { id, totalDebt, adj });
-                CRITICAL_ASSERT(Number.isFinite(penalty),   "Index: penalty is not finite",   { id, penalty, adj });
-            } else {
-                throw new Error('JKHCalcEngine.calcTotalsAsOfAdjusted is missing');
-            }
-        } else {
-            throw new Error('no JKHCalcEngine');
-        }
+        throw new Error('INDEX_DIRECT_CALC_DISABLED');
     } catch (e) {
         // (2) fallback — последняя строка последнего месяца (как раньше)
         let endRow = null;
@@ -813,7 +778,7 @@ function shouldUsePassiveSummaryMode(){
 function normalizeSummaryStatus(value){
     const s = String(value || "missing").trim().toLowerCase();
     if (s === "stale") return "dirty";
-    return (s === "fresh" || s === "dirty" || s === "missing" || s === "error") ? s : "error";
+    return (s === "fresh" || s === "dirty" || s === "missing" || s === "error" || s === "invalid") ? s : "error";
 }
 
 function summaryNumberToDisplay(value){
@@ -909,6 +874,9 @@ function validateIndexSummaryTotals(summary, status){
     } else if (status === "error") {
         whyEmptyTotals = "summary error";
         exactGuard = "summary_status error";
+    } else if (status === "invalid") {
+        whyEmptyTotals = "summary invalid";
+        exactGuard = "summary_status invalid";
     }
 
     return {
@@ -1057,7 +1025,7 @@ function renderIndexSummaryError(message){
 function getIndexServerSummaryStatusFilter(){
     const raw = String(filters.summaryStatus || "").trim().toLowerCase();
     if (!raw) return "";
-    if (raw === "stale" || raw === "устаревшие" || raw === "устаревший") return "dirty,missing,error";
+    if (raw === "stale" || raw === "устаревшие" || raw === "устаревший") return "dirty,missing,error,invalid";
     return raw;
 }
 
@@ -1145,18 +1113,6 @@ function rebuildIndexRows(){
 }
 
 function hasUsablePaymentLedger(abonentId){
-    try {
-        const arr = (window.Data && typeof window.Data.readPaymentLedger === "function")
-            ? window.Data.readPaymentLedger(abonentId)
-            : (function(){
-                const key = ((typeof window.getPaymentsKeyForAbonent === "function") ? window.getPaymentsKeyForAbonent(abonentId) : "");
-                return key ? getPaymentRowsByStorageKeyCached(key) : [];
-            })();
-        if (!Array.isArray(arr)) return false;
-        for (const row of arr){
-            if (toNum(row && row.accrued) > 0 || toNum(row && row.paid) > 0) return true;
-        }
-    } catch (e) {}
     return false;
 }
 
@@ -1364,7 +1320,7 @@ function initSorting() {
 function isSummaryBatchStatus(status){
     if (String(status || "").trim().toLowerCase() === "legacy") return false;
     const s = normalizeSummaryStatus(status);
-    return s === "dirty" || s === "missing" || s === "error";
+    return s === "dirty" || s === "missing" || s === "error" || s === "invalid";
 }
 
 function getSummaryBatchUid(row){

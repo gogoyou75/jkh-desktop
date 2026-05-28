@@ -74,6 +74,7 @@ RECALC_BATCH_RUNNING_TTL_SECONDS = 30 * 60
 RECALC_BATCH_MAX_UIDS = 100
 RECALC_BATCH_KEEP_PER_OWNER = 20
 RECALC_BATCH_RETENTION_DAYS = 7
+SNAPSHOT_ENGINE_VERSION = "JKHCalcEngine:stage16-mvp"
 
 class User(db.Model):
     __tablename__ = "users"
@@ -224,6 +225,18 @@ class AbonentSummary(db.Model):
     abonent_id = db.Column(db.String(128), nullable=False, default="", index=True)
     account_uid = db.Column(db.String(128), nullable=False, default="", index=True)
     account_number = db.Column(db.String(128), nullable=False, default="", index=True)
+    fio = db.Column(db.String(255), nullable=False, default="")
+    address = db.Column(db.String(1024), nullable=False, default="")
+    total_accrued = db.Column(db.Numeric(14, 2), nullable=True)
+    total_paid = db.Column(db.Numeric(14, 2), nullable=True)
+    main_debt = db.Column(db.Numeric(14, 2), nullable=True)
+    penalty_debt = db.Column(db.Numeric(14, 2), nullable=True)
+    total_debt = db.Column(db.Numeric(14, 2), nullable=True)
+    summary_status = db.Column(db.String(32), nullable=False, default="missing", index=True)
+    summary_reason = db.Column(db.String(128), nullable=False, default="")
+    input_hash = db.Column(db.String(64), nullable=False, default="", index=True)
+    dirty_since = db.Column(db.DateTime, nullable=True)
+    last_error_code = db.Column(db.String(64), nullable=False, default="")
     summary_json = db.Column(db.Text, nullable=False, default="{}")
     created_at = db.Column(db.DateTime, nullable=False, server_default=text("CURRENT_TIMESTAMP"))
     updated_at = db.Column(
@@ -231,6 +244,51 @@ class AbonentSummary(db.Model):
         server_default=text("CURRENT_TIMESTAMP"),
         onupdate=text("CURRENT_TIMESTAMP"),
     )
+
+
+class CardSnapshot(db.Model):
+    __tablename__ = "card_snapshot"
+
+    id = db.Column(db.BigInteger, primary_key=True, autoincrement=True)
+    owner_id = db.Column(db.String(128), nullable=False, index=True)
+    abonent_uid = db.Column(db.String(128), nullable=False, default="", index=True)
+    abonent_id = db.Column(db.String(128), nullable=False, default="", index=True)
+    snapshot_status = db.Column(db.String(32), nullable=False, default="missing", index=True)
+    snapshot_reason = db.Column(db.String(128), nullable=False, default="")
+    input_hash = db.Column(db.String(64), nullable=False, default="", index=True)
+    ledger_version = db.Column(db.String(64), nullable=False, default="")
+    tariff_version = db.Column(db.String(64), nullable=False, default="")
+    rate_version = db.Column(db.String(64), nullable=False, default="")
+    exclude_version = db.Column(db.String(64), nullable=False, default="")
+    links_version = db.Column(db.String(64), nullable=False, default="")
+    engine_version = db.Column(db.String(64), nullable=False, default=SNAPSHOT_ENGINE_VERSION)
+    computed_at = db.Column(db.DateTime, nullable=True)
+    updated_at = db.Column(
+        db.DateTime,
+        server_default=text("CURRENT_TIMESTAMP"),
+        onupdate=text("CURRENT_TIMESTAMP"),
+    )
+    snapshot_json = db.Column(db.Text, nullable=False, default="{}")
+
+    __table_args__ = (db.UniqueConstraint("owner_id", "abonent_uid", name="uq_card_snapshot_owner_uid"),)
+
+
+class RecalcUidLock(db.Model):
+    __tablename__ = "recalc_uid_locks"
+
+    id = db.Column(db.BigInteger, primary_key=True, autoincrement=True)
+    owner_id = db.Column(db.String(128), nullable=False, index=True)
+    abonent_uid = db.Column(db.String(128), nullable=False, index=True)
+    lock_token = db.Column(db.String(64), nullable=False, default="")
+    status = db.Column(db.String(32), nullable=False, default="running", index=True)
+    started_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = db.Column(
+        db.DateTime,
+        server_default=text("CURRENT_TIMESTAMP"),
+        onupdate=text("CURRENT_TIMESTAMP"),
+    )
+
+    __table_args__ = (db.UniqueConstraint("owner_id", "abonent_uid", name="uq_recalc_uid_lock_owner_uid"),)
 
 
 class RecalcBatchJob(db.Model):
@@ -312,6 +370,54 @@ def _abonent_summary_payload(row: AbonentSummary):
         "created_at": row.created_at.isoformat() + "Z" if row.created_at else None,
         "updated_at": row.updated_at.isoformat() + "Z" if row.updated_at else None,
     }
+
+
+def _decimal_or_none(value):
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None
+    try:
+        d = Decimal(str(value).replace(",", "."))
+    except (InvalidOperation, ValueError, TypeError):
+        return None
+    if not d.is_finite():
+        return None
+    return d
+
+
+def _summary_value(summary: dict, *keys):
+    totals = summary.get("totals") if isinstance(summary.get("totals"), dict) else {}
+    for key in keys:
+        if key.startswith("totals."):
+            value = totals.get(key.split(".", 1)[1])
+        else:
+            value = summary.get(key)
+        if value is not None and not (isinstance(value, str) and not value.strip()):
+            return value
+    return None
+
+
+def _apply_abonent_summary_columns(row: AbonentSummary, target: dict, summary: dict):
+    identity = target.get("identity") if isinstance(target, dict) and isinstance(target.get("identity"), dict) else {}
+    summary = summary if isinstance(summary, dict) else {}
+    abonent = summary.get("abonent") if isinstance(summary.get("abonent"), dict) else {}
+    status = _summary_status_from_payload(summary)
+    reason = _norm_text(summary.get("summary_reason") or summary.get("reason"))
+
+    row.fio = _norm_text(summary.get("fio") or abonent.get("fio") or identity.get("fio"))
+    row.address = _norm_text(summary.get("address") or abonent.get("address") or identity.get("address"))
+    row.total_accrued = _decimal_or_none(_summary_value(summary, "total_accrued", "totals.total_accrued", "totals.accrued"))
+    row.total_paid = _decimal_or_none(_summary_value(summary, "total_paid", "totals.total_paid", "totals.paid"))
+    row.main_debt = _decimal_or_none(_summary_value(summary, "main_debt", "principal", "total_principal", "totals.principal"))
+    row.penalty_debt = _decimal_or_none(_summary_value(summary, "penalty_debt", "penalty", "total_penalty", "totals.penalty", "totals.total_penalty"))
+    row.total_debt = _decimal_or_none(_summary_value(summary, "total_debt", "total", "totals.total_debt", "totals.total", "totals.debt"))
+    row.summary_status = status
+    row.summary_reason = reason
+    row.input_hash = _norm_text(summary.get("input_hash"))
+    row.last_error_code = reason if status in {"error", "invalid"} else ""
+    if status == "dirty" and not row.dirty_since:
+        row.dirty_since = datetime.utcnow()
+    elif status == "fresh":
+        row.dirty_since = None
 
 
 def _normalize_email(value: str) -> str:
@@ -1134,6 +1240,7 @@ def _upsert_abonent_summary_payload(owner_id: str, account_uid: str, target: dic
         row.abonent_id = abonent_id or row.abonent_id
         row.account_number = account_number or row.account_number
         row.summary_json = summary_json
+        _apply_abonent_summary_columns(row, target, summary)
     else:
         row = AbonentSummary(
             owner_id=owner_id,
@@ -1142,6 +1249,7 @@ def _upsert_abonent_summary_payload(owner_id: str, account_uid: str, target: dic
             account_number=account_number,
             summary_json=summary_json,
         )
+        _apply_abonent_summary_columns(row, target, summary)
         db.session.add(row)
     return row
 
@@ -1156,7 +1264,7 @@ def _summary_status_from_payload(summary: dict | None):
     reason = _norm_text(summary.get("summary_reason") or summary.get("reason"))
     if status == "dirty" and reason == "CALC_PERIOD_CHANGED":
         return "missing"
-    if status in {"fresh", "dirty", "missing", "error"}:
+    if status in {"fresh", "dirty", "missing", "error", "invalid"}:
         return status
     return "missing"
 
@@ -1602,7 +1710,16 @@ def _recalc_batch_create_job(owner_id: str, user_id: str, raw_uids, reason: str)
 
     targets = _owner_abonent_summary_targets(owner_id)
     targets_by_uid = {_norm_text(t.get("account_uid")): t for t in targets if _norm_text(t.get("account_uid"))}
-    accepted = [uid for uid in requested if uid in targets_by_uid]
+    active_uid_rows = (
+        db.session.query(RecalcBatchJobItem.account_uid)
+        .join(RecalcBatchJob, RecalcBatchJob.id == RecalcBatchJobItem.job_id)
+        .filter(RecalcBatchJob.owner_id == owner_id)
+        .filter(RecalcBatchJob.status.in_(["queued", "running"]))
+        .filter(RecalcBatchJobItem.status.in_(["queued", "running"]))
+        .all()
+    )
+    active_uids = {_norm_text(row[0]) for row in active_uid_rows if _norm_text(row[0])}
+    accepted = [uid for uid in requested if uid in targets_by_uid and uid not in active_uids]
     skipped = len(requested) - len(accepted)
     job = RecalcBatchJob(owner_id=owner_id, requested_by=user_id, reason=reason_norm, status="queued", total_count=len(accepted), skipped_count=skipped)
     db.session.add(job)
@@ -1926,16 +2043,21 @@ def abonent_summary_mark_dirty():
                 existing_summary = {}
             row.abonent_id = _norm_text(target.get("abonent_id"))
             row.account_number = _norm_text(target.get("account_number"))
-            row.summary_json = json.dumps(_dirty_abonent_summary_payload(existing_summary, reason), ensure_ascii=False, sort_keys=True)
+            dirty_summary = _dirty_abonent_summary_payload(existing_summary, reason)
+            row.summary_json = json.dumps(dirty_summary, ensure_ascii=False, sort_keys=True)
+            _apply_abonent_summary_columns(row, target, dirty_summary)
             counters["updated"] += 1
         else:
-            db.session.add(AbonentSummary(
+            dirty_summary = _dirty_abonent_summary_payload(None, reason)
+            row = AbonentSummary(
                 owner_id=owner,
                 abonent_id=_norm_text(target.get("abonent_id")),
                 account_uid=account_uid,
                 account_number=_norm_text(target.get("account_number")),
-                summary_json=json.dumps(_dirty_abonent_summary_payload(None, reason), ensure_ascii=False, sort_keys=True),
-            ))
+                summary_json=json.dumps(dirty_summary, ensure_ascii=False, sort_keys=True),
+            )
+            _apply_abonent_summary_columns(row, target, dirty_summary)
+            db.session.add(row)
             counters["created"] += 1
 
         db.session.commit()
@@ -2100,15 +2222,18 @@ def abonent_summary_rebuild():
                 row.abonent_id = abonent_id
                 row.account_number = account_number
                 row.summary_json = summary_json
+                _apply_abonent_summary_columns(row, target, summary)
                 counters["updated"] += 1
             else:
-                db.session.add(AbonentSummary(
+                row = AbonentSummary(
                     owner_id=owner,
                     abonent_id=abonent_id,
                     account_uid=account_uid,
                     account_number=account_number,
                     summary_json=summary_json,
-                ))
+                )
+                _apply_abonent_summary_columns(row, target, summary)
+                db.session.add(row)
                 counters["created"] += 1
 
             db.session.commit()
@@ -2132,15 +2257,19 @@ def abonent_summary_rebuild():
                 row.abonent_id = _norm_text(target.get("abonent_id"))
                 row.account_number = _norm_text(target.get("account_number"))
                 row.summary_json = summary_json
+                _apply_abonent_summary_columns(row, target, _build_missing_abonent_summary(target))
                 counters["updated"] += 1
             else:
-                db.session.add(AbonentSummary(
+                missing_summary = _build_missing_abonent_summary(target)
+                row = AbonentSummary(
                     owner_id=owner,
                     abonent_id=_norm_text(target.get("abonent_id")),
                     account_uid=account_uid,
                     account_number=_norm_text(target.get("account_number")),
-                    summary_json=summary_json,
-                ))
+                    summary_json=json.dumps(missing_summary, ensure_ascii=False, sort_keys=True),
+                )
+                _apply_abonent_summary_columns(row, target, missing_summary)
+                db.session.add(row)
                 counters["created"] += 1
 
         db.session.commit()
@@ -2150,6 +2279,121 @@ def abonent_summary_rebuild():
         return jsonify(ok=False, error="summary_rebuild_failed", counters=counters, details=str(exc)), 500
 
     return jsonify(ok=True, counters=counters)
+
+
+def _card_snapshot_payload(row: CardSnapshot):
+    try:
+        snapshot = json.loads(row.snapshot_json or "{}")
+    except (TypeError, ValueError):
+        snapshot = {}
+    return {
+        "owner_id": row.owner_id,
+        "abonent_uid": row.abonent_uid or "",
+        "abonent_id": row.abonent_id or "",
+        "snapshot_status": row.snapshot_status or "missing",
+        "snapshot_reason": row.snapshot_reason or "",
+        "input_hash": row.input_hash or "",
+        "ledger_version": row.ledger_version or "",
+        "tariff_version": row.tariff_version or "",
+        "rate_version": row.rate_version or "",
+        "exclude_version": row.exclude_version or "",
+        "links_version": row.links_version or "",
+        "engine_version": row.engine_version or SNAPSHOT_ENGINE_VERSION,
+        "computed_at": row.computed_at.isoformat() + "Z" if row.computed_at else None,
+        "updated_at": row.updated_at.isoformat() + "Z" if row.updated_at else None,
+        "snapshot": snapshot,
+    }
+
+
+@app.get("/api/card_snapshot/<account_uid>")
+def card_snapshot_get(account_uid: str):
+    user, err = _require_user()
+    if err:
+        return err
+    uid = _norm_text(account_uid)
+    if not uid:
+        return jsonify(ok=False, error="account_uid_required"), 400
+    row = CardSnapshot.query.filter_by(owner_id=user.id, abonent_uid=uid).first()
+    if not row:
+        return jsonify(ok=True, snapshot_status="missing", snapshot_reason="SNAPSHOT_NOT_BUILT", snapshot=None)
+    return jsonify(ok=True, **_card_snapshot_payload(row))
+
+
+@app.post("/api/card_snapshot/<account_uid>")
+def card_snapshot_put(account_uid: str):
+    user, err = _require_user()
+    if err:
+        return err
+    uid = _norm_text(account_uid)
+    if not uid:
+        return jsonify(ok=False, error="account_uid_required"), 400
+    body = request.get_json(silent=True) or {}
+    if not isinstance(body, dict):
+        return jsonify(ok=False, error="snapshot_invalid"), 400
+    snapshot = body.get("snapshot") if isinstance(body.get("snapshot"), dict) else body
+    status = _norm_text(body.get("snapshot_status") or snapshot.get("snapshot_status") or snapshot.get("summary_status") or snapshot.get("status") or "fresh").lower()
+    if status not in {"fresh", "dirty", "missing", "error", "invalid"}:
+        status = "invalid"
+    reason = _norm_text(body.get("snapshot_reason") or snapshot.get("snapshot_reason") or snapshot.get("summary_reason") or snapshot.get("reason"))
+    row = CardSnapshot.query.filter_by(owner_id=user.id, abonent_uid=uid).first()
+    if not row:
+        row = CardSnapshot(owner_id=user.id, abonent_uid=uid)
+        db.session.add(row)
+    row.abonent_id = _norm_text(body.get("abonent_id") or snapshot.get("abonentId") or snapshot.get("abonent_id"))
+    row.snapshot_status = status
+    row.snapshot_reason = reason
+    row.input_hash = _norm_text(body.get("input_hash") or snapshot.get("input_hash"))
+    row.ledger_version = _norm_text(body.get("ledger_version") or snapshot.get("ledgerVersion") or snapshot.get("ledger_version"))
+    row.tariff_version = _norm_text(body.get("tariff_version") or snapshot.get("tariff_version"))
+    row.rate_version = _norm_text(body.get("rate_version") or snapshot.get("rate_version"))
+    row.exclude_version = _norm_text(body.get("exclude_version") or snapshot.get("exclude_version"))
+    row.links_version = _norm_text(body.get("links_version") or snapshot.get("links_version"))
+    row.engine_version = _norm_text(body.get("engine_version") or snapshot.get("engine_version")) or SNAPSHOT_ENGINE_VERSION
+    row.computed_at = datetime.utcnow() if status == "fresh" else row.computed_at
+    row.snapshot_json = json.dumps(snapshot, ensure_ascii=False, sort_keys=True)
+    db.session.commit()
+    return jsonify(ok=True, **_card_snapshot_payload(row))
+
+
+@app.post("/api/recalc_lock/<account_uid>/begin")
+def recalc_lock_begin(account_uid: str):
+    user, err = _require_user()
+    if err:
+        return err
+    uid = _norm_text(account_uid)
+    if not uid:
+        return jsonify(ok=False, error="account_uid_required"), 400
+    now = datetime.utcnow()
+    token = secrets.token_hex(16)
+    existing = RecalcUidLock.query.filter_by(owner_id=user.id, abonent_uid=uid).first()
+    if existing and existing.status == "running":
+        age = (now - (existing.started_at or now)).total_seconds()
+        if age <= RECALC_BATCH_RUNNING_TTL_SECONDS:
+            return jsonify(ok=True, status="already_running", account_uid=uid)
+        existing.status = "stale"
+    if existing:
+        existing.lock_token = token
+        existing.status = "running"
+        existing.started_at = now
+    else:
+        db.session.add(RecalcUidLock(owner_id=user.id, abonent_uid=uid, lock_token=token, status="running", started_at=now))
+    db.session.commit()
+    return jsonify(ok=True, status="started", account_uid=uid, lock_token=token)
+
+
+@app.post("/api/recalc_lock/<account_uid>/finish")
+def recalc_lock_finish(account_uid: str):
+    user, err = _require_user()
+    if err:
+        return err
+    uid = _norm_text(account_uid)
+    body = request.get_json(silent=True) or {}
+    token = _norm_text(body.get("lock_token"))
+    row = RecalcUidLock.query.filter_by(owner_id=user.id, abonent_uid=uid).first()
+    if row and (not token or row.lock_token == token):
+        row.status = "finished"
+        db.session.commit()
+    return jsonify(ok=True, status="finished", account_uid=uid)
 
 
 @app.post("/api/auth/register")
@@ -2767,11 +3011,9 @@ def import_payments_validate(batch_id):
                     r.reason_text = "Дубликат в текущем батче"
                     duplicate += 1
                 else:
-                    key = f"payments_{r.account_uid}"
-                    legacy_key = f"payments_{r.account_number}"
+                    uid_key_part = r.account_uid
+                    key = f"payments_{uid_key_part}"
                     kv = KVStore.query.filter_by(owner=batch.owner_id, k=key).first()
-                    if not kv:
-                        kv = KVStore.query.filter_by(owner=batch.owner_id, k=legacy_key).first()
                     try:
                         ledger = _load_existing_payment_ledger_or_raise(kv)
                     except LedgerJsonInvalidError:
@@ -2906,8 +3148,8 @@ def import_payments_apply(batch_id):
             normalized_source_index = normalize_source_index(r.source_index)
             fingerprint = payment_fingerprint(normalized_uid, normalized_paid_date, normalized_amount, normalized_source_index)
 
-            key = f"payments_{normalized_uid}"
-            legacy_key = f"payments_{normalized_account_number}"
+            uid_key_part = normalized_uid
+            key = f"payments_{uid_key_part}"
             existing_fingerprint = ImportAppliedFingerprint.query.filter_by(
                 owner_id=batch.owner_id,
                 import_type="payments",
@@ -2944,12 +3186,8 @@ def import_payments_apply(batch_id):
             db.session.add(fingerprint_row)
 
             kv = KVStore.query.filter_by(owner=batch.owner_id, k=key).with_for_update().first()
-            legacy_kv = None
             ledger = []
             source_kv = kv
-            if not source_kv:
-                legacy_kv = KVStore.query.filter_by(owner=batch.owner_id, k=legacy_key).first()
-                source_kv = legacy_kv
             try:
                 ledger = _load_existing_payment_ledger_or_raise(source_kv)
             except LedgerJsonInvalidError:
