@@ -3857,19 +3857,48 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
         return { ok:false, reason:normalizeManualRecalcReason(autoResult && autoResult.reason), autoaccrual:autoResult, autoaccrual_changed:!!(autoResult && autoResult.changed) };
       }
       console.time("[recalc-step] build runtime rows before summary");
+      console.time("[recalc-detail] get ledger");
       const arr = getPayments();
+      console.timeEnd("[recalc-detail] get ledger");
+      console.time("[recalc-detail] period selection");
       const periodActive = !!(explicitReportPeriod || explicitRuntimePeriod);
       const selectedPeriod = explicitReportPeriod ? { from: String(opts.period.from || ""), to: String(opts.period.to || "") } : explicitRuntimePeriod;
-      const runtimeRows = periodActive && selectedPeriod ? applyResponsibilityRangeToView(applyCalcFilter(arr, true, selectedPeriod)).slice() : arr;
+      console.timeEnd("[recalc-detail] period selection");
+      console.time("[recalc-detail] build runtimeRows");
+      let runtimeRows;
+      if (periodActive && selectedPeriod) {
+        console.time("[recalc-detail] applyCalcFilter row/month loop");
+        const filteredRows = applyCalcFilter(arr, true, selectedPeriod);
+        console.timeEnd("[recalc-detail] applyCalcFilter row/month loop");
+        console.time("[recalc-detail] responsibility month/row loops");
+        const responsibilityRows = applyResponsibilityRangeToView(filteredRows);
+        console.timeEnd("[recalc-detail] responsibility month/row loops");
+        console.time("[recalc-detail] clone/copy rows");
+        runtimeRows = responsibilityRows.slice();
+        console.timeEnd("[recalc-detail] clone/copy rows");
+      } else {
+        console.time("[recalc-detail] clone/copy rows");
+        runtimeRows = arr;
+        console.timeEnd("[recalc-detail] clone/copy rows");
+      }
+      console.timeEnd("[recalc-detail] build runtimeRows");
+      console.time("[recalc-detail] build baseRows row/month loop");
       const baseRows = runningTotalsBaseRows(runtimeRows);
+      console.timeEnd("[recalc-detail] build baseRows row/month loop");
+      console.time("[recalc-detail] build maps/indexes");
       const ledgerVersion = (window.Data && Data.computeLedgerRuntimeVersion) ? String(Data.computeLedgerRuntimeVersion(id) || "") : "";
+      console.time("[recalc-detail] ledgerSignature row loop");
       const sig = ledgerSignatureForRows(arr) + "::" + runtimeCacheSignature(ledgerVersion, periodActive, selectedPeriod);
+      console.timeEnd("[recalc-detail] ledgerSignature row loop");
       const rowsById = {};
+      console.timeEnd("[recalc-detail] build maps/indexes");
+      console.time("[recalc-detail] build rowsById row loop");
       runtimeRows.forEach(function(r){
         const asOf = asOfForRow(r);
         const t = calcTotalsAsOfMemoized(baseRows, asOf, sig);
         rowsById[String(r.id)] = { pay_main: t.principal, pay_penalty: t.penalty, total: t.total };
       });
+      console.timeEnd("[recalc-detail] build rowsById row loop");
       console.timeEnd("[recalc-step] build runtime rows before summary");
       const payload = { ledgerVersion: ledgerVersion, runtimeSignature: runtimeCacheSignature(ledgerVersion, periodActive, selectedPeriod), periodActive: !!periodActive, period: periodActive && selectedPeriod ? { from: selectedPeriod.from || "", to: selectedPeriod.to || "" } : null, rowsById: rowsById, updatedAt: (new Date()).toISOString() };
       console.time("[recalc] save runtime cache");
