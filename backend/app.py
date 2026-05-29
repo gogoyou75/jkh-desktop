@@ -323,6 +323,42 @@ class RecalcBatchJobItem(db.Model):
     error_message = db.Column(db.Text, nullable=False, default="")
 
 
+class BulkCalcVerifyJob(db.Model):
+    __tablename__ = "bulk_calc_verify_jobs"
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    owner_id = db.Column(db.String(128), nullable=False, index=True)
+    requested_by = db.Column(db.String(64), nullable=False, default="")
+    reason = db.Column(db.String(64), nullable=False, default="")
+    status = db.Column(db.String(32), nullable=False, default="queued", index=True)
+    total_count = db.Column(db.Integer, nullable=False, default=0)
+    processed_count = db.Column(db.Integer, nullable=False, default=0)
+    ok_count = db.Column(db.Integer, nullable=False, default=0)
+    mismatch_count = db.Column(db.Integer, nullable=False, default=0)
+    error_count = db.Column(db.Integer, nullable=False, default=0)
+    skipped_count = db.Column(db.Integer, nullable=False, default=0)
+    created_at = db.Column(db.DateTime, nullable=False, server_default=text("CURRENT_TIMESTAMP"))
+    started_at = db.Column(db.DateTime, nullable=True)
+    finished_at = db.Column(db.DateTime, nullable=True)
+    error_message = db.Column(db.Text, nullable=False, default="")
+
+
+class BulkCalcVerifyJobItem(db.Model):
+    __tablename__ = "bulk_calc_verify_job_items"
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    job_id = db.Column(db.Integer, db.ForeignKey("bulk_calc_verify_jobs.id"), nullable=False, index=True)
+    owner_id = db.Column(db.String(128), nullable=False, index=True)
+    account_uid = db.Column(db.String(128), nullable=False, default="", index=True)
+    status = db.Column(db.String(32), nullable=False, default="queued", index=True)
+    reason = db.Column(db.String(128), nullable=False, default="")
+    old_summary_json = db.Column(db.Text, nullable=False, default="{}")
+    new_summary_json = db.Column(db.Text, nullable=False, default="{}")
+    diff_json = db.Column(db.Text, nullable=False, default="{}")
+    error_code = db.Column(db.String(64), nullable=False, default="")
+    started_at = db.Column(db.DateTime, nullable=True)
+    finished_at = db.Column(db.DateTime, nullable=True)
+    error_message = db.Column(db.Text, nullable=False, default="")
+
+
 def _json_error(error: str, code: int):
     return jsonify(ok=False, error=error), code
 
@@ -1732,6 +1768,290 @@ def _recalc_batch_create_job(owner_id: str, user_id: str, raw_uids, reason: str)
     return job, {"requested": len(requested), "accepted": len(accepted), "skipped": skipped}
 
 
+def _bulk_verify_json_load(raw_value, default=None):
+    if default is None:
+        default = {}
+    try:
+        parsed = json.loads(raw_value or "{}")
+    except (TypeError, ValueError):
+        return default
+    return parsed if isinstance(parsed, dict) else default
+
+
+def _bulk_verify_pick(summary: dict | None, keys: tuple[str, ...]):
+    summary = summary if isinstance(summary, dict) else {}
+    totals = summary.get("totals") if isinstance(summary.get("totals"), dict) else {}
+    period = summary.get("period") if isinstance(summary.get("period"), dict) else {}
+    for key in keys:
+        if key.startswith("totals."):
+            value = totals.get(key.split(".", 1)[1])
+        elif key.startswith("period."):
+            value = period.get(key.split(".", 1)[1])
+        else:
+            value = summary.get(key)
+        if value is not None and not (isinstance(value, str) and not value.strip()):
+            return value
+    return None
+
+
+def _bulk_verify_decimal_text(value):
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None
+    try:
+        num = Decimal(str(value).replace(",", "."))
+    except (InvalidOperation, ValueError, TypeError):
+        return str(value)
+    if not num.is_finite():
+        return str(value)
+    return str(num.quantize(Decimal("0.01")))
+
+
+def _bulk_verify_text(value):
+    if value is None:
+        return None
+    return _norm_text(value)
+
+
+def _bulk_verify_summary_view(summary: dict | None):
+    summary = summary if isinstance(summary, dict) else {}
+    return {
+        "total_accrued": _bulk_verify_decimal_text(_bulk_verify_pick(summary, ("total_accrued", "totals.total_accrued", "totals.accrued"))),
+        "total_paid": _bulk_verify_decimal_text(_bulk_verify_pick(summary, ("total_paid", "totals.total_paid", "totals.paid"))),
+        "main_debt": _bulk_verify_decimal_text(_bulk_verify_pick(summary, ("main_debt", "principal", "total_principal", "totals.principal"))),
+        "penalty_debt": _bulk_verify_decimal_text(_bulk_verify_pick(summary, ("penalty_debt", "penalty", "total_penalty", "totals.penalty", "totals.total_penalty"))),
+        "total_debt": _bulk_verify_decimal_text(_bulk_verify_pick(summary, ("total_debt", "total", "totals.total_debt", "totals.total", "totals.debt"))),
+        "period_from": _bulk_verify_text(_bulk_verify_pick(summary, ("period_from", "period_start", "start_date", "period.from"))),
+        "period_to": _bulk_verify_text(_bulk_verify_pick(summary, ("period_to", "period_end", "end_date", "period.to"))),
+        "input_hash": _bulk_verify_text(_bulk_verify_pick(summary, ("input_hash",))),
+        "version": _bulk_verify_text(_bulk_verify_pick(summary, ("version", "calc_engine_version", "engine_version"))),
+    }
+
+
+def _bulk_verify_summary_from_snapshot(snapshot: dict | None):
+    src = snapshot if isinstance(snapshot, dict) else {}
+    totals = src.get("totals") if isinstance(src.get("totals"), dict) else {}
+    return {
+        "summary_status": _norm_text(src.get("summary_status") or src.get("status") or "fresh").lower(),
+        "summary_reason": _norm_text(src.get("summary_reason") or src.get("reason") or "OK"),
+        "totals": totals,
+        "total_accrued": _bulk_verify_pick(src, ("total_accrued", "totals.total_accrued", "totals.accrued")),
+        "total_paid": _bulk_verify_pick(src, ("total_paid", "totals.total_paid", "totals.paid")),
+        "main_debt": _bulk_verify_pick(src, ("main_debt", "principal", "total_principal", "totals.principal")),
+        "penalty_debt": _bulk_verify_pick(src, ("penalty_debt", "penalty", "total_penalty", "totals.penalty", "totals.total_penalty")),
+        "total_debt": _bulk_verify_pick(src, ("total_debt", "total", "totals.total_debt", "totals.total", "totals.debt")),
+        "period": src.get("period") if isinstance(src.get("period"), dict) else {},
+        "input_hash": _norm_text(src.get("input_hash")),
+        "version": _norm_text(src.get("version") or src.get("calc_engine_version") or src.get("engine_version")),
+    }
+
+
+def _bulk_verify_diff(old_summary: dict | None, new_summary: dict | None):
+    old_view = _bulk_verify_summary_view(old_summary)
+    new_view = _bulk_verify_summary_view(new_summary)
+    diff = {}
+    for key in ("total_accrued", "total_paid", "main_debt", "penalty_debt", "total_debt", "period_from", "period_to", "input_hash", "version"):
+        if old_view.get(key) != new_view.get(key):
+            diff[key] = {"old": old_view.get(key), "new": new_view.get(key)}
+    return old_view, new_view, diff
+
+
+def _bulk_verify_active_uids(owner_id: str):
+    active = set()
+    recalc_rows = (
+        db.session.query(RecalcBatchJobItem.account_uid)
+        .join(RecalcBatchJob, RecalcBatchJob.id == RecalcBatchJobItem.job_id)
+        .filter(RecalcBatchJob.owner_id == owner_id)
+        .filter(RecalcBatchJob.status.in_(["queued", "running"]))
+        .filter(RecalcBatchJobItem.status.in_(["queued", "running"]))
+        .all()
+    )
+    active.update(_norm_text(row[0]) for row in recalc_rows if _norm_text(row[0]))
+    verify_rows = (
+        db.session.query(BulkCalcVerifyJobItem.account_uid)
+        .join(BulkCalcVerifyJob, BulkCalcVerifyJob.id == BulkCalcVerifyJobItem.job_id)
+        .filter(BulkCalcVerifyJob.owner_id == owner_id)
+        .filter(BulkCalcVerifyJob.status.in_(["queued", "running"]))
+        .filter(BulkCalcVerifyJobItem.status.in_(["queued", "running"]))
+        .all()
+    )
+    active.update(_norm_text(row[0]) for row in verify_rows if _norm_text(row[0]))
+    lock_rows = RecalcUidLock.query.filter_by(owner_id=owner_id, status="running").all()
+    now = datetime.utcnow()
+    for row in lock_rows:
+        age = (now - (row.started_at or now)).total_seconds()
+        if age <= RECALC_BATCH_RUNNING_TTL_SECONDS and _norm_text(row.abonent_uid):
+            active.add(_norm_text(row.abonent_uid))
+    return active
+
+
+def _bulk_verify_status_counts(job_id: int, owner_id: str):
+    counts = {"ok": 0, "mismatch": 0, "error": 0, "skipped": 0, "processed": 0}
+    items = BulkCalcVerifyJobItem.query.filter_by(job_id=job_id, owner_id=owner_id).all()
+    for item in items:
+        status = _norm_text(item.status)
+        if status in counts:
+            counts[status] += 1
+        if status in {"ok", "mismatch", "error", "skipped"}:
+            counts["processed"] += 1
+    return counts
+
+
+def _bulk_verify_refresh_job_counters(job: BulkCalcVerifyJob):
+    counts = _bulk_verify_status_counts(job.id, job.owner_id)
+    job.processed_count = counts["processed"]
+    job.ok_count = counts["ok"]
+    job.mismatch_count = counts["mismatch"]
+    job.error_count = counts["error"]
+    job.skipped_count = counts["skipped"]
+    if counts["processed"] >= int(job.total_count or 0):
+        job.status = "completed"
+        if not job.finished_at:
+            job.finished_at = datetime.utcnow()
+
+
+def _bulk_verify_item_payload(item: BulkCalcVerifyJobItem):
+    return {
+        "uid": _norm_text(item.account_uid),
+        "account_uid": _norm_text(item.account_uid),
+        "status": _norm_text(item.status),
+        "reason": _norm_text(item.reason) or _norm_text(item.error_message),
+        "old_summary": _bulk_verify_json_load(item.old_summary_json),
+        "new_summary": _bulk_verify_json_load(item.new_summary_json),
+        "diff": _bulk_verify_json_load(item.diff_json),
+        "error_code": _norm_text(item.error_code),
+    }
+
+
+def _bulk_verify_job_response(job: BulkCalcVerifyJob):
+    items = BulkCalcVerifyJobItem.query.filter_by(job_id=job.id, owner_id=job.owner_id).order_by(BulkCalcVerifyJobItem.id.asc()).all()
+    return {
+        "success": True,
+        "job_id": int(job.id),
+        "status": _norm_text(job.status) or "queued",
+        "total": int(job.total_count or 0),
+        "processed": int(job.processed_count or 0),
+        "ok_count": int(job.ok_count or 0),
+        "ok_items": int(job.ok_count or 0),
+        "ok": int(job.ok_count or 0),
+        "mismatch": int(job.mismatch_count or 0),
+        "error": int(job.error_count or 0),
+        "skipped": int(job.skipped_count or 0),
+        "reason": _norm_text(job.reason),
+        "message": _norm_text(job.error_message),
+        "items": [_bulk_verify_item_payload(item) for item in items],
+    }
+
+
+def _bulk_verify_create_job(owner_id: str, user_id: str, raw_uids, reason: str):
+    requested = _recalc_normalize_uids(raw_uids)
+    if not requested:
+        return None, {"requested": 0}
+    if len(requested) > RECALC_BATCH_MAX_UIDS:
+        return "TOO_MANY_UIDS", {"max_uids": RECALC_BATCH_MAX_UIDS, "requested": len(requested)}
+
+    app.logger.info("[stage16][bulk-verify] start owner_id=%s requested=%s", owner_id, len(requested))
+    targets = _owner_abonent_summary_targets(owner_id)
+    targets_by_uid = {_norm_text(t.get("account_uid")): t for t in targets if _norm_text(t.get("account_uid"))}
+    active_uids = _bulk_verify_active_uids(owner_id)
+    reason_norm = _norm_text(reason) or "STAGE16_BULK_VERIFY"
+
+    job = BulkCalcVerifyJob(owner_id=owner_id, requested_by=user_id, reason=reason_norm, status="queued", total_count=len(requested))
+    db.session.add(job)
+    db.session.flush()
+
+    for uid in requested:
+        if uid not in targets_by_uid:
+            db.session.add(BulkCalcVerifyJobItem(
+                job_id=job.id,
+                owner_id=owner_id,
+                account_uid=uid,
+                status="skipped",
+                reason="UID_NOT_FOUND",
+                error_code="UID_NOT_FOUND",
+                finished_at=datetime.utcnow(),
+            ))
+            continue
+        if uid in active_uids:
+            app.logger.info("[stage16][bulk-verify] already_running owner_id=%s uid=%s", owner_id, uid)
+            db.session.add(BulkCalcVerifyJobItem(
+                job_id=job.id,
+                owner_id=owner_id,
+                account_uid=uid,
+                status="skipped",
+                reason="already_running",
+                error_code="already_running",
+                finished_at=datetime.utcnow(),
+            ))
+            continue
+        db.session.add(BulkCalcVerifyJobItem(job_id=job.id, owner_id=owner_id, account_uid=uid, status="queued"))
+
+    db.session.flush()
+    _bulk_verify_refresh_job_counters(job)
+    db.session.commit()
+    return job, {"requested": len(requested)}
+
+
+def _bulk_verify_process_job(owner_id: str, job: BulkCalcVerifyJob, step_limit: int = 25):
+    if not job or job.owner_id != owner_id or job.status not in {"queued", "running"}:
+        return
+    if job.status == "queued":
+        job.status = "running"
+        if not job.started_at:
+            job.started_at = datetime.utcnow()
+        db.session.commit()
+
+    items = (
+        BulkCalcVerifyJobItem.query
+        .filter_by(job_id=job.id, owner_id=owner_id)
+        .filter(BulkCalcVerifyJobItem.status.in_(["queued", "running"]))
+        .order_by(BulkCalcVerifyJobItem.id.asc())
+        .limit(max(1, int(step_limit)))
+        .all()
+    )
+    for item in items:
+        item.status = "running"
+        if not item.started_at:
+            item.started_at = datetime.utcnow()
+        db.session.commit()
+        try:
+            summary_row = AbonentSummary.query.filter_by(owner_id=owner_id, account_uid=item.account_uid).order_by(AbonentSummary.id.asc()).first()
+            snapshot_row = CardSnapshot.query.filter_by(owner_id=owner_id, abonent_uid=item.account_uid).first()
+            old_summary = _bulk_verify_json_load(summary_row.summary_json if summary_row else "{}", {})
+            if not snapshot_row:
+                raise ValueError("CARD_SNAPSHOT_MISSING")
+            snapshot = _bulk_verify_json_load(snapshot_row.snapshot_json, {})
+            new_summary = _bulk_verify_summary_from_snapshot(snapshot)
+            new_status = _summary_status_from_payload(new_summary)
+            if new_status in {"error", "invalid"}:
+                raise ValueError(_norm_text(new_summary.get("summary_reason")) or "CARD_SNAPSHOT_ERROR")
+            old_view, new_view, diff = _bulk_verify_diff(old_summary, new_summary)
+            item.old_summary_json = json.dumps(old_view, ensure_ascii=False, sort_keys=True)
+            item.new_summary_json = json.dumps(new_view, ensure_ascii=False, sort_keys=True)
+            item.diff_json = json.dumps(diff, ensure_ascii=False, sort_keys=True)
+            if diff:
+                item.status = "mismatch"
+                item.reason = "SUMMARY_SNAPSHOT_MISMATCH"
+                app.logger.info("[stage16][bulk-verify] item mismatch owner_id=%s uid=%s", owner_id, item.account_uid)
+            else:
+                item.status = "ok"
+                item.reason = "OK"
+                app.logger.info("[stage16][bulk-verify] item ok owner_id=%s uid=%s", owner_id, item.account_uid)
+        except Exception as exc:
+            code = _norm_text(str(exc)) or "BULK_VERIFY_ITEM_FAILED"
+            item.status = "error"
+            item.reason = code
+            item.error_code = code
+            item.error_message = code
+            app.logger.info("[stage16][bulk-verify] item error owner_id=%s uid=%s error=%s", owner_id, item.account_uid, code)
+        item.finished_at = datetime.utcnow()
+        db.session.commit()
+
+    _bulk_verify_refresh_job_counters(job)
+    if job.status == "completed":
+        app.logger.info("[stage16][bulk-verify] completed owner_id=%s job_id=%s", owner_id, job.id)
+    db.session.commit()
+
+
 
 def _parse_summary_status_filter(raw_value: str):
     raw = _norm_text(raw_value).lower()
@@ -2180,6 +2500,41 @@ def abonent_summary_recalc_batch_job_status(job_id: int):
     _recalc_batch_process_job(user.id, job, step_limit=10)
     db.session.refresh(job)
     return jsonify(**_batch_job_status_response(job))
+
+
+@app.post("/api/abonent_summary/bulk_calc_verify")
+def abonent_summary_bulk_calc_verify_create():
+    user, err = _require_user()
+    if err:
+        return err
+    body = request.get_json(silent=True) or {}
+    if not isinstance(body, dict):
+        return jsonify(success=False, error="summary_invalid"), 400
+    raw_uids = body.get("uids")
+    if isinstance(raw_uids, str):
+        raw_uids = [raw_uids]
+    if not isinstance(raw_uids, list):
+        return jsonify(success=False, error="uids_required"), 400
+    job, counters = _bulk_verify_create_job(user.id, user.id, raw_uids, body.get("reason"))
+    if job == "TOO_MANY_UIDS":
+        return jsonify(success=False, error="TOO_MANY_UIDS", details={"max_uids": counters.get("max_uids"), "requested": counters.get("requested")}), 400
+    if not job:
+        return jsonify(success=False, error="uids_required"), 400
+    db.session.refresh(job)
+    return jsonify(**_bulk_verify_job_response(job))
+
+
+@app.get("/api/abonent_summary/bulk_calc_verify/<int:job_id>")
+def abonent_summary_bulk_calc_verify_status(job_id: int):
+    user, err = _require_user()
+    if err:
+        return err
+    job = BulkCalcVerifyJob.query.filter_by(id=job_id, owner_id=user.id).first()
+    if not job:
+        return jsonify(success=False, error="job_not_found"), 404
+    _bulk_verify_process_job(user.id, job, step_limit=10)
+    db.session.refresh(job)
+    return jsonify(**_bulk_verify_job_response(job))
 
 
 @app.post("/api/abonent_summary/rebuild")

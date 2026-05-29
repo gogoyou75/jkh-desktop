@@ -1,5 +1,12 @@
 # AUDIT_GAPS_AND_TODO_TABLE — что было пропущено / что надо сделать
 
+## Stage 16 bulk-calc-verify update
+
+- Added verify-only backend shell for explicit UID batches.
+- Scope is limited to persisted `abonent_summary` versus persisted `card_snapshot` comparison.
+- No `calc_engine.js` changes, no Python/Pandas financial calculation, no summary apply, no `payments_<LS>` fallback.
+- Remaining audit risk: backend can verify only persisted results that were produced earlier by the existing explicit card calculation path; it does not independently recompute legal formulas.
+
 Дата: **2026-05-04**  
 Источник: аудит `TRACEABILITY_MATRIX.md`, `LOGIC_SPEC.md`, ключевых frontend-файлов.
 

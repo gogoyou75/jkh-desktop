@@ -17,3 +17,11 @@
 - Kept period/report calculations runtime-only and blocked period summaries from updating the full summary layer.
 - Switched `index.html` to summary-only loading: no calculation engine, ledger reads, autoaccrual, flush, or hidden recalculation on open.
 - `calc_engine.js`, FIFO, penalty formulas, transfer/merge/split financial logic, and `payments_<uid>` ledger structure were not changed.
+
+## Stage 16 bulk-calc-verify
+
+- Added verify-only backend endpoints `POST /api/abonent_summary/bulk_calc_verify` and `GET /api/abonent_summary/bulk_calc_verify/<job_id>`.
+- Added owner-scoped `bulk_calc_verify_jobs` and `bulk_calc_verify_job_items` storage for per-UID `ok`, `mismatch`, `error`, and `skipped` reports.
+- Added UID concurrency guard against active bulk verify, recalc batch, and recalc lock work; duplicate active UID work is reported as `already_running` / `skipped`.
+- Added diff reporting between persisted `abonent_summary` and persisted `card_snapshot` fields without applying or overwriting summary data.
+- No changes to `web/calc_engine.js`, FIFO, penalty formula, backend financial formulas, `payments_<uid>` storage, or server-first index behavior.

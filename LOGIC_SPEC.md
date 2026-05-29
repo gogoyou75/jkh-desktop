@@ -22,3 +22,14 @@
 - `index.html` is summary-only: it does not load the calculation engine, read payment ledgers, apply autoaccrual, flush, or recalculate on open.
 - Card opening remains readonly. Fresh snapshots can be displayed; dirty/missing/error/invalid states require an explicit recalculation action.
 - Period/report calculations are runtime-only unless a report is explicitly saved. They do not dirty the full `card_snapshot` or `abonent_summary`.
+
+## Stage 16 - bulk-calc-verify
+
+- `POST /api/abonent_summary/bulk_calc_verify` accepts only an explicit `uids` list. It must not infer "all abonents" from an empty request.
+- `GET /api/abonent_summary/bulk_calc_verify/<job_id>` returns job counters and per-UID `ok`, `mismatch`, `error`, or `skipped` items.
+- This stage is a verify shell only. It does not apply recalculated data, does not overwrite `abonent_summary`, and does not modify `card_snapshot`.
+- The backend does not implement a second calculation engine. It compares persisted `abonent_summary` with persisted `card_snapshot` fields produced by the existing explicit card calculation path.
+- Compared fields: `total_accrued`, `total_paid`, `main_debt`, `penalty_debt`, `total_debt`, `period_from`, `period_to`, `input_hash`, and version metadata when present.
+- Per-UID failures are recorded in the item result and do not fail the whole batch.
+- One active bulk verify/recalc job per UID is allowed. Concurrent UID work is reported as `already_running` / `skipped`.
+- `payments_<LS>` fallback, Python/Pandas calculation, FIFO optimization, formula changes, incremental replay, checkpoint continuation, and verify/apply mixing are forbidden.
