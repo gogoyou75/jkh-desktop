@@ -3836,7 +3836,9 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
         endRecalcTotalTimer();
         return { ok:false, reason:"RECALC_LOCK_UNAVAILABLE", summary_status:"error", summary_reason:"RECALC_LOCK_UNAVAILABLE" };
       }
+      console.time("[recalc-step] begin lock");
       recalcLock = await Data.beginRecalcUidLock(id);
+      console.timeEnd("[recalc-step] begin lock");
       if (recalcLock && recalcLock.status === "already_running") {
         try { console.log("[payment-table][recalc-explicit]", { abonentId: id, stage: "already_running", recalcMode: recalcMode }); } catch(eLogLock) {}
         endRecalcTotalTimer();
@@ -3846,12 +3848,15 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
         endRecalcTotalTimer();
         return { ok:false, reason:(recalcLock && (recalcLock.reason || recalcLock.error)) || "RECALC_LOCK_FAILED", summary_status:"error", summary_reason:"RECALC_LOCK_FAILED", recalc_lock:recalcLock };
       }
+      console.time("[recalc-step] autoaccrual");
       const autoResult = await applyControlledAutoAccrualForManualRecalc(id, opts);
+      console.timeEnd("[recalc-step] autoaccrual");
       if (!autoResult || autoResult.ok !== true) {
         try { console.log("[payment-table][recalc-explicit]", { abonentId: id, stage: "autoaccrual_failed", reason: normalizeManualRecalcReason(autoResult && autoResult.reason) }); } catch(eLogAuto) {}
         endRecalcTotalTimer();
         return { ok:false, reason:normalizeManualRecalcReason(autoResult && autoResult.reason), autoaccrual:autoResult, autoaccrual_changed:!!(autoResult && autoResult.changed) };
       }
+      console.time("[recalc-step] build runtime rows before summary");
       const arr = getPayments();
       const periodActive = !!(explicitReportPeriod || explicitRuntimePeriod);
       const selectedPeriod = explicitReportPeriod ? { from: String(opts.period.from || ""), to: String(opts.period.to || "") } : explicitRuntimePeriod;
@@ -3865,6 +3870,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
         const t = calcTotalsAsOfMemoized(baseRows, asOf, sig);
         rowsById[String(r.id)] = { pay_main: t.principal, pay_penalty: t.penalty, total: t.total };
       });
+      console.timeEnd("[recalc-step] build runtime rows before summary");
       const payload = { ledgerVersion: ledgerVersion, runtimeSignature: runtimeCacheSignature(ledgerVersion, periodActive, selectedPeriod), periodActive: !!periodActive, period: periodActive && selectedPeriod ? { from: selectedPeriod.from || "", to: selectedPeriod.to || "" } : null, rowsById: rowsById, updatedAt: (new Date()).toISOString() };
       console.time("[recalc] save runtime cache");
       if (window.Data && typeof Data.writeLedgerRuntimeCache === "function") Data.writeLedgerRuntimeCache(id, payload);
@@ -3872,7 +3878,9 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
       __paymentTableRenderedSignature = "";
       __paymentTableMode = "readonly_no_recalc";
       console.time("[recalc] loadPaymentTable");
+      console.time("[recalc-step] loadPaymentTable before summary");
       await loadPaymentTable("full_recalc_completed");
+      console.timeEnd("[recalc-step] loadPaymentTable before summary");
       console.timeEnd("[recalc] loadPaymentTable");
       if (!window.Data || typeof Data.recalculateAbonentCard !== "function") {
         endRecalcTotalTimer();
@@ -3889,6 +3897,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
         recalcLockToken: recalcLock.lock_token || ""
       });
       console.timeEnd("[recalc] Data.recalculateAbonentCard");
+      console.time("[recalc-step] build fresh runtime rows after summary");
       const freshArr = getPayments();
       const freshPeriodActive = periodActive;
       const freshSelectedPeriod = selectedPeriod;
@@ -3902,6 +3911,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
         const t = calcTotalsAsOfMemoized(freshBaseRows, asOf, freshSig);
         freshRowsById[String(r.id)] = { pay_main: t.principal, pay_penalty: t.penalty, total: t.total };
       });
+      console.timeEnd("[recalc-step] build fresh runtime rows after summary");
       const freshPayload = { ledgerVersion: freshLedgerVersion, runtimeSignature: runtimeCacheSignature(freshLedgerVersion, freshPeriodActive, freshSelectedPeriod), periodActive: !!freshPeriodActive, period: freshPeriodActive && freshSelectedPeriod ? { from: freshSelectedPeriod.from || "", to: freshSelectedPeriod.to || "" } : null, rowsById: freshRowsById, updatedAt: (new Date()).toISOString() };
       capturePaymentTableComputedRowsSnapshot(freshRuntimeRows, freshRowsById, freshPeriodActive, freshSelectedPeriod, freshPayload.runtimeSignature, freshLedgerVersion);
       console.time("[recalc] save runtime cache");
@@ -3922,7 +3932,12 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
       };
     } finally {
       if (recalcLock && recalcLock.status === "started" && window.Data && typeof Data.finishRecalcUidLock === "function") {
-        await Data.finishRecalcUidLock(recalcLock.account_uid || id, recalcLock.lock_token || "");
+        console.time("[recalc-step] finish lock");
+        try {
+          await Data.finishRecalcUidLock(recalcLock.account_uid || id, recalcLock.lock_token || "");
+        } finally {
+          console.timeEnd("[recalc-step] finish lock");
+        }
       }
     }
   };
