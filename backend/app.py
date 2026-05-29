@@ -37,6 +37,10 @@ app.config["IMPORT_UPLOAD_BLOB_TTL_DAYS"] = int(os.getenv("IMPORT_UPLOAD_BLOB_TT
 
 db = SQLAlchemy(app)
 
+
+def sqlite_autoincrement_bigint_pk():
+    return db.BigInteger().with_variant(db.Integer, "sqlite")
+
 IMPORT_BATCH_CRITICAL_COLUMNS = (
     "rows_skipped",
     "file_name",
@@ -185,7 +189,7 @@ class ImportBatchRow(db.Model):
 class ImportAppliedFingerprint(db.Model):
     __tablename__ = "import_applied_fingerprints"
 
-    id = db.Column(db.BigInteger, primary_key=True, autoincrement=True)
+    id = db.Column(sqlite_autoincrement_bigint_pk(), primary_key=True, autoincrement=True)
     owner_id = db.Column(db.String(191), nullable=False, index=True)
     import_type = db.Column(db.String(32), nullable=False, default="payments")
     fingerprint = db.Column(db.String(255), nullable=False)
@@ -207,7 +211,7 @@ class ImportAppliedFingerprint(db.Model):
 class PaymentAuditLog(db.Model):
     __tablename__ = "payment_audit_log"
 
-    id = db.Column(db.BigInteger, primary_key=True, autoincrement=True)
+    id = db.Column(sqlite_autoincrement_bigint_pk(), primary_key=True, autoincrement=True)
     owner_id = db.Column(db.String(128), nullable=False, index=True)
     batch_id = db.Column(db.Integer, nullable=False, index=True)
     row_id = db.Column(db.Integer, nullable=True, index=True)
@@ -220,7 +224,7 @@ class PaymentAuditLog(db.Model):
 class AbonentSummary(db.Model):
     __tablename__ = "abonent_summary"
 
-    id = db.Column(db.BigInteger, primary_key=True, autoincrement=True)
+    id = db.Column(sqlite_autoincrement_bigint_pk(), primary_key=True, autoincrement=True)
     owner_id = db.Column(db.String(128), nullable=False, index=True)
     abonent_id = db.Column(db.String(128), nullable=False, default="", index=True)
     account_uid = db.Column(db.String(128), nullable=False, default="", index=True)
@@ -249,7 +253,7 @@ class AbonentSummary(db.Model):
 class CardSnapshot(db.Model):
     __tablename__ = "card_snapshot"
 
-    id = db.Column(db.BigInteger, primary_key=True, autoincrement=True)
+    id = db.Column(sqlite_autoincrement_bigint_pk(), primary_key=True, autoincrement=True)
     owner_id = db.Column(db.String(128), nullable=False, index=True)
     abonent_uid = db.Column(db.String(128), nullable=False, default="", index=True)
     abonent_id = db.Column(db.String(128), nullable=False, default="", index=True)
@@ -276,7 +280,7 @@ class CardSnapshot(db.Model):
 class RecalcUidLock(db.Model):
     __tablename__ = "recalc_uid_locks"
 
-    id = db.Column(db.BigInteger, primary_key=True, autoincrement=True)
+    id = db.Column(sqlite_autoincrement_bigint_pk(), primary_key=True, autoincrement=True)
     owner_id = db.Column(db.String(128), nullable=False, index=True)
     abonent_uid = db.Column(db.String(128), nullable=False, index=True)
     lock_token = db.Column(db.String(64), nullable=False, default="")

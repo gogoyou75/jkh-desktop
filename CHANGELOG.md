@@ -25,3 +25,11 @@
 - Added UID concurrency guard against active bulk verify, recalc batch, and recalc lock work; duplicate active UID work is reported as `already_running` / `skipped`.
 - Added diff reporting between persisted `abonent_summary` and persisted `card_snapshot` fields without applying or overwriting summary data.
 - No changes to `web/calc_engine.js`, FIFO, penalty formula, backend financial formulas, `payments_<uid>` storage, or server-first index behavior.
+
+## Stage 16.1 - test/schema stabilization
+
+- Updated backend SQLite test compatibility for `BIGINT` autoincrement primary keys while keeping non-SQLite storage types unchanged.
+- Aligned the manual `abonent_summary` test schema with the current persisted summary model fields.
+- Updated stale abonent summary rebuild assertions to the current readonly/report-period and explicit full-summary contracts.
+- Fixed Windows SQLite test teardown to close SQLAlchemy connections before deleting temporary database files.
+- No changes to `web/calc_engine.js`, penalty formula, FIFO, payment allocation, bulk verify endpoint behavior, or backend financial logic.

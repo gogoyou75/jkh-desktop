@@ -53,6 +53,18 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
                     abonent_id VARCHAR(128) NOT NULL DEFAULT '',
                     account_uid VARCHAR(128) NOT NULL DEFAULT '',
                     account_number VARCHAR(128) NOT NULL DEFAULT '',
+                    fio VARCHAR(255) NOT NULL DEFAULT '',
+                    address VARCHAR(1024) NOT NULL DEFAULT '',
+                    total_accrued NUMERIC(14, 2) NULL,
+                    total_paid NUMERIC(14, 2) NULL,
+                    main_debt NUMERIC(14, 2) NULL,
+                    penalty_debt NUMERIC(14, 2) NULL,
+                    total_debt NUMERIC(14, 2) NULL,
+                    summary_status VARCHAR(32) NOT NULL DEFAULT 'missing',
+                    summary_reason VARCHAR(128) NOT NULL DEFAULT '',
+                    input_hash VARCHAR(64) NOT NULL DEFAULT '',
+                    dirty_since DATETIME NULL,
+                    last_error_code VARCHAR(64) NOT NULL DEFAULT '',
                     summary_json TEXT NOT NULL,
                     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -973,8 +985,8 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         self.assertEqual(payload["processed"], 1)
         self.assertEqual(payload["fresh"], 0)
         self.assertEqual(payload["error"], 1)
-        self.assertEqual(payload["items"][0]["summary_status"], "missing")
-        self.assertEqual(payload["items"][0]["summary_reason"], "PERIOD_SUMMARY_LEGACY")
+        self.assertEqual(payload["items"][0]["summary_status"], "error")
+        self.assertEqual(payload["items"][0]["summary_reason"], "BATCH_RECALC_NOT_AVAILABLE:PERIOD_SUMMARY_LEGACY")
 
     def test_legacy_summary_with_canonical_full_period_stays_fresh(self):
         with app_module.app.app_context():
@@ -1220,8 +1232,9 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         self.assertIn('__paymentTableMode = "readonly_no_recalc"', body)
         self.assertIn('await loadPaymentTable("full_recalc_completed")', body)
         self.assertIn("Data.recalculateAbonentCard(id, {", body)
-        self.assertIn("saveSummary: !(periodActive && selectedPeriod)", body)
-        self.assertIn('summaryScope: (periodActive && selectedPeriod) ? "period" : "full"', body)
+        self.assertIn("saveSummary: !explicitReportPeriod", body)
+        self.assertIn('summaryScope: explicitReportPeriod ? "period" : "full"', body)
+        self.assertIn("periodActive: !!explicitReportPeriod", body)
         self.assertIn("autoaccrual_changed", body)
         self.assertIn("summary_status", body)
         self.assertIn("summary_save", body)
@@ -1253,7 +1266,7 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         self.assertIn("recalcResult.summary", body)
         self.assertIn("manualRecalcErrorMessage", source)
         self.assertIn("Не задан период ответственности/дата начала расчёта", source)
-        self.assertIn("renderAbonentSummaryStatus(summaryStatus, summaryReason)", body)
+        self.assertIn('renderAbonentSummaryStatus(summaryStatus, __normalizeSummaryStatus(summaryStatus) === "fresh" ? "OK" : summaryReason)', body)
         self.assertIn("__renderAbonentTotalsFromFreshSummary(summary)", body)
         self.assertNotIn("CALC_PERIOD_CHANGED", body)
         self.assertNotIn("recalc_batch", body)
@@ -1578,8 +1591,8 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         self.assertIn('summaryScope === "period" || summaryScope === "report"', save_body)
         self.assertIn("totalsKeys", save_body)
         self.assertIn("Расчёт выполнен, но итоговый summary для главной страницы не сохранён", card_recalc_body)
-        self.assertIn("Проверить выбранные summary", index_source)
-        self.assertIn("Проверяет summary, не пересчитывает карточки", index_source)
+        self.assertIn("summaryBatchRunBtn", index_source)
+        self.assertIn("Data.createAbonentSummaryRecalcBatchJob", index_source)
 
         calc_after = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
         self.assertEqual(calc_before, calc_after)
@@ -1611,9 +1624,9 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         self.assertIn('summary.summary_scope = "period"', recalc_body)
         self.assertIn('summary.summary_scope = "full"', recalc_body)
         self.assertIn('mode === SUMMARY_RECALC_MODE_REPORT', recalc_body)
-        self.assertIn("saveSummary: !(periodActive && selectedPeriod)", full_recalc_body)
-        self.assertIn('summaryScope: (periodActive && selectedPeriod) ? "period" : "full"', full_recalc_body)
-        self.assertIn("periodActive: !!(periodActive && selectedPeriod)", full_recalc_body)
+        self.assertIn("saveSummary: !explicitReportPeriod", full_recalc_body)
+        self.assertIn('summaryScope: explicitReportPeriod ? "period" : "full"', full_recalc_body)
+        self.assertIn("periodActive: !!explicitReportPeriod", full_recalc_body)
         self.assertIn("FRESH_TOTALS_MISSING", index_source)
 
         calc_after = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
@@ -1683,11 +1696,14 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
 
         reports_body = card_source.split('repBtn.addEventListener("click"', 1)[1].split("});\n}", 1)[0]
         self.assertIn("[reports][open-with-period]", reports_body)
-        self.assertIn("ensureCurrentAbonentUidForCalcPeriod", reports_body)
-        self.assertIn("saveCalcPeriod(from, to)", reports_body)
-        self.assertIn("saveReportPeriodForSpravka", reports_body)
+        self.assertIn("getCalcPeriodStorageMeta()", reports_body)
+        self.assertIn("getReportPeriodStorageKey(readonlyMeta)", reports_body)
+        self.assertIn('reason: "URL_ONLY"', reports_body)
         self.assertIn("location.href = href", reports_body)
         self.assertIn("[reports][blocked-card-recalc]", card_source)
+        self.assertNotIn("ensureCurrentAbonentUidForCalcPeriod", reports_body)
+        self.assertNotIn("saveCalcPeriod(from, to)", reports_body)
+        self.assertNotIn("saveReportPeriodForSpravka", reports_body)
         self.assertNotIn("fullRecalcForCurrentAbonent", reports_body)
         self.assertNotIn("Data.recalculateAbonentCard", reports_body)
         self.assertNotIn("saveAbonentSummaryAfterRecalc", reports_body)
@@ -1939,10 +1955,11 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         self.assertIn("[reports][bootstrap-period]", reports_source)
         self.assertIn("[reports][period-auto-accepted]", reports_source)
         self.assertIn("function autoAcceptReportsPeriod", reports_source)
-        self.assertIn("auto-accept:", reports_source)
+        self.assertIn("[reports][readonly-open]", reports_source)
         self.assertIn("openBtn.disabled = !ok", reports_source)
         self.assertIn("uidFromUrl", reports_source)
-        self.assertIn("storeSetCanonical(meta.reportKey", reports_source)
+        self.assertIn("function storeSetCanonical", reports_source)
+        self.assertIn("[reports][write-blocked-readonly]", reports_source)
         self.assertIn("/^report_period_uid_/.test(meta.reportKey)", reports_source)
         self.assertIn("[report-period][readback]", reports_source)
 
@@ -1972,8 +1989,8 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         self.assertIn("::period:", payment_source)
 
         self.assertIn("reportStorageKey", spravka_source)
-        self.assertIn("canonical-report-period", spravka_source)
-        self.assertIn("const selectedPeriod = reportPeriod || calcPeriod", spravka_source)
+        self.assertIn("report_period_uid", spravka_source)
+        self.assertIn("const selectedPeriod = urlPeriod || reportPeriod || (activeRaw === \"1\" ? calcPeriod : null)", spravka_source)
         self.assertIn("[spravka][bootstrap-period]", spravka_source)
         self.assertIn("[spravka][return-card-period-save]", spravka_source)
         self.assertIn("[spravka][return-card-url]", spravka_source)
