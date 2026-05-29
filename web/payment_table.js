@@ -2384,29 +2384,49 @@ function calcTotalsAsOfMemoized(rows, asOfDate, ledgerSignature){
 }
 
 function runningTotalsBaseRows(allRows){
+  console.time("[baseRows] full");
   let baseRows = Array.isArray(allRows) ? allRows : [];
-  if (isCalcPeriodActive()) {
+  console.time("[baseRows] isCalcPeriodActive");
+  const periodActive = isCalcPeriodActive();
+  console.timeEnd("[baseRows] isCalcPeriodActive");
+  if (periodActive) {
+    console.time("[baseRows] getCalcPeriod");
     const p = getCalcPeriod();
+    console.timeEnd("[baseRows] getCalcPeriod");
+    console.time("[baseRows] parse period bounds");
     const fromD = p ? parseDateAnyToDate(p.from) : null;
     const toD   = p ? parseDateAnyToDate(p.to)   : null;
+    console.timeEnd("[baseRows] parse period bounds");
 
     if (fromD && toD) {
+      console.time("[baseRows] build month bounds");
       const fromKey = (fromD.getFullYear() * 12) + (fromD.getMonth() + 1);
       const toKey   = (toD.getFullYear()   * 12) + (toD.getMonth() + 1);
+      console.timeEnd("[baseRows] build month bounds");
 
+      console.time("[baseRows] filter row loop");
       baseRows = baseRows.filter(r => {
+        console.time("[baseRows] row parse year/month");
         let y = parseInt(r?.year, 10);
         let m = parseInt(r?.month, 10);
+        console.timeEnd("[baseRows] row parse year/month");
         if (!(Number.isFinite(y) && Number.isFinite(m) && y > 0 && m >= 1 && m <= 12)) {
+          console.time("[baseRows] paid_date fallback parse");
           const d = parseDateAnyToDate(r?.paid_date);
+          console.timeEnd("[baseRows] paid_date fallback parse");
           if (d) { y = d.getFullYear(); m = d.getMonth() + 1; }
         }
         if (!(Number.isFinite(y) && Number.isFinite(m) && y > 0 && m >= 1 && m <= 12)) return false;
+        console.time("[baseRows] row month key/check");
         const key = (y * 12) + m;
-        return key >= fromKey && key <= toKey;
+        const keep = key >= fromKey && key <= toKey;
+        console.timeEnd("[baseRows] row month key/check");
+        return keep;
       });
+      console.timeEnd("[baseRows] filter row loop");
     }
   }
+  console.timeEnd("[baseRows] full");
   return baseRows;
 }
 
