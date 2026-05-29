@@ -3822,68 +3822,88 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
     const explicitRuntimePeriod = opts.runtimePeriod && isManualRecalcPeriodValid(opts.runtimePeriod)
       ? { from: String(opts.runtimePeriod.from || ""), to: String(opts.runtimePeriod.to || "") }
       : null;
+    let recalcLock = null;
     try { console.log("[payment-table][recalc-explicit]", { abonentId: id, stage: "start", recalcMode: recalcMode }); } catch(eLogStart) {}
-    const autoResult = await applyControlledAutoAccrualForManualRecalc(id, opts);
-    if (!autoResult || autoResult.ok !== true) {
-      try { console.log("[payment-table][recalc-explicit]", { abonentId: id, stage: "autoaccrual_failed", reason: normalizeManualRecalcReason(autoResult && autoResult.reason) }); } catch(eLogAuto) {}
-      return { ok:false, reason:normalizeManualRecalcReason(autoResult && autoResult.reason), autoaccrual:autoResult, autoaccrual_changed:!!(autoResult && autoResult.changed) };
+    try {
+      if (!window.Data || typeof Data.beginRecalcUidLock !== "function" || typeof Data.finishRecalcUidLock !== "function") {
+        return { ok:false, reason:"RECALC_LOCK_UNAVAILABLE", summary_status:"error", summary_reason:"RECALC_LOCK_UNAVAILABLE" };
+      }
+      recalcLock = await Data.beginRecalcUidLock(id);
+      if (recalcLock && recalcLock.status === "already_running") {
+        try { console.log("[payment-table][recalc-explicit]", { abonentId: id, stage: "already_running", recalcMode: recalcMode }); } catch(eLogLock) {}
+        return { ok:false, reason:"RECALC_ALREADY_RUNNING", summary_status:"already_running", summary_reason:"RECALC_ALREADY_RUNNING", status:"already_running", recalc_lock:recalcLock };
+      }
+      if (!recalcLock || recalcLock.ok !== true || recalcLock.status !== "started") {
+        return { ok:false, reason:(recalcLock && (recalcLock.reason || recalcLock.error)) || "RECALC_LOCK_FAILED", summary_status:"error", summary_reason:"RECALC_LOCK_FAILED", recalc_lock:recalcLock };
+      }
+      const autoResult = await applyControlledAutoAccrualForManualRecalc(id, opts);
+      if (!autoResult || autoResult.ok !== true) {
+        try { console.log("[payment-table][recalc-explicit]", { abonentId: id, stage: "autoaccrual_failed", reason: normalizeManualRecalcReason(autoResult && autoResult.reason) }); } catch(eLogAuto) {}
+        return { ok:false, reason:normalizeManualRecalcReason(autoResult && autoResult.reason), autoaccrual:autoResult, autoaccrual_changed:!!(autoResult && autoResult.changed) };
+      }
+      const arr = getPayments();
+      const periodActive = !!(explicitReportPeriod || explicitRuntimePeriod);
+      const selectedPeriod = explicitReportPeriod ? { from: String(opts.period.from || ""), to: String(opts.period.to || "") } : explicitRuntimePeriod;
+      const runtimeRows = periodActive && selectedPeriod ? applyResponsibilityRangeToView(applyCalcFilter(arr, true, selectedPeriod)).slice() : arr;
+      const baseRows = runningTotalsBaseRows(runtimeRows);
+      const ledgerVersion = (window.Data && Data.computeLedgerRuntimeVersion) ? String(Data.computeLedgerRuntimeVersion(id) || "") : "";
+      const sig = ledgerSignatureForRows(arr) + "::" + runtimeCacheSignature(ledgerVersion, periodActive, selectedPeriod);
+      const rowsById = {};
+      runtimeRows.forEach(function(r){
+        const asOf = asOfForRow(r);
+        const t = calcTotalsAsOfMemoized(baseRows, asOf, sig);
+        rowsById[String(r.id)] = { pay_main: t.principal, pay_penalty: t.penalty, total: t.total };
+      });
+      const payload = { ledgerVersion: ledgerVersion, runtimeSignature: runtimeCacheSignature(ledgerVersion, periodActive, selectedPeriod), periodActive: !!periodActive, period: periodActive && selectedPeriod ? { from: selectedPeriod.from || "", to: selectedPeriod.to || "" } : null, rowsById: rowsById, updatedAt: (new Date()).toISOString() };
+      if (window.Data && typeof Data.writeLedgerRuntimeCache === "function") Data.writeLedgerRuntimeCache(id, payload);
+      __paymentTableRenderedSignature = "";
+      __paymentTableMode = "readonly_no_recalc";
+      await loadPaymentTable("full_recalc_completed");
+      if (!window.Data || typeof Data.recalculateAbonentCard !== "function") {
+        return { ok:false, reason:"SUMMARY_RECALC_UNAVAILABLE", autoaccrual_changed:!!autoResult.changed, summary_status:"error", summary_reason:"SUMMARY_RECALC_UNAVAILABLE", summary:null, summary_save:{ ok:false, reason:"SUMMARY_RECALC_UNAVAILABLE" } };
+      }
+      const summaryResult = await Data.recalculateAbonentCard(id, {
+        period: periodActive && selectedPeriod ? selectedPeriod : undefined,
+        saveSummary: !explicitReportPeriod,
+        summaryScope: explicitReportPeriod ? "period" : "full",
+        periodActive: !!explicitReportPeriod,
+        recalcMode: recalcMode,
+        recalcLockHeld: true,
+        recalcLockToken: recalcLock.lock_token || ""
+      });
+      const freshArr = getPayments();
+      const freshPeriodActive = periodActive;
+      const freshSelectedPeriod = selectedPeriod;
+      const freshRuntimeRows = freshPeriodActive && freshSelectedPeriod ? applyResponsibilityRangeToView(applyCalcFilter(freshArr, true, freshSelectedPeriod)).slice() : freshArr;
+      const freshBaseRows = runningTotalsBaseRows(freshRuntimeRows);
+      const freshLedgerVersion = (window.Data && Data.computeLedgerRuntimeVersion) ? String(Data.computeLedgerRuntimeVersion(id) || "") : "";
+      const freshSig = ledgerSignatureForRows(freshArr) + "::" + runtimeCacheSignature(freshLedgerVersion, freshPeriodActive, freshSelectedPeriod);
+      const freshRowsById = {};
+      freshRuntimeRows.forEach(function(r){
+        const asOf = asOfForRow(r);
+        const t = calcTotalsAsOfMemoized(freshBaseRows, asOf, freshSig);
+        freshRowsById[String(r.id)] = { pay_main: t.principal, pay_penalty: t.penalty, total: t.total };
+      });
+      const freshPayload = { ledgerVersion: freshLedgerVersion, runtimeSignature: runtimeCacheSignature(freshLedgerVersion, freshPeriodActive, freshSelectedPeriod), periodActive: !!freshPeriodActive, period: freshPeriodActive && freshSelectedPeriod ? { from: freshSelectedPeriod.from || "", to: freshSelectedPeriod.to || "" } : null, rowsById: freshRowsById, updatedAt: (new Date()).toISOString() };
+      capturePaymentTableComputedRowsSnapshot(freshRuntimeRows, freshRowsById, freshPeriodActive, freshSelectedPeriod, freshPayload.runtimeSignature, freshLedgerVersion);
+      if (window.Data && typeof Data.writeLedgerRuntimeCache === "function") Data.writeLedgerRuntimeCache(id, freshPayload);
+      const summary = summaryResult && summaryResult.summary && typeof summaryResult.summary === "object" ? summaryResult.summary : null;
+      try { console.log("[payment-table][recalc-explicit]", { abonentId: id, stage: "done", recalcMode: recalcMode, ok: !!(summaryResult && summaryResult.ok === true), summary_status: summaryResult && (summaryResult.summary_status || summaryResult.status) || "error" }); } catch(eLogDone) {}
+      return {
+        ok:!!(summaryResult && summaryResult.ok === true),
+        reason: summaryResult && (summaryResult.summary_reason || summaryResult.reason) || "",
+        autoaccrual_changed:!!autoResult.changed,
+        autoaccrual:autoResult,
+        summary_status: summaryResult && (summaryResult.summary_status || summaryResult.status) || "error",
+        summary_reason: summaryResult && (summaryResult.summary_reason || summaryResult.reason) || "",
+        summary: summary,
+        summary_save: summaryResult
+      };
+    } finally {
+      if (recalcLock && recalcLock.status === "started" && window.Data && typeof Data.finishRecalcUidLock === "function") {
+        await Data.finishRecalcUidLock(recalcLock.account_uid || id, recalcLock.lock_token || "");
+      }
     }
-    const arr = getPayments();
-    const periodActive = !!(explicitReportPeriod || explicitRuntimePeriod);
-    const selectedPeriod = explicitReportPeriod ? { from: String(opts.period.from || ""), to: String(opts.period.to || "") } : explicitRuntimePeriod;
-    const runtimeRows = periodActive && selectedPeriod ? applyResponsibilityRangeToView(applyCalcFilter(arr, true, selectedPeriod)).slice() : arr;
-    const baseRows = runningTotalsBaseRows(runtimeRows);
-    const ledgerVersion = (window.Data && Data.computeLedgerRuntimeVersion) ? String(Data.computeLedgerRuntimeVersion(id) || "") : "";
-    const sig = ledgerSignatureForRows(arr) + "::" + runtimeCacheSignature(ledgerVersion, periodActive, selectedPeriod);
-    const rowsById = {};
-    runtimeRows.forEach(function(r){
-      const asOf = asOfForRow(r);
-      const t = calcTotalsAsOfMemoized(baseRows, asOf, sig);
-      rowsById[String(r.id)] = { pay_main: t.principal, pay_penalty: t.penalty, total: t.total };
-    });
-    const payload = { ledgerVersion: ledgerVersion, runtimeSignature: runtimeCacheSignature(ledgerVersion, periodActive, selectedPeriod), periodActive: !!periodActive, period: periodActive && selectedPeriod ? { from: selectedPeriod.from || "", to: selectedPeriod.to || "" } : null, rowsById: rowsById, updatedAt: (new Date()).toISOString() };
-    if (window.Data && typeof Data.writeLedgerRuntimeCache === "function") Data.writeLedgerRuntimeCache(id, payload);
-    __paymentTableRenderedSignature = "";
-    __paymentTableMode = "readonly_no_recalc";
-    await loadPaymentTable("full_recalc_completed");
-    if (!window.Data || typeof Data.recalculateAbonentCard !== "function") {
-      return { ok:false, reason:"SUMMARY_RECALC_UNAVAILABLE", autoaccrual_changed:!!autoResult.changed, summary_status:"error", summary_reason:"SUMMARY_RECALC_UNAVAILABLE", summary:null, summary_save:{ ok:false, reason:"SUMMARY_RECALC_UNAVAILABLE" } };
-    }
-    const summaryResult = await Data.recalculateAbonentCard(id, {
-      period: periodActive && selectedPeriod ? selectedPeriod : undefined,
-      saveSummary: !explicitReportPeriod,
-      summaryScope: explicitReportPeriod ? "period" : "full",
-      periodActive: !!explicitReportPeriod,
-      recalcMode: recalcMode
-    });
-    const freshArr = getPayments();
-    const freshPeriodActive = periodActive;
-    const freshSelectedPeriod = selectedPeriod;
-    const freshRuntimeRows = freshPeriodActive && freshSelectedPeriod ? applyResponsibilityRangeToView(applyCalcFilter(freshArr, true, freshSelectedPeriod)).slice() : freshArr;
-    const freshBaseRows = runningTotalsBaseRows(freshRuntimeRows);
-    const freshLedgerVersion = (window.Data && Data.computeLedgerRuntimeVersion) ? String(Data.computeLedgerRuntimeVersion(id) || "") : "";
-    const freshSig = ledgerSignatureForRows(freshArr) + "::" + runtimeCacheSignature(freshLedgerVersion, freshPeriodActive, freshSelectedPeriod);
-    const freshRowsById = {};
-    freshRuntimeRows.forEach(function(r){
-      const asOf = asOfForRow(r);
-      const t = calcTotalsAsOfMemoized(freshBaseRows, asOf, freshSig);
-      freshRowsById[String(r.id)] = { pay_main: t.principal, pay_penalty: t.penalty, total: t.total };
-    });
-    const freshPayload = { ledgerVersion: freshLedgerVersion, runtimeSignature: runtimeCacheSignature(freshLedgerVersion, freshPeriodActive, freshSelectedPeriod), periodActive: !!freshPeriodActive, period: freshPeriodActive && freshSelectedPeriod ? { from: freshSelectedPeriod.from || "", to: freshSelectedPeriod.to || "" } : null, rowsById: freshRowsById, updatedAt: (new Date()).toISOString() };
-    capturePaymentTableComputedRowsSnapshot(freshRuntimeRows, freshRowsById, freshPeriodActive, freshSelectedPeriod, freshPayload.runtimeSignature, freshLedgerVersion);
-    if (window.Data && typeof Data.writeLedgerRuntimeCache === "function") Data.writeLedgerRuntimeCache(id, freshPayload);
-    const summary = summaryResult && summaryResult.summary && typeof summaryResult.summary === "object" ? summaryResult.summary : null;
-    try { console.log("[payment-table][recalc-explicit]", { abonentId: id, stage: "done", recalcMode: recalcMode, ok: !!(summaryResult && summaryResult.ok === true), summary_status: summaryResult && (summaryResult.summary_status || summaryResult.status) || "error" }); } catch(eLogDone) {}
-    return {
-      ok:!!(summaryResult && summaryResult.ok === true),
-      reason: summaryResult && (summaryResult.summary_reason || summaryResult.reason) || "",
-      autoaccrual_changed:!!autoResult.changed,
-      autoaccrual:autoResult,
-      summary_status: summaryResult && (summaryResult.summary_status || summaryResult.status) || "error",
-      summary_reason: summaryResult && (summaryResult.summary_reason || summaryResult.reason) || "",
-      summary: summary,
-      summary_save: summaryResult
-    };
   };
 
   window.__loadPaymentTable = requestLoadPaymentTable;

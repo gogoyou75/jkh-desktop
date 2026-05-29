@@ -3793,6 +3793,10 @@
   }
 
   async function beginRecalcUidLock(uid) {
+    var found = _findAbonentByIdOrUid(uid);
+    var abonent = found && found.abonent ? found.abonent : (uid && typeof uid === "object" ? uid : null);
+    var resolvedUid = String(abonent && (abonent.uid || abonent.account_uid || abonent.accountUid) || uid || "").trim();
+    uid = resolvedUid;
     if (!isValidUid(uid)) return { ok: false, status: "error", reason: "UID_REQUIRED" };
     var localKey = "stage16_recalc_lock_" + uid;
     var now = Date.now();
@@ -3817,6 +3821,10 @@
   }
 
   async function finishRecalcUidLock(uid, token) {
+    var found = _findAbonentByIdOrUid(uid);
+    var abonent = found && found.abonent ? found.abonent : (uid && typeof uid === "object" ? uid : null);
+    uid = String(abonent && (abonent.uid || abonent.account_uid || abonent.accountUid) || uid || "").trim();
+    if (!isValidUid(uid)) return { ok: false, status: "error", reason: "UID_REQUIRED" };
     try { sessionStorage.removeItem("stage16_recalc_lock_" + uid); } catch (eLocal) {}
     try {
       await fetch("/api/recalc_lock/" + encodeURIComponent(uid) + "/finish", {
@@ -3852,7 +3860,9 @@
       return { ok: false, uid: uid, summary_status: "error", summary_reason: "UID_LEDGER_PATH_REQUIRED", summary: null };
     }
 
-    var lock = await beginRecalcUidLock(uid);
+    var lock = opts.recalcLockHeld === true
+      ? { ok: true, status: "started", account_uid: uid, lock_token: opts.recalcLockToken || "", external: true }
+      : await beginRecalcUidLock(uid);
     if (lock && lock.status === "already_running") {
       return {
         ok: false,
@@ -3947,7 +3957,9 @@
         reason: result && (result.summary_reason || result.reason) || ""
       };
     } finally {
-      await finishRecalcUidLock(uid, lock && lock.lock_token);
+      if (!(lock && lock.external === true)) {
+        await finishRecalcUidLock(uid, lock && lock.lock_token);
+      }
     }
   }
 

@@ -3530,6 +3530,9 @@ function bindCalcButtons(){
             }
             return msg;
         }
+        if (String(reason || "") === "RECALC_ALREADY_RUNNING" || recalcResult && (recalcResult.status === "already_running" || recalcResult.summary_status === "already_running")) {
+            return "Пересчёт уже выполняется в другой вкладке. Дождитесь завершения и обновите карточку.";
+        }
         return "Пересчёт не выполнен: " + String(reason || "CALC_FAILED");
     }
 
@@ -3634,7 +3637,8 @@ function bindCalcButtons(){
                 __logCardRecalcResult(recalcResult, currentAbonentId);
                 if (!recalcResult || recalcResult.ok !== true) {
                     const reason = String(recalcResult && (recalcResult.reason || recalcResult.summary_reason) || "CALC_FAILED");
-                    renderAbonentSummaryStatus("error", reason);
+                    const lockStatus = recalcResult && (recalcResult.status === "already_running" || recalcResult.summary_status === "already_running");
+                    renderAbonentSummaryStatus(lockStatus ? "already_running" : "error", reason);
                     alert(manualRecalcErrorMessage(recalcResult, reason));
                     return;
                 }
