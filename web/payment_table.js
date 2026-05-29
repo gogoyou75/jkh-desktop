@@ -2310,6 +2310,22 @@ function calcRowBase(r) {
 }
 
 const __paymentTotalsMemo = new Map();
+window.__calcTotalsMemoStats = window.__calcTotalsMemoStats || {
+  totalCalls: 0,
+  memoHits: 0,
+  memoMisses: 0,
+  calcCalls: 0,
+  calcTotalMs: 0,
+  calcMaxMs: 0,
+  reset: function(){
+    this.totalCalls = 0;
+    this.memoHits = 0;
+    this.memoMisses = 0;
+    this.calcCalls = 0;
+    this.calcTotalMs = 0;
+    this.calcMaxMs = 0;
+  }
+};
 let __paymentTableRenderedSignature = "";
 let __paymentTableCalcToken = 0;
 let __paymentTableCalcTimerActive = false;
@@ -2371,10 +2387,23 @@ function memoKeyForTotals(ledgerSignature, asOfDate){
 }
 
 function calcTotalsAsOfMemoized(rows, asOfDate, ledgerSignature){
+  const stats = window.__calcTotalsMemoStats;
+  if (stats) stats.totalCalls += 1;
   const key = memoKeyForTotals(ledgerSignature, asOfDate);
   const cached = __paymentTotalsMemo.get(key);
-  if (cached) return cached;
+  if (cached) {
+    if (stats) stats.memoHits += 1;
+    return cached;
+  }
+  if (stats) stats.memoMisses += 1;
+  const calcStartedAt = perfNow();
   const t = calcTotalsAsOf(rows, asOfDate);
+  const calcMs = Math.max(0, perfNow() - calcStartedAt);
+  if (stats) {
+    stats.calcCalls += 1;
+    stats.calcTotalMs += calcMs;
+    if (calcMs > stats.calcMaxMs) stats.calcMaxMs = calcMs;
+  }
   const out = { principal: t.principal, penalty: t.penalty, total: t.total };
   __paymentTotalsMemo.set(key, out);
   if (__paymentTotalsMemo.size > 2000) {
@@ -3833,6 +3862,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
 
   window.fullRecalcForCurrentAbonent = async function fullRecalcForCurrentAbonent(options){
     console.time("[recalc] total");
+    if (window.__calcTotalsMemoStats) window.__calcTotalsMemoStats.reset();
     function endRecalcTotalTimer(){
       try { console.timeEnd("[recalc] total"); } catch(eTimer) {}
     }
@@ -4005,6 +4035,20 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
       console.timeEnd("[recalc] save runtime cache");
       const summary = summaryResult && summaryResult.summary && typeof summaryResult.summary === "object" ? summaryResult.summary : null;
       try { console.log("[payment-table][recalc-explicit]", { abonentId: id, stage: "done", recalcMode: recalcMode, ok: !!(summaryResult && summaryResult.ok === true), summary_status: summaryResult && (summaryResult.summary_status || summaryResult.status) || "error" }); } catch(eLogDone) {}
+      try {
+        const memoStats = window.__calcTotalsMemoStats || {};
+        const calcCalls = Number(memoStats.calcCalls) || 0;
+        const calcTotalMs = Number(memoStats.calcTotalMs) || 0;
+        console.log("[calcTotalsAsOfMemoized][summary]", {
+          totalCalls: Number(memoStats.totalCalls) || 0,
+          memoHits: Number(memoStats.memoHits) || 0,
+          memoMisses: Number(memoStats.memoMisses) || 0,
+          calcCalls: calcCalls,
+          calcTotalMs: Math.round(calcTotalMs),
+          calcAvgMs: calcCalls ? Math.round((calcTotalMs / calcCalls) * 100) / 100 : 0,
+          calcMaxMs: Math.round(Number(memoStats.calcMaxMs) || 0)
+        });
+      } catch(eMemoSummary) {}
       endRecalcTotalTimer();
       return {
         ok:!!(summaryResult && summaryResult.ok === true),
