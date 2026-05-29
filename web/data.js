@@ -3221,96 +3221,117 @@
     if (!isValidUid(uid)) throw new Error("UID_REQUIRED");
     var ledgerKey = resolvePaymentLedgerKey(abonentOrId);
     if (ledgerKey !== ("payments_" + uid)) throw new Error("UID_LEDGER_PATH_REQUIRED");
-    var rawLedger = _getProjectRaw(ledgerKey);
-    if (rawLedger !== null && rawLedger !== undefined) _parseLedgerRows(rawLedger, ledgerKey);
-    var rows = window.JKHCalcEngine.loadPaymentsForAbonent(String(abonentId));
-    var totals = window.JKHCalcEngine.calcTotalsAsOfAdjusted(rows, asOf, {
-      abonentId: String(abonentId),
-      applyAdvanceOffset: true,
-      allowNegativePrincipal: true
-    });
-    var principal = Number(totals && totals.principal);
-    var penalty = Number(totals && totals.penaltyDebt);
-    var total = Number(totals && totals.total);
-    var periodTotals = _summaryPeriodTotals(rows, from, to);
+    console.time("[card-recalc] read ledger");
+    try {
+      var rawLedger = _getProjectRaw(ledgerKey);
+      if (rawLedger !== null && rawLedger !== undefined) _parseLedgerRows(rawLedger, ledgerKey);
+    } finally {
+      console.timeEnd("[card-recalc] read ledger");
+    }
+    console.time("[card-recalc] build rows");
+    try {
+      var rows = window.JKHCalcEngine.loadPaymentsForAbonent(String(abonentId));
+    } finally {
+      console.timeEnd("[card-recalc] build rows");
+    }
+    console.time("[card-recalc] calc totals");
+    try {
+      var totals = window.JKHCalcEngine.calcTotalsAsOfAdjusted(rows, asOf, {
+        abonentId: String(abonentId),
+        applyAdvanceOffset: true,
+        allowNegativePrincipal: true
+      });
+      var principal = Number(totals && totals.principal);
+      var penalty = Number(totals && totals.penaltyDebt);
+      var total = Number(totals && totals.total);
+      var periodTotals = _summaryPeriodTotals(rows, from, to);
+    } finally {
+      console.timeEnd("[card-recalc] calc totals");
+    }
     if (!Number.isFinite(principal) || !Number.isFinite(penalty) || !Number.isFinite(total)) {
       throw new Error("CALC_TOTALS_INVALID");
     }
-    var periodFrom = String(from || "");
-    var periodTo = String(to || "");
-    var accountUid = String(abonent && (abonent.uid || abonent.account_uid || abonent.accountUid) || "").trim();
-    var versions = computeFinancialInputVersions(abonent || accountUid);
-    var accountNumber = String(abonent && (abonent.account_number || abonent.accountNumber || abonent.ls || abonent.id) || abonentId || "").trim();
-    var fio = String(abonent && (abonent.fio || abonent.full_name || abonent.fullName || abonent.name_full || abonent.display_name) || "").trim();
-    var fioParts = fio ? fio.split(/\s+/) : [];
-    var fam = String(abonent && (abonent.fam || abonent.last_name || abonent.lastName) || fioParts[0] || "").trim();
-    var name = String(abonent && (abonent.name || abonent.first_name || abonent.firstName) || fioParts[1] || "").trim();
-    var otch = String(abonent && (abonent.otch || abonent.middle_name || abonent.middleName) || fioParts.slice(2).join(" ") || "").trim();
-    var regnum = resolveAbonentRegnumForSummary(abonentId, abonent);
-    return {
-      status: "fresh",
-      reason: "OK",
-      summary_status: "fresh",
-      summary_reason: "OK",
-      start_date: periodFrom,
-      end_date: periodTo,
-      period_start: periodFrom,
-      period_end: periodTo,
-      regnum: regnum,
-      flat_reg: regnum,
-      premise_regnum: regnum,
-      premiseRegnum: regnum,
-      account_uid: accountUid,
-      uid: accountUid,
-      account_number: accountNumber,
-      abonent_id: abonentId,
-      id: abonentId,
-      fio: fio,
-      fam: fam,
-      name: name,
-      otch: otch,
-      abonent: {
-        id: abonentId,
-        abonent_id: abonentId,
-        account_number: accountNumber,
+    console.time("[card-recalc] build summary payload");
+    try {
+      var periodFrom = String(from || "");
+      var periodTo = String(to || "");
+      var accountUid = String(abonent && (abonent.uid || abonent.account_uid || abonent.accountUid) || "").trim();
+      var versions = computeFinancialInputVersions(abonent || accountUid);
+      var accountNumber = String(abonent && (abonent.account_number || abonent.accountNumber || abonent.ls || abonent.id) || abonentId || "").trim();
+      var fio = String(abonent && (abonent.fio || abonent.full_name || abonent.fullName || abonent.name_full || abonent.display_name) || "").trim();
+      var fioParts = fio ? fio.split(/\s+/) : [];
+      var fam = String(abonent && (abonent.fam || abonent.last_name || abonent.lastName) || fioParts[0] || "").trim();
+      var name = String(abonent && (abonent.name || abonent.first_name || abonent.firstName) || fioParts[1] || "").trim();
+      var otch = String(abonent && (abonent.otch || abonent.middle_name || abonent.middleName) || fioParts.slice(2).join(" ") || "").trim();
+      var regnum = resolveAbonentRegnumForSummary(abonentId, abonent);
+      var summaryPayload = {
+        status: "fresh",
+        reason: "OK",
+        summary_status: "fresh",
+        summary_reason: "OK",
+        start_date: periodFrom,
+        end_date: periodTo,
+        period_start: periodFrom,
+        period_end: periodTo,
+        regnum: regnum,
+        flat_reg: regnum,
+        premise_regnum: regnum,
+        premiseRegnum: regnum,
         account_uid: accountUid,
+        uid: accountUid,
+        account_number: accountNumber,
+        abonent_id: abonentId,
+        id: abonentId,
         fio: fio,
         fam: fam,
         name: name,
         otch: otch,
-        regnum: regnum,
-        premise_regnum: regnum,
-        premiseRegnum: regnum
-      },
-      period: { from: periodFrom, to: periodTo },
-      total_debt: total,
-      total_penalty: penalty,
-      total_accrued: periodTotals.total_accrued,
-      total_paid: periodTotals.total_paid,
-      penalty: penalty,
-      totals: {
-        principal: principal,
-        debt: total,
-        penalty: penalty,
-        total: total,
-        accrued: periodTotals.total_accrued,
-        paid: periodTotals.total_paid,
-        balance: total,
+        abonent: {
+          id: abonentId,
+          abonent_id: abonentId,
+          account_number: accountNumber,
+          account_uid: accountUid,
+          fio: fio,
+          fam: fam,
+          name: name,
+          otch: otch,
+          regnum: regnum,
+          premise_regnum: regnum,
+          premiseRegnum: regnum
+        },
+        period: { from: periodFrom, to: periodTo },
         total_debt: total,
         total_penalty: penalty,
         total_accrued: periodTotals.total_accrued,
-        total_paid: periodTotals.total_paid
-      },
-      ledger_version: versions.ledger_version,
-      tariff_version: versions.tariff_version,
-      rate_version: versions.rate_version,
-      exclude_version: versions.exclude_version,
-      links_version: versions.links_version,
-      engine_version: versions.engine_version,
-      input_hash: versions.input_hash,
-      calc_engine_version: "JKHCalcEngine",
-      generated_at: new Date().toISOString()
-    };
+        total_paid: periodTotals.total_paid,
+        penalty: penalty,
+        totals: {
+          principal: principal,
+          debt: total,
+          penalty: penalty,
+          total: total,
+          accrued: periodTotals.total_accrued,
+          paid: periodTotals.total_paid,
+          balance: total,
+          total_debt: total,
+          total_penalty: penalty,
+          total_accrued: periodTotals.total_accrued,
+          total_paid: periodTotals.total_paid
+        },
+        ledger_version: versions.ledger_version,
+        tariff_version: versions.tariff_version,
+        rate_version: versions.rate_version,
+        exclude_version: versions.exclude_version,
+        links_version: versions.links_version,
+        engine_version: versions.engine_version,
+        input_hash: versions.input_hash,
+        calc_engine_version: "JKHCalcEngine",
+        generated_at: new Date().toISOString()
+      };
+    } finally {
+      console.timeEnd("[card-recalc] build summary payload");
+    }
+    return summaryPayload;
   }
 
   function buildAbonentSummaryErrorAfterExplicitRecalc(abonentOrId, period, reason) {
@@ -3776,7 +3797,12 @@
           periodTo: String(period && period.to || "")
         });
       } catch (eFullLog) {}
-      saveResult = await saveAbonentSummaryAfterRecalc(abonentOrId, summary);
+      console.time("[card-recalc] save summary");
+      try {
+        saveResult = await saveAbonentSummaryAfterRecalc(abonentOrId, summary);
+      } finally {
+        console.timeEnd("[card-recalc] save summary");
+      }
     }
     var status = saveResult && (saveResult.summary_status || saveResult.status) || summary.summary_status || summary.status || "error";
     var reasonOut = saveResult && (saveResult.summary_reason || saveResult.reason) || summary.summary_reason || summary.reason || "";
@@ -3837,9 +3863,17 @@
   }
 
   async function recalculateAbonentCard(abonentOrId, options) {
+    console.time("[card-recalc] full");
+    var cardRecalcFullTimerEnded = false;
+    function endCardRecalcFullTimer() {
+      if (cardRecalcFullTimerEnded) return;
+      cardRecalcFullTimerEnded = true;
+      try { console.timeEnd("[card-recalc] full"); } catch (eTimer) {}
+    }
     var opts = options || {};
     var ready = await waitForServerFirstDataReady({ timeoutMs: opts.timeoutMs || opts.timeout || 8000 });
     if (!ready || ready.ok !== true) {
+      endCardRecalcFullTimer();
       return { ok: false, uid: "", summary_status: "error", summary_reason: "SERVER_FIRST_DATA_NOT_READY", summary: null };
     }
 
@@ -3849,14 +3883,17 @@
     var uid = String(abonent && abonent.uid || (typeof abonentOrId === "object" ? abonentOrId && abonentOrId.uid : "") || "").trim();
 
     if (!abonent || !abonentId) {
+      endCardRecalcFullTimer();
       return { ok: false, uid: uid, summary_status: "error", summary_reason: "ABONENT_NOT_FOUND", summary: null };
     }
     if (!isValidUid(uid)) {
+      endCardRecalcFullTimer();
       return { ok: false, uid: uid, summary_status: "error", summary_reason: "UID_REQUIRED", summary: null };
     }
 
     var ledgerKey = resolvePaymentLedgerKey(abonentOrId);
     if (ledgerKey !== ("payments_" + uid)) {
+      endCardRecalcFullTimer();
       return { ok: false, uid: uid, summary_status: "error", summary_reason: "UID_LEDGER_PATH_REQUIRED", summary: null };
     }
 
@@ -3864,6 +3901,7 @@
       ? { ok: true, status: "started", account_uid: uid, lock_token: opts.recalcLockToken || "", external: true }
       : await beginRecalcUidLock(uid);
     if (lock && lock.status === "already_running") {
+      endCardRecalcFullTimer();
       return {
         ok: false,
         uid: uid,
@@ -3888,6 +3926,7 @@
           legacyRowsCount: legacyInfo.rowsCount,
           reason: "LEGACY_LEDGER_MIGRATION_REQUIRED"
         });
+        endCardRecalcFullTimer();
         return {
           ok: false,
           uid: uid,
@@ -3933,6 +3972,7 @@
       var errorSave = periodErrorScope
         ? { ok: true, skipped: true, reason: "PERIOD_SUMMARY_NOT_SAVED", summary_status: errorSummary.summary_status || errorSummary.status || "error", summary_reason: errorSummary.summary_reason || errorSummary.reason || ledgerReason, summary_scope: "period" }
         : await saveAbonentSummaryAfterRecalc(abonentOrId, errorSummary);
+      endCardRecalcFullTimer();
       return {
         ok: false,
         uid: uid,
@@ -3946,6 +3986,7 @@
       }
 
       var result = await recalcAbonentSummaryExplicit(abonentOrId, opts);
+      endCardRecalcFullTimer();
       return {
         ok: !!(result && result.ok === true),
         uid: uid,
@@ -3960,6 +4001,7 @@
       if (!(lock && lock.external === true)) {
         await finishRecalcUidLock(uid, lock && lock.lock_token);
       }
+      endCardRecalcFullTimer();
     }
   }
 
