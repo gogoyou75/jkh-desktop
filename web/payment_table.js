@@ -2218,13 +2218,19 @@ function calcTotalsAsOf(rows, asOfDate){
   // ✅ Variant B (единый движок): если подключён calc_engine.js (window.JKHCalcEngine),
   // то считаем через него — чтобы карточка и справка совпадали 1:1.
   try {
+    console.time("[rowsById] calcTotalsAsOf engine lookup");
     const eng = window.JKHCalcEngine;
+    console.timeEnd("[rowsById] calcTotalsAsOf engine lookup");
     if (eng && typeof eng.calcTotalsAsOfAdjusted === 'function') {
+      console.time("[rowsById] calcTotalsAsOfAdjusted");
       const t = eng.calcTotalsAsOfAdjusted(rows, asOfDate, { abonentId: getAbonentId(), applyAdvanceOffset: true, allowNegativePrincipal: true });
+      console.timeEnd("[rowsById] calcTotalsAsOfAdjusted");
       // 🔒 CRITICAL-ASSERT (DEV): долги не должны быть отрицательными
       if (typeof CRITICAL_ASSERT === 'function') {
+        console.time("[rowsById] critical asserts");
         CRITICAL_ASSERT(Number.isFinite(t.principal), 'Card: principal is not finite', { principal: t.principal, asOfDate });
         CRITICAL_ASSERT(Number.isFinite(t.penaltyDebt), 'Card: penalty is not finite', { penalty: t.penaltyDebt, asOfDate });
+        console.timeEnd("[rowsById] critical asserts");
       }
       return { principal: t.principal, penalty: t.penaltyDebt, total: t.total };
     }
@@ -2240,19 +2246,29 @@ function calcTotalsAsOf(rows, asOfDate){
     /* fallback to local calc */
   }
 
+  console.time("[rowsById] load excludes");
   const excludes = loadExcludes();
+  console.timeEnd("[rowsById] load excludes");
+  console.time("[rowsById] load rates");
   const rates = loadRates();
+  console.timeEnd("[rowsById] load rates");
 
   // ⚖️ Разделение долга при смене собственника:
   // в расчёт обязательств попадают ТОЛЬКО месяцы ответственности текущего ЛС.
   // (диапазон берём из AbonentsDB.links, а если задано — ещё и из abonent.calcStartDate/calcEndDate)
   let allowedYm = null;
   try {
+    console.time("[rowsById] responsibility lookup");
     const range = getActiveResponsibilityRangeISO();
     if (range?.from) {
+      console.time("[rowsById] month loop");
       const ms = monthIter(range.from, range.to);
+      console.timeEnd("[rowsById] month loop");
+      console.time("[rowsById] map months to set");
       allowedYm = new Set(ms.map(m => `${m.year}-${m.month}`));
+      console.timeEnd("[rowsById] map months to set");
     }
+    console.timeEnd("[rowsById] responsibility lookup");
   } catch(e) { console.error(e); throw e; }
 
   // ---------------------------------------------------------
@@ -2264,41 +2280,64 @@ function calcTotalsAsOf(rows, asOfDate){
   // Поэтому для расчёта на дату asOfDate берём обязательства
   // только за месяцы <= месяца asOfDate.
   // ---------------------------------------------------------
+  console.time("[rowsById] build obligations row/month loop");
   const allObligations = buildObligationsFromRows(rows, allowedYm);
+  console.timeEnd("[rowsById] build obligations row/month loop");
   const asOfYm = `${asOfDate.getFullYear()}-${pad2(asOfDate.getMonth() + 1)}`;
+  console.time("[rowsById] obligations filter");
   const obligations = allObligations.filter(ob => String(ob.key || "") <= asOfYm);
+  console.timeEnd("[rowsById] obligations filter");
 
+  console.time("[rowsById] build payment events row loop");
   const payments = buildPaymentEventsFromRows(rows);
+  console.timeEnd("[rowsById] build payment events row loop");
+  console.time("[rowsById] allocatePaymentsFIFO nested loop");
   const advances = allocatePaymentsFIFO(obligations, payments);
+  console.timeEnd("[rowsById] allocatePaymentsFIFO nested loop");
 
   // Переплата (аванс) на дату asOfDate уменьшает задолженность по обяз.
   // Если аванс превышает долг — задолженность становится отрицательной.
   const asOfDay = startOfDay(asOfDate);
+  console.time("[rowsById] advances reduce");
   const advanceUpTo = r2((advances || []).reduce((sum, a) => {
     if (a && a.date && a.date.getTime() <= asOfDay.getTime()) return sum + toNum(a.amount);
     return sum;
   }, 0));
+  console.timeEnd("[rowsById] advances reduce");
 
   let principalTotal = 0;
   let penaltyTotal = 0;
 
+  console.time("[rowsById] obligations calc loop");
   for (const ob of obligations){
+    console.time("[rowsById] sort applications");
     sortApplications(ob);
+    console.timeEnd("[rowsById] sort applications");
 
+    console.time("[rowsById] sumAppliedUpTo");
     const applied = sumAppliedUpTo(ob, startOfDay(asOfDate));
+    console.timeEnd("[rowsById] sumAppliedUpTo");
+    console.time("[rowsById] principal calculation");
     const principal = Math.max(ob.amount - applied, 0);
     principalTotal += principal;
+    console.timeEnd("[rowsById] principal calculation");
 
+    console.time("[rowsById] calcPenaltyForObligation day loop");
     penaltyTotal += calcPenaltyForObligation(ob, asOfDate, excludes, rates);
+    console.timeEnd("[rowsById] calcPenaltyForObligation day loop");
   }
+  console.timeEnd("[rowsById] obligations calc loop");
 
+    console.time("[rowsById] final totals build");
     const principalAdj = r2(principalTotal - advanceUpTo);
 
-  return {
+  const totalsOut = {
     principal: principalAdj,
     penalty: r2(penaltyTotal),
     total: r2(principalAdj + penaltyTotal)
   };
+  console.timeEnd("[rowsById] final totals build");
+  return totalsOut;
 }
 
 // Совместимость: раньше были "базовые" расчёты по строке.
@@ -2371,15 +2410,31 @@ function memoKeyForTotals(ledgerSignature, asOfDate){
 }
 
 function calcTotalsAsOfMemoized(rows, asOfDate, ledgerSignature){
+  console.time("[rowsById] memo key");
   const key = memoKeyForTotals(ledgerSignature, asOfDate);
+  console.timeEnd("[rowsById] memo key");
+  console.time("[rowsById] memo get");
   const cached = __paymentTotalsMemo.get(key);
-  if (cached) return cached;
+  console.timeEnd("[rowsById] memo get");
+  if (cached) {
+    console.time("[rowsById] memo hit return");
+    console.timeEnd("[rowsById] memo hit return");
+    return cached;
+  }
+  console.time("[rowsById] calcTotalsAsOf");
   const t = calcTotalsAsOf(rows, asOfDate);
+  console.timeEnd("[rowsById] calcTotalsAsOf");
+  console.time("[rowsById] memo result build");
   const out = { principal: t.principal, penalty: t.penalty, total: t.total };
+  console.timeEnd("[rowsById] memo result build");
+  console.time("[rowsById] memo set");
   __paymentTotalsMemo.set(key, out);
+  console.timeEnd("[rowsById] memo set");
+  console.time("[rowsById] memo size/clear check");
   if (__paymentTotalsMemo.size > 2000) {
     try { __paymentTotalsMemo.clear(); } catch(e) {}
   }
+  console.timeEnd("[rowsById] memo size/clear check");
   return out;
 }
 
@@ -3913,11 +3968,23 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
       const rowsById = {};
       console.timeEnd("[recalc-detail] build maps/indexes");
       console.time("[recalc-detail] build rowsById row loop");
+      console.time("[recalc-detail] rowsById row loop");
+      try { console.log("[rowsById] loop count", { count: Array.isArray(runtimeRows) ? runtimeRows.length : 0 }); } catch(eRowsCount) {}
+      let rowsByIdLoopCount = 0;
       runtimeRows.forEach(function(r){
+        rowsByIdLoopCount += 1;
+        console.time("[rowsById] asOfForRow");
         const asOf = asOfForRow(r);
+        console.timeEnd("[rowsById] asOfForRow");
+        console.time("[rowsById] calcTotalsAsOfMemoized");
         const t = calcTotalsAsOfMemoized(baseRows, asOf, sig);
+        console.timeEnd("[rowsById] calcTotalsAsOfMemoized");
+        console.time("[rowsById] assign result");
         rowsById[String(r.id)] = { pay_main: t.principal, pay_penalty: t.penalty, total: t.total };
+        console.timeEnd("[rowsById] assign result");
       });
+      try { console.log("[rowsById] loop completed", { count: rowsByIdLoopCount }); } catch(eRowsDone) {}
+      console.timeEnd("[recalc-detail] rowsById row loop");
       console.timeEnd("[recalc-detail] build rowsById row loop");
       console.timeEnd("[recalc-step] build runtime rows before summary");
       const payload = { ledgerVersion: ledgerVersion, runtimeSignature: runtimeCacheSignature(ledgerVersion, periodActive, selectedPeriod), periodActive: !!periodActive, period: periodActive && selectedPeriod ? { from: selectedPeriod.from || "", to: selectedPeriod.to || "" } : null, rowsById: rowsById, updatedAt: (new Date()).toISOString() };
