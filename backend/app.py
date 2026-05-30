@@ -73,7 +73,7 @@ IMPORT_BATCH_AUDIT_FIELDS_MIGRATION_SQL = (
 
 
 RECALC_BATCH_ACTIVE_STATUSES = {"queued", "running"}
-RECALC_BATCH_FINAL_STATUSES = {"completed", "failed", "stale"}
+RECALC_BATCH_FINAL_STATUSES = {"completed", "done", "failed", "stale"}
 RECALC_BATCH_RUNNING_TTL_SECONDS = 30 * 60
 RECALC_BATCH_MAX_UIDS = 100
 RECALC_BATCH_KEEP_PER_OWNER = 20
@@ -1827,6 +1827,205 @@ def _recalc_batch_process_job(owner_id: str, job: RecalcBatchJob, step_limit: in
         db.session.commit()
 
 
+def _client_recalc_job_progress_response(job: RecalcBatchJob):
+    return jsonify(**_batch_job_status_response(job))
+
+
+def _summary_uid_from_payload(summary: dict):
+    if not isinstance(summary, dict):
+        return ""
+    abonent = summary.get("abonent") if isinstance(summary.get("abonent"), dict) else {}
+    return _norm_text(
+        summary.get("account_uid")
+        or summary.get("uid")
+        or summary.get("accountUid")
+        or abonent.get("account_uid")
+        or abonent.get("uid")
+        or abonent.get("accountUid")
+    )
+
+
+def _client_recalc_summary_payload(status: str, summary: dict | None, target: dict, account_uid: str, reason: str):
+    payload = dict(summary) if isinstance(summary, dict) else {}
+    clean_status = _norm_text(status).lower()
+    if clean_status not in {"fresh", "error", "skipped"}:
+        clean_status = "error"
+    clean_reason = _norm_text(reason)
+    if clean_status == "fresh":
+        clean_reason = clean_reason or _norm_text(payload.get("summary_reason") or payload.get("reason")) or "RECALC_OK"
+    elif clean_status == "skipped":
+        clean_reason = clean_reason or "SKIPPED_BY_CLIENT"
+    else:
+        clean_reason = clean_reason or _norm_text(payload.get("summary_reason") or payload.get("reason")) or "CLIENT_RECALC_FAILED"
+
+    payload["summary_status"] = clean_status
+    payload["status"] = clean_status
+    payload["summary_reason"] = clean_reason
+    payload["reason"] = clean_reason
+    payload["calculation_source"] = "CLIENT_CALCULATED_SUMMARY"
+    payload["account_uid"] = account_uid
+    payload["uid"] = account_uid
+    payload["account_number"] = _norm_text(target.get("account_number")) or _norm_text(payload.get("account_number"))
+    payload["abonent_id"] = _norm_text(target.get("abonent_id")) or _norm_text(payload.get("abonent_id"))
+
+    if clean_status != "fresh":
+        for key in (
+            "totals",
+            "total",
+            "total_debt",
+            "total_penalty",
+            "total_accrued",
+            "total_paid",
+            "penalty_debt",
+            "main_debt",
+            "penalty",
+            "debt",
+            "accrued",
+            "paid",
+        ):
+            payload.pop(key, None)
+    return payload, clean_status, clean_reason
+
+
+@app.get("/api/recalc_batch_job/<int:job_id>/next_uid")
+def client_recalc_batch_job_next_uid(job_id: int):
+    user, err = _require_user()
+    if err:
+        return err
+    job = RecalcBatchJob.query.filter_by(id=job_id, owner_id=user.id).first()
+    if not job:
+        return jsonify(ok=False, error="job_not_found"), 404
+    if job.status not in {"queued", "running"}:
+        return jsonify(ok=False, error="job_not_active", status=_norm_text(job.status)), 400
+
+    if job.status == "queued":
+        job.status = "running"
+        if not job.started_at:
+            job.started_at = datetime.utcnow()
+
+    item = (
+        RecalcBatchJobItem.query
+        .filter_by(job_id=job.id, owner_id=user.id, status="queued")
+        .order_by(RecalcBatchJobItem.id.asc())
+        .first()
+    )
+    if item:
+        item.status = "running"
+        item.started_at = datetime.utcnow()
+        db.session.commit()
+        targets_by_uid = _owner_recalc_targets_by_uid(user.id)
+        target = targets_by_uid.get(_norm_text(item.account_uid)) or {}
+        return jsonify(
+            ok=True,
+            job_id=int(job.id),
+            item_id=int(item.id),
+            account_uid=_norm_text(item.account_uid),
+            account_number=_norm_text(target.get("account_number")),
+        )
+
+    running = RecalcBatchJobItem.query.filter_by(job_id=job.id, owner_id=user.id, status="running").count()
+    if running:
+        db.session.commit()
+        return jsonify(ok=True, status="retry", reason="no_available_uid", job_id=int(job.id))
+
+    job.status = "done"
+    if not job.finished_at:
+        job.finished_at = datetime.utcnow()
+    db.session.commit()
+    return jsonify(ok=True, status="done", reason="all_done", job_id=int(job.id), all_done=True)
+
+
+@app.post("/api/recalc_batch_job/<int:job_id>/complete_uid")
+def client_recalc_batch_job_complete_uid(job_id: int):
+    user, err = _require_user()
+    if err:
+        return err
+    job = RecalcBatchJob.query.filter_by(id=job_id, owner_id=user.id).first()
+    if not job:
+        return jsonify(ok=False, error="job_not_found"), 404
+
+    body = request.get_json(silent=True) or {}
+    if not isinstance(body, dict):
+        return jsonify(ok=False, error="invalid_payload"), 400
+    try:
+        item_id = int(body.get("item_id"))
+    except (TypeError, ValueError):
+        return jsonify(ok=False, error="item_id_required"), 400
+
+    item = RecalcBatchJobItem.query.filter_by(id=item_id, job_id=job.id, owner_id=user.id).first()
+    if not item:
+        return jsonify(ok=False, error="item_not_found"), 404
+    if item.status != "running":
+        return jsonify(ok=False, error="item_not_running", item_status=_norm_text(item.status)), 409
+
+    status = _norm_text(body.get("status")).lower()
+    if status not in {"fresh", "error", "skipped"}:
+        return jsonify(ok=False, error="invalid_status"), 400
+
+    summary = body.get("summary") if isinstance(body.get("summary"), dict) else {}
+    summary_uid = _summary_uid_from_payload(summary)
+    if summary_uid and summary_uid != _norm_text(item.account_uid):
+        return jsonify(ok=False, error="uid_mismatch"), 400
+
+    targets_by_uid = _owner_recalc_targets_by_uid(user.id)
+    target = targets_by_uid.get(_norm_text(item.account_uid)) or {
+        "owner_id": user.id,
+        "account_uid": item.account_uid,
+        "account_number": "",
+        "abonent_id": "",
+        "identity": {"account_uid": item.account_uid},
+    }
+    error_reason = _norm_text(body.get("error_reason"))
+    payload, summary_status, summary_reason = _client_recalc_summary_payload(
+        status,
+        summary,
+        target,
+        _norm_text(item.account_uid),
+        error_reason,
+    )
+
+    if summary_status in {"fresh", "error"}:
+        row = AbonentSummary.query.filter_by(owner_id=user.id, account_uid=item.account_uid).order_by(AbonentSummary.id.asc()).first()
+        if row:
+            row.abonent_id = _norm_text(target.get("abonent_id")) or row.abonent_id
+            row.account_number = _norm_text(target.get("account_number")) or row.account_number
+        else:
+            row = AbonentSummary(
+                owner_id=user.id,
+                abonent_id=_norm_text(target.get("abonent_id")),
+                account_uid=_norm_text(item.account_uid),
+                account_number=_norm_text(target.get("account_number")),
+            )
+            db.session.add(row)
+        _set_abonent_summary_json(row, target, payload)
+
+    item.status = summary_status
+    item.summary_status = summary_status
+    item.summary_reason = summary_reason
+    item.error_message = "" if summary_status == "fresh" else summary_reason
+    item.finished_at = datetime.utcnow()
+    job.processed_count = int(job.processed_count or 0) + 1
+    if summary_status == "fresh":
+        job.fresh_count = int(job.fresh_count or 0) + 1
+    elif summary_status == "skipped":
+        job.skipped_count = int(job.skipped_count or 0) + 1
+    else:
+        job.error_count = int(job.error_count or 0) + 1
+
+    remaining = RecalcBatchJobItem.query.filter_by(job_id=job.id, owner_id=user.id).filter(RecalcBatchJobItem.status.in_(["queued", "running"])).count()
+    if remaining == 0:
+        job.status = "done"
+        job.finished_at = datetime.utcnow()
+    elif job.status == "queued":
+        job.status = "running"
+        if not job.started_at:
+            job.started_at = datetime.utcnow()
+
+    db.session.commit()
+    db.session.refresh(job)
+    return _client_recalc_job_progress_response(job)
+
+
 def _recalc_normalize_uids(raw_uids):
     out = []
     seen = set()
@@ -1877,6 +2076,68 @@ def _recalc_cleanup_old_jobs(owner_id: str):
         db.session.delete(job)
 
 
+def _owner_recalc_targets_by_uid(owner_id: str):
+    targets = {}
+    for target in _owner_abonent_summary_targets(owner_id):
+        uid = _norm_text(target.get("account_uid"))
+        if uid:
+            targets[uid] = target
+
+    cfg = _abonents_api_select_config()
+    if cfg is None:
+        return targets
+    uid_col = cfg.get("uid_col")
+    owner_col = cfg.get("owner_col")
+    if not uid_col or not owner_col:
+        return targets
+
+    select_parts = [f"a.{_sql_ident(uid_col)} AS account_uid"]
+    account_col = cfg.get("account_col")
+    abonent_id_col = cfg.get("abonent_id_col")
+    fio_col = cfg.get("fio_col")
+    if account_col:
+        select_parts.append(f"a.{_sql_ident(account_col)} AS account_number")
+    else:
+        select_parts.append("'' AS account_number")
+    if abonent_id_col:
+        select_parts.append(f"a.{_sql_ident(abonent_id_col)} AS abonent_id")
+    else:
+        select_parts.append("'' AS abonent_id")
+    if fio_col:
+        select_parts.append(f"a.{_sql_ident(fio_col)} AS fio")
+    else:
+        select_parts.append("'' AS fio")
+
+    rows = db.session.execute(
+        text(
+            f"""
+            SELECT {", ".join(select_parts)}
+            FROM {_sql_ident(cfg["abonent_table"])} a
+            WHERE a.{_sql_ident(owner_col)} = :owner
+            """
+        ),
+        {"owner": owner_id},
+    ).all()
+    for row in rows:
+        data = dict(row._mapping)
+        uid = _norm_text(data.get("account_uid"))
+        if not uid or uid in targets:
+            continue
+        targets[uid] = {
+            "owner_id": owner_id,
+            "account_uid": uid,
+            "account_number": _norm_text(data.get("account_number")),
+            "abonent_id": _norm_text(data.get("abonent_id")),
+            "identity": {
+                "account_uid": uid,
+                "account_number": _norm_text(data.get("account_number")),
+                "abonent_id": _norm_text(data.get("abonent_id")),
+                "fio": _norm_text(data.get("fio")),
+            },
+        }
+    return targets
+
+
 def _recalc_batch_create_job(owner_id: str, user_id: str, raw_uids, reason: str):
     requested = _recalc_normalize_uids(raw_uids)
     if not requested:
@@ -1899,8 +2160,7 @@ def _recalc_batch_create_job(owner_id: str, user_id: str, raw_uids, reason: str)
             db.session.commit()
             return active_job, {"requested": len(requested), "accepted": int(active_job.total_count or 0), "skipped": int(active_job.skipped_count or 0)}
 
-    targets = _owner_abonent_summary_targets(owner_id)
-    targets_by_uid = {_norm_text(t.get("account_uid")): t for t in targets if _norm_text(t.get("account_uid"))}
+    targets_by_uid = _owner_recalc_targets_by_uid(owner_id)
     active_uid_rows = (
         db.session.query(RecalcBatchJobItem.account_uid)
         .join(RecalcBatchJob, RecalcBatchJob.id == RecalcBatchJobItem.job_id)

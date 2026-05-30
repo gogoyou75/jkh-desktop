@@ -2901,6 +2901,50 @@
     return data;
   }
 
+  async function getNextRecalcUid(jobId) {
+    var res = await fetch("/api/recalc_batch_job/" + encodeURIComponent(String(jobId)) + "/next_uid", {
+      method: "GET",
+      credentials: "include"
+    });
+    var text = await res.text();
+    var data = null;
+    try { data = text ? JSON.parse(text) : null; } catch (e) { data = null; }
+    if (!res.ok || !data || data.ok === false) {
+      var err = new Error((data && data.error) || ("HTTP_" + res.status));
+      err.status = res.status;
+      err.payload = data;
+      err.responseText = text;
+      throw err;
+    }
+    return data;
+  }
+
+  async function completeRecalcUid(jobId, itemId, status, summary, errorReason) {
+    var payload = {
+      item_id: itemId,
+      status: String(status || ""),
+      summary: summary && typeof summary === "object" ? summary : {},
+      error_reason: String(errorReason || "")
+    };
+    var res = await fetch("/api/recalc_batch_job/" + encodeURIComponent(String(jobId)) + "/complete_uid", {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+    var text = await res.text();
+    var data = null;
+    try { data = text ? JSON.parse(text) : null; } catch (e) { data = null; }
+    if (!res.ok || !data || data.ok === false) {
+      var err = new Error((data && data.error) || ("HTTP_" + res.status));
+      err.status = res.status;
+      err.payload = data;
+      err.responseText = text;
+      throw err;
+    }
+    return data;
+  }
+
 
   async function getAbonentSummaryRecalcBatchJobLatest() {
     var res = await fetch("/api/abonent_summary/recalc_batch_job/latest", {
@@ -3132,7 +3176,8 @@
     if (raw === SUMMARY_RECALC_MODE_FULL || raw === "FULL") return SUMMARY_RECALC_MODE_FULL;
     if (raw === SUMMARY_RECALC_MODE_REPORT || raw === "REPORT" || raw === "PERIOD") return SUMMARY_RECALC_MODE_REPORT;
     var scope = String(opts.summaryScope || opts.summary_scope || "").trim().toLowerCase();
-    if (opts.saveSummary === false || scope === "period" || scope === "report") return SUMMARY_RECALC_MODE_REPORT;
+    if (scope === "full") return SUMMARY_RECALC_MODE_FULL;
+    if (scope === "period" || scope === "report") return SUMMARY_RECALC_MODE_REPORT;
     return SUMMARY_RECALC_MODE_FULL;
   }
 
@@ -3778,12 +3823,19 @@
     }
 
     var saveResult = null;
-    if (periodActive) {
-      saveResult = { ok: true, skipped: true, reason: "PERIOD_SUMMARY_NOT_SAVED", summary_status: summary.summary_status || summary.status || "fresh", summary_reason: summary.summary_reason || summary.reason || "OK", summary_scope: "period" };
+    if (periodActive || opts.saveSummary === false) {
+      saveResult = {
+        ok: true,
+        skipped: true,
+        reason: periodActive ? "PERIOD_SUMMARY_NOT_SAVED" : "CLIENT_BATCH_SUMMARY_NOT_SAVED",
+        summary_status: summary.summary_status || summary.status || "fresh",
+        summary_reason: summary.summary_reason || summary.reason || "OK",
+        summary_scope: periodActive ? "period" : "full"
+      };
       try {
-        console.log("[summary][skip-save-period-summary]", {
+        console.log(periodActive ? "[summary][skip-save-period-summary]" : "[summary][skip-save-summary]", {
           uid: String(summary.account_uid || summary.uid || ""),
-          periodActive: true,
+          periodActive: periodActive,
           periodFrom: String(period && period.from || ""),
           periodTo: String(period && period.to || "")
         });
@@ -3945,7 +3997,8 @@
       } catch (e) {
       var ledgerReason = _summaryCalcErrorCode(e);
       var errorScopeOpt = String(opts.summaryScope || opts.summary_scope || "").toLowerCase();
-      var periodErrorScope = opts.saveSummary === false || errorScopeOpt === "period" || errorScopeOpt === "report";
+      var periodErrorScope = errorScopeOpt === "period" || errorScopeOpt === "report";
+      var skipErrorSummarySave = opts.saveSummary === false;
       var periodForError = await _resolveAbonentSummaryRecalcPeriod(abonentOrId, opts.period, {
         mode: periodErrorScope ? SUMMARY_RECALC_MODE_REPORT : SUMMARY_RECALC_MODE_FULL,
         summaryScope: opts.summaryScope || opts.summary_scope,
@@ -3969,8 +4022,8 @@
         errorSummary.summary_scope = "full";
         errorSummary.calculation_mode = SUMMARY_RECALC_MODE_FULL;
       }
-      var errorSave = periodErrorScope
-        ? { ok: true, skipped: true, reason: "PERIOD_SUMMARY_NOT_SAVED", summary_status: errorSummary.summary_status || errorSummary.status || "error", summary_reason: errorSummary.summary_reason || errorSummary.reason || ledgerReason, summary_scope: "period" }
+      var errorSave = (periodErrorScope || skipErrorSummarySave)
+        ? { ok: true, skipped: true, reason: periodErrorScope ? "PERIOD_SUMMARY_NOT_SAVED" : "CLIENT_BATCH_SUMMARY_NOT_SAVED", summary_status: errorSummary.summary_status || errorSummary.status || "error", summary_reason: errorSummary.summary_reason || errorSummary.reason || ledgerReason, summary_scope: periodErrorScope ? "period" : "full" }
         : await saveAbonentSummaryAfterRecalc(abonentOrId, errorSummary);
       endCardRecalcFullTimer();
       return {
@@ -4060,6 +4113,8 @@
     createAbonentSummaryRecalcBatchJob: createAbonentSummaryRecalcBatchJob,
     runAbonentSummaryRecalcBatchJob: runAbonentSummaryRecalcBatchJob,
     getAbonentSummaryRecalcBatchJob: getAbonentSummaryRecalcBatchJob,
+    getNextRecalcUid: getNextRecalcUid,
+    completeRecalcUid: completeRecalcUid,
     getAbonentSummaryRecalcBatchJobLatest: getAbonentSummaryRecalcBatchJobLatest,
     resolveAbonentRegnumForSummary: resolveAbonentRegnumForSummary,
     buildAbonentSummaryAfterExplicitRecalc: buildAbonentSummaryAfterExplicitRecalc,
