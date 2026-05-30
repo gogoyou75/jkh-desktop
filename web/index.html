@@ -824,6 +824,70 @@ const INDEX_SUMMARY_TOTAL_KEYS = {
     paid: ["totals.paid", "totals.total_paid", "total_paid", "oplacheno", "paid", "paid_total", "paidTotal"]
 };
 
+function firstPresentValue(){
+    for (let i = 0; i < arguments.length; i++) {
+        const v = arguments[i];
+        if (v !== null && v !== undefined && v !== "") return v;
+    }
+    return "";
+}
+
+function isBackendAbonentsRow(item){
+    return !!(item && typeof item === "object" && !item.summary && (
+        item.uid !== undefined ||
+        item.total_debt !== undefined ||
+        item.total_accrued !== undefined ||
+        item.total_paid !== undefined ||
+        item.penalty_debt !== undefined ||
+        item.total_penalty !== undefined
+    ));
+}
+
+function buildSummaryFromBackendAbonentsRow(item){
+    const penalty = firstPresentValue(item && item.penalty_debt, item && item.total_penalty);
+    const summary = {
+        summary_status: item && item.summary_status,
+        status: item && item.summary_status,
+        summary_reason: item && item.summary_reason,
+        reason: item && item.summary_reason,
+        abonent_id: item && item.abonent_id,
+        account_uid: firstPresentValue(item && item.uid, item && item.account_uid),
+        account_number: item && item.account_number,
+        fio: item && item.fio,
+        address: item && item.address,
+        regnum: firstPresentValue(item && item.regnum, item && item.premise),
+        premise_regnum: firstPresentValue(item && item.regnum, item && item.premise),
+        total_debt: item && item.total_debt,
+        total_accrued: item && item.total_accrued,
+        total_paid: item && item.total_paid,
+        penalty_debt: penalty,
+        total_penalty: penalty,
+        updated_at: item && item.updated_at,
+        abonent: {
+            abonent_id: item && item.abonent_id,
+            account_uid: firstPresentValue(item && item.uid, item && item.account_uid),
+            account_number: item && item.account_number,
+            fio: item && item.fio,
+            address: item && item.address,
+            regnum: firstPresentValue(item && item.regnum, item && item.premise)
+        }
+    };
+    if (summary.summary_status === "fresh" || summary.total_debt !== "" || summary.total_accrued !== "" || summary.total_paid !== "" || penalty !== "") {
+        summary.totals = {
+            debt: summary.total_debt,
+            total_debt: summary.total_debt,
+            total: summary.total_debt,
+            accrued: summary.total_accrued,
+            total_accrued: summary.total_accrued,
+            paid: summary.total_paid,
+            total_paid: summary.total_paid,
+            penalty: penalty,
+            total_penalty: penalty
+        };
+    }
+    return summary;
+}
+
 function validateIndexSummaryTotals(summary, status){
     const totalsObj = summary && summary.totals && typeof summary.totals === "object" && !Array.isArray(summary.totals) ? summary.totals : null;
     const fields = {};
@@ -915,7 +979,9 @@ function summaryStatusHtml(row){
 }
 
 function buildIndexRowFromSummaryItem(item){
-    const summary = (item && item.summary && typeof item.summary === "object") ? item.summary : {};
+    const summary = (item && item.summary && typeof item.summary === "object")
+        ? item.summary
+        : (isBackendAbonentsRow(item) ? buildSummaryFromBackendAbonentsRow(item) : {});
     const abonent = (summary.abonent && typeof summary.abonent === "object") ? summary.abonent : {};
     const status = normalizeSummaryStatus(summary.summary_status || summary.status || item && item.summary_status);
     const rawReason = String(summary.summary_reason || summary.reason || "").trim();
@@ -945,8 +1011,8 @@ function buildIndexRowFromSummaryItem(item){
     };
 
     return {
-        id: String(item && (item.abonent_id || item.account_number || item.account_uid || item.id) || abonent.id || abonent.abonent_id || abonent.account_number || abonent.account_uid || ""),
-        accountUid: String(item && item.account_uid || summary.account_uid || summary.accountUid || abonent.account_uid || abonent.accountUid || ""),
+        id: String(item && (item.abonent_id || item.account_number || item.uid || item.account_uid || item.id) || abonent.id || abonent.abonent_id || abonent.account_number || abonent.account_uid || ""),
+        accountUid: String(item && (item.uid || item.account_uid) || summary.account_uid || summary.accountUid || abonent.account_uid || abonent.accountUid || ""),
         fam: String(fam || ""),
         name: String(name || ""),
         otch: String(otch || ""),
@@ -957,14 +1023,14 @@ function buildIndexRowFromSummaryItem(item){
         startDate: isFresh ? formatSummaryDate(pickSummaryValue(summary, ["start_date", "startDate", "period_start", "date_from", "period_from", "period.from"]) || period.from || period.period_from || period.date_from || period.start_date) : "",
         endDate: isFresh ? formatSummaryDate(pickSummaryValue(summary, ["end_date", "endDate", "period_end", "date_to", "period_to", "as_of", "period.to"]) || period.to || period.period_to || period.date_to || period.end_date || period.as_of) : "",
         note: String(summary.note || summary.defaultNote || ""),
-        flatReg: String(summary.flat_reg || summary.regnum || summary.premise_regnum || summary.premiseRegnum || abonent.flat_reg || abonent.regnum || abonent.premise_regnum || abonent.premiseRegnum || ""),
+        flatReg: String(summary.flat_reg || summary.regnum || summary.premise_regnum || summary.premiseRegnum || item && (item.regnum || item.premise) || abonent.flat_reg || abonent.regnum || abonent.premise_regnum || abonent.premiseRegnum || ""),
         rowStatusMark: "",
         summaryStatus: displayStatus,
         summaryReason: reason,
         rawSummaryStatus: status,
         rawSummaryReason: rawReason,
         __totalsRenderDebug: {
-            uid: String(item && item.account_uid || summary.account_uid || summary.accountUid || abonent.account_uid || abonent.accountUid || ""),
+            uid: String(item && (item.uid || item.account_uid) || summary.account_uid || summary.accountUid || abonent.account_uid || abonent.accountUid || ""),
             summaryStatus: displayStatus,
             rawSummaryStatus: status,
             summaryReason: reason,
@@ -1022,6 +1088,38 @@ function renderIndexSummaryError(message){
     if (controls) controls.innerHTML = "";
 }
 
+function normalizeIndexApiPagination(payload){
+    const p = payload && payload.pagination && typeof payload.pagination === "object" ? payload.pagination : {};
+    const page = Number(p.page || payload && payload.page || currentPage) || 1;
+    const perPage = Number(p.per_page || p.limit || payload && payload.limit || pageSize) || pageSize;
+    const total = Number(p.total || payload && payload.total || (payload && Array.isArray(payload.items) ? payload.items.length : 0)) || 0;
+    const pages = Number(p.pages || (perPage ? Math.ceil(total / perPage) : 0)) || 0;
+    return {
+        page: page,
+        per_page: perPage,
+        total: total,
+        pages: pages,
+        has_next: p.has_next !== undefined ? !!p.has_next : page < pages,
+        has_prev: p.has_prev !== undefined ? !!p.has_prev : page > 1
+    };
+}
+
+async function renderIndexRowsLegacyFallback(reason){
+    indexPassiveSummaryMode = false;
+    indexSummaryState = Object.assign({}, indexSummaryState, {
+        mode: "legacy",
+        loading: false,
+        error: String(reason || "")
+    });
+    if (window.AbonentsDB && window.AbonentsDB.abonents) {
+        try { console.warn("[index][abonents-api-fallback]", { reason: String(reason || "api_unavailable") }); } catch(eLog) {}
+        rebuildIndexRows();
+        render();
+        return true;
+    }
+    return false;
+}
+
 function getIndexServerSummaryStatusFilter(){
     const raw = String(filters.summaryStatus || "").trim().toLowerCase();
     if (!raw) return "";
@@ -1061,14 +1159,15 @@ async function loadPassiveSummaryPage(page){
         pruneSummaryBatchSelection();
         indexSummaryState.loading = false;
         indexSummaryState.error = "";
-        indexSummaryState.pagination = Object.assign({ page: currentPage, per_page: pageSize, total: allRows.length, pages: 0, has_next: false, has_prev: false }, payload.pagination || {});
+        indexSummaryState.pagination = normalizeIndexApiPagination(payload);
         currentPage = Number(indexSummaryState.pagination.page) || currentPage;
         render();
     } catch(e) {
         allRows = [];
         indexSummaryState.loading = false;
         indexSummaryState.error = String(e && e.message || e || "summary_api_error");
-        renderIndexSummaryError(indexSummaryState.error);
+        const fallbackOk = await renderIndexRowsLegacyFallback(indexSummaryState.error);
+        if (!fallbackOk) renderIndexSummaryError(indexSummaryState.error);
     }
 }
 

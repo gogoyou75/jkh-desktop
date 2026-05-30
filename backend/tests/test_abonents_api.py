@@ -166,6 +166,7 @@ class AbonentsApiTest(unittest.TestCase):
         self.assertEqual(item["total_debt"], 100.25)
         self.assertEqual(item["total_accrued"], 150.25)
         self.assertEqual(item["total_paid"], 50)
+        self.assertEqual(item["penalty_debt"], 7.75)
         self.assertEqual(item["total_penalty"], 7.75)
         self.assertEqual(item["regnum"], "REG-1")
         self.assertEqual(item["address_street"], "Main")
@@ -186,6 +187,13 @@ class AbonentsApiTest(unittest.TestCase):
         self.assertEqual(body["limit"], 1)
         self.assertEqual(body["total"], 3)
         self.assertEqual(len(body["items"]), 1)
+
+    def test_status_filter_includes_missing_left_join_rows(self):
+        self._login("owner1")
+        body = self.client.get("/api/abonents?summary_status=missing").get_json()
+        self.assertEqual(body["total"], 1)
+        self.assertEqual(body["items"][0]["uid"], "uid-missing")
+        self.assertEqual(body["items"][0]["summary_status"], "missing")
 
     def test_limit_is_clamped_to_200(self):
         self._login("owner1")

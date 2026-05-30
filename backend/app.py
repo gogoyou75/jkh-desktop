@@ -2346,6 +2346,7 @@ def _abonents_api_row_payload(row):
         "total_debt": _decimal_json_or_none(data.get("total_debt")) if has_summary else None,
         "total_accrued": _decimal_json_or_none(data.get("total_accrued")) if has_summary else None,
         "total_paid": _decimal_json_or_none(data.get("total_paid")) if has_summary else None,
+        "penalty_debt": _decimal_json_or_none(data.get("total_penalty")) if has_summary else None,
         "total_penalty": _decimal_json_or_none(data.get("total_penalty")) if has_summary else None,
         "updated_at": _dt_json_or_none(data.get("updated_at")) if has_summary else None,
     }
@@ -2355,7 +2356,7 @@ def _abonents_api_row_payload(row):
     return payload
 
 
-def _abonents_api_query(owner: str, search_text: str):
+def _abonents_api_query(owner: str, search_text: str, status_filter=None):
     cfg = _abonents_api_select_config()
     if cfg is None:
         raise RuntimeError("abonents_table_missing")
@@ -2390,6 +2391,19 @@ def _abonents_api_query(owner: str, search_text: str):
                 for expr in search_exprs
             ]
             where_parts.append("(" + " OR ".join(like_parts) + ")")
+    if status_filter:
+        status_names = []
+        for value in sorted(status_filter):
+            clean = _norm_text(value).lower()
+            if clean in {"fresh", "dirty", "missing", "error", "invalid"}:
+                status_names.append(clean)
+        if status_names:
+            placeholders = []
+            for index, status_name in enumerate(status_names):
+                key = f"status_{index}"
+                params[key] = status_name
+                placeholders.append(f":{key}")
+            where_parts.append("LOWER(COALESCE(s.summary_status, 'missing')) IN (" + ", ".join(placeholders) + ")")
 
     select_sql = ",\n            ".join([
         f"{abonent_id_expr} AS abonent_id",
@@ -2594,7 +2608,10 @@ def abonents_index_list():
     query_text = request.args.get("query", request.args.get("search", ""))
 
     try:
-        select_sql, from_sql, where_sql, order_sql, params = _abonents_api_query(owner, query_text)
+        status_filter = _parse_summary_status_filter(
+            request.args.get("summary_status") or request.args.get("status") or ""
+        )
+        select_sql, from_sql, where_sql, order_sql, params = _abonents_api_query(owner, query_text, status_filter)
         if select_sql is None:
             return _legacy_abonents_index_response(owner, page, limit, query_text)
         total = db.session.execute(
