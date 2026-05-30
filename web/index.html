@@ -237,6 +237,12 @@ Doc: docs/LOGIC_SPEC_v1.5.3.md
     <button id="summaryBatchStopBtn" type="button" disabled>Остановить</button>
     <span id="summaryBatchCount">Нет выбранных UID</span>
     <div id="summaryBatchProgress" class="summary-batch-progress"></div>
+    <div id="summaryBatchStats" class="summary-batch-stats" style="display:none;"></div>
+    <button id="summaryBatchShowErrorsBtn" type="button" style="display:none;">Показать ошибки</button>
+    <div id="summaryBatchErrors" class="summary-batch-errors" style="display:none;"></div>
+    <div id="summaryBatchLegend" class="summary-batch-legend">
+        fresh — итог актуален; error — расчёт завершился ошибкой; missing — summary отсутствует; invalid — summary повреждён; dirty — требуется пересчёт
+    </div>
 </div>
 
 <table id="abonentsTable" class="sticky-header">
@@ -355,7 +361,9 @@ let indexSummaryState = {
 let summaryBatchSelectedUids = {};
 let summaryBatchRunning = false;
 let summaryBatchStopRequested = false;
-let summaryBatchJobState = { jobId: null, timer: null, retries: 0 };
+let summaryBatchJobState = { jobId: null, timer: null, retries: 0, total: 0 };
+let summaryBatchErrorsVisible = false;
+let summaryBatchProgressState = { jobId: null, total: 0, processed: 0, fresh: 0, error: 0, skipped: 0, errors: [], finished: false, paused: false };
 
 function __indexOwnerId(){
     try {
@@ -1446,6 +1454,96 @@ function pruneSummaryBatchSelection(){
     });
 }
 
+function summaryBatchAccountLabel(uid){
+    uid = String(uid || "").trim();
+    const row = (allRows || []).find(function(r){ return getSummaryBatchUid(r) === uid; });
+    return String(row && row.id || uid || "");
+}
+
+function resetSummaryBatchProgress(){
+    summaryBatchErrorsVisible = false;
+    summaryBatchProgressState = { jobId: null, total: 0, processed: 0, fresh: 0, error: 0, skipped: 0, errors: [], finished: false, paused: false };
+    renderSummaryBatchProgress();
+}
+
+function addSummaryBatchError(uid, reason){
+    uid = String(uid || "").trim();
+    reason = String(reason || "CLIENT_RECALC_FAILED").trim();
+    if (!uid && !reason) return;
+    const key = uid + "\n" + reason;
+    const exists = (summaryBatchProgressState.errors || []).some(function(item){
+        return item && item.key === key;
+    });
+    if (!exists) {
+        summaryBatchProgressState.errors.push({
+            key: key,
+            uid: uid,
+            account: summaryBatchAccountLabel(uid),
+            reason: reason
+        });
+    }
+}
+
+function mergeSummaryBatchPayloadErrors(payload){
+    if (!payload || typeof payload !== "object") return;
+    const items = Array.isArray(payload.items) ? payload.items : [];
+    items.forEach(function(item){
+        const status = String(item && (item.summary_status || item.status) || "").toLowerCase();
+        const reason = String(item && (item.summary_reason || item.error_message) || "").trim();
+        if (status === "error" || reason) addSummaryBatchError(item && item.account_uid, reason || "UID_PROCESSING_FAILED");
+    });
+    const sample = Array.isArray(payload.sample_errors) ? payload.sample_errors : [];
+    sample.forEach(function(item){
+        addSummaryBatchError(item && item.account_uid, item && item.error);
+    });
+}
+
+function updateSummaryBatchProgressState(patch){
+    patch = patch || {};
+    Object.keys(patch).forEach(function(key){
+        if (key !== "errors") summaryBatchProgressState[key] = patch[key];
+    });
+    renderSummaryBatchProgress();
+}
+
+function renderSummaryBatchProgress(){
+    const stats = document.getElementById("summaryBatchStats");
+    const showBtn = document.getElementById("summaryBatchShowErrorsBtn");
+    const errorsBox = document.getElementById("summaryBatchErrors");
+    const state = summaryBatchProgressState || {};
+    const hasJob = !!state.jobId || !!state.total || !!state.processed || !!state.finished || !!state.paused;
+    if (stats) {
+        if (!hasJob) {
+            stats.style.display = "none";
+            stats.innerHTML = "";
+        } else {
+            const total = Number(state.total || 0);
+            const processed = Number(state.processed || 0);
+            const left = Math.max(0, total - processed);
+            stats.style.display = "block";
+            stats.innerHTML = [
+                "Job #" + escapeHtml(state.jobId || ""),
+                "Обработано: " + processed + "/" + total,
+                "Fresh: " + Number(state.fresh || 0),
+                "Error: " + Number(state.error || 0),
+                "Skipped: " + Number(state.skipped || 0),
+                "Осталось: " + left
+            ].map(function(line){ return "<div>" + line + "</div>"; }).join("");
+        }
+    }
+    const errors = Array.isArray(state.errors) ? state.errors : [];
+    if (showBtn) {
+        showBtn.style.display = errors.length ? "inline-block" : "none";
+        showBtn.textContent = summaryBatchErrorsVisible ? "Скрыть ошибки" : "Показать ошибки";
+    }
+    if (errorsBox) {
+        errorsBox.style.display = errors.length && summaryBatchErrorsVisible ? "block" : "none";
+        errorsBox.innerHTML = errors.map(function(item){
+            return '<div class="summary-batch-error-item"><div>ЛС ' + escapeHtml(item.account || item.uid || "") + '</div><div>' + escapeHtml(item.reason || "") + '</div></div>';
+        }).join("");
+    }
+}
+
 function updateSummaryBatchPanel(){
     const panel = document.getElementById("summaryBatchPanel");
     const countEl = document.getElementById("summaryBatchCount");
@@ -1462,6 +1560,7 @@ function updateSummaryBatchPanel(){
     if (runBtn) runBtn.disabled = summaryBatchRunning || !selected.length;
     if (selectBtn) selectBtn.disabled = summaryBatchRunning || !staleOnPage;
     if (stopBtn) stopBtn.disabled = !summaryBatchRunning || summaryBatchStopRequested;
+    renderSummaryBatchProgress();
 }
 
 function bindSummaryBatchPanelOnce(){
@@ -1471,6 +1570,7 @@ function bindSummaryBatchPanelOnce(){
     const selectBtn = document.getElementById("summaryBatchSelectStaleBtn");
     const runBtn = document.getElementById("summaryBatchRunBtn");
     const stopBtn = document.getElementById("summaryBatchStopBtn");
+    const showErrorsBtn = document.getElementById("summaryBatchShowErrorsBtn");
     if (selectBtn) {
         selectBtn.onclick = function(){
             getCurrentSummaryBatchRows().forEach(function(r){
@@ -1481,6 +1581,12 @@ function bindSummaryBatchPanelOnce(){
         };
     }
     if (runBtn) runBtn.onclick = runSelectedSummaryBatch;
+    if (showErrorsBtn) {
+        showErrorsBtn.onclick = function(){
+            summaryBatchErrorsVisible = !summaryBatchErrorsVisible;
+            renderSummaryBatchProgress();
+        };
+    }
     if (stopBtn) {
         stopBtn.onclick = function(){
             if (!summaryBatchRunning) return;
@@ -1525,7 +1631,12 @@ async function runSelectedSummaryBatch(){
     if (!selected.length) {
         const message = "No selected UID.";
         if (progress) progress.textContent = message;
-        alert(message);
+        updateSummaryBatchPanel();
+        return;
+    }
+    const resumeJobId = summaryBatchJobState.jobId;
+    if (!resumeJobId && selected.length > 10 && !confirm("Выбрано " + selected.length + " абонентов.\nЗапустить пересчёт?")) {
+        if (progress) progress.textContent = "Пересчёт отменён оператором.";
         updateSummaryBatchPanel();
         return;
     }
@@ -1537,7 +1648,6 @@ async function runSelectedSummaryBatch(){
     } catch (engineError) {
         const message = "Расчётный модуль не загружен. Пересчёт не запущен.";
         if (progress) progress.textContent = message;
-        alert(message);
         updateSummaryBatchPanel();
         return;
     }
@@ -1553,9 +1663,18 @@ async function runSelectedSummaryBatch(){
     if (progress) progress.textContent = "Проверка выбранных UID на сервере: " + selected.length + "...";
 
     try {
+        if (resumeJobId) {
+            updateSummaryBatchProgressState({ jobId: resumeJobId, total: summaryBatchJobState.total || selected.length, paused: false, finished: false });
+            if (progress) progress.textContent = "Job #" + resumeJobId + " resumed. Continuing queued UID...";
+            await processClientSummaryBatchJob(resumeJobId, Number(summaryBatchJobState.total || selected.length || 0));
+            return;
+        }
+        resetSummaryBatchProgress();
         const created = await Data.createAbonentSummaryRecalcBatchJob(selected, "CLIENT_RECALC");
         if (!created || !created.job_id) throw new Error("job_create_failed");
         summaryBatchJobState.jobId = created.job_id;
+        summaryBatchJobState.total = Number(created.accepted || selected.length || 0);
+        updateSummaryBatchProgressState({ jobId: created.job_id, total: summaryBatchJobState.total, processed: 0, fresh: 0, error: 0, skipped: 0, finished: false, paused: false });
         if (progress) progress.textContent = "Job #" + created.job_id + " created. accepted=" + created.accepted + ", skipped=" + created.skipped + ". Client worker started...";
         await processClientSummaryBatchJob(created.job_id, Number(created.accepted || selected.length || 0));
     } catch (e) {
@@ -1567,10 +1686,10 @@ async function runSelectedSummaryBatch(){
             if (progress) progress.textContent = "Ошибка batch-проверки: " + msg;
         }
         if (progress && detail) progress.textContent = String(progress.textContent || "") + detail;
-        alert(progress ? progress.textContent : ("Batch recalculation error: " + msg + detail));
         summaryBatchRunning = false;
         summaryBatchStopRequested = false;
         summaryBatchJobState.jobId = null;
+        summaryBatchJobState.total = 0;
         updateSummaryBatchPanel();
     }
 }
@@ -1635,24 +1754,38 @@ function summaryBatchResultReason(result, fallback){
 
 async function finishClientSummaryBatchJob(jobId, total, processedLocal, freshLocal, errorLocal, skippedLocal){
     const progress = document.getElementById("summaryBatchProgress");
-    const doneText = "Завершено. Job #" + jobId + ": processed=" + processedLocal + "/" + total + ", fresh=" + freshLocal + ", error=" + errorLocal + ", skipped=" + skippedLocal + ".";
+    const doneText = "Пересчёт завершён. Fresh: " + freshLocal + ". Error: " + errorLocal + ". Skipped: " + skippedLocal + ".";
     selectedUidsClear();
+    updateSummaryBatchProgressState({
+        jobId: jobId,
+        total: total,
+        processed: processedLocal,
+        fresh: freshLocal,
+        error: errorLocal,
+        skipped: skippedLocal,
+        finished: true,
+        paused: false
+    });
     if (progress) progress.textContent = doneText + " Refreshing summary...";
     await loadPassiveSummaryPage(currentPage);
     if (progress) progress.textContent = doneText;
     summaryBatchRunning = false;
     summaryBatchStopRequested = false;
     summaryBatchJobState.jobId = null;
+    summaryBatchJobState.total = 0;
     updateSummaryBatchPanel();
 }
 
 async function processClientSummaryBatchJob(jobId, totalAccepted){
     const progress = document.getElementById("summaryBatchProgress");
-    let processedLocal = 0;
-    let freshLocal = 0;
-    let errorLocal = 0;
-    let skippedLocal = 0;
-    const total = Number(totalAccepted || 0);
+    const prior = summaryBatchProgressState && summaryBatchProgressState.jobId === jobId ? summaryBatchProgressState : {};
+    let processedLocal = Number(prior.processed || 0);
+    let freshLocal = Number(prior.fresh || 0);
+    let errorLocal = Number(prior.error || 0);
+    let skippedLocal = Number(prior.skipped || 0);
+    let total = Number(totalAccepted || prior.total || 0);
+    let pausedByOperator = false;
+    updateSummaryBatchProgressState({ jobId: jobId, total: total, processed: processedLocal, fresh: freshLocal, error: errorLocal, skipped: skippedLocal, paused: false, finished: false });
     try {
         while (!summaryBatchStopRequested) {
             let next = null;
@@ -1709,30 +1842,41 @@ async function processClientSummaryBatchJob(jobId, totalAccepted){
             }
             completePayload = await Data.completeRecalcUid(jobId, itemId, status, summary, reason);
             if (status === "fresh") freshLocal += 1;
-            else errorLocal += 1;
+            else {
+                errorLocal += 1;
+                addSummaryBatchError(uid, reason);
+            }
             processedLocal += 1;
             if (completePayload && completePayload.job) {
+                total = Number(completePayload.job.total_count || completePayload.job.total || total || 0);
                 freshLocal = Number(completePayload.job.fresh_count || freshLocal || 0);
                 errorLocal = Number(completePayload.job.error_count || errorLocal || 0);
                 skippedLocal = Number(completePayload.job.skipped_count || skippedLocal || 0);
             }
+            mergeSummaryBatchPayloadErrors(completePayload);
+            updateSummaryBatchProgressState({ jobId: jobId, total: total, processed: processedLocal, fresh: freshLocal, error: errorLocal, skipped: skippedLocal, paused: false, finished: false });
             const completeStatus = String(completePayload && (completePayload.status || completePayload.job && completePayload.job.status) || "").toLowerCase();
             if (completeStatus === "done" || completeStatus === "completed") {
                 await finishClientSummaryBatchJob(jobId, total, processedLocal, freshLocal, errorLocal, skippedLocal);
                 return;
             }
-            if (progress) progress.textContent = "Job #" + jobId + ": processed=" + processedLocal + "/" + total + ", fresh=" + freshLocal + ", error=" + errorLocal + ", skipped=" + skippedLocal + ". Refreshing summary...";
-            await loadPassiveSummaryPage(currentPage);
+            if (progress) progress.textContent = "Job #" + jobId + ": processed=" + processedLocal + "/" + total + ", fresh=" + freshLocal + ", error=" + errorLocal + ", skipped=" + skippedLocal + ".";
             await summaryBatchYield(0);
         }
+        pausedByOperator = true;
+        summaryBatchJobState.jobId = jobId;
+        summaryBatchJobState.total = total;
+        updateSummaryBatchProgressState({ jobId: jobId, total: total, processed: processedLocal, fresh: freshLocal, error: errorLocal, skipped: skippedLocal, paused: true, finished: false });
         if (progress) progress.textContent = "Job #" + jobId + " paused by operator. No new UID will be requested.";
     } catch (e) {
         if (progress) progress.textContent = "Client batch worker error: " + String(e && e.message || e) + (e && e.payload ? " payload=" + JSON.stringify(e.payload) : "");
-        alert(progress ? progress.textContent : "Client batch worker error");
     } finally {
         summaryBatchRunning = false;
         summaryBatchStopRequested = false;
-        summaryBatchJobState.jobId = null;
+        if (!pausedByOperator) {
+            summaryBatchJobState.jobId = null;
+            summaryBatchJobState.total = 0;
+        }
         updateSummaryBatchPanel();
     }
 }
