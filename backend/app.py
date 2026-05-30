@@ -439,10 +439,7 @@ def _dt_json_or_none(value):
 
 
 def _abonent_summary_payload(row: AbonentSummary):
-    try:
-        summary = json.loads(row.summary_json or "{}")
-    except (TypeError, ValueError):
-        summary = {}
+    summary, _parse_error = _safe_summary_from_json_for_columns(row.summary_json)
 
     return {
         "id": row.id,
@@ -484,7 +481,7 @@ def _apply_abonent_summary_columns(row: AbonentSummary, target: dict, summary: d
     identity = target.get("identity") if isinstance(target, dict) and isinstance(target.get("identity"), dict) else {}
     summary = summary if isinstance(summary, dict) else {}
     abonent = summary.get("abonent") if isinstance(summary.get("abonent"), dict) else {}
-    status = _summary_status_from_payload(summary)
+    status = _summary_column_status_from_payload(summary)
     reason = _norm_text(summary.get("summary_reason") or summary.get("reason"))
 
     row.fio = _norm_text(summary.get("fio") or abonent.get("fio") or identity.get("fio"))
@@ -502,6 +499,119 @@ def _apply_abonent_summary_columns(row: AbonentSummary, target: dict, summary: d
         row.dirty_since = datetime.utcnow()
     elif status == "fresh":
         row.dirty_since = None
+
+
+def _set_abonent_summary_json(row: AbonentSummary, target: dict, summary: dict):
+    row.summary_json = json.dumps(summary if isinstance(summary, dict) else {}, ensure_ascii=False, sort_keys=True)
+    _apply_abonent_summary_columns(row, target, summary)
+
+
+def _safe_summary_from_json_for_columns(raw_json: str):
+    try:
+        payload = json.loads(raw_json or "{}")
+    except (TypeError, ValueError):
+        return {"summary_status": "invalid", "summary_reason": "SUMMARY_JSON_INVALID"}, "SUMMARY_JSON_INVALID"
+    if not isinstance(payload, dict):
+        return {"summary_status": "invalid", "summary_reason": "SUMMARY_JSON_NOT_OBJECT"}, "SUMMARY_JSON_NOT_OBJECT"
+    return payload, ""
+
+
+def _summary_column_status_from_payload(summary: dict | None):
+    if not isinstance(summary, dict):
+        return "invalid"
+    status = _norm_text(summary.get("summary_status") or summary.get("status")).lower()
+    if status in {"fresh", "dirty", "missing", "error", "invalid"}:
+        return status
+    return "missing"
+
+
+def _column_decimal_equal(left, right):
+    left_dec = _decimal_or_none(left)
+    right_dec = _decimal_or_none(right)
+    return left_dec == right_dec
+
+
+def _expected_abonent_summary_column_row(row: AbonentSummary):
+    summary, parse_error = _safe_summary_from_json_for_columns(row.summary_json)
+    expected = AbonentSummary(
+        owner_id=row.owner_id,
+        abonent_id=row.abonent_id or "",
+        account_uid=row.account_uid or "",
+        account_number=row.account_number or "",
+    )
+    _apply_abonent_summary_columns(expected, {}, summary)
+    if parse_error:
+        expected.last_error_code = parse_error
+    return expected, parse_error
+
+
+def _abonent_summary_consistency_mismatches(row: AbonentSummary):
+    expected, parse_error = _expected_abonent_summary_column_row(row)
+    checks = (
+        ("summary_status", _norm_text(row.summary_status), _norm_text(expected.summary_status)),
+        ("summary_reason", _norm_text(row.summary_reason), _norm_text(expected.summary_reason)),
+        ("total_debt", row.total_debt, expected.total_debt),
+        ("total_accrued", row.total_accrued, expected.total_accrued),
+        ("total_paid", row.total_paid, expected.total_paid),
+        ("penalty_debt", row.penalty_debt, expected.penalty_debt),
+    )
+    mismatches = []
+    for field, current, expected_value in checks:
+        if field.startswith("total_") or field == "penalty_debt":
+            if not _column_decimal_equal(current, expected_value):
+                mismatches.append({"field": field, "column": current, "expected": expected_value})
+        elif current != expected_value:
+            mismatches.append({"field": field, "column": current, "expected": expected_value})
+    return mismatches, expected, parse_error
+
+
+def audit_abonent_summary_consistency(apply: bool = False, sample_limit: int = 20, owner_id: str = ""):
+    query = AbonentSummary.query
+    if _norm_text(owner_id):
+        query = query.filter_by(owner_id=_norm_text(owner_id))
+
+    result = {
+        "checked": 0,
+        "mismatch_count": 0,
+        "updated": 0,
+        "samples": [],
+    }
+    for row in query.order_by(AbonentSummary.id.asc()).all():
+        result["checked"] += 1
+        mismatches, expected, parse_error = _abonent_summary_consistency_mismatches(row)
+        if not mismatches:
+            continue
+        result["mismatch_count"] += 1
+        if len(result["samples"]) < sample_limit:
+            result["samples"].append({
+                "id": row.id,
+                "owner_id": row.owner_id,
+                "account_uid": row.account_uid,
+                "account_number": row.account_number,
+                "parse_error": parse_error,
+                "mismatches": [
+                    {
+                        "field": item["field"],
+                        "column": str(item["column"]) if item["column"] is not None else None,
+                        "expected": str(item["expected"]) if item["expected"] is not None else None,
+                    }
+                    for item in mismatches
+                ],
+            })
+        if apply:
+            row.total_accrued = expected.total_accrued
+            row.total_paid = expected.total_paid
+            row.penalty_debt = expected.penalty_debt
+            row.total_debt = expected.total_debt
+            row.summary_status = expected.summary_status
+            row.summary_reason = expected.summary_reason
+            row.last_error_code = expected.last_error_code
+            row.dirty_since = expected.dirty_since
+            result["updated"] += 1
+
+    if apply and result["updated"]:
+        db.session.commit()
+    return result
 
 
 def _normalize_email(value: str) -> str:
@@ -1318,22 +1428,19 @@ def _upsert_abonent_summary_payload(owner_id: str, account_uid: str, target: dic
         return None
     abonent_id = _norm_text(target.get("abonent_id") if isinstance(target, dict) else "")
     account_number = _norm_text(target.get("account_number") if isinstance(target, dict) else "")
-    summary_json = json.dumps(summary, ensure_ascii=False, sort_keys=True)
     row = AbonentSummary.query.filter_by(owner_id=owner_id, account_uid=account_uid).order_by(AbonentSummary.id.asc()).first()
     if row:
         row.abonent_id = abonent_id or row.abonent_id
         row.account_number = account_number or row.account_number
-        row.summary_json = summary_json
-        _apply_abonent_summary_columns(row, target, summary)
+        _set_abonent_summary_json(row, target, summary)
     else:
         row = AbonentSummary(
             owner_id=owner_id,
             abonent_id=abonent_id,
             account_uid=account_uid,
             account_number=account_number,
-            summary_json=summary_json,
         )
-        _apply_abonent_summary_columns(row, target, summary)
+        _set_abonent_summary_json(row, target, summary)
         db.session.add(row)
     return row
 
@@ -2613,8 +2720,7 @@ def abonent_summary_mark_dirty():
             row.abonent_id = _norm_text(target.get("abonent_id"))
             row.account_number = _norm_text(target.get("account_number"))
             dirty_summary = _dirty_abonent_summary_payload(existing_summary, reason)
-            row.summary_json = json.dumps(dirty_summary, ensure_ascii=False, sort_keys=True)
-            _apply_abonent_summary_columns(row, target, dirty_summary)
+            _set_abonent_summary_json(row, target, dirty_summary)
             counters["updated"] += 1
         else:
             dirty_summary = _dirty_abonent_summary_payload(None, reason)
@@ -2623,9 +2729,8 @@ def abonent_summary_mark_dirty():
                 abonent_id=_norm_text(target.get("abonent_id")),
                 account_uid=account_uid,
                 account_number=_norm_text(target.get("account_number")),
-                summary_json=json.dumps(dirty_summary, ensure_ascii=False, sort_keys=True),
             )
-            _apply_abonent_summary_columns(row, target, dirty_summary)
+            _set_abonent_summary_json(row, target, dirty_summary)
             db.session.add(row)
             counters["created"] += 1
 
@@ -2820,13 +2925,11 @@ def abonent_summary_rebuild():
 
             abonent_id = _norm_text(body.get("abonent_id")) or _norm_text(target.get("abonent_id"))
             account_number = _norm_text(body.get("account_number")) or _norm_text(target.get("account_number"))
-            summary_json = json.dumps(summary, ensure_ascii=False, sort_keys=True)
             row = AbonentSummary.query.filter_by(owner_id=owner, account_uid=account_uid).order_by(AbonentSummary.id.asc()).first()
             if row:
                 row.abonent_id = abonent_id
                 row.account_number = account_number
-                row.summary_json = summary_json
-                _apply_abonent_summary_columns(row, target, summary)
+                _set_abonent_summary_json(row, target, summary)
                 counters["updated"] += 1
             else:
                 row = AbonentSummary(
@@ -2834,9 +2937,8 @@ def abonent_summary_rebuild():
                     abonent_id=abonent_id,
                     account_uid=account_uid,
                     account_number=account_number,
-                    summary_json=summary_json,
                 )
-                _apply_abonent_summary_columns(row, target, summary)
+                _set_abonent_summary_json(row, target, summary)
                 db.session.add(row)
                 counters["created"] += 1
 
@@ -2855,24 +2957,21 @@ def abonent_summary_rebuild():
                 counters["skipped"] += 1
                 continue
 
-            summary_json = json.dumps(_build_missing_abonent_summary(target), ensure_ascii=False, sort_keys=True)
+            missing_summary = _build_missing_abonent_summary(target)
             row = AbonentSummary.query.filter_by(owner_id=owner, account_uid=account_uid).order_by(AbonentSummary.id.asc()).first()
             if row:
                 row.abonent_id = _norm_text(target.get("abonent_id"))
                 row.account_number = _norm_text(target.get("account_number"))
-                row.summary_json = summary_json
-                _apply_abonent_summary_columns(row, target, _build_missing_abonent_summary(target))
+                _set_abonent_summary_json(row, target, missing_summary)
                 counters["updated"] += 1
             else:
-                missing_summary = _build_missing_abonent_summary(target)
                 row = AbonentSummary(
                     owner_id=owner,
                     abonent_id=_norm_text(target.get("abonent_id")),
                     account_uid=account_uid,
                     account_number=_norm_text(target.get("account_number")),
-                    summary_json=json.dumps(missing_summary, ensure_ascii=False, sort_keys=True),
                 )
-                _apply_abonent_summary_columns(row, target, missing_summary)
+                _set_abonent_summary_json(row, target, missing_summary)
                 db.session.add(row)
                 counters["created"] += 1
 
