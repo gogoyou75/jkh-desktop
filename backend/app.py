@@ -11,7 +11,7 @@ from datetime import datetime, date
 
 from flask import Flask, jsonify, request, session, Response
 from flask_sqlalchemy import SQLAlchemy
-from sqlalchemy import text
+from sqlalchemy import inspect as sa_inspect, text
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from werkzeug.security import generate_password_hash, check_password_hash
 from openpyxl import load_workbook, Workbook
@@ -392,6 +392,50 @@ def _pagination_payload(page: int, per_page: int, total: int):
         "has_next": page < pages,
         "has_prev": page > 1,
     }
+
+
+def _table_columns(table_name: str):
+    try:
+        inspector = sa_inspect(db.engine)
+        if not inspector.has_table(table_name):
+            return set()
+        return {col["name"] for col in inspector.get_columns(table_name)}
+    except SQLAlchemyError:
+        db.session.rollback()
+        raise
+
+
+def _first_existing_column(columns, candidates):
+    for name in candidates:
+        if name in columns:
+            return name
+    return None
+
+
+def _sql_ident(name: str) -> str:
+    return "`" + str(name).replace("`", "``") + "`"
+
+
+def _sql_cast_text(expr: str) -> str:
+    if db.engine.dialect.name == "mysql":
+        return f"CAST({expr} AS CHAR)"
+    return f"CAST({expr} AS TEXT)"
+
+
+def _decimal_json_or_none(value):
+    if value is None:
+        return None
+    if isinstance(value, Decimal):
+        return str(value)
+    return value
+
+
+def _dt_json_or_none(value):
+    if value is None:
+        return None
+    if hasattr(value, "isoformat"):
+        return value.isoformat() + "Z"
+    return str(value)
 
 
 def _abonent_summary_payload(row: AbonentSummary):
@@ -2112,6 +2156,224 @@ def _abonent_index_payload(target: dict, summary: dict):
     }
 
 
+def _abonents_table_name():
+    for table_name in ("abonent", "abonents"):
+        if _table_columns(table_name):
+            return table_name
+    return None
+
+
+def _abonents_api_select_config():
+    abonent_table = _abonents_table_name()
+    if not abonent_table:
+        return None
+
+    abonent_cols = _table_columns(abonent_table)
+    premise_cols = _table_columns("premise")
+    summary_cols = _table_columns("abonent_summary")
+    if not summary_cols:
+        return None
+
+    uid_col = _first_existing_column(abonent_cols, ("uid", "account_uid", "abonent_uid"))
+    abonent_id_col = _first_existing_column(abonent_cols, ("abonent_id", "id"))
+    account_col = _first_existing_column(abonent_cols, ("account_number", "ls", "personal_account", "account", "id"))
+    fio_col = _first_existing_column(abonent_cols, ("fio", "full_name", "fullName", "name"))
+    owner_col = _first_existing_column(abonent_cols, ("owner_id", "owner"))
+    if not owner_col or not uid_col:
+        return None
+
+    premise_join = ""
+    if premise_cols:
+        premise_id_col = _first_existing_column(abonent_cols, ("premise_id", "premise", "premise_uid"))
+        premise_pk_col = _first_existing_column(premise_cols, ("id", "premise_id", "uid"))
+        premise_owner_col = _first_existing_column(premise_cols, ("owner_id", "owner"))
+        premise_abonent_uid_col = _first_existing_column(premise_cols, ("abonent_uid", "account_uid", "uid"))
+        premise_abonent_id_col = _first_existing_column(premise_cols, ("abonent_id",))
+        if premise_id_col and premise_pk_col:
+            premise_join = f"LEFT JOIN premise p ON p.{_sql_ident(premise_pk_col)} = a.{_sql_ident(premise_id_col)}"
+        elif premise_abonent_uid_col:
+            premise_join = f"LEFT JOIN premise p ON p.{_sql_ident(premise_abonent_uid_col)} = a.{_sql_ident(uid_col)}"
+        elif premise_abonent_id_col and abonent_id_col:
+            premise_join = f"LEFT JOIN premise p ON p.{_sql_ident(premise_abonent_id_col)} = a.{_sql_ident(abonent_id_col)}"
+        if premise_join and premise_owner_col:
+            premise_join += f" AND p.{_sql_ident(premise_owner_col)} = :owner"
+        if not premise_join:
+            premise_cols = set()
+
+    regnum_col = _first_existing_column(premise_cols, ("regnum", "registration_number"))
+    premise_address_col = _first_existing_column(premise_cols, ("address", "full_address", "addr"))
+    abonent_address_col = _first_existing_column(abonent_cols, ("address", "full_address", "addr"))
+
+    return {
+        "abonent_table": abonent_table,
+        "abonent_cols": abonent_cols,
+        "premise_cols": premise_cols,
+        "uid_col": uid_col,
+        "abonent_id_col": abonent_id_col,
+        "account_col": account_col,
+        "fio_col": fio_col,
+        "owner_col": owner_col,
+        "premise_join": premise_join,
+        "regnum_col": regnum_col,
+        "premise_address_col": premise_address_col,
+        "abonent_address_col": abonent_address_col,
+    }
+
+
+def _abonents_api_row_payload(row):
+    data = dict(row._mapping)
+    has_summary = data.get("summary_row_id") is not None
+    summary_status = _norm_text(data.get("summary_status")) if has_summary else "missing"
+    summary_reason = _norm_text(data.get("summary_reason")) if has_summary else "SUMMARY_NOT_BUILT"
+
+    payload = {
+        "abonent_id": _norm_text(data.get("abonent_id")),
+        "account_number": _norm_text(data.get("account_number")),
+        "uid": _norm_text(data.get("uid")),
+        "fio": _norm_text(data.get("fio")),
+        "premise": _norm_text(data.get("premise")),
+        "regnum": _norm_text(data.get("regnum")),
+        "address": _norm_text(data.get("address")),
+        "summary_status": summary_status or "missing",
+        "summary_reason": summary_reason,
+        "total_debt": _decimal_json_or_none(data.get("total_debt")) if has_summary else None,
+        "total_accrued": _decimal_json_or_none(data.get("total_accrued")) if has_summary else None,
+        "total_paid": _decimal_json_or_none(data.get("total_paid")) if has_summary else None,
+        "total_penalty": _decimal_json_or_none(data.get("total_penalty")) if has_summary else None,
+        "updated_at": _dt_json_or_none(data.get("updated_at")) if has_summary else None,
+    }
+    for key, value in data.items():
+        if key.startswith("address_"):
+            payload[key] = _norm_text(value)
+    return payload
+
+
+def _abonents_api_query(owner: str, search_text: str):
+    cfg = _abonents_api_select_config()
+    if cfg is None:
+        raise RuntimeError("abonents_table_missing")
+
+    a_table = _sql_ident(cfg["abonent_table"])
+    owner_expr = f"a.{_sql_ident(cfg['owner_col'])}"
+    uid_expr = f"a.{_sql_ident(cfg['uid_col'])}"
+    abonent_id_expr = f"a.{_sql_ident(cfg['abonent_id_col'])}" if cfg["abonent_id_col"] else "''"
+    account_expr = f"a.{_sql_ident(cfg['account_col'])}" if cfg["account_col"] else abonent_id_expr
+    fio_expr = f"a.{_sql_ident(cfg['fio_col'])}" if cfg["fio_col"] else "''"
+    premise_expr = "p.`id`" if "id" in cfg["premise_cols"] else "''"
+    regnum_expr = f"p.{_sql_ident(cfg['regnum_col'])}" if cfg["regnum_col"] else "''"
+    premise_address_expr = f"p.{_sql_ident(cfg['premise_address_col'])}" if cfg["premise_address_col"] else "''"
+    abonent_address_expr = f"a.{_sql_ident(cfg['abonent_address_col'])}" if cfg["abonent_address_col"] else "''"
+
+    address_selects = []
+    for col in ("city", "street", "house", "building", "corpus", "flat", "apartment", "room"):
+        if col in cfg["premise_cols"]:
+            address_selects.append(f"p.{_sql_ident(col)} AS address_{col}")
+
+    where_parts = [f"{owner_expr} = :owner"]
+    params = {"owner": owner}
+    q = _norm_text(search_text).lower()
+    if q:
+        search_exprs = [abonent_id_expr, account_expr, uid_expr, fio_expr, premise_address_expr, regnum_expr]
+        tokens = [x for x in re.split(r"\s+", q) if x]
+        for index, token in enumerate(tokens):
+            key = f"search_{index}"
+            params[key] = f"%{token}%"
+            like_parts = [
+                f"LOWER(COALESCE({_sql_cast_text(expr)}, '')) LIKE :{key}"
+                for expr in search_exprs
+            ]
+            where_parts.append("(" + " OR ".join(like_parts) + ")")
+
+    select_sql = ",\n            ".join([
+        f"{abonent_id_expr} AS abonent_id",
+        f"{account_expr} AS account_number",
+        f"{uid_expr} AS uid",
+        f"{fio_expr} AS fio",
+        f"{premise_expr} AS premise",
+        f"{regnum_expr} AS regnum",
+        f"COALESCE(NULLIF({_sql_cast_text(premise_address_expr)}, ''), NULLIF({_sql_cast_text(abonent_address_expr)}, '')) AS address",
+        "s.id AS summary_row_id",
+        "s.summary_status AS summary_status",
+        "s.summary_reason AS summary_reason",
+        "s.total_debt AS total_debt",
+        "s.total_accrued AS total_accrued",
+        "s.total_paid AS total_paid",
+        "s.penalty_debt AS total_penalty",
+        "s.updated_at AS updated_at",
+        *address_selects,
+    ])
+    from_sql = f"""
+        FROM {a_table} a
+        {cfg["premise_join"]}
+        LEFT JOIN abonent_summary s
+            ON s.id = (
+                SELECT s2.id
+                FROM abonent_summary s2
+                WHERE s2.owner_id = :owner
+                    AND s2.account_uid = {uid_expr}
+                ORDER BY s2.updated_at DESC, s2.id DESC
+                LIMIT 1
+            )
+    """
+    where_sql = " AND ".join(where_parts)
+    order_sql = f"ORDER BY {fio_expr}, {account_expr}, {uid_expr}"
+    return select_sql, from_sql, where_sql, order_sql, params
+
+
+def _legacy_abonents_index_response(owner: str, page: int, per_page: int, query_text: str):
+    status_filter = _parse_summary_status_filter(
+        request.args.get("summary_status") or request.args.get("status") or ""
+    )
+
+    targets = [t for t in _owner_abonent_summary_targets(owner) if _target_matches_abonent_query(t, query_text)]
+    start = (page - 1) * per_page
+
+    def load_summaries_by_uid(page_targets):
+        uids = [_norm_text(t.get("account_uid")) for t in page_targets if _norm_text(t.get("account_uid"))]
+        if not uids:
+            return {}
+        summary_rows = (
+            AbonentSummary.query
+            .filter_by(owner_id=owner)
+            .filter(AbonentSummary.account_uid.in_(uids))
+            .order_by(AbonentSummary.updated_at.desc(), AbonentSummary.id.desc())
+            .all()
+        )
+        summaries = {}
+        for row in summary_rows:
+            uid = _norm_text(row.account_uid)
+            if uid and uid not in summaries:
+                summaries[uid] = row
+        return summaries
+
+    if status_filter is None:
+        total = len(targets)
+        page_targets = targets[start:start + per_page]
+        summaries_by_uid = load_summaries_by_uid(page_targets)
+        page_pairs = [
+            (target, _summary_from_row_or_missing(summaries_by_uid.get(_norm_text(target.get("account_uid"))), target))
+            for target in page_targets
+        ]
+    else:
+        summaries_by_uid = load_summaries_by_uid(targets)
+        filtered = []
+        for target in targets:
+            uid = _norm_text(target.get("account_uid"))
+            summary = _summary_from_row_or_missing(summaries_by_uid.get(uid), target)
+            status = _summary_status_from_payload(summary)
+            if status in status_filter:
+                filtered.append((target, summary))
+
+        total = len(filtered)
+        page_pairs = filtered[start:start + per_page]
+
+    return jsonify(
+        ok=True,
+        items=[_abonent_index_payload(target, summary) for target, summary in page_pairs],
+        pagination=_pagination_payload(page, per_page, total),
+    )
+
+
 def _row_human_error_payload(r: ImportBatchRow):
     return {
         "excel_row_ref": r.excel_row_ref,
@@ -2212,70 +2474,53 @@ def initdb():
 
 @app.get("/api/abonents")
 def abonents_index_list():
-    # CRITICAL GUARD: lightweight index endpoint is a read-only list transport.
+    # CRITICAL GUARD: lightweight index endpoint is read-only DB summary transport.
     # Owner is always taken from session; never trust owner/query owner from client.
-    # Do not read payments_<uid>, do not run recalculation, and do not expose stale totals.
+    # Keep this handler list-only: no ledger reads, no calculation side effects,
+    # and no synthesized totals when abonent_summary is missing or errored.
     user, err = _require_user()
     if err:
         return err
 
     owner = user.id
-    page, per_page = _parse_pagination_args()
-    query_text = request.args.get("query", "")
-    status_filter = _parse_summary_status_filter(
-        request.args.get("summary_status") or request.args.get("status") or ""
-    )
+    page, limit = _parse_pagination_args(default_per_page=50, max_per_page=200)
+    query_text = request.args.get("query", request.args.get("search", ""))
 
-    targets = [t for t in _owner_abonent_summary_targets(owner) if _target_matches_abonent_query(t, query_text)]
-    start = (page - 1) * per_page
-
-    def load_summaries_by_uid(page_targets):
-        uids = [_norm_text(t.get("account_uid")) for t in page_targets if _norm_text(t.get("account_uid"))]
-        if not uids:
-            return {}
-        summary_rows = (
-            AbonentSummary.query
-            .filter_by(owner_id=owner)
-            .filter(AbonentSummary.account_uid.in_(uids))
-            .order_by(AbonentSummary.updated_at.desc(), AbonentSummary.id.desc())
-            .all()
-        )
-        summaries = {}
-        for row in summary_rows:
-            uid = _norm_text(row.account_uid)
-            if uid and uid not in summaries:
-                summaries[uid] = row
-        return summaries
-
-    if status_filter is None:
-        total = len(targets)
-        page_targets = targets[start:start + per_page]
-        summaries_by_uid = load_summaries_by_uid(page_targets)
-        page_pairs = [
-            (target, _summary_from_row_or_missing(summaries_by_uid.get(_norm_text(target.get("account_uid"))), target))
-            for target in page_targets
-        ]
-    else:
-        # summary_status filtering must include missing summaries. Therefore only
-        # this branch inspects summaries for all query-matched targets; the
-        # default list path joins summaries for the requested page only.
-        summaries_by_uid = load_summaries_by_uid(targets)
-        filtered = []
-        for target in targets:
-            uid = _norm_text(target.get("account_uid"))
-            summary = _summary_from_row_or_missing(summaries_by_uid.get(uid), target)
-            status = _summary_status_from_payload(summary)
-            if status not in status_filter:
-                continue
-            filtered.append((target, summary))
-
-        total = len(filtered)
-        page_pairs = filtered[start:start + per_page]
+    try:
+        select_sql, from_sql, where_sql, order_sql, params = _abonents_api_query(owner, query_text)
+        if select_sql is None:
+            return _legacy_abonents_index_response(owner, page, limit, query_text)
+        total = db.session.execute(
+            text(f"SELECT COUNT(*) AS total {from_sql} WHERE {where_sql}"),
+            params,
+        ).scalar() or 0
+        rows = db.session.execute(
+            text(
+                f"""
+                SELECT {select_sql}
+                {from_sql}
+                WHERE {where_sql}
+                {order_sql}
+                LIMIT :limit OFFSET :offset
+                """
+            ),
+            {**params, "limit": limit, "offset": (page - 1) * limit},
+        ).all()
+    except RuntimeError as exc:
+        if str(exc) == "abonents_table_missing":
+            return _legacy_abonents_index_response(owner, page, limit, query_text)
+        raise
+    except SQLAlchemyError as exc:
+        db.session.rollback()
+        app.logger.exception("GET /api/abonents failed for owner=%s", owner)
+        return jsonify(ok=False, error="abonents_query_failed", details=str(exc)), 500
 
     return jsonify(
         ok=True,
-        items=[_abonent_index_payload(target, summary) for target, summary in page_pairs],
-        pagination=_pagination_payload(page, per_page, total),
+        items=[_abonents_api_row_payload(row) for row in rows],
+        page=page,
+        limit=limit,
+        total=total,
     )
 
 
