@@ -1531,6 +1531,17 @@ async function runSelectedSummaryBatch(){
     }
     try { console.log("[recalc][explicit-batch]", { uidCount: selected.length, uids: selected }); } catch(eBatchLog) {}
 
+    try {
+        if (progress) progress.textContent = "Loading calculation module...";
+        await ensureCalcEngineForManualBatch();
+    } catch (engineError) {
+        const message = "Расчётный модуль не загружен. Пересчёт не запущен.";
+        if (progress) progress.textContent = message;
+        alert(message);
+        updateSummaryBatchPanel();
+        return;
+    }
+
     if (summaryBatchJobState.timer) {
         clearTimeout(summaryBatchJobState.timer);
         summaryBatchJobState.timer = null;
@@ -1564,6 +1575,39 @@ async function runSelectedSummaryBatch(){
     }
 }
 
+async function ensureCalcEngineForManualBatch(){
+    if (window.JKHCalcEngine) return true;
+    if (window.__indexCalcEngineLoadPromise) return window.__indexCalcEngineLoadPromise;
+
+    window.__indexCalcEngineLoadPromise = new Promise(function(resolve, reject){
+        const existing = document.querySelector('script[data-index-lazy-calc-engine="1"]');
+        if (existing) {
+            existing.addEventListener("load", function(){
+                if (window.JKHCalcEngine) resolve(true);
+                else reject(new Error("CALC_ENGINE_UNAVAILABLE_AFTER_LOAD"));
+            }, { once: true });
+            existing.addEventListener("error", function(){
+                reject(new Error("CALC_ENGINE_LOAD_FAILED"));
+            }, { once: true });
+            return;
+        }
+
+        const script = document.createElement("script");
+        script.src = "calc_engine.js";
+        script.async = false;
+        script.dataset.indexLazyCalcEngine = "1";
+        script.onload = function(){
+            if (window.JKHCalcEngine) resolve(true);
+            else reject(new Error("CALC_ENGINE_UNAVAILABLE_AFTER_LOAD"));
+        };
+        script.onerror = function(){
+            reject(new Error("CALC_ENGINE_LOAD_FAILED"));
+        };
+        document.head.appendChild(script);
+    });
+    return window.__indexCalcEngineLoadPromise;
+}
+
 function summaryBatchYield(delayMs){
     return new Promise(function(resolve){
         const delay = Number(delayMs || 0);
@@ -1589,6 +1633,19 @@ function summaryBatchResultReason(result, fallback){
     return String(result && (result.summary_reason || result.reason) || fallback || "CLIENT_RECALC_FAILED");
 }
 
+async function finishClientSummaryBatchJob(jobId, total, processedLocal, freshLocal, errorLocal, skippedLocal){
+    const progress = document.getElementById("summaryBatchProgress");
+    const doneText = "Завершено. Job #" + jobId + ": processed=" + processedLocal + "/" + total + ", fresh=" + freshLocal + ", error=" + errorLocal + ", skipped=" + skippedLocal + ".";
+    selectedUidsClear();
+    if (progress) progress.textContent = doneText + " Refreshing summary...";
+    await loadPassiveSummaryPage(currentPage);
+    if (progress) progress.textContent = doneText;
+    summaryBatchRunning = false;
+    summaryBatchStopRequested = false;
+    summaryBatchJobState.jobId = null;
+    updateSummaryBatchPanel();
+}
+
 async function processClientSummaryBatchJob(jobId, totalAccepted){
     const progress = document.getElementById("summaryBatchProgress");
     let processedLocal = 0;
@@ -1598,17 +1655,19 @@ async function processClientSummaryBatchJob(jobId, totalAccepted){
     const total = Number(totalAccepted || 0);
     try {
         while (!summaryBatchStopRequested) {
-            const next = await Data.getNextRecalcUid(jobId);
+            let next = null;
+            try {
+                next = await Data.getNextRecalcUid(jobId);
+            } catch (nextError) {
+                const payload = nextError && nextError.payload;
+                if (payload && payload.error === "job_not_active" && String(payload.status || "") === "done") {
+                    await finishClientSummaryBatchJob(jobId, total, processedLocal, freshLocal, errorLocal, skippedLocal);
+                    return;
+                }
+                throw nextError;
+            }
             if (next && (next.all_done || String(next.status || "") === "done")) {
-                const doneText = "Job #" + jobId + " done. processed=" + processedLocal + "/" + total + ", fresh=" + freshLocal + ", error=" + errorLocal + ", skipped=" + skippedLocal + ".";
-                selectedUidsClear();
-                if (progress) progress.textContent = doneText + " Refreshing summary...";
-                await loadPassiveSummaryPage(currentPage);
-                if (progress) progress.textContent = doneText;
-                summaryBatchRunning = false;
-                summaryBatchStopRequested = false;
-                summaryBatchJobState.jobId = null;
-                updateSummaryBatchPanel();
+                await finishClientSummaryBatchJob(jobId, total, processedLocal, freshLocal, errorLocal, skippedLocal);
                 return;
             }
             if (next && String(next.status || "") === "retry") {
@@ -1656,6 +1715,11 @@ async function processClientSummaryBatchJob(jobId, totalAccepted){
                 freshLocal = Number(completePayload.job.fresh_count || freshLocal || 0);
                 errorLocal = Number(completePayload.job.error_count || errorLocal || 0);
                 skippedLocal = Number(completePayload.job.skipped_count || skippedLocal || 0);
+            }
+            const completeStatus = String(completePayload && (completePayload.status || completePayload.job && completePayload.job.status) || "").toLowerCase();
+            if (completeStatus === "done" || completeStatus === "completed") {
+                await finishClientSummaryBatchJob(jobId, total, processedLocal, freshLocal, errorLocal, skippedLocal);
+                return;
             }
             if (progress) progress.textContent = "Job #" + jobId + ": processed=" + processedLocal + "/" + total + ", fresh=" + freshLocal + ", error=" + errorLocal + ", skipped=" + skippedLocal + ". Refreshing summary...";
             await loadPassiveSummaryPage(currentPage);
