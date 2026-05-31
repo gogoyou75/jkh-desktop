@@ -371,6 +371,7 @@ let summaryBatchStopRequested = false;
 let summaryBatchJobState = { jobId: null, timer: null, retries: 0, total: 0, mode: "summary" };
 let summaryBatchErrorsVisible = false;
 let summaryBatchProgressState = { jobId: null, total: 0, processed: 0, fresh: 0, error: 0, skipped: 0, errors: [], finished: false, paused: false };
+let summaryBatchPerfStats = [];
 
 function __indexOwnerId(){
     try {
@@ -1719,6 +1720,7 @@ async function runSelectedSummaryBatch(options){
     }
     summaryBatchJobState.retries = 0;
     summaryBatchJobState.mode = batchMode;
+    summaryBatchPerfStats = [];
     summaryBatchRunning = true;
     summaryBatchStopRequested = false;
     updateSummaryBatchPanel();
@@ -1866,9 +1868,26 @@ async function collectSnapshotBackfillDiagnostic(uid, result, stage, extra){
     };
 }
 
+function renderSummaryBatchPerfTop10(){
+    if (!Array.isArray(summaryBatchPerfStats) || !summaryBatchPerfStats.length) return "";
+    var top10 = summaryBatchPerfStats
+        .slice()
+        .sort(function(a, b){ return Number(b.durationMs || 0) - Number(a.durationMs || 0); })
+        .slice(0, 10);
+    try { console.table(top10); } catch(e) {}
+    return "\n\nТоп-10 медленных UID:\n" + top10.map(function(s){
+        return "ЛС " + (s.account || "") +
+            " / " + s.uid +
+            ": " + Number(s.durationMs || 0) + "ms" +
+            " (" + Number(s.ledgerRowsCount || 0) + " ledger rows" +
+            ", " + Number(s.rowsByIdCount || 0) + " rowsById)";
+    }).join("\n");
+}
+
 async function finishClientSummaryBatchJob(jobId, total, processedLocal, freshLocal, errorLocal, skippedLocal){
     const progress = document.getElementById("summaryBatchProgress");
     const doneText = (summaryBatchJobState.mode === "snapshot" ? "Snapshot backfill завершён" : "Пересчёт завершён") + ". Fresh: " + freshLocal + ". Error: " + errorLocal + ". Skipped: " + skippedLocal + ".";
+    const perfText = renderSummaryBatchPerfTop10();
     selectedUidsClear();
     updateSummaryBatchProgressState({
         jobId: jobId,
@@ -1880,9 +1899,9 @@ async function finishClientSummaryBatchJob(jobId, total, processedLocal, freshLo
         finished: true,
         paused: false
     });
-    if (progress) progress.textContent = doneText + " Refreshing summary...";
+    if (progress) progress.textContent = doneText + " Refreshing summary..." + perfText;
     await loadPassiveSummaryPage(currentPage);
-    if (progress) progress.textContent = doneText;
+    if (progress) progress.textContent = doneText + perfText;
     summaryBatchRunning = false;
     summaryBatchStopRequested = false;
     summaryBatchJobState.jobId = null;
@@ -1929,7 +1948,8 @@ async function processClientSummaryBatchJob(jobId, totalAccepted, mode){
             const uid = String(next && next.account_uid || "").trim();
             if (!itemId || !uid) throw new Error("invalid_next_uid_response");
 
-            if (progress) progress.textContent = "Job #" + jobId + ": " + (batchMode === "snapshot" ? "creating snapshot for UID " : "recalculating UID ") + uid + " (" + (processedLocal + 1) + "/" + total + ")...";
+            const accountLabel = summaryBatchAccountLabel(uid);
+            if (progress) progress.textContent = "Job #" + jobId + ": " + (batchMode === "snapshot" ? "создание snapshot для ЛС " : "пересчёт ЛС ") + accountLabel + " / UID " + uid + " (" + (processedLocal + 1) + "/" + total + ")...";
             await summaryBatchYield(0);
 
             let completePayload = null;
@@ -1945,6 +1965,15 @@ async function processClientSummaryBatchJob(jobId, totalAccepted, mode){
                         recalcMode: "FULL_SUMMARY_REBUILD",
                         mode: "FULL_SUMMARY_REBUILD",
                         timeoutMs: 15000
+                    });
+                    summaryBatchPerfStats.push({
+                        uid: uid,
+                        account: summaryBatchAccountLabel(uid),
+                        durationMs: Number(result && result.rowsBuildDurationMs || 0),
+                        ledgerRowsCount: Number(result && result.ledgerRowsCount || 0),
+                        filteredRowsCount: Number(result && result.filteredRowsCount || 0),
+                        rowsByIdCount: Number(result && result.rowsByIdCount || 0),
+                        reason: String(result && (result.summary_reason || result.reason) || "")
                     });
                 } else {
                     result = await Data.recalculateAbonentCard(uid, {

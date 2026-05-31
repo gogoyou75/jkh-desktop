@@ -3486,25 +3486,43 @@
   }
 
   function buildRowsByIdFromLedgerForSnapshot(ledgerRows, context) {
+    var t0 = (window.performance && performance.now) ? performance.now() : Date.now();
     var ctx = context || {};
     var rows = Array.isArray(ledgerRows) ? ledgerRows : [];
     var period = ctx.period && typeof ctx.period === "object" ? ctx.period : {};
     var abonentId = String(ctx.abonentId || "").trim();
     var ledgerVersion = String(ctx.ledgerVersion || "");
+    function finishRowsBuild(result) {
+      var durationMs = Math.round(((window.performance && performance.now) ? performance.now() : Date.now()) - t0);
+      result = result && typeof result === "object" ? result : { ok: false, rowsById: {}, reason: "ROWS_BY_ID_BUILD_FAILED" };
+      result.durationMs = durationMs;
+      try {
+        console.log("[snapshot][rows-build]", {
+          uid: String(ctx && ctx.uid || ""),
+          abonentId: String(ctx && ctx.abonentId || ""),
+          ledgerRows: rows.length,
+          filteredRows: Number(result.filteredRowsCount || result.rowsCount || 0),
+          rowsByIdCount: result.rowsById ? Object.keys(result.rowsById).length : 0,
+          timeMs: durationMs,
+          reason: String(result.reason || "")
+        });
+      } catch(e) {}
+      return result;
+    }
     if (!window.JKHCalcEngine || typeof window.JKHCalcEngine.calcTotalsAsOfAdjusted !== "function") {
-      return { ok: false, rowsById: {}, reason: "CALC_ENGINE_UNAVAILABLE", rowsCount: rows.length, ledgerVersion: ledgerVersion, periodActive: false, period: period };
+      return finishRowsBuild({ ok: false, rowsById: {}, reason: "CALC_ENGINE_UNAVAILABLE", rowsCount: rows.length, ledgerVersion: ledgerVersion, periodActive: false, period: period });
     }
     if (!rows.length) {
-      return { ok: false, rowsById: {}, reason: "LEDGER_ROWS_EMPTY", rowsCount: 0, ledgerVersion: ledgerVersion, periodActive: false, period: period };
+      return finishRowsBuild({ ok: false, rowsById: {}, reason: "LEDGER_ROWS_EMPTY", rowsCount: 0, ledgerVersion: ledgerVersion, periodActive: false, period: period });
     }
     if (!period.from || !period.to || !_isValidIsoPeriod(period.from, period.to)) {
-      return { ok: false, rowsById: {}, reason: "PERIOD_RESOLUTION_FAILED", rowsCount: rows.length, ledgerVersion: ledgerVersion, periodActive: false, period: period };
+      return finishRowsBuild({ ok: false, rowsById: {}, reason: "PERIOD_RESOLUTION_FAILED", rowsCount: rows.length, ledgerVersion: ledgerVersion, periodActive: false, period: period });
     }
     var filteredRows = rows.filter(function(row) {
       return _snapshotRowInResponsibilityPeriod(row, period);
     });
     if (!filteredRows.length) {
-      return { ok: false, rowsById: {}, reason: "ROWS_BY_ID_BUILD_FAILED", rowsCount: rows.length, filteredRowsCount: 0, ledgerVersion: ledgerVersion, periodActive: false, period: period };
+      return finishRowsBuild({ ok: false, rowsById: {}, reason: "ROWS_BY_ID_BUILD_FAILED", rowsCount: rows.length, filteredRowsCount: 0, ledgerVersion: ledgerVersion, periodActive: false, period: period });
     }
     var rowsById = {};
     for (var i = 0; i < filteredRows.length; i++) {
@@ -3529,9 +3547,9 @@
       };
     }
     if (!_cardSnapshotRowsByIdCount(rowsById)) {
-      return { ok: false, rowsById: {}, reason: "ROWS_BY_ID_EMPTY_AFTER_WITH_ROWS_RECALC", rowsCount: rows.length, filteredRowsCount: filteredRows.length, ledgerVersion: ledgerVersion, periodActive: false, period: period };
+      return finishRowsBuild({ ok: false, rowsById: {}, reason: "ROWS_BY_ID_EMPTY_AFTER_WITH_ROWS_RECALC", rowsCount: rows.length, filteredRowsCount: filteredRows.length, ledgerVersion: ledgerVersion, periodActive: false, period: period });
     }
-    return {
+    return finishRowsBuild({
       ok: true,
       rowsById: rowsById,
       reason: "OK",
@@ -3540,7 +3558,7 @@
       ledgerVersion: ledgerVersion,
       periodActive: false,
       period: period
-    };
+    });
   }
 
   function resolveAbonentRegnumForSummary(abonentId, abonent) {
@@ -4471,6 +4489,8 @@
         periodActive: false,
         period: { from: String(period.from || ""), to: String(period.to || "") },
         ledgerRowsCount: ledgerRows.length,
+        rowsBuildDurationMs: Number(rowsResult && rowsResult.durationMs || 0),
+        filteredRowsCount: Number(rowsResult && (rowsResult.filteredRowsCount || rowsResult.rowsCount) || 0),
         rowsByIdCount: 0,
         rowsByIdSource: "datajs_batch_rows_builder",
         responsibility: responsibility
@@ -4501,6 +4521,8 @@
       periodActive: false,
       period: { from: String(period.from || ""), to: String(period.to || "") },
       ledgerRowsCount: ledgerRows.length,
+      rowsBuildDurationMs: Number(rowsResult && rowsResult.durationMs || 0),
+      filteredRowsCount: Number(rowsResult && (rowsResult.filteredRowsCount || rowsResult.rowsCount) || 0),
       rowsByIdCount: _cardSnapshotRowsByIdCount(rowsResult.rowsById),
       rowsByIdSource: "datajs_batch_rows_builder",
       responsibility: responsibility
