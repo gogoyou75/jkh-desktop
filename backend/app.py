@@ -2624,6 +2624,18 @@ def _abonents_api_row_payload(row):
     has_summary = data.get("summary_row_id") is not None
     summary_status = _norm_text(data.get("summary_status")) if has_summary else "missing"
     summary_reason = _norm_text(data.get("summary_reason")) if has_summary else "SUMMARY_NOT_BUILT"
+    snapshot_status = _cache_status(data.get("snapshot_status") if data.get("snapshot_row_id") is not None else "missing")
+    snapshot_reason = _cache_reason("snapshot", snapshot_status, data.get("snapshot_reason") if data.get("snapshot_row_id") is not None else "")
+    summary_hash = _norm_text(data.get("summary_input_hash")) if has_summary else ""
+    snapshot_hash = _norm_text(data.get("snapshot_input_hash")) if data.get("snapshot_row_id") is not None else ""
+    hash_mismatch = summary_hash != snapshot_hash
+    warnings = []
+    if hash_mismatch:
+        warnings.append("INPUT_HASH_CHANGED")
+    if summary_status == "fresh" and data.get("snapshot_row_id") is None:
+        warnings.append("SUMMARY_FRESH_CARD_SNAPSHOT_MISSING")
+    if summary_status == "fresh" and snapshot_status in {"dirty", "error", "invalid"}:
+        warnings.append("SUMMARY_FRESH_SNAPSHOT_NOT_FRESH")
 
     payload = {
         "abonent_id": _norm_text(data.get("abonent_id")),
@@ -2641,6 +2653,12 @@ def _abonents_api_row_payload(row):
         "penalty_debt": _decimal_json_or_none(data.get("total_penalty")) if has_summary else None,
         "total_penalty": _decimal_json_or_none(data.get("total_penalty")) if has_summary else None,
         "updated_at": _dt_json_or_none(data.get("updated_at")) if has_summary else None,
+        "snapshot_status": snapshot_status,
+        "snapshot_reason": snapshot_reason,
+        "input_hash_summary": summary_hash,
+        "input_hash_snapshot": snapshot_hash,
+        "hash_mismatch": hash_mismatch,
+        "warnings": sorted(set(warnings)),
     }
     for key, value in data.items():
         if key.startswith("address_"):
@@ -2708,11 +2726,16 @@ def _abonents_api_query(owner: str, search_text: str, status_filter=None):
         "s.id AS summary_row_id",
         "s.summary_status AS summary_status",
         "s.summary_reason AS summary_reason",
+        "s.input_hash AS summary_input_hash",
         "s.total_debt AS total_debt",
         "s.total_accrued AS total_accrued",
         "s.total_paid AS total_paid",
         "s.penalty_debt AS total_penalty",
         "s.updated_at AS updated_at",
+        "c.id AS snapshot_row_id",
+        "c.snapshot_status AS snapshot_status",
+        "c.snapshot_reason AS snapshot_reason",
+        "c.input_hash AS snapshot_input_hash",
         *address_selects,
     ])
     from_sql = f"""
@@ -2727,6 +2750,9 @@ def _abonents_api_query(owner: str, search_text: str, status_filter=None):
                 ORDER BY s2.updated_at DESC, s2.id DESC
                 LIMIT 1
             )
+        LEFT JOIN card_snapshot c
+            ON c.owner_id = :owner
+            AND c.abonent_uid = {uid_expr}
     """
     where_sql = " AND ".join(where_parts)
     order_sql = f"ORDER BY {fio_expr}, {account_expr}, {uid_expr}"
@@ -3552,6 +3578,25 @@ def _card_snapshot_payload(row: CardSnapshot):
     }
 
 
+def _snapshot_uid_from_payload(snapshot: dict):
+    if not isinstance(snapshot, dict):
+        return ""
+    return _norm_text(
+        snapshot.get("uid")
+        or snapshot.get("account_uid")
+        or snapshot.get("accountUid")
+        or snapshot.get("abonent_uid")
+        or snapshot.get("abonentUid")
+    )
+
+
+def _snapshot_target_for_owner(owner_id: str, uid: str):
+    uid = _norm_text(uid)
+    if not uid:
+        return None
+    return _owner_recalc_targets_by_uid(owner_id).get(uid)
+
+
 @app.get("/api/audit/snapshot_summary")
 def audit_snapshot_summary_endpoint():
     # Read-only diagnostics endpoint. Do not recalc, repair, rebuild, or mutate DB here.
@@ -3593,19 +3638,28 @@ def card_snapshot_put(account_uid: str):
     if not isinstance(body, dict):
         return jsonify(ok=False, error="snapshot_invalid"), 400
     snapshot = body.get("snapshot") if isinstance(body.get("snapshot"), dict) else body
-    status = _norm_text(body.get("snapshot_status") or snapshot.get("snapshot_status") or snapshot.get("summary_status") or snapshot.get("status") or "fresh").lower()
-    if status not in {"fresh", "dirty", "missing", "error", "invalid"}:
-        status = "invalid"
-    reason = _cache_reason(
-        "snapshot",
-        status,
-        body.get("snapshot_reason") or snapshot.get("snapshot_reason") or snapshot.get("summary_reason") or snapshot.get("reason"),
-    )
+    if not isinstance(snapshot, dict) or not snapshot:
+        return jsonify(ok=False, error="snapshot_invalid"), 400
+    snapshot_uid = _snapshot_uid_from_payload(snapshot) or _norm_text(body.get("abonent_uid") or body.get("account_uid"))
+    if snapshot_uid and snapshot_uid != uid:
+        return jsonify(ok=False, error="uid_mismatch"), 400
+    target = _snapshot_target_for_owner(user.id, uid)
+    if not target:
+        return jsonify(ok=False, error="uid_not_found"), 404
+    status = "fresh"
+    reason = "OK"
+    snapshot = dict(snapshot)
+    snapshot["uid"] = uid
+    snapshot["account_uid"] = uid
+    snapshot["snapshot_status"] = status
+    snapshot["summary_status"] = status
+    snapshot["snapshot_reason"] = reason
+    snapshot["summary_reason"] = reason
     row = CardSnapshot.query.filter_by(owner_id=user.id, abonent_uid=uid).first()
     if not row:
         row = CardSnapshot(owner_id=user.id, abonent_uid=uid)
         db.session.add(row)
-    row.abonent_id = _norm_text(body.get("abonent_id") or snapshot.get("abonentId") or snapshot.get("abonent_id"))
+    row.abonent_id = _norm_text(body.get("abonent_id") or snapshot.get("abonentId") or snapshot.get("abonent_id") or target.get("abonent_id"))
     row.snapshot_status = status
     row.snapshot_reason = reason
     row.input_hash = _norm_text(body.get("input_hash") or snapshot.get("input_hash"))

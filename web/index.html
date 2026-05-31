@@ -236,6 +236,8 @@ Doc: docs/LOGIC_SPEC_v1.5.3.md
 <div id="summaryBatchPanel" class="summary-batch-panel" style="display:none;">
     <button id="summaryBatchSelectStaleBtn" type="button">Выбрать устаревшие на странице</button>
     <button id="summaryBatchRunBtn" type="button" title="Batch-пересчёт выбранных абонентов">Пересчитать выбранных абонентов</button>
+    <button id="summarySnapshotSelectBtn" type="button">Выбрать UID без snapshot</button>
+    <button id="summarySnapshotRunBtn" type="button" title="Пересчитать и сохранить card_snapshot для выбранных UID">Создать snapshot для выбранных</button>
     <button id="summaryBatchStopBtn" type="button" disabled>Остановить</button>
     <span id="summaryBatchCount">Нет выбранных UID</span>
     <div id="summaryBatchProgress" class="summary-batch-progress"></div>
@@ -365,7 +367,7 @@ let indexSummaryState = {
 let summaryBatchSelectedUids = {};
 let summaryBatchRunning = false;
 let summaryBatchStopRequested = false;
-let summaryBatchJobState = { jobId: null, timer: null, retries: 0, total: 0 };
+let summaryBatchJobState = { jobId: null, timer: null, retries: 0, total: 0, mode: "summary" };
 let summaryBatchErrorsVisible = false;
 let summaryBatchProgressState = { jobId: null, total: 0, processed: 0, fresh: 0, error: 0, skipped: 0, errors: [], finished: false, paused: false };
 
@@ -1043,6 +1045,12 @@ function buildIndexRowFromSummaryItem(item){
         summaryReason: reason,
         rawSummaryStatus: status,
         rawSummaryReason: rawReason,
+        snapshotStatus: String(item && item.snapshot_status || "missing").toLowerCase(),
+        snapshotReason: String(item && item.snapshot_reason || ""),
+        inputHashSummary: String(item && item.input_hash_summary || ""),
+        inputHashSnapshot: String(item && item.input_hash_snapshot || ""),
+        hashMismatch: !!(item && item.hash_mismatch),
+        warnings: Array.isArray(item && item.warnings) ? item.warnings : [],
         __totalsRenderDebug: {
             uid: String(item && (item.uid || item.account_uid) || summary.account_uid || summary.accountUid || abonent.account_uid || abonent.accountUid || ""),
             summaryStatus: displayStatus,
@@ -1447,6 +1455,27 @@ function getCurrentSummaryBatchRows(){
     });
 }
 
+function isSnapshotBackfillCandidate(row){
+    if (!row || normalizeSummaryStatus(row.rawSummaryStatus || row.summaryStatus) !== "fresh") return false;
+    const snapshotStatus = String(row.snapshotStatus || "missing").toLowerCase();
+    const warnings = Array.isArray(row.warnings) ? row.warnings : [];
+    return snapshotStatus === "missing"
+        || snapshotStatus === "invalid"
+        || snapshotStatus === "dirty"
+        || snapshotStatus === "error"
+        || row.hashMismatch === true
+        || warnings.indexOf("SUMMARY_FRESH_CARD_SNAPSHOT_MISSING") >= 0
+        || warnings.indexOf("INPUT_HASH_CHANGED") >= 0
+        || warnings.indexOf("SUMMARY_FRESH_SNAPSHOT_NOT_FRESH") >= 0;
+}
+
+function getCurrentSnapshotBackfillRows(){
+    return (filteredRows || []).filter(function(r){
+        const uid = getSummaryBatchUid(r);
+        return uid && isSnapshotBackfillCandidate(r);
+    });
+}
+
 function pruneSummaryBatchSelection(){
     const known = {};
     (allRows || []).forEach(function(r){
@@ -1553,6 +1582,8 @@ function updateSummaryBatchPanel(){
     const countEl = document.getElementById("summaryBatchCount");
     const runBtn = document.getElementById("summaryBatchRunBtn");
     const selectBtn = document.getElementById("summaryBatchSelectStaleBtn");
+    const snapshotSelectBtn = document.getElementById("summarySnapshotSelectBtn");
+    const snapshotRunBtn = document.getElementById("summarySnapshotRunBtn");
     const stopBtn = document.getElementById("summaryBatchStopBtn");
     if (!panel) return;
     const summaryMode = indexPassiveSummaryMode && indexSummaryState.mode === "summary";
@@ -1560,9 +1591,12 @@ function updateSummaryBatchPanel(){
     if (!summaryMode) return;
     const selected = Object.keys(summaryBatchSelectedUids).filter(function(uid){ return summaryBatchSelectedUids[uid]; });
     const staleOnPage = getCurrentSummaryBatchRows().length;
-    if (countEl) countEl.textContent = selected.length ? ("Выбрано UID: " + selected.length) : ("Устаревших на странице: " + staleOnPage);
+    const snapshotOnPage = getCurrentSnapshotBackfillRows().length;
+    if (countEl) countEl.textContent = selected.length ? ("Выбрано UID: " + selected.length) : ("Устаревших: " + staleOnPage + "; snapshot: " + snapshotOnPage);
     if (runBtn) runBtn.disabled = summaryBatchRunning || !selected.length;
     if (selectBtn) selectBtn.disabled = summaryBatchRunning || !staleOnPage;
+    if (snapshotSelectBtn) snapshotSelectBtn.disabled = summaryBatchRunning || !snapshotOnPage;
+    if (snapshotRunBtn) snapshotRunBtn.disabled = summaryBatchRunning || !selected.length;
     if (stopBtn) stopBtn.disabled = !summaryBatchRunning || summaryBatchStopRequested;
     renderSummaryBatchProgress();
 }
@@ -1573,6 +1607,8 @@ function bindSummaryBatchPanelOnce(){
     panel.dataset.bound = "1";
     const selectBtn = document.getElementById("summaryBatchSelectStaleBtn");
     const runBtn = document.getElementById("summaryBatchRunBtn");
+    const snapshotSelectBtn = document.getElementById("summarySnapshotSelectBtn");
+    const snapshotRunBtn = document.getElementById("summarySnapshotRunBtn");
     const stopBtn = document.getElementById("summaryBatchStopBtn");
     const showErrorsBtn = document.getElementById("summaryBatchShowErrorsBtn");
     if (selectBtn) {
@@ -1584,7 +1620,17 @@ function bindSummaryBatchPanelOnce(){
             render();
         };
     }
-    if (runBtn) runBtn.onclick = runSelectedSummaryBatch;
+    if (snapshotSelectBtn) {
+        snapshotSelectBtn.onclick = function(){
+            getCurrentSnapshotBackfillRows().forEach(function(r){
+                const uid = getSummaryBatchUid(r);
+                if (uid) summaryBatchSelectedUids[uid] = true;
+            });
+            render();
+        };
+    }
+    if (runBtn) runBtn.onclick = function(){ runSelectedSummaryBatch({ mode: "summary" }); };
+    if (snapshotRunBtn) snapshotRunBtn.onclick = function(){ runSelectedSummaryBatch({ mode: "snapshot" }); };
     if (showErrorsBtn) {
         showErrorsBtn.onclick = function(){
             summaryBatchErrorsVisible = !summaryBatchErrorsVisible;
@@ -1621,13 +1667,20 @@ async function loadLatestSummaryBatchStatus(){
     } catch(e) {}
 }
 
-async function runSelectedSummaryBatch(){
+async function runSelectedSummaryBatch(options){
+    const runOptions = options || {};
+    const batchMode = String(runOptions.mode || "summary").toLowerCase() === "snapshot" ? "snapshot" : "summary";
     const progress = document.getElementById("summaryBatchProgress");
     if (summaryBatchRunning) return;
-    if (progress) progress.textContent = "Запуск пересчёта выбранных UID...";
+    if (progress) progress.textContent = batchMode === "snapshot" ? "Запуск создания snapshot для выбранных UID..." : "Запуск пересчёта выбранных UID...";
     if (!window.Data || typeof Data.createAbonentSummaryRecalcBatchJob !== "function" || typeof Data.getNextRecalcUid !== "function" || typeof Data.completeRecalcUid !== "function" || typeof Data.recalculateAbonentCard !== "function") {
         if (progress) progress.textContent = "Batch job API unavailable: Data API is not loaded.";
         alert("Batch job API недоступен: Data API не загружен.");
+        return;
+    }
+    if (batchMode === "snapshot" && (typeof Data.buildCardSnapshotFromCurrentResult !== "function" || typeof Data.saveCardSnapshotAndWait !== "function")) {
+        if (progress) progress.textContent = "Snapshot API unavailable: Data snapshot API is not loaded.";
+        alert("Snapshot API недоступен: Data snapshot API не загружен.");
         return;
     }
     let selected = Object.keys(summaryBatchSelectedUids).filter(function(uid){ return summaryBatchSelectedUids[uid]; });
@@ -1661,6 +1714,7 @@ async function runSelectedSummaryBatch(){
         summaryBatchJobState.timer = null;
     }
     summaryBatchJobState.retries = 0;
+    summaryBatchJobState.mode = batchMode;
     summaryBatchRunning = true;
     summaryBatchStopRequested = false;
     updateSummaryBatchPanel();
@@ -1670,17 +1724,17 @@ async function runSelectedSummaryBatch(){
         if (resumeJobId) {
             updateSummaryBatchProgressState({ jobId: resumeJobId, total: summaryBatchJobState.total || selected.length, paused: false, finished: false });
             if (progress) progress.textContent = "Job #" + resumeJobId + " resumed. Continuing queued UID...";
-            await processClientSummaryBatchJob(resumeJobId, Number(summaryBatchJobState.total || selected.length || 0));
+            await processClientSummaryBatchJob(resumeJobId, Number(summaryBatchJobState.total || selected.length || 0), batchMode);
             return;
         }
         resetSummaryBatchProgress();
-        const created = await Data.createAbonentSummaryRecalcBatchJob(selected, "CLIENT_RECALC");
+        const created = await Data.createAbonentSummaryRecalcBatchJob(selected, batchMode === "snapshot" ? "SNAPSHOT_BACKFILL" : "CLIENT_RECALC");
         if (!created || !created.job_id) throw new Error("job_create_failed");
         summaryBatchJobState.jobId = created.job_id;
         summaryBatchJobState.total = Number(created.accepted || selected.length || 0);
         updateSummaryBatchProgressState({ jobId: created.job_id, total: summaryBatchJobState.total, processed: 0, fresh: 0, error: 0, skipped: 0, finished: false, paused: false });
         if (progress) progress.textContent = "Job #" + created.job_id + " created. accepted=" + created.accepted + ", skipped=" + created.skipped + ". Client worker started...";
-        await processClientSummaryBatchJob(created.job_id, Number(created.accepted || selected.length || 0));
+        await processClientSummaryBatchJob(created.job_id, Number(created.accepted || selected.length || 0), batchMode);
     } catch (e) {
         const msg = String(e && e.message || e);
         const detail = e && e.payload ? " payload=" + JSON.stringify(e.payload) : "";
@@ -1694,6 +1748,7 @@ async function runSelectedSummaryBatch(){
         summaryBatchStopRequested = false;
         summaryBatchJobState.jobId = null;
         summaryBatchJobState.total = 0;
+        summaryBatchJobState.mode = "summary";
         updateSummaryBatchPanel();
     }
 }
@@ -1758,7 +1813,7 @@ function summaryBatchResultReason(result, fallback){
 
 async function finishClientSummaryBatchJob(jobId, total, processedLocal, freshLocal, errorLocal, skippedLocal){
     const progress = document.getElementById("summaryBatchProgress");
-    const doneText = "Пересчёт завершён. Fresh: " + freshLocal + ". Error: " + errorLocal + ". Skipped: " + skippedLocal + ".";
+    const doneText = (summaryBatchJobState.mode === "snapshot" ? "Snapshot backfill завершён" : "Пересчёт завершён") + ". Fresh: " + freshLocal + ". Error: " + errorLocal + ". Skipped: " + skippedLocal + ".";
     selectedUidsClear();
     updateSummaryBatchProgressState({
         jobId: jobId,
@@ -1777,11 +1832,13 @@ async function finishClientSummaryBatchJob(jobId, total, processedLocal, freshLo
     summaryBatchStopRequested = false;
     summaryBatchJobState.jobId = null;
     summaryBatchJobState.total = 0;
+    summaryBatchJobState.mode = "summary";
     updateSummaryBatchPanel();
 }
 
-async function processClientSummaryBatchJob(jobId, totalAccepted){
+async function processClientSummaryBatchJob(jobId, totalAccepted, mode){
     const progress = document.getElementById("summaryBatchProgress");
+    const batchMode = String(mode || summaryBatchJobState.mode || "summary").toLowerCase() === "snapshot" ? "snapshot" : "summary";
     const prior = summaryBatchProgressState && summaryBatchProgressState.jobId === jobId ? summaryBatchProgressState : {};
     let processedLocal = Number(prior.processed || 0);
     let freshLocal = Number(prior.fresh || 0);
@@ -1817,7 +1874,7 @@ async function processClientSummaryBatchJob(jobId, totalAccepted){
             const uid = String(next && next.account_uid || "").trim();
             if (!itemId || !uid) throw new Error("invalid_next_uid_response");
 
-            if (progress) progress.textContent = "Job #" + jobId + ": recalculating UID " + uid + " (" + (processedLocal + 1) + "/" + total + ")...";
+            if (progress) progress.textContent = "Job #" + jobId + ": " + (batchMode === "snapshot" ? "creating snapshot for UID " : "recalculating UID ") + uid + " (" + (processedLocal + 1) + "/" + total + ")...";
             await summaryBatchYield(0);
 
             let completePayload = null;
@@ -1844,9 +1901,26 @@ async function processClientSummaryBatchJob(jobId, totalAccepted){
             } else {
                 summary = { account_uid: uid, summary_status: "error", summary_reason: reason };
             }
+            if (batchMode === "snapshot" && status === "fresh") {
+                const snapshot = Data.buildCardSnapshotFromCurrentResult(uid, result);
+                if (!snapshot) {
+                    status = "skipped";
+                    reason = "CARD_SNAPSHOT_BUILD_FAILED";
+                    addSummaryBatchError(uid, reason);
+                } else {
+                    const snapshotSave = await Data.saveCardSnapshotAndWait(uid, snapshot);
+                    if (!snapshotSave || snapshotSave.ok !== true || snapshotSave.serverOk !== true || snapshotSave.serverReadbackOk !== true) {
+                        status = "skipped";
+                        reason = String(snapshotSave && snapshotSave.reason || "CARD_SNAPSHOT_SAVE_FAILED");
+                        addSummaryBatchError(uid, reason);
+                    }
+                }
+            }
             completePayload = await Data.completeRecalcUid(jobId, itemId, status, summary, reason);
             if (status === "fresh") freshLocal += 1;
-            else {
+            else if (status === "skipped") {
+                skippedLocal += 1;
+            } else {
                 errorLocal += 1;
                 addSummaryBatchError(uid, reason);
             }
