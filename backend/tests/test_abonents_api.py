@@ -64,6 +64,7 @@ class AbonentsApiTest(unittest.TestCase):
             """))
             app_module.db.session.add(app_module.User(id="owner1", email="o1@test", password_hash="x", role="user", display_name="o1"))
             app_module.db.session.add(app_module.User(id="owner2", email="o2@test", password_hash="x", role="user", display_name="o2"))
+            app_module.db.session.add(app_module.User(id="admin", email="admin@test", password_hash="x", role="admin", display_name="admin"))
             app_module.db.session.execute(app_module.text("""
                 INSERT INTO premise (id, owner_id, regnum, address, city, street, house, flat)
                 VALUES
@@ -103,6 +104,7 @@ class AbonentsApiTest(unittest.TestCase):
                 penalty_debt=Decimal("7.75"),
                 summary_status="fresh",
                 summary_reason="OK",
+                input_hash="hash-fresh",
                 summary_json='{"summary_status":"fresh"}',
             ))
             app_module.db.session.add(app_module.AbonentSummary(
@@ -208,6 +210,37 @@ class AbonentsApiTest(unittest.TestCase):
         self.assertNotIn("recalc_batch", source)
         self.assertNotIn("autoaccrual", source.lower().replace("do not run recalculation/autoaccrual", ""))
         self.assertNotIn("payments_<", source.lower().replace("do not read payments_<uid>", ""))
+
+    def test_snapshot_summary_audit_is_admin_only_and_readonly(self):
+        with app_module.app.app_context():
+            app_module.db.session.add(app_module.CardSnapshot(
+                owner_id="owner1",
+                abonent_uid="uid-fresh",
+                abonent_id="a1",
+                snapshot_status="fresh",
+                snapshot_reason="OK",
+                input_hash="hash-snapshot",
+                snapshot_json='{"snapshot_status":"fresh","totals":{"debt":100.25}}',
+            ))
+            app_module.db.session.commit()
+
+        self._login("owner1")
+        forbidden = self.client.get("/api/audit/snapshot_summary?owner=owner1")
+        self.assertEqual(forbidden.status_code, 403)
+
+        self._login("admin")
+        response = self.client.get("/api/audit/snapshot_summary?owner=owner1")
+        body = response.get_json()
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(body["dry_run"])
+        self.assertEqual(body["counts"]["total_abonents"], 3)
+        self.assertEqual(body["counts"]["hash_mismatch_count"], 1)
+        fresh_item = next(item for item in body["items"] if item["account_uid"] == "uid-fresh")
+        self.assertEqual(fresh_item["summary_status"], "fresh")
+        self.assertTrue(fresh_item["hash_mismatch"])
+        self.assertIn("INPUT_HASH_CHANGED", fresh_item["warnings"])
+        missing_item = next(item for item in body["items"] if item["account_uid"] == "uid-missing")
+        self.assertEqual(missing_item["snapshot_reason"], "CARD_SNAPSHOT_MISSING")
 
 
 if __name__ == "__main__":

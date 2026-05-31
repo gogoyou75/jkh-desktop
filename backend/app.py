@@ -62,6 +62,21 @@ ABONENT_SUMMARY_DIRTY_REASONS = {
     "UNKNOWN_CHANGE",
 }
 
+AUDIT_REASON_DEFAULTS = {
+    "summary": {
+        "dirty": "INPUT_HASH_CHANGED",
+        "missing": "SUMMARY_NOT_BUILT",
+        "error": "CALC_ENGINE_UNAVAILABLE",
+        "invalid": "SUMMARY_JSON_INVALID",
+    },
+    "snapshot": {
+        "dirty": "INPUT_HASH_CHANGED",
+        "missing": "CARD_SNAPSHOT_MISSING",
+        "error": "CALC_ENGINE_UNAVAILABLE",
+        "invalid": "CARD_SNAPSHOT_JSON_INVALID",
+    },
+}
+
 IMPORT_BATCH_AUDIT_FIELDS_MIGRATION_SQL = (
     "ALTER TABLE import_batches "
     "ADD COLUMN rows_skipped INT NOT NULL DEFAULT 0, "
@@ -438,6 +453,23 @@ def _dt_json_or_none(value):
     return str(value)
 
 
+def _cache_status(value: str, default: str = "missing"):
+    status = _norm_text(value).lower()
+    if status in {"fresh", "dirty", "missing", "error", "invalid"}:
+        return status
+    return default
+
+
+def _cache_reason(kind: str, status: str, reason: str):
+    clean_status = _cache_status(status)
+    clean_reason = _norm_text(reason)
+    if clean_status == "fresh":
+        return clean_reason
+    if clean_reason:
+        return clean_reason
+    return AUDIT_REASON_DEFAULTS.get(kind, {}).get(clean_status, "UNKNOWN_REASON")
+
+
 def _abonent_summary_payload(row: AbonentSummary):
     summary, _parse_error = _safe_summary_from_json_for_columns(row.summary_json)
 
@@ -482,7 +514,7 @@ def _apply_abonent_summary_columns(row: AbonentSummary, target: dict, summary: d
     summary = summary if isinstance(summary, dict) else {}
     abonent = summary.get("abonent") if isinstance(summary.get("abonent"), dict) else {}
     status = _summary_column_status_from_payload(summary)
-    reason = _norm_text(summary.get("summary_reason") or summary.get("reason"))
+    reason = _cache_reason("summary", status, summary.get("summary_reason") or summary.get("reason"))
 
     row.fio = _norm_text(summary.get("fio") or abonent.get("fio") or identity.get("fio"))
     row.address = _norm_text(summary.get("address") or abonent.get("address") or identity.get("address"))
@@ -1302,9 +1334,9 @@ def _dirty_abonent_summary_payload(existing_summary: dict | None, reason: str):
         payload.pop(key, None)
     payload.update({
         "summary_status": "dirty",
-        "summary_reason": reason,
+        "summary_reason": _cache_reason("summary", "dirty", reason),
         "status": "dirty",
-        "reason": reason,
+        "reason": _cache_reason("summary", "dirty", reason),
         "dirty_at": datetime.utcnow().isoformat() + "Z",
     })
     if "period" not in payload or not isinstance(payload.get("period"), dict):
@@ -3261,6 +3293,241 @@ def abonent_summary_rebuild():
     return jsonify(ok=True, counters=counters)
 
 
+def _audit_snapshot_summary_targets(owner_id: str = ""):
+    owner_id = _norm_text(owner_id)
+    cfg = _abonents_api_select_config()
+    if cfg is None:
+        owners = [owner_id] if owner_id else [_norm_text(row[0]) for row in db.session.query(User.id).all()]
+        targets = []
+        for owner in owners:
+            for target in _owner_abonent_summary_targets(owner):
+                target = dict(target)
+                target["owner_id"] = owner
+                targets.append(target)
+        return targets
+
+    a_table = _sql_ident(cfg["abonent_table"])
+    owner_expr = f"a.{_sql_ident(cfg['owner_col'])}"
+    uid_expr = f"a.{_sql_ident(cfg['uid_col'])}"
+    abonent_id_expr = f"a.{_sql_ident(cfg['abonent_id_col'])}" if cfg["abonent_id_col"] else "''"
+    account_expr = f"a.{_sql_ident(cfg['account_col'])}" if cfg["account_col"] else abonent_id_expr
+    fio_expr = f"a.{_sql_ident(cfg['fio_col'])}" if cfg["fio_col"] else "''"
+    address_expr = f"a.{_sql_ident(cfg['abonent_address_col'])}" if cfg["abonent_address_col"] else "''"
+    where_sql = f"WHERE {owner_expr} = :owner" if owner_id else ""
+    params = {"owner": owner_id} if owner_id else {}
+    rows = db.session.execute(
+        text(f"""
+            SELECT
+                {owner_expr} AS owner_id,
+                {abonent_id_expr} AS abonent_id,
+                {uid_expr} AS account_uid,
+                {account_expr} AS account_number,
+                {fio_expr} AS fio,
+                {address_expr} AS address
+            FROM {a_table} a
+            {where_sql}
+            ORDER BY {owner_expr}, {account_expr}, {uid_expr}
+        """),
+        params,
+    ).all()
+    targets = []
+    seen = set()
+    for row in rows:
+        data = dict(row._mapping)
+        uid = _norm_text(data.get("account_uid"))
+        owner = _norm_text(data.get("owner_id"))
+        if not uid or (owner, uid) in seen:
+            continue
+        seen.add((owner, uid))
+        targets.append({
+            "owner_id": owner,
+            "abonent_id": _norm_text(data.get("abonent_id")),
+            "account_uid": uid,
+            "account_number": _norm_text(data.get("account_number")),
+            "identity": {
+                "fio": _norm_text(data.get("fio")),
+                "address": _norm_text(data.get("address")),
+            },
+        })
+    return targets
+
+
+def _latest_rows_by_owner_uid(model, owner_uids, uid_attr):
+    if not owner_uids:
+        return {}
+    owners = sorted({_norm_text(owner) for owner, _uid in owner_uids if _norm_text(owner)})
+    uids = sorted({_norm_text(uid) for _owner, uid in owner_uids if _norm_text(uid)})
+    if not owners or not uids:
+        return {}
+    rows = (
+        model.query
+        .filter(model.owner_id.in_(owners))
+        .filter(getattr(model, uid_attr).in_(uids))
+        .order_by(model.updated_at.desc(), model.id.desc())
+        .all()
+    )
+    result = {}
+    wanted = set(owner_uids)
+    for row in rows:
+        key = (_norm_text(row.owner_id), _norm_text(getattr(row, uid_attr)))
+        if key in wanted and key not in result:
+            result[key] = row
+    return result
+
+
+def _safe_json_object(raw_json: str, invalid_reason: str):
+    try:
+        payload = json.loads(raw_json or "{}")
+    except (TypeError, ValueError):
+        return {}, invalid_reason
+    if not isinstance(payload, dict):
+        return {}, invalid_reason
+    return payload, ""
+
+
+def _audit_summary_payload(row: AbonentSummary | None, target: dict):
+    if not row:
+        return {
+            "exists": False,
+            "status": "missing",
+            "reason": _cache_reason("summary", "missing", ""),
+            "input_hash": "",
+            "updated_at": None,
+            "json": {},
+            "json_error": "",
+            "totals_error": "",
+        }
+    payload, json_error = _safe_json_object(row.summary_json, "SUMMARY_JSON_INVALID")
+    status = _cache_status(row.summary_status or payload.get("summary_status") or payload.get("status"))
+    reason = _cache_reason("summary", status, row.summary_reason or payload.get("summary_reason") or payload.get("reason") or json_error)
+    return {
+        "exists": True,
+        "status": status,
+        "reason": reason,
+        "input_hash": _norm_text(row.input_hash or payload.get("input_hash")),
+        "updated_at": _dt_json_or_none(row.updated_at),
+        "json": payload,
+        "json_error": json_error,
+        "totals_error": _fresh_totals_validation_reason(payload) if status == "fresh" else "",
+    }
+
+
+def _audit_snapshot_payload(row: CardSnapshot | None):
+    if not row:
+        return {
+            "exists": False,
+            "status": "missing",
+            "reason": _cache_reason("snapshot", "missing", ""),
+            "input_hash": "",
+            "updated_at": None,
+            "json": {},
+            "json_error": "",
+        }
+    payload, json_error = _safe_json_object(row.snapshot_json, "CARD_SNAPSHOT_JSON_INVALID")
+    status = _cache_status(row.snapshot_status or payload.get("snapshot_status") or payload.get("summary_status") or payload.get("status"))
+    reason = _cache_reason("snapshot", status, row.snapshot_reason or payload.get("snapshot_reason") or payload.get("summary_reason") or payload.get("reason") or json_error)
+    return {
+        "exists": True,
+        "status": status,
+        "reason": reason,
+        "input_hash": _norm_text(row.input_hash or payload.get("input_hash")),
+        "updated_at": _dt_json_or_none(row.updated_at),
+        "json": payload,
+        "json_error": json_error,
+    }
+
+
+def build_snapshot_summary_audit(owner_id: str = ""):
+    targets = _audit_snapshot_summary_targets(owner_id)
+    owner_uids = {
+        (_norm_text(target.get("owner_id")), _norm_text(target.get("account_uid")))
+        for target in targets
+        if _norm_text(target.get("owner_id")) and _norm_text(target.get("account_uid"))
+    }
+    summaries = _latest_rows_by_owner_uid(AbonentSummary, owner_uids, "account_uid")
+    snapshots = _latest_rows_by_owner_uid(CardSnapshot, owner_uids, "abonent_uid")
+    counts = {
+        "total_abonents": len(targets),
+        "fresh_summary_count": 0,
+        "error_count": 0,
+        "missing_count": 0,
+        "dirty_count": 0,
+        "snapshot_missing_count": 0,
+        "snapshot_dirty_error_count": 0,
+        "hash_mismatch_count": 0,
+    }
+    items = []
+    for target in targets:
+        owner = _norm_text(target.get("owner_id"))
+        uid = _norm_text(target.get("account_uid"))
+        key = (owner, uid)
+        summary = _audit_summary_payload(summaries.get(key), target)
+        snapshot = _audit_snapshot_payload(snapshots.get(key))
+        warnings = []
+
+        if summary["status"] == "fresh":
+            counts["fresh_summary_count"] += 1
+            if summary.get("totals_error"):
+                warnings.append(summary["totals_error"])
+        elif summary["status"] in {"error", "invalid"}:
+            counts["error_count"] += 1
+        elif summary["status"] == "missing":
+            counts["missing_count"] += 1
+        elif summary["status"] == "dirty":
+            counts["dirty_count"] += 1
+
+        if snapshot["status"] == "missing" or not snapshot["exists"]:
+            counts["snapshot_missing_count"] += 1
+        if snapshot["status"] in {"dirty", "error", "invalid"}:
+            counts["snapshot_dirty_error_count"] += 1
+
+        if summary.get("json_error"):
+            warnings.append(summary["json_error"])
+        if snapshot.get("json_error"):
+            warnings.append(snapshot["json_error"])
+        if snapshot["status"] == "fresh" and (not snapshot["json"] or snapshot.get("json_error")):
+            warnings.append("FRESH_SNAPSHOT_JSON_INVALID")
+
+        hash_mismatch = summary["input_hash"] != snapshot["input_hash"]
+        if hash_mismatch:
+            counts["hash_mismatch_count"] += 1
+            warnings.append("INPUT_HASH_CHANGED")
+        if summary["status"] == "fresh" and not snapshot["exists"]:
+            warnings.append("SUMMARY_FRESH_CARD_SNAPSHOT_MISSING")
+        if summary["status"] == "fresh" and snapshot["status"] in {"dirty", "error", "invalid"}:
+            warnings.append("SUMMARY_FRESH_SNAPSHOT_NOT_FRESH")
+        if summary["status"] != "fresh" and not summary["reason"]:
+            warnings.append("SUMMARY_REASON_MISSING")
+        if snapshot["status"] != "fresh" and not snapshot["reason"]:
+            warnings.append("SNAPSHOT_REASON_MISSING")
+
+        items.append({
+            "owner_id": owner,
+            "account_number": _norm_text(target.get("account_number")),
+            "account_uid": uid,
+            "summary_status": summary["status"],
+            "summary_reason": summary["reason"],
+            "snapshot_status": snapshot["status"],
+            "snapshot_reason": snapshot["reason"],
+            "input_hash_summary": summary["input_hash"],
+            "input_hash_snapshot": snapshot["input_hash"],
+            "has_card_snapshot": bool(snapshot["exists"]),
+            "has_abonent_summary": bool(summary["exists"]),
+            "updated_at_summary": summary["updated_at"],
+            "updated_at_snapshot": snapshot["updated_at"],
+            "hash_mismatch": hash_mismatch,
+            "warnings": sorted(set(warnings)),
+        })
+
+    return {
+        "ok": True,
+        "dry_run": True,
+        "owner_id": _norm_text(owner_id),
+        "counts": counts,
+        "items": items,
+    }
+
+
 def _card_snapshot_payload(row: CardSnapshot):
     try:
         snapshot = json.loads(row.snapshot_json or "{}")
@@ -3283,6 +3550,21 @@ def _card_snapshot_payload(row: CardSnapshot):
         "updated_at": row.updated_at.isoformat() + "Z" if row.updated_at else None,
         "snapshot": snapshot,
     }
+
+
+@app.get("/api/audit/snapshot_summary")
+def audit_snapshot_summary_endpoint():
+    # Read-only diagnostics endpoint. Do not recalc, repair, rebuild, or mutate DB here.
+    admin, err = _require_admin()
+    if err:
+        return err
+    owner = _norm_text(request.args.get("owner") or request.args.get("owner_id") or "")
+    try:
+        return jsonify(build_snapshot_summary_audit(owner))
+    except SQLAlchemyError as exc:
+        db.session.rollback()
+        app.logger.exception("snapshot_summary audit failed for admin=%s owner=%s", admin.id, owner)
+        return jsonify(ok=False, error="snapshot_summary_audit_failed", details=str(exc)), 500
 
 
 @app.get("/api/card_snapshot/<account_uid>")
@@ -3314,7 +3596,11 @@ def card_snapshot_put(account_uid: str):
     status = _norm_text(body.get("snapshot_status") or snapshot.get("snapshot_status") or snapshot.get("summary_status") or snapshot.get("status") or "fresh").lower()
     if status not in {"fresh", "dirty", "missing", "error", "invalid"}:
         status = "invalid"
-    reason = _norm_text(body.get("snapshot_reason") or snapshot.get("snapshot_reason") or snapshot.get("summary_reason") or snapshot.get("reason"))
+    reason = _cache_reason(
+        "snapshot",
+        status,
+        body.get("snapshot_reason") or snapshot.get("snapshot_reason") or snapshot.get("summary_reason") or snapshot.get("reason"),
+    )
     row = CardSnapshot.query.filter_by(owner_id=user.id, abonent_uid=uid).first()
     if not row:
         row = CardSnapshot(owner_id=user.id, abonent_uid=uid)
