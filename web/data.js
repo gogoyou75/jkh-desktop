@@ -1299,6 +1299,160 @@
     });
   }
 
+  function diagnoseCardSnapshotBuildFromCurrentResult(abonentOrId, result) {
+    var found = _findAbonentByIdOrUid(abonentOrId);
+    var abonent = found && found.abonent ? found.abonent : null;
+    var abonentId = String(found && found.id || (abonent && abonent.id) || (typeof abonentOrId === "object" ? abonentOrId && abonentOrId.id : abonentOrId) || "").trim();
+    var uid = String(abonent && abonent.uid || (typeof abonentOrId === "object" ? abonentOrId && abonentOrId.uid : abonentOrId) || "").trim();
+    var db = window.AbonentsDB || {};
+    var regnum = "";
+    try { regnum = resolveAbonentRegnumForSummary(abonentId, abonent || {}); } catch (eReg) { regnum = ""; }
+    var linksRaw = Array.isArray(db.links) ? db.links : (Array.isArray(db.abonentPremiseLinks) ? db.abonentPremiseLinks : []);
+    var ownLinks = (linksRaw || []).filter(function(link) {
+      var linkAbonent = String(link && (link.abonentId || link.abonent_id || link.abonent || link.accountId || link.ls || link.personalAccount || link.uid || link.account_uid) || "").trim();
+      return linkAbonent === abonentId || linkAbonent === uid;
+    });
+    var premiseLinks = regnum ? (linksRaw || []).filter(function(link) {
+      return String(link && link.regnum || "").trim() === regnum;
+    }) : [];
+    var activeOwnLinks = ownLinks.filter(function(link) { return !String(link && (link.dateTo || link.to || link.end || link.endDate || link.date_end || link.respTo) || "").trim(); });
+    var closedOwnLinks = ownLinks.length - activeOwnLinks.length;
+    var activePremiseLinks = premiseLinks.filter(function(link) { return !String(link && (link.dateTo || link.to || link.end || link.endDate || link.date_end || link.respTo) || "").trim(); });
+    var ledgerKey = "";
+    var runtimeKey = "";
+    var ledgerVersion = "";
+    var versions = {};
+    var runtimeRaw = null;
+    var runtimeCache = null;
+    var runtimeParseError = "";
+    var runtimeValidation = { valid: false, reason: "not_checked" };
+    var runtimeRowsByIdCount = 0;
+    var runtimeCacheVersion = "";
+    var fallbackAvailable = false;
+    var fallbackRowsByIdCount = 0;
+    var fallbackLedgerVersion = "";
+    var fallbackLedgerVersionMatches = false;
+    var rowsById = {};
+    var rowsByIdSource = "";
+    var ledgerRowsCount = 0;
+    var snapshotRowsByIdCount = 0;
+    var localSnapshotRaw = "";
+    try { ledgerKey = resolvePaymentLedgerKey(abonent || uid); } catch (eLedgerKey) { ledgerKey = ""; }
+    try { runtimeKey = resolveRuntimeCacheKey(abonent || uid); } catch (eRuntimeKey) { runtimeKey = ""; }
+    try { ledgerVersion = computeLedgerRuntimeVersion(abonent || uid); } catch (eLedgerVersion) { ledgerVersion = ""; }
+    try { versions = computeFinancialInputVersions(abonent || uid); } catch (eVersions) { versions = {}; }
+    try {
+      runtimeRaw = runtimeKey ? _getProjectRaw(runtimeKey) : null;
+      if (runtimeRaw !== null && runtimeRaw !== undefined && String(runtimeRaw) !== "") {
+        runtimeCache = JSON.parse(String(runtimeRaw));
+        runtimeValidation = isLedgerRuntimeCacheValid(abonent || uid, runtimeCache, {});
+      } else {
+        runtimeValidation = { valid: false, reason: "missing" };
+      }
+    } catch (eRuntime) {
+      runtimeParseError = String(eRuntime && eRuntime.message || eRuntime || "runtime_cache_json_invalid");
+      runtimeValidation = { valid: false, reason: "json_invalid" };
+      runtimeCache = null;
+    }
+    var runtimeRowsById = runtimeCache && runtimeCache.rowsById && typeof runtimeCache.rowsById === "object" && !Array.isArray(runtimeCache.rowsById) ? runtimeCache.rowsById : {};
+    runtimeRowsByIdCount = _cardSnapshotRowsByIdCount(runtimeRowsById);
+    runtimeCacheVersion = String(runtimeCache && (runtimeCache.ledgerVersion || runtimeCache.ledgerHash) || "");
+    if (runtimeCacheVersion === ledgerVersion && runtimeRowsByIdCount > 0) {
+      rowsById = runtimeRowsById;
+      rowsByIdSource = "runtime_cache";
+    }
+    var fallback = null;
+    try {
+      fallbackAvailable = typeof window.__getPaymentTableComputedRowsSnapshot === "function";
+      fallback = fallbackAvailable ? window.__getPaymentTableComputedRowsSnapshot() : null;
+    } catch (eFallback) {
+      fallback = null;
+    }
+    var fallbackRowsById = fallback && fallback.rowsById && typeof fallback.rowsById === "object" && !Array.isArray(fallback.rowsById) ? fallback.rowsById : {};
+    fallbackRowsByIdCount = _cardSnapshotRowsByIdCount(fallbackRowsById);
+    fallbackLedgerVersion = String(fallback && fallback.ledgerVersion || "");
+    fallbackLedgerVersionMatches = !!(fallbackRowsByIdCount > 0 && fallbackLedgerVersion === ledgerVersion);
+    if (!rowsByIdSource && fallbackLedgerVersionMatches) {
+      rowsById = fallbackRowsById;
+      rowsByIdSource = "payment_table_fallback";
+    }
+    var ledgerRows = fallback && Array.isArray(fallback.rows) && _cardSnapshotRowsByIdCount(rowsById) > 0 ? fallback.rows : readPaymentLedger(abonent || uid);
+    var rows = (Array.isArray(ledgerRows) ? ledgerRows : []).map(function(row) {
+      var copy = deepClone(row || {});
+      var item = rowsById[String(copy.id || "")];
+      if (item && typeof item === "object") {
+        copy.pay_main = item.pay_main;
+        copy.pay_penalty = item.pay_penalty;
+        copy.total = item.total;
+      }
+      return copy;
+    });
+    ledgerRowsCount = Array.isArray(ledgerRows) ? ledgerRows.length : 0;
+    snapshotRowsByIdCount = _cardSnapshotRowsByIdCount(_cardSnapshotRowsById(rows));
+    try { localSnapshotRaw = _getProjectRaw(resolveCardSnapshotKey(abonent || uid)); } catch (eLocalSnapshot) { localSnapshotRaw = ""; }
+    var summary = result && result.summary && typeof result.summary === "object" ? result.summary : null;
+    var reason = "OK";
+    if (!isValidUid(uid)) reason = "UID_REQUIRED";
+    else if (!summary) reason = "SUMMARY_MISSING_IN_RECALC_RESULT";
+    else if (!rowsByIdSource && runtimeRowsByIdCount <= 0 && !fallbackAvailable) reason = "RUNTIME_CACHE_ROWS_BY_ID_EMPTY_AND_PAYMENT_TABLE_FALLBACK_UNAVAILABLE";
+    else if (!rowsByIdSource && fallbackRowsByIdCount > 0 && !fallbackLedgerVersionMatches) reason = "PAYMENT_TABLE_FALLBACK_LEDGER_VERSION_MISMATCH";
+    else if (!rowsByIdSource) reason = "ROWS_BY_ID_SOURCE_EMPTY";
+    else if (snapshotRowsByIdCount <= 0 && ledgerRowsCount <= 0) reason = "SNAPSHOT_ROWS_BY_ID_EMPTY_LEDGER_EMPTY";
+    else if (snapshotRowsByIdCount <= 0) reason = "SNAPSHOT_ROWS_BY_ID_EMPTY";
+    return {
+      ok: reason === "OK",
+      reason: reason,
+      uid: uid,
+      abonentId: abonentId,
+      regnum: regnum,
+      ledgerKey: ledgerKey,
+      runtimeCacheKey: runtimeKey,
+      ledgerVersion: ledgerVersion,
+      inputHash: String(versions && versions.input_hash || ""),
+      summaryStatus: String(result && (result.summary_status || result.status) || summary && (summary.summary_status || summary.status) || ""),
+      localSnapshotPresent: localSnapshotRaw !== null && localSnapshotRaw !== undefined && String(localSnapshotRaw) !== "",
+      links: {
+        ownCount: ownLinks.length,
+        activeOwnCount: activeOwnLinks.length,
+        closedOwnCount: closedOwnLinks,
+        premiseCount: premiseLinks.length,
+        activePremiseCount: activePremiseLinks.length,
+        activePremiseAbonentIds: activePremiseLinks.map(function(link) { return String(link && (link.abonentId || link.abonent_id || link.abonent || link.ls || "") || "").trim(); }).filter(Boolean)
+      },
+      transfer: {
+        debtTransferredFrom: String(abonent && abonent.debtTransferredFrom || ""),
+        transferMeta: abonent && abonent.transferMeta && typeof abonent.transferMeta === "object" ? deepClone(abonent.transferMeta) : null,
+        transferToKeyPresent: _getProjectRaw("jkh_transfer_to_v1:" + abonentId) !== null,
+        transferBalanceKeyPresent: regnum ? _getProjectRaw("jkh_transfer_balance_v1:" + abonentId + ":" + regnum) !== null : false,
+        frozenDebtDate: String(abonent && abonent.frozenDebtDate || "")
+      },
+      runtimeCache: {
+        present: runtimeRaw !== null && runtimeRaw !== undefined && String(runtimeRaw) !== "",
+        parseError: runtimeParseError,
+        validation: runtimeValidation,
+        version: runtimeCacheVersion,
+        versionMatches: runtimeCacheVersion === ledgerVersion,
+        rowsByIdCount: runtimeRowsByIdCount,
+        periodActive: runtimeCache && runtimeCache.periodActive === true,
+        period: runtimeCache && runtimeCache.period && typeof runtimeCache.period === "object" ? deepClone(runtimeCache.period) : null
+      },
+      paymentTableFallback: {
+        available: fallbackAvailable,
+        rowsByIdCount: fallbackRowsByIdCount,
+        ledgerVersion: fallbackLedgerVersion,
+        ledgerVersionMatches: fallbackLedgerVersionMatches,
+        periodActive: fallback && fallback.periodActive === true,
+        period: fallback && fallback.period && typeof fallback.period === "object" ? deepClone(fallback.period) : null
+      },
+      buildInputs: {
+        rowsByIdSource: rowsByIdSource,
+        selectedRowsByIdCount: _cardSnapshotRowsByIdCount(rowsById),
+        ledgerRowsCount: ledgerRowsCount,
+        snapshotRowsByIdCount: snapshotRowsByIdCount
+      }
+    };
+  }
+
   function readLedgerRuntimeCache(abonentOrId, options) {
     var key = resolveRuntimeCacheKey(abonentOrId);
     var version = computeLedgerRuntimeVersion(abonentOrId);
@@ -4099,6 +4253,7 @@
     debugCardSnapshotLifecycle: debugCardSnapshotLifecycle,
     invalidateCardSnapshot: invalidateCardSnapshot,
     buildCardSnapshotFromCurrentResult: buildCardSnapshotFromCurrentResult,
+    diagnoseCardSnapshotBuildFromCurrentResult: diagnoseCardSnapshotBuildFromCurrentResult,
     readLedgerRuntimeCache: readLedgerRuntimeCache,
     getRuntimeCache: getRuntimeCache,
     writeLedgerRuntimeCache: writeLedgerRuntimeCache,

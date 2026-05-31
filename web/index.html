@@ -71,6 +71,7 @@ Doc: docs/LOGIC_SPEC_v1.5.3.md
         .summary-batch-panel { margin:10px 0 12px; padding:10px 12px; border:1px solid #d9e2ef; border-radius:8px; background:#f7fbff; font-size:13px; }
         .summary-batch-panel button { margin-right:8px; }
         .summary-batch-progress { margin-top:7px; color:#345; }
+        .summary-batch-error-detail { margin:6px 0 0; padding:6px; max-height:260px; overflow:auto; background:#fff; border:1px solid #ddd; font-size:11px; white-space:pre-wrap; }
         .summary-row-select { text-align:center; width:34px; }
         .summary-page-counters { margin:8px 0 10px; font-size:12px; color:#333; }
         .summary-page-counters span { display:inline-block; margin-right:10px; padding:2px 6px; border:1px solid #ddd; background:#fff; }
@@ -1499,11 +1500,12 @@ function resetSummaryBatchProgress(){
     renderSummaryBatchProgress();
 }
 
-function addSummaryBatchError(uid, reason){
+function addSummaryBatchError(uid, reason, detail){
     uid = String(uid || "").trim();
     reason = String(reason || "CLIENT_RECALC_FAILED").trim();
     if (!uid && !reason) return;
-    const key = uid + "\n" + reason;
+    const detailText = detail ? JSON.stringify(detail) : "";
+    const key = uid + "\n" + reason + "\n" + detailText;
     const exists = (summaryBatchProgressState.errors || []).some(function(item){
         return item && item.key === key;
     });
@@ -1512,7 +1514,8 @@ function addSummaryBatchError(uid, reason){
             key: key,
             uid: uid,
             account: summaryBatchAccountLabel(uid),
-            reason: reason
+            reason: reason,
+            detail: detail || null
         });
     }
 }
@@ -1572,7 +1575,8 @@ function renderSummaryBatchProgress(){
     if (errorsBox) {
         errorsBox.style.display = errors.length && summaryBatchErrorsVisible ? "block" : "none";
         errorsBox.innerHTML = errors.map(function(item){
-            return '<div class="summary-batch-error-item"><div>ЛС ' + escapeHtml(item.account || item.uid || "") + '</div><div>' + escapeHtml(item.reason || "") + '</div></div>';
+            const detail = item.detail ? '<pre class="summary-batch-error-detail">' + escapeHtml(JSON.stringify(item.detail, null, 2)) + '</pre>' : '';
+            return '<div class="summary-batch-error-item"><div>ЛС ' + escapeHtml(item.account || item.uid || "") + '</div><div>' + escapeHtml(item.reason || "") + '</div>' + detail + '</div>';
         }).join("");
     }
 }
@@ -1811,6 +1815,57 @@ function summaryBatchResultReason(result, fallback){
     return String(result && (result.summary_reason || result.reason) || fallback || "CLIENT_RECALC_FAILED");
 }
 
+async function fetchBackendCardSnapshotDiagnostic(uid){
+    uid = String(uid || "").trim();
+    if (!uid) return { ok: false, error: "UID_REQUIRED" };
+    try {
+        const res = await fetch("/api/card_snapshot/" + encodeURIComponent(uid), { credentials: "include" });
+        const text = await res.text();
+        let data = null;
+        try { data = text ? JSON.parse(text) : null; } catch(eParse) { data = null; }
+        return {
+            httpStatus: res.status,
+            ok: !!(res.ok && data && data.ok !== false),
+            has_card_snapshot: !!(data && data.snapshot),
+            snapshot_status: String(data && data.snapshot_status || ""),
+            snapshot_reason: String(data && data.snapshot_reason || ""),
+            input_hash: String(data && data.input_hash || ""),
+            error: data && data.error || (!res.ok ? ("HTTP_" + res.status) : "")
+        };
+    } catch (e) {
+        return { ok: false, error: String(e && e.message || e || "SNAPSHOT_STATUS_FETCH_FAILED") };
+    }
+}
+
+async function collectSnapshotBackfillDiagnostic(uid, result, stage, extra){
+    const row = (allRows || []).find(function(r){ return getSummaryBatchUid(r) === String(uid || "").trim(); }) || null;
+    let buildDiagnostic = null;
+    try {
+        buildDiagnostic = window.Data && typeof Data.diagnoseCardSnapshotBuildFromCurrentResult === "function"
+            ? Data.diagnoseCardSnapshotBuildFromCurrentResult(uid, result)
+            : { ok: false, reason: "DIAGNOSTIC_API_UNAVAILABLE" };
+    } catch (eDiag) {
+        buildDiagnostic = { ok: false, reason: "DIAGNOSTIC_FAILED", error: String(eDiag && eDiag.message || eDiag) };
+    }
+    const backendSnapshot = await fetchBackendCardSnapshotDiagnostic(uid);
+    return {
+        stage: String(stage || ""),
+        uid: String(uid || ""),
+        indexRow: row ? {
+            account: String(row.id || ""),
+            summaryStatus: String(row.rawSummaryStatus || row.summaryStatus || ""),
+            summaryReason: String(row.rawSummaryReason || row.summaryReason || ""),
+            snapshotStatus: String(row.snapshotStatus || ""),
+            snapshotReason: String(row.snapshotReason || ""),
+            hashMismatch: row.hashMismatch === true,
+            warnings: Array.isArray(row.warnings) ? row.warnings : []
+        } : null,
+        backendSnapshot: backendSnapshot,
+        buildCardSnapshotFromCurrentResult: buildDiagnostic,
+        extra: extra || null
+    };
+}
+
 async function finishClientSummaryBatchJob(jobId, total, processedLocal, freshLocal, errorLocal, skippedLocal){
     const progress = document.getElementById("summaryBatchProgress");
     const doneText = (summaryBatchJobState.mode === "snapshot" ? "Snapshot backfill завершён" : "Пересчёт завершён") + ". Fresh: " + freshLocal + ". Error: " + errorLocal + ". Skipped: " + skippedLocal + ".";
@@ -1906,13 +1961,15 @@ async function processClientSummaryBatchJob(jobId, totalAccepted, mode){
                 if (!snapshot) {
                     status = "skipped";
                     reason = "CARD_SNAPSHOT_BUILD_FAILED";
-                    addSummaryBatchError(uid, reason);
+                    const diagnostic = await collectSnapshotBackfillDiagnostic(uid, result, "buildCardSnapshotFromCurrentResult", { snapshotReturned: false });
+                    addSummaryBatchError(uid, reason, diagnostic);
                 } else {
                     const snapshotSave = await Data.saveCardSnapshotAndWait(uid, snapshot);
                     if (!snapshotSave || snapshotSave.ok !== true || snapshotSave.serverOk !== true || snapshotSave.serverReadbackOk !== true) {
                         status = "skipped";
                         reason = String(snapshotSave && snapshotSave.reason || "CARD_SNAPSHOT_SAVE_FAILED");
-                        addSummaryBatchError(uid, reason);
+                        const diagnostic = await collectSnapshotBackfillDiagnostic(uid, result, "saveCardSnapshotAndWait", { snapshotReturned: true, snapshotSave: snapshotSave || null });
+                        addSummaryBatchError(uid, reason, diagnostic);
                     }
                 }
             }
