@@ -449,7 +449,7 @@ function escapeHtml(str){
         .replaceAll("'", "&#039;");
 }
 
-// поддержка ISO YYYY-MM-DD и RU DD.MM.YYYY (как в payment_table.js)
+// поддержка ISO YYYY-MM-DD и RU DD.MM.YYYY
 function parseDateAnyToDate(value) {
     if (value === null || value === undefined) return null;
     const s = String(value || "").trim();
@@ -1682,7 +1682,7 @@ async function runSelectedSummaryBatch(options){
         alert("Batch job API недоступен: Data API не загружен.");
         return;
     }
-    if (batchMode === "snapshot" && (typeof Data.buildCardSnapshotFromCurrentResult !== "function" || typeof Data.saveCardSnapshotAndWait !== "function")) {
+    if (batchMode === "snapshot" && (typeof Data.recalculateAbonentCardWithRows !== "function" || typeof Data.buildCardSnapshotFromCurrentResult !== "function" || typeof Data.saveCardSnapshotAndWait !== "function")) {
         if (progress) progress.textContent = "Snapshot API unavailable: Data snapshot API is not loaded.";
         alert("Snapshot API недоступен: Data snapshot API не загружен.");
         return;
@@ -1938,13 +1938,23 @@ async function processClientSummaryBatchJob(jobId, totalAccepted, mode){
             let reason = "CLIENT_RECALC_FAILED";
             let summary = {};
             try {
-                result = await Data.recalculateAbonentCard(uid, {
-                    saveSummary: false,
-                    summaryScope: "full",
-                    recalcMode: "FULL_SUMMARY_REBUILD",
-                    mode: "FULL_SUMMARY_REBUILD",
-                    timeoutMs: 15000
-                });
+                if (batchMode === "snapshot") {
+                    result = await Data.recalculateAbonentCardWithRows(uid, {
+                        saveSummary: false,
+                        summaryScope: "full",
+                        recalcMode: "FULL_SUMMARY_REBUILD",
+                        mode: "FULL_SUMMARY_REBUILD",
+                        timeoutMs: 15000
+                    });
+                } else {
+                    result = await Data.recalculateAbonentCard(uid, {
+                        saveSummary: false,
+                        summaryScope: "full",
+                        recalcMode: "FULL_SUMMARY_REBUILD",
+                        mode: "FULL_SUMMARY_REBUILD",
+                        timeoutMs: 15000
+                    });
+                }
             } catch (itemError) {
                 reason = String(itemError && itemError.message || itemError || "CLIENT_RECALC_FAILED");
                 result = null;
@@ -1953,21 +1963,29 @@ async function processClientSummaryBatchJob(jobId, totalAccepted, mode){
                 status = summaryBatchResultStatus(result);
                 reason = summaryBatchResultReason(result, status === "fresh" ? "RECALC_OK" : "CLIENT_RECALC_FAILED");
                 summary = result && result.summary || {};
+                if (batchMode === "snapshot" && status !== "fresh" && String(result.summary_status || result.status || "").toLowerCase() === "fresh") {
+                    status = "skipped";
+                    reason = String(result.reason || result.summary_reason || "ROWS_BY_ID_BUILD_FAILED");
+                    const diagnostic = await collectSnapshotBackfillDiagnostic(uid, result, "recalculateAbonentCardWithRows", { snapshotReturned: false });
+                    addSummaryBatchError(uid, reason, diagnostic);
+                }
             } else {
                 summary = { account_uid: uid, summary_status: "error", summary_reason: reason };
             }
             if (batchMode === "snapshot" && status === "fresh") {
-                const snapshot = Data.buildCardSnapshotFromCurrentResult(uid, result);
+                const snapshot = Data.buildCardSnapshotFromCurrentResult(uid, result, {
+                    rowsById: result && result.rowsById
+                });
                 if (!snapshot) {
                     status = "skipped";
-                    reason = "CARD_SNAPSHOT_BUILD_FAILED";
+                    reason = result && result.rowsByIdSource === "datajs_batch_rows_builder" ? "ROWS_BY_ID_EMPTY_AFTER_WITH_ROWS_RECALC" : "SNAPSHOT_BUILD_FAILED_AFTER_ROWS";
                     const diagnostic = await collectSnapshotBackfillDiagnostic(uid, result, "buildCardSnapshotFromCurrentResult", { snapshotReturned: false });
                     addSummaryBatchError(uid, reason, diagnostic);
                 } else {
                     const snapshotSave = await Data.saveCardSnapshotAndWait(uid, snapshot);
                     if (!snapshotSave || snapshotSave.ok !== true || snapshotSave.serverOk !== true || snapshotSave.serverReadbackOk !== true) {
                         status = "skipped";
-                        reason = String(snapshotSave && snapshotSave.reason || "CARD_SNAPSHOT_SAVE_FAILED");
+                        reason = snapshotSave && snapshotSave.serverReadbackOk === false ? "CARD_SNAPSHOT_READBACK_FAILED" : String(snapshotSave && snapshotSave.reason || "CARD_SNAPSHOT_SAVE_FAILED");
                         const diagnostic = await collectSnapshotBackfillDiagnostic(uid, result, "saveCardSnapshotAndWait", { snapshotReturned: true, snapshotSave: snapshotSave || null });
                         addSummaryBatchError(uid, reason, diagnostic);
                     }

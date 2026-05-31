@@ -1214,7 +1214,13 @@
     }
   }
 
-  function buildCardSnapshotFromCurrentResult(abonentOrId, result) {
+  function _snapshotRowsByIdOption(options) {
+    var opts = options || {};
+    var rowsById = opts.rowsById && typeof opts.rowsById === "object" && !Array.isArray(opts.rowsById) ? opts.rowsById : {};
+    return rowsById;
+  }
+
+  function buildCardSnapshotFromCurrentResult(abonentOrId, result, options) {
     var found = _findAbonentByIdOrUid(abonentOrId);
     var abonent = found && found.abonent ? found.abonent : null;
     var abonentId = String(found && found.id || (abonent && abonent.id) || (typeof abonentOrId === "object" ? abonentOrId && abonentOrId.id : abonentOrId) || "").trim();
@@ -1224,7 +1230,20 @@
     var runtimeCache = readLedgerRuntimeCache(abonent || uid) || {};
     var ledgerVersion = computeLedgerRuntimeVersion(abonent || uid);
     var runtimeCacheVersion = String(runtimeCache.ledgerVersion || runtimeCache.ledgerHash || "");
-    var rowsById = runtimeCacheVersion === ledgerVersion && runtimeCache.rowsById && typeof runtimeCache.rowsById === "object" && !Array.isArray(runtimeCache.rowsById) ? runtimeCache.rowsById : {};
+    var optionRowsById = _snapshotRowsByIdOption(options);
+    var resultRowsById = result && result.rowsById && typeof result.rowsById === "object" && !Array.isArray(result.rowsById) ? result.rowsById : {};
+    var rowsById = {};
+    var rowsByIdSource = "";
+    if (_cardSnapshotRowsByIdCount(optionRowsById) > 0) {
+      rowsById = optionRowsById;
+      rowsByIdSource = "options.rowsById";
+    } else if (_cardSnapshotRowsByIdCount(resultRowsById) > 0) {
+      rowsById = resultRowsById;
+      rowsByIdSource = "result.rowsById";
+    } else {
+      rowsById = runtimeCacheVersion === ledgerVersion && runtimeCache.rowsById && typeof runtimeCache.rowsById === "object" && !Array.isArray(runtimeCache.rowsById) ? runtimeCache.rowsById : {};
+      if (_cardSnapshotRowsByIdCount(rowsById) > 0) rowsByIdSource = "runtime_cache";
+    }
     var fallback = null;
     if (_cardSnapshotRowsByIdCount(rowsById) <= 0) {
       try {
@@ -1235,6 +1254,7 @@
       var fallbackRowsById = fallback && fallback.rowsById && typeof fallback.rowsById === "object" && !Array.isArray(fallback.rowsById) ? fallback.rowsById : {};
       if (_cardSnapshotRowsByIdCount(fallbackRowsById) > 0 && String(fallback.ledgerVersion || "") === ledgerVersion) {
         rowsById = fallbackRowsById;
+        rowsByIdSource = "payment_table_fallback";
         runtimeCache = {
           ledgerVersion: String(fallback.ledgerVersion || ""),
           runtimeSignature: String(fallback.runtimeSignature || ""),
@@ -1295,7 +1315,8 @@
       period: snapshotPeriod,
       sourcePeriodActive: snapshotPeriodActive,
       sourcePeriod: snapshotPeriod,
-      runtimeSignature: String(runtimeCache.runtimeSignature || "")
+      runtimeSignature: String(runtimeCache.runtimeSignature || ""),
+      rowsByIdSource: rowsByIdSource
     });
   }
 
@@ -1332,6 +1353,8 @@
     var fallbackRowsByIdCount = 0;
     var fallbackLedgerVersion = "";
     var fallbackLedgerVersionMatches = false;
+    var optionRowsById = _snapshotRowsByIdOption(result && result.__snapshotBuildOptions);
+    var resultRowsById = result && result.rowsById && typeof result.rowsById === "object" && !Array.isArray(result.rowsById) ? result.rowsById : {};
     var rowsById = {};
     var rowsByIdSource = "";
     var ledgerRowsCount = 0;
@@ -1357,7 +1380,13 @@
     var runtimeRowsById = runtimeCache && runtimeCache.rowsById && typeof runtimeCache.rowsById === "object" && !Array.isArray(runtimeCache.rowsById) ? runtimeCache.rowsById : {};
     runtimeRowsByIdCount = _cardSnapshotRowsByIdCount(runtimeRowsById);
     runtimeCacheVersion = String(runtimeCache && (runtimeCache.ledgerVersion || runtimeCache.ledgerHash) || "");
-    if (runtimeCacheVersion === ledgerVersion && runtimeRowsByIdCount > 0) {
+    if (_cardSnapshotRowsByIdCount(optionRowsById) > 0) {
+      rowsById = optionRowsById;
+      rowsByIdSource = "options.rowsById";
+    } else if (_cardSnapshotRowsByIdCount(resultRowsById) > 0) {
+      rowsById = resultRowsById;
+      rowsByIdSource = "result.rowsById";
+    } else if (runtimeCacheVersion === ledgerVersion && runtimeRowsByIdCount > 0) {
       rowsById = runtimeRowsById;
       rowsByIdSource = "runtime_cache";
     }
@@ -1394,6 +1423,7 @@
     var reason = "OK";
     if (!isValidUid(uid)) reason = "UID_REQUIRED";
     else if (!summary) reason = "SUMMARY_MISSING_IN_RECALC_RESULT";
+    else if (!rowsByIdSource && result && result.rowsByIdSource === "datajs_batch_rows_builder") reason = "ROWS_BY_ID_EMPTY_AFTER_WITH_ROWS_RECALC";
     else if (!rowsByIdSource && runtimeRowsByIdCount <= 0 && !fallbackAvailable) reason = "RUNTIME_CACHE_ROWS_BY_ID_EMPTY_AND_PAYMENT_TABLE_FALLBACK_UNAVAILABLE";
     else if (!rowsByIdSource && fallbackRowsByIdCount > 0 && !fallbackLedgerVersionMatches) reason = "PAYMENT_TABLE_FALLBACK_LEDGER_VERSION_MISMATCH";
     else if (!rowsByIdSource) reason = "ROWS_BY_ID_SOURCE_EMPTY";
@@ -1449,7 +1479,15 @@
         selectedRowsByIdCount: _cardSnapshotRowsByIdCount(rowsById),
         ledgerRowsCount: ledgerRowsCount,
         snapshotRowsByIdCount: snapshotRowsByIdCount
-      }
+      },
+      withRowsResult: result ? {
+        rowsByIdCount: _cardSnapshotRowsByIdCount(resultRowsById),
+        rowsByIdSource: String(result.rowsByIdSource || ""),
+        ledgerRowsCount: Number(result.ledgerRowsCount || 0),
+        summaryStatus: String(result.summary_status || result.status || ""),
+        summaryReason: String(result.summary_reason || result.reason || ""),
+        responsibility: result.responsibility || null
+      } : null
     };
   }
 
@@ -3374,6 +3412,137 @@
     return period;
   }
 
+  function _snapshotResponsibilityDiagnostics(abonentOrId, period) {
+    var found = _findAbonentByIdOrUid(abonentOrId);
+    var abonent = found && found.abonent ? found.abonent : null;
+    var abonentId = String(found && found.id || (abonent && abonent.id) || (typeof abonentOrId === "object" ? abonentOrId && abonentOrId.id : abonentOrId) || "").trim();
+    var uid = String(abonent && (abonent.uid || abonent.account_uid || abonent.accountUid) || (typeof abonentOrId === "object" ? abonentOrId && abonentOrId.uid : "") || "").trim();
+    var regnum = resolveAbonentRegnumForSummary(abonentId, abonent || {});
+    var db = window.AbonentsDB || {};
+    var linksRaw = Array.isArray(db.links) ? db.links : (Array.isArray(db.abonentPremiseLinks) ? db.abonentPremiseLinks : []);
+    function linkAbonentId(link) {
+      return String(link && (link.abonentId || link.abonent_id || link.abonent || link.accountId || link.ls || link.personalAccount || link.uid || link.account_uid) || "").trim();
+    }
+    function linkTo(link) {
+      return _dateAnyToIsoLocal(link && (link.dateTo || link.to || link.end || link.endDate || link.date_end || link.respTo));
+    }
+    var ownLinks = linksRaw.filter(function(link) {
+      var id = linkAbonentId(link);
+      return id && (id === abonentId || id === uid);
+    });
+    var premiseLinks = regnum ? linksRaw.filter(function(link) {
+      return String(link && link.regnum || "").trim() === regnum;
+    }) : [];
+    var activeOwn = ownLinks.filter(function(link) { return !linkTo(link); });
+    var activePremise = premiseLinks.filter(function(link) { return !linkTo(link); });
+    var transferMeta = abonent && abonent.transferMeta && typeof abonent.transferMeta === "object" ? abonent.transferMeta : {};
+    return {
+      ownCount: ownLinks.length,
+      activeOwnCount: activeOwn.length,
+      closedOwnCount: ownLinks.length - activeOwn.length,
+      premiseCount: premiseLinks.length,
+      activePremiseCount: activePremise.length,
+      activePremiseAbonentIds: activePremise.map(linkAbonentId).filter(Boolean),
+      regnum: regnum,
+      periodFrom: String(period && period.from || ""),
+      periodTo: String(period && period.to || ""),
+      transferMode: String(transferMeta.transferMode || transferMeta.mode || ""),
+      debtTransferredFrom: String(abonent && abonent.debtTransferredFrom || ""),
+      transferMeta: transferMeta && Object.keys(transferMeta).length ? deepClone(transferMeta) : null
+    };
+  }
+
+  function _snapshotRowMonthKey(row) {
+    return _summaryMonthKey(row);
+  }
+
+  function _snapshotRowPaidDateIso(row) {
+    var d = _summaryPaidDate(row);
+    if (!d) return "";
+    return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
+  }
+
+  function _snapshotRowInResponsibilityPeriod(row, period) {
+    var from = String(period && period.from || "");
+    var to = String(period && period.to || "");
+    if (!from || !to) return true;
+    var fromMonth = from.slice(0, 7);
+    var toMonth = to.slice(0, 7);
+    var rowMonth = _snapshotRowMonthKey(row);
+    if (rowMonth && rowMonth >= fromMonth && rowMonth <= toMonth) return true;
+    var paidIso = _snapshotRowPaidDateIso(row);
+    return !!(paidIso && paidIso >= from && paidIso <= to);
+  }
+
+  function _snapshotAsOfDateForRow(row, period) {
+    var paid = _summaryPaidDate(row);
+    if (paid) return paid;
+    var y = Number(row && row.year);
+    var m = Number(row && row.month);
+    if (Number.isFinite(y) && Number.isFinite(m) && y > 0 && m >= 1 && m <= 12) {
+      return new Date(Math.trunc(y), Math.trunc(m), 0, 12, 0, 0);
+    }
+    return _dateFromIsoLocal(period && period.to);
+  }
+
+  function buildRowsByIdFromLedgerForSnapshot(ledgerRows, context) {
+    var ctx = context || {};
+    var rows = Array.isArray(ledgerRows) ? ledgerRows : [];
+    var period = ctx.period && typeof ctx.period === "object" ? ctx.period : {};
+    var abonentId = String(ctx.abonentId || "").trim();
+    var ledgerVersion = String(ctx.ledgerVersion || "");
+    if (!window.JKHCalcEngine || typeof window.JKHCalcEngine.calcTotalsAsOfAdjusted !== "function") {
+      return { ok: false, rowsById: {}, reason: "CALC_ENGINE_UNAVAILABLE", rowsCount: rows.length, ledgerVersion: ledgerVersion, periodActive: false, period: period };
+    }
+    if (!rows.length) {
+      return { ok: false, rowsById: {}, reason: "LEDGER_ROWS_EMPTY", rowsCount: 0, ledgerVersion: ledgerVersion, periodActive: false, period: period };
+    }
+    if (!period.from || !period.to || !_isValidIsoPeriod(period.from, period.to)) {
+      return { ok: false, rowsById: {}, reason: "PERIOD_RESOLUTION_FAILED", rowsCount: rows.length, ledgerVersion: ledgerVersion, periodActive: false, period: period };
+    }
+    var filteredRows = rows.filter(function(row) {
+      return _snapshotRowInResponsibilityPeriod(row, period);
+    });
+    if (!filteredRows.length) {
+      return { ok: false, rowsById: {}, reason: "ROWS_BY_ID_BUILD_FAILED", rowsCount: rows.length, filteredRowsCount: 0, ledgerVersion: ledgerVersion, periodActive: false, period: period };
+    }
+    var rowsById = {};
+    for (var i = 0; i < filteredRows.length; i++) {
+      var row = filteredRows[i] || {};
+      var rowId = String(row.id || "").trim();
+      if (!rowId) continue;
+      var asOf = _snapshotAsOfDateForRow(row, period);
+      if (!asOf || asOf.toString() === "Invalid Date") continue;
+      var totals = window.JKHCalcEngine.calcTotalsAsOfAdjusted(filteredRows, asOf, {
+        abonentId: abonentId,
+        applyAdvanceOffset: true,
+        allowNegativePrincipal: true
+      });
+      var principal = Number(totals && totals.principal);
+      var penalty = Number(totals && totals.penaltyDebt);
+      var total = Number(totals && totals.total);
+      if (!Number.isFinite(principal) || !Number.isFinite(penalty) || !Number.isFinite(total)) continue;
+      rowsById[rowId] = {
+        pay_main: principal,
+        pay_penalty: penalty,
+        total: total
+      };
+    }
+    if (!_cardSnapshotRowsByIdCount(rowsById)) {
+      return { ok: false, rowsById: {}, reason: "ROWS_BY_ID_EMPTY_AFTER_WITH_ROWS_RECALC", rowsCount: rows.length, filteredRowsCount: filteredRows.length, ledgerVersion: ledgerVersion, periodActive: false, period: period };
+    }
+    return {
+      ok: true,
+      rowsById: rowsById,
+      reason: "OK",
+      rowsCount: rows.length,
+      filteredRowsCount: filteredRows.length,
+      ledgerVersion: ledgerVersion,
+      periodActive: false,
+      period: period
+    };
+  }
+
   function resolveAbonentRegnumForSummary(abonentId, abonent) {
     function clean(v) { return String(v || "").trim(); }
 
@@ -4212,6 +4381,132 @@
     }
   }
 
+  async function recalculateAbonentCardWithRows(abonentOrId, options) {
+    var opts = options || {};
+    var ready = await waitForServerFirstDataReady({ timeoutMs: opts.timeoutMs || opts.timeout || 8000 });
+    if (!ready || ready.ok !== true) {
+      return { ok: false, uid: "", summary_status: "error", summary_reason: "SERVER_FIRST_DATA_NOT_READY", reason: "SERVER_FIRST_DATA_NOT_READY", rowsById: {} };
+    }
+    var found = _findAbonentByIdOrUid(abonentOrId);
+    var abonent = found && found.abonent ? found.abonent : null;
+    var abonentId = String(found && found.id || (abonent && abonent.id) || (typeof abonentOrId === "object" ? abonentOrId && abonentOrId.id : abonentOrId) || "").trim();
+    var uid = String(abonent && (abonent.uid || abonent.account_uid || abonent.accountUid) || (typeof abonentOrId === "object" ? abonentOrId && abonentOrId.uid : "") || "").trim();
+    if (!abonent || !abonentId) {
+      return { ok: false, uid: uid, abonentId: abonentId, summary_status: "error", summary_reason: "ABONENT_NOT_FOUND", reason: "ABONENT_NOT_FOUND", rowsById: {} };
+    }
+    if (!isValidUid(uid)) {
+      return { ok: false, uid: uid, abonentId: abonentId, summary_status: "error", summary_reason: "UID_REQUIRED", reason: "UID_REQUIRED", rowsById: {} };
+    }
+    var period = await _resolveAbonentSummaryRecalcPeriod(abonentOrId, opts.period, {
+      mode: SUMMARY_RECALC_MODE_FULL,
+      summaryScope: "full",
+      saveSummary: opts.saveSummary
+    });
+    var responsibility = _snapshotResponsibilityDiagnostics(abonentOrId, period);
+    if (!period || period.ok !== true) {
+      var periodReason = String(period && (period.error || period.reason) || "PERIOD_RESOLUTION_FAILED");
+      return { ok: false, uid: uid, abonentId: abonentId, summary_status: "error", summary_reason: periodReason, reason: periodReason, rowsById: {}, responsibility: responsibility };
+    }
+    var ledgerKey = resolvePaymentLedgerKey(abonentOrId);
+    if (ledgerKey !== ("payments_" + uid)) {
+      return { ok: false, uid: uid, abonentId: abonentId, summary_status: "error", summary_reason: "UID_LEDGER_PATH_REQUIRED", reason: "UID_LEDGER_PATH_REQUIRED", rowsById: {}, responsibility: responsibility };
+    }
+    var ledgerRows = [];
+    try {
+      ledgerRows = readPaymentLedger(abonentOrId);
+    } catch (eLedger) {
+      var ledgerReason = _summaryCalcErrorCode(eLedger);
+      return { ok: false, uid: uid, abonentId: abonentId, summary_status: "error", summary_reason: ledgerReason, reason: ledgerReason, rowsById: {}, responsibility: responsibility };
+    }
+    var summaryResult = await recalculateAbonentCard(abonentOrId, Object.assign({}, opts, {
+      saveSummary: opts.saveSummary === true,
+      summaryScope: "full",
+      recalcMode: SUMMARY_RECALC_MODE_FULL,
+      mode: SUMMARY_RECALC_MODE_FULL
+    }));
+    var summary = summaryResult && summaryResult.summary && typeof summaryResult.summary === "object" ? summaryResult.summary : null;
+    var summaryStatus = String(summaryResult && (summaryResult.summary_status || summaryResult.status) || "");
+    var summaryReason = String(summaryResult && (summaryResult.summary_reason || summaryResult.reason) || "");
+    if (!summaryResult || summaryResult.ok !== true || summaryStatus !== "fresh" || !summary) {
+      return Object.assign({}, summaryResult || {}, {
+        ok: false,
+        uid: uid,
+        abonentId: abonentId,
+        summary_status: summaryStatus || "error",
+        summary_reason: summaryReason || "CLIENT_RECALC_FAILED",
+        reason: summaryReason || "CLIENT_RECALC_FAILED",
+        summary: summary,
+        rowsById: {},
+        ledgerRowsCount: ledgerRows.length,
+        rowsByIdCount: 0,
+        rowsByIdSource: "",
+        responsibility: responsibility
+      });
+    }
+    var ledgerVersion = computeLedgerRuntimeVersion(abonentOrId);
+    var versions = computeFinancialInputVersions(abonentOrId);
+    var rowsResult = buildRowsByIdFromLedgerForSnapshot(ledgerRows, {
+      uid: uid,
+      abonentId: abonentId,
+      regnum: responsibility && responsibility.regnum || resolveAbonentRegnumForSummary(abonentId, abonent),
+      period: { from: String(period.from || ""), to: String(period.to || "") },
+      ledgerRows: ledgerRows,
+      summary: summary,
+      ledgerVersion: ledgerVersion,
+      inputHash: versions.input_hash
+    });
+    if (!rowsResult || rowsResult.ok !== true) {
+      var rowsReason = String(rowsResult && rowsResult.reason || "ROWS_BY_ID_BUILD_FAILED");
+      return {
+        ok: false,
+        uid: uid,
+        abonentId: abonentId,
+        summary_status: summaryStatus,
+        summary_reason: summaryReason || rowsReason,
+        reason: rowsReason,
+        summary: summary,
+        rowsById: {},
+        ledgerVersion: ledgerVersion,
+        inputHash: versions.input_hash,
+        periodActive: false,
+        period: { from: String(period.from || ""), to: String(period.to || "") },
+        ledgerRowsCount: ledgerRows.length,
+        rowsByIdCount: 0,
+        rowsByIdSource: "datajs_batch_rows_builder",
+        responsibility: responsibility
+      };
+    }
+    var runtimePayload = {
+      ledgerVersion: ledgerVersion,
+      runtimeSignature: _runtimeCacheSignature(ledgerVersion, false, null),
+      periodActive: false,
+      period: null,
+      rowsById: rowsResult.rowsById,
+      updatedAt: (new Date()).toISOString()
+    };
+    try { writeLedgerRuntimeCache(abonentOrId, runtimePayload); } catch (eRuntimeWrite) {}
+    return {
+      ok: true,
+      uid: uid,
+      abonentId: abonentId,
+      summary_status: summaryStatus,
+      summary_reason: summaryReason || "OK",
+      summary: summary,
+      save: summaryResult && summaryResult.save,
+      status: summaryStatus,
+      reason: summaryReason || "OK",
+      rowsById: rowsResult.rowsById,
+      ledgerVersion: ledgerVersion,
+      inputHash: versions.input_hash,
+      periodActive: false,
+      period: { from: String(period.from || ""), to: String(period.to || "") },
+      ledgerRowsCount: ledgerRows.length,
+      rowsByIdCount: _cardSnapshotRowsByIdCount(rowsResult.rowsById),
+      rowsByIdSource: "datajs_batch_rows_builder",
+      responsibility: responsibility
+    };
+  }
+
 
 
   // ============================================================
@@ -4254,6 +4549,7 @@
     invalidateCardSnapshot: invalidateCardSnapshot,
     buildCardSnapshotFromCurrentResult: buildCardSnapshotFromCurrentResult,
     diagnoseCardSnapshotBuildFromCurrentResult: diagnoseCardSnapshotBuildFromCurrentResult,
+    buildRowsByIdFromLedgerForSnapshot: buildRowsByIdFromLedgerForSnapshot,
     readLedgerRuntimeCache: readLedgerRuntimeCache,
     getRuntimeCache: getRuntimeCache,
     writeLedgerRuntimeCache: writeLedgerRuntimeCache,
@@ -4275,6 +4571,7 @@
     buildAbonentSummaryAfterExplicitRecalc: buildAbonentSummaryAfterExplicitRecalc,
     recalcAbonentSummaryExplicit: recalcAbonentSummaryExplicit,
     recalculateAbonentCard: recalculateAbonentCard,
+    recalculateAbonentCardWithRows: recalculateAbonentCardWithRows,
     beginRecalcUidLock: beginRecalcUidLock,
     finishRecalcUidLock: finishRecalcUidLock,
     waitForServerFirstDataReady: waitForServerFirstDataReady,
