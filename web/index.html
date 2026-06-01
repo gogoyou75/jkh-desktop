@@ -239,6 +239,7 @@ Doc: docs/LOGIC_SPEC_v1.5.3.md
     <button id="summaryBatchRunBtn" type="button" title="Batch-пересчёт выбранных абонентов">Пересчитать выбранных абонентов</button>
     <button id="summarySnapshotSelectBtn" type="button">Выбрать UID без snapshot</button>
     <button id="summarySnapshotRunBtn" type="button" title="Пересчитать и сохранить card_snapshot для выбранных UID">Создать snapshot для выбранных</button>
+    <button id="summaryBatchClearBtn" type="button">Снять выбор</button>
     <button id="summaryBatchStopBtn" type="button" disabled>Остановить</button>
     <span id="summaryBatchCount">Нет выбранных UID</span>
     <div id="summaryBatchProgress" class="summary-batch-progress"></div>
@@ -1589,6 +1590,7 @@ function updateSummaryBatchPanel(){
     const selectBtn = document.getElementById("summaryBatchSelectStaleBtn");
     const snapshotSelectBtn = document.getElementById("summarySnapshotSelectBtn");
     const snapshotRunBtn = document.getElementById("summarySnapshotRunBtn");
+    const clearBtn = document.getElementById("summaryBatchClearBtn");
     const stopBtn = document.getElementById("summaryBatchStopBtn");
     if (!panel) return;
     const summaryMode = indexPassiveSummaryMode && indexSummaryState.mode === "summary";
@@ -1602,6 +1604,7 @@ function updateSummaryBatchPanel(){
     if (selectBtn) selectBtn.disabled = summaryBatchRunning || !staleOnPage;
     if (snapshotSelectBtn) snapshotSelectBtn.disabled = summaryBatchRunning || !snapshotOnPage;
     if (snapshotRunBtn) snapshotRunBtn.disabled = summaryBatchRunning || !selected.length;
+    if (clearBtn) clearBtn.disabled = summaryBatchRunning || !selected.length;
     if (stopBtn) stopBtn.disabled = !summaryBatchRunning || summaryBatchStopRequested;
     renderSummaryBatchProgress();
 }
@@ -1614,6 +1617,7 @@ function bindSummaryBatchPanelOnce(){
     const runBtn = document.getElementById("summaryBatchRunBtn");
     const snapshotSelectBtn = document.getElementById("summarySnapshotSelectBtn");
     const snapshotRunBtn = document.getElementById("summarySnapshotRunBtn");
+    const clearBtn = document.getElementById("summaryBatchClearBtn");
     const stopBtn = document.getElementById("summaryBatchStopBtn");
     const showErrorsBtn = document.getElementById("summaryBatchShowErrorsBtn");
     if (selectBtn) {
@@ -1636,6 +1640,12 @@ function bindSummaryBatchPanelOnce(){
     }
     if (runBtn) runBtn.onclick = function(){ runSelectedSummaryBatch({ mode: "summary" }); };
     if (snapshotRunBtn) snapshotRunBtn.onclick = function(){ runSelectedSummaryBatch({ mode: "snapshot" }); };
+    if (clearBtn) {
+        clearBtn.onclick = function(){
+            selectedUidsClear();
+            render();
+        };
+    }
     if (showErrorsBtn) {
         showErrorsBtn.onclick = function(){
             summaryBatchErrorsVisible = !summaryBatchErrorsVisible;
@@ -1929,6 +1939,9 @@ function renderSummaryBatchPerfTop10(){
                 account: s.account,
                 durationMs: Number(s.durationMs || 0),
                 profileTotalMs: Number(s.profileTotalMs || 0),
+                rowsByIdSource: String(s.rowsByIdSource || ""),
+                runtimeCacheHit: s.runtimeCacheHit === true,
+                runtimeCacheReason: String(s.runtimeCacheReason || ""),
                 slowest: summaryBatchSlowestProfileStep(s.profileSteps || []),
                 rowsBuildSlowest: summaryBatchSlowestProfileStep(s.rowsBuildProfileSteps || []),
                 calcTotalsAsOfAdjusted: summaryBatchCalcTotalsStats(s)
@@ -1941,6 +1954,9 @@ function renderSummaryBatchPerfTop10(){
         return "ЛС " + (s.account || "") +
             " / " + s.uid +
             ": " + Number(s.profileTotalMs || s.durationMs || 0) + "ms" +
+            "\n  source: " + (s.rowsByIdSource || "") +
+            ", cacheHit: " + (s.runtimeCacheHit === true ? "true" : "false") +
+            (s.runtimeCacheReason ? ", cache reason: " + s.runtimeCacheReason : "") +
             summaryBatchSlowestProfileText(s.profileSteps || []) +
             summaryBatchRowsBuildSlowestProfileText(s.rowsBuildProfileSteps || []) +
             summaryBatchCalcTotalsStatsText(s) +
@@ -2039,6 +2055,9 @@ async function processClientSummaryBatchJob(jobId, totalAccepted, mode){
                         profileSteps: Array.isArray(result && result.profileSteps) ? result.profileSteps : [],
                         rowsBuildProfileTotalMs: Number(result && result.rowsBuildProfileTotalMs || 0),
                         rowsBuildProfileSteps: Array.isArray(result && result.rowsBuildProfileSteps) ? result.rowsBuildProfileSteps : [],
+                        rowsByIdSource: String(result && result.rowsByIdSource || ""),
+                        runtimeCacheHit: result && result.runtimeCacheHit === true,
+                        runtimeCacheReason: String(result && result.runtimeCacheReason || ""),
                         calcTotalsAsOfAdjustedCallCount: Number(result && result.calcTotalsAsOfAdjustedCallCount || 0),
                         calcTotalsAsOfAdjustedCacheHits: Number(result && result.calcTotalsAsOfAdjustedCacheHits || 0),
                         calcTotalsAsOfAdjustedAvgMs: Number(result && result.calcTotalsAsOfAdjustedAvgMs || 0),
@@ -2283,7 +2302,7 @@ function render() {
         else if (r.rowStatusMark === "расчёт остановлен") tr.classList.add("row-stopped");
 
         const batchUid = getSummaryBatchUid(r);
-        const canBatchSelect = summaryMode && batchUid && isSummaryBatchStatus(r.summaryStatus);
+        const canBatchSelect = summaryMode && batchUid && (isSummaryBatchStatus(r.summaryStatus) || isSnapshotBackfillCandidate(r));
         const batchChecked = canBatchSelect && !!summaryBatchSelectedUids[batchUid];
 
         tr.innerHTML = `

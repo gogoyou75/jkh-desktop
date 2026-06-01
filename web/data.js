@@ -3756,6 +3756,128 @@
     });
   }
 
+  function validateSnapshotRuntimeCacheFastPath(abonentOrId, cache, context) {
+    var ctx = context || {};
+    var uid = String(ctx.uid || "").trim();
+    var abonentId = String(ctx.abonentId || "").trim();
+    var ledgerRows = Array.isArray(ctx.ledgerRows) ? ctx.ledgerRows : [];
+    var period = ctx.period && typeof ctx.period === "object" ? ctx.period : {};
+    var ledgerVersion = String(ctx.ledgerVersion || computeLedgerRuntimeVersion(abonentOrId));
+    var inputHash = String(ctx.inputHash || "");
+    var runtimeSignature = String(ctx.runtimeSignature || _runtimeCacheSignature(ledgerVersion, false, null));
+    var rowsById = cache && cache.rowsById && typeof cache.rowsById === "object" && !Array.isArray(cache.rowsById) ? cache.rowsById : {};
+    var rowsByIdCount = _cardSnapshotRowsByIdCount(rowsById);
+    var reason = "";
+    var valid = false;
+    if (!cache || typeof cache !== "object" || Array.isArray(cache)) {
+      reason = "RUNTIME_CACHE_MISSING";
+    } else if (rowsByIdCount <= 0) {
+      reason = "RUNTIME_CACHE_ROWS_MISSING";
+    } else {
+      var cachePeriod = cache.period && typeof cache.period === "object" ? cache.period : null;
+      var periodFrom = String(period.from || "");
+      var periodTo = String(period.to || "");
+      if (!cachePeriod || String(cachePeriod.from || "") !== periodFrom || String(cachePeriod.to || "") !== periodTo) {
+        reason = "RUNTIME_CACHE_PERIOD_MISMATCH";
+      } else if (inputHash && String(cache.inputHash || cache.input_hash || "") !== inputHash) {
+        reason = "RUNTIME_CACHE_INPUT_HASH_MISMATCH";
+      } else {
+        var visibleRows = ledgerRows.filter(function(row) {
+          return _snapshotRowInResponsibilityPeriod(row, period);
+        });
+        var validation = isLedgerRuntimeCacheValid(abonentOrId, cache, {
+          rows: ledgerRows,
+          visibleRows: visibleRows,
+          periodActive: false,
+          selectedPeriod: null,
+          runtimeSignature: runtimeSignature
+        });
+        valid = !!(validation && validation.valid === true);
+        reason = valid ? "OK" : String(validation && validation.reason || "RUNTIME_CACHE_INVALID");
+      }
+    }
+    try {
+      console.log("[snapshot][runtime-cache-fast-path]", {
+        uid: uid,
+        abonentId: abonentId,
+        cacheHit: valid,
+        reason: reason,
+        rowsByIdCount: rowsByIdCount,
+        ledgerVersion: ledgerVersion,
+        inputHash: inputHash,
+        runtimeSignature: runtimeSignature,
+        periodActive: false,
+        period: period
+      });
+    } catch(e) {}
+    return {
+      valid: valid,
+      reason: reason,
+      rowsById: valid ? rowsById : {},
+      rowsByIdCount: valid ? rowsByIdCount : 0,
+      ledgerVersion: ledgerVersion,
+      runtimeSignature: runtimeSignature,
+      periodActive: false,
+      period: period
+    };
+  }
+
+  function experimentalPlanRowsByIdIncrementalInputs(abonentOrId, ledgerRows, context) {
+    var ctx = context || {};
+    var found = _findAbonentByIdOrUid(abonentOrId);
+    var abonent = found && found.abonent ? found.abonent : null;
+    var uid = String(ctx.uid || abonent && (abonent.uid || abonent.account_uid || abonent.accountUid) || "").trim();
+    var rows = Array.isArray(ledgerRows) ? ledgerRows : [];
+    var period = ctx.period && typeof ctx.period === "object" ? ctx.period : {};
+    var visibleRows = period.from && period.to ? rows.filter(function(row) {
+      return _snapshotRowInResponsibilityPeriod(row, period);
+    }) : rows.slice();
+    var asOfKeys = {};
+    var monthKeys = {};
+    var firstAsOf = "";
+    var lastAsOf = "";
+    var hasPayments = false;
+    var hasAccruals = false;
+    var estimatedCurrentCalls = 0;
+    for (var i = 0; i < visibleRows.length; i++) {
+      var row = visibleRows[i] || {};
+      if (Math.abs(Number(row.paid || 0)) > 0.0000001) hasPayments = true;
+      if (Math.abs(Number(row.accrued || 0)) > 0.0000001) hasAccruals = true;
+      var monthKey = _snapshotRowMonthKey(row);
+      if (monthKey) monthKeys[monthKey] = true;
+      var rowId = String(row.id || "").trim();
+      var asOf = _snapshotAsOfDateForRow(row, period);
+      if (!rowId || !asOf || asOf.toString() === "Invalid Date") continue;
+      var asOfKey = asOf.getFullYear() + "-" + String(asOf.getMonth() + 1).padStart(2, "0") + "-" + String(asOf.getDate()).padStart(2, "0");
+      asOfKeys[asOfKey] = true;
+      estimatedCurrentCalls += 1;
+      if (!firstAsOf || asOfKey < firstAsOf) firstAsOf = asOfKey;
+      if (!lastAsOf || asOfKey > lastAsOf) lastAsOf = asOfKey;
+    }
+    var uniqueAsOfCount = Object.keys(asOfKeys).length;
+    var estimatedIncrementalSteps = visibleRows.length;
+    return {
+      uid: uid,
+      ledgerRowsCount: rows.length,
+      visibleRowsCount: visibleRows.length,
+      uniqueAsOfCount: uniqueAsOfCount,
+      monthCount: Object.keys(monthKeys).length,
+      firstAsOf: firstAsOf,
+      lastAsOf: lastAsOf,
+      hasPayments: hasPayments,
+      hasAccruals: hasAccruals,
+      estimatedCurrentCalls: estimatedCurrentCalls,
+      estimatedIncrementalSteps: estimatedIncrementalSteps,
+      possibleGain: estimatedIncrementalSteps > 0 ? Math.round((estimatedCurrentCalls / estimatedIncrementalSteps) * 100) / 100 : 0
+    };
+  }
+
+  // Stage 19.4E design note:
+  // computeRowsStateIncremental(rows, options) should sort ledger rows by exact asOf,
+  // walk chronologically, maintain obligation state, apply accruals/payments and
+  // penalty/exclusion effects incrementally, record rowsById at each asOf, then
+  // compare against calcTotalsAsOfAdjusted before any production switch.
+
   function resolveAbonentRegnumForSummary(abonentId, abonent) {
     function clean(v) { return String(v || "").trim(); }
 
@@ -4695,12 +4817,70 @@
     });
     var ledgerVersion = versionInfo.ledgerVersion;
     var versions = versionInfo.versions;
+    var runtimeSignature = _runtimeCacheSignature(ledgerVersion, false, null);
+    var periodDescriptor = { from: String(period.from || ""), to: String(period.to || "") };
+    var cacheFastPath = profiler.syncStep("runtime cache fast path", function() {
+      var cache = readLedgerRuntimeCache(abonentOrId, {
+        rows: ledgerRows,
+        visibleRows: ledgerRows.filter(function(row) { return _snapshotRowInResponsibilityPeriod(row, periodDescriptor); }),
+        periodActive: false,
+        selectedPeriod: null,
+        runtimeSignature: runtimeSignature
+      });
+      return validateSnapshotRuntimeCacheFastPath(abonentOrId, cache, {
+        uid: uid,
+        abonentId: abonentId,
+        ledgerRows: ledgerRows,
+        period: periodDescriptor,
+        ledgerVersion: ledgerVersion,
+        inputHash: versions.input_hash,
+        runtimeSignature: runtimeSignature
+      });
+    });
+    if (cacheFastPath && cacheFastPath.valid === true) {
+      var fastPayload = profiler.syncStep("return/build payload", function() {
+        return {
+          ok: true,
+          uid: uid,
+          abonentId: abonentId,
+          summary_status: summaryStatus,
+          summary_reason: summaryReason || "OK",
+          summary: summary,
+          save: summaryResult && summaryResult.save,
+          status: summaryStatus,
+          reason: summaryReason || "OK",
+          rowsById: cacheFastPath.rowsById,
+          ledgerVersion: ledgerVersion,
+          inputHash: versions.input_hash,
+          periodActive: false,
+          period: periodDescriptor,
+          ledgerRowsCount: ledgerRows.length,
+          rowsBuildDurationMs: 0,
+          rowsBuildProfileTotalMs: 0,
+          rowsBuildProfileSteps: [],
+          runtimeCacheHit: true,
+          runtimeCacheReason: cacheFastPath.reason || "OK",
+          filteredRowsCount: Number(cacheFastPath.rowsByIdCount || 0),
+          rowsByIdCount: _cardSnapshotRowsByIdCount(cacheFastPath.rowsById),
+          rowsByIdSource: "runtime_cache_fast_path",
+          responsibility: responsibility
+        };
+      });
+      return attachProfile(fastPayload, {
+        ledgerRowsCount: ledgerRows.length,
+        rowsByIdCount: fastPayload.rowsByIdCount,
+        rowsBuildDurationMs: 0,
+        runtimeCacheHit: true,
+        runtimeCacheReason: cacheFastPath.reason || "OK",
+        responsibility: responsibility
+      });
+    }
     var rowsResult = profiler.syncStep("buildRowsByIdFromLedgerForSnapshot", function() {
       return buildRowsByIdFromLedgerForSnapshot(ledgerRows, {
         uid: uid,
         abonentId: abonentId,
         regnum: responsibility && responsibility.regnum || resolveAbonentRegnumForSummary(abonentId, abonent),
-        period: { from: String(period.from || ""), to: String(period.to || "") },
+        period: periodDescriptor,
         ledgerRows: ledgerRows,
         summary: summary,
         ledgerVersion: ledgerVersion,
@@ -4721,7 +4901,7 @@
         ledgerVersion: ledgerVersion,
         inputHash: versions.input_hash,
         periodActive: false,
-        period: { from: String(period.from || ""), to: String(period.to || "") },
+        period: periodDescriptor,
         ledgerRowsCount: ledgerRows.length,
         rowsBuildDurationMs: Number(rowsResult && rowsResult.durationMs || 0),
         rowsBuildProfileTotalMs: Number(rowsResult && rowsResult.profileTotalMs || rowsResult && rowsResult.durationMs || 0),
@@ -4735,14 +4915,17 @@
         filteredRowsCount: Number(rowsResult && (rowsResult.filteredRowsCount || rowsResult.rowsCount) || 0),
         rowsByIdCount: 0,
         rowsByIdSource: "datajs_batch_rows_builder",
+        runtimeCacheHit: false,
+        runtimeCacheReason: cacheFastPath && cacheFastPath.reason || "RUNTIME_CACHE_MISSING",
         responsibility: responsibility
       }, { ledgerRowsCount: ledgerRows.length, rowsByIdCount: 0, rowsBuildDurationMs: Number(rowsResult && rowsResult.durationMs || 0), responsibility: responsibility });
     }
     var runtimePayload = {
       ledgerVersion: ledgerVersion,
       runtimeSignature: _runtimeCacheSignature(ledgerVersion, false, null),
+      inputHash: versions.input_hash,
       periodActive: false,
-      period: null,
+      period: periodDescriptor,
       rowsById: rowsResult.rowsById,
       updatedAt: (new Date()).toISOString()
     };
@@ -4766,7 +4949,7 @@
         ledgerVersion: ledgerVersion,
         inputHash: versions.input_hash,
         periodActive: false,
-        period: { from: String(period.from || ""), to: String(period.to || "") },
+        period: periodDescriptor,
         ledgerRowsCount: ledgerRows.length,
         rowsBuildDurationMs: Number(rowsResult && rowsResult.durationMs || 0),
         rowsBuildProfileTotalMs: Number(rowsResult && rowsResult.profileTotalMs || rowsResult && rowsResult.durationMs || 0),
@@ -4780,6 +4963,8 @@
         filteredRowsCount: Number(rowsResult && (rowsResult.filteredRowsCount || rowsResult.rowsCount) || 0),
         rowsByIdCount: _cardSnapshotRowsByIdCount(rowsResult.rowsById),
         rowsByIdSource: "datajs_batch_rows_builder",
+        runtimeCacheHit: false,
+        runtimeCacheReason: cacheFastPath && cacheFastPath.reason || "RUNTIME_CACHE_MISSING",
         responsibility: responsibility
       };
     });
@@ -4834,6 +5019,7 @@
     buildCardSnapshotFromCurrentResult: buildCardSnapshotFromCurrentResult,
     diagnoseCardSnapshotBuildFromCurrentResult: diagnoseCardSnapshotBuildFromCurrentResult,
     buildRowsByIdFromLedgerForSnapshot: buildRowsByIdFromLedgerForSnapshot,
+    experimentalPlanRowsByIdIncrementalInputs: experimentalPlanRowsByIdIncrementalInputs,
     readLedgerRuntimeCache: readLedgerRuntimeCache,
     getRuntimeCache: getRuntimeCache,
     writeLedgerRuntimeCache: writeLedgerRuntimeCache,
