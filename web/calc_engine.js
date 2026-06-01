@@ -1102,6 +1102,218 @@
     return out;
   }
 
+  function computeRowsStateIncremental(ledgerRows, options) {
+    const opts = options || {};
+    const t0 = (window.performance && performance.now) ? performance.now() : Date.now();
+    const steps = [];
+    function now(){ return (window.performance && performance.now) ? performance.now() : Date.now(); }
+    function step(name, fn){
+      const s0 = now();
+      try{
+        const value = fn();
+        steps.push({ name, ms: Math.round(now() - s0), ok: true });
+        return value;
+      }catch(e){
+        steps.push({ name, ms: Math.round(now() - s0), ok: false, error: String(e && e.message || e) });
+        throw e;
+      }
+    }
+    function rowAsOfDate(row){
+      const paid = parseDateAnyToDate(row && row.paid_date);
+      if (paid) return startOfDay(paid);
+      const y = parseInt(row && row.year, 10);
+      const m = parseInt(row && row.month, 10);
+      if (Number.isFinite(y) && Number.isFinite(m) && y > 0 && m >= 1 && m <= 12) return endOfMonthDate(y, m);
+      return parseDateAnyToDate(opts.period && opts.period.to);
+    }
+    function toMonthKeyISO(iso){
+      if (!iso || typeof iso !== "string") return null;
+      const m = iso.match(/^(\d{4})-(\d{2})/);
+      return m ? (m[1] + "-" + m[2]) : null;
+    }
+    function pickRowPeriod(row){
+      const pf = row.period_from || row.pay_period_from || row.for_period_from || row.periodFrom || row.from_period || row.from || "";
+      const pt = row.period_to   || row.pay_period_to   || row.for_period_to   || row.periodTo   || row.to_period   || row.to   || "";
+      const mkFrom = toMonthKeyISO(pf);
+      const mkTo = toMonthKeyISO(pt);
+      if (mkFrom || mkTo) return { mkFrom: mkFrom || mkTo, mkTo: mkTo || mkFrom };
+      return null;
+    }
+    function buildPaymentEventsPure(rows){
+      const pays = [];
+      const globalPeriod = opts.globalPeriod && typeof opts.globalPeriod === "object" ? opts.globalPeriod : null;
+      for (const row of rows){
+        const paid = toNum(row && row.paid);
+        if (paid <= 0) continue;
+        const d = parseDateAnyToDate(row && row.paid_date);
+        if (!d) continue;
+        const payMonthKey = d.getFullYear() + "-" + pad2(d.getMonth() + 1);
+        let minKey = "0000-00";
+        let maxKey = payMonthKey;
+        const rp = pickRowPeriod(row || {});
+        if (rp){
+          minKey = rp.mkFrom || minKey;
+          maxKey = rp.mkTo || maxKey;
+        }else if (globalPeriod){
+          const gFrom = toMonthKeyISO(globalPeriod.from);
+          const gTo = toMonthKeyISO(globalPeriod.to);
+          if (gFrom || gTo){
+            minKey = gFrom || minKey;
+            maxKey = gTo || maxKey;
+          }
+        }
+        pays.push({ date: startOfDay(d), amount: r2(paid), rowId: row && row.id, minKey, maxKey, payMonthKey });
+      }
+      pays.sort((a,b)=>a.date-b.date || (Number(a.rowId)||0)-(Number(b.rowId)||0));
+      return pays;
+    }
+    function cloneObligation(ob){
+      return { key: ob.key, amount: ob.amount, dueDate: ob.dueDate, applications: [] };
+    }
+    function adjustedFromCore(core, asOfDate){
+      let principal = core.principalAdj;
+      let penaltyDebt = core.penaltyAccruedTotal;
+      const tb = opts.transferBalance || null;
+      if (tb){
+        const asOfISO = `${asOfDate.getFullYear()}-${pad2(asOfDate.getMonth()+1)}-${pad2(asOfDate.getDate())}`;
+        if (asOfISO >= String(tb.startDate || "")){
+          principal = r2(principal + toNum(tb.principal));
+          penaltyDebt = r2(penaltyDebt + toNum(tb.penalty));
+        }
+      }
+      if (principal < 0){
+        let extra = r2(-principal);
+        const usedOnPenalty = r2(Math.min(extra, penaltyDebt));
+        penaltyDebt = r2(Math.max(penaltyDebt - usedOnPenalty, 0));
+        extra = r2(extra - usedOnPenalty);
+        principal = opts.allowNegativePrincipal ? r2(-extra) : 0;
+      }
+      return { principal: r2(principal), penaltyDebt: r2(penaltyDebt), total: r2(principal + penaltyDebt) };
+    }
+
+    try{
+      const rows = step("normalize rows", function(){
+        return Array.isArray(ledgerRows) ? ledgerRows.slice() : [];
+      });
+      const rowEvents = step("resolve asOf events", function(){
+        return rows.map(function(row, index){
+          const asOf = rowAsOfDate(row);
+          return { row, index, rowId: String(row && row.id || "").trim(), asOf };
+        }).filter(function(ev){ return ev.rowId && ev.asOf && ev.asOf.toString() !== "Invalid Date"; });
+      });
+      const byAsOf = step("group by exact asOf", function(){
+        const map = new Map();
+        for (const ev of rowEvents){
+          const key = `${ev.asOf.getFullYear()}-${pad2(ev.asOf.getMonth()+1)}-${pad2(ev.asOf.getDate())}`;
+          if (!map.has(key)) map.set(key, []);
+          map.get(key).push(ev);
+        }
+        return map;
+      });
+      const allowedYm = step("resolve responsibility months", function(){
+        const range = opts.responsibilityRange && typeof opts.responsibilityRange === "object" ? opts.responsibilityRange : null;
+        if (!range || !range.from) return null;
+        const ms = monthIter(range.from, range.to);
+        return new Set(ms.map(m => `${m.year}-${m.month}`));
+      });
+      const allObligations = step("build obligations", function(){
+        // Obligation is created once per ledger month with accrued amount and due date.
+        return buildObligationsFromRows(rows, allowedYm);
+      });
+      const paymentsAll = step("build payments", function(){
+        // Payment events keep exact paid_date and use_period/pay_for_period limits.
+        return buildPaymentEventsPure(rows);
+      });
+      const excludes = Array.isArray(opts.excludes) ? opts.excludes : [];
+      const rates = Array.isArray(opts.rates) ? opts.rates : [];
+      const freezeDate = opts.freezeTo ? parseDateAnyToDate(opts.freezeTo) : null;
+      const rowsById = {};
+      const state = {
+        currentDate: null,
+        // Experimental state model for Stage 19.4E. The current implementation
+        // recomputes per unique asOf from prebuilt obligations/payments; Stage 19.4F
+        // can replace this with true rolling obligation state after compare parity.
+        obligations: new Map(),
+        currentPrincipal: 0,
+        currentPenalty: 0,
+        remainingAdvance: 0
+      };
+      step("compute rowsById by asOf", function(){
+        const dates = Array.from(byAsOf.keys()).sort();
+        for (const key of dates){
+          const events = byAsOf.get(key) || [];
+          const asOfRaw = events[0] && events[0].asOf;
+          const asOfEff = freezeDate ? minDateObj(asOfRaw, freezeDate) : asOfRaw;
+          const asOfDay = startOfDay(asOfEff);
+          const asOfYm = `${asOfEff.getFullYear()}-${pad2(asOfEff.getMonth()+1)}`;
+          const obligations = allObligations.filter(ob => String(ob.key || "") <= asOfYm).map(cloneObligation);
+          const payments = paymentsAll.filter(p => p && p.date && p.date.getTime() <= asOfDay.getTime());
+          // Payments are applied FIFO to principal with the same use_period month limits.
+          const advances = allocatePaymentsFIFO(obligations, payments);
+          const advanceUpTo = r2((advances || []).reduce((sum, a) => {
+            if (a && a.date && a.date.getTime() <= asOfDay.getTime()) return sum + toNum(a.amount);
+            return sum;
+          }, 0));
+          let principalTotal = 0;
+          let penaltyTotal = 0;
+          for (const ob of obligations){
+            sortApplications(ob);
+            const applied = sumAppliedUpTo(ob, asOfDay);
+            principalTotal += Math.max(ob.amount - applied, 0);
+            // Penalty accrual uses exact day iteration, excludes, moratorium rates,
+            // and the 30/90 day denominator rules from calcPenaltyForObligation.
+            penaltyTotal += calcPenaltyForObligation(ob, asOfEff, excludes, rates);
+            state.obligations.set(ob.key, {
+              monthKey: ob.key,
+              amount: ob.amount,
+              dueDate: ob.dueDate,
+              remainingPrincipal: r2(Math.max(ob.amount - applied, 0)),
+              penaltyAccrued: r2(penaltyTotal),
+              lastPenaltyDate: asOfDay
+            });
+          }
+          const principalAdj = opts.applyAdvanceOffset ? r2(principalTotal - advanceUpTo) : r2(principalTotal);
+          const adjusted = adjustedFromCore({ principalAdj, penaltyAccruedTotal: r2(penaltyTotal), advanceUpTo }, asOfEff);
+          state.currentDate = asOfDay;
+          state.currentPrincipal = adjusted.principal;
+          state.currentPenalty = adjusted.penaltyDebt;
+          state.remainingAdvance = r2(advanceUpTo || 0);
+          for (const ev of events){
+            rowsById[ev.rowId] = {
+              pay_main: adjusted.principal,
+              pay_penalty: adjusted.penaltyDebt,
+              total: adjusted.total
+            };
+          }
+        }
+        return rowsById;
+      });
+      const totalMs = Math.round(now() - t0);
+      return {
+        ok: true,
+        rowsById,
+        rowsCount: rows.length,
+        reason: "OK",
+        profile: { totalMs, steps },
+        diagnostics: {
+          ledgerRowsCount: rows.length,
+          uniqueAsOfCount: byAsOf.size,
+          obligationsCount: allObligations.length,
+          paymentsCount: paymentsAll.length
+        }
+      };
+    }catch(e){
+      return {
+        ok: false,
+        rowsById: {},
+        rowsCount: Array.isArray(ledgerRows) ? ledgerRows.length : 0,
+        reason: String(e && (e.code || e.message) || e || "INCREMENTAL_ROWS_BUILD_FAILED"),
+        profile: { totalMs: Math.round(now() - t0), steps },
+        diagnostics: { ledgerRowsCount: Array.isArray(ledgerRows) ? ledgerRows.length : 0, uniqueAsOfCount: 0, obligationsCount: 0, paymentsCount: 0 }
+      };
+    }
+  }
+
 
   window.JKHCalcEngine = {
     pad2, r2, toNum,
@@ -1118,6 +1330,7 @@
     loadRates,
     calcTotalsAsOfAdjusted,
     calcTotalsAsOfCore,
+    computeRowsStateIncremental,
     buildCourtViewRows,
     calcPenaltyBreakdownBySourceMonth,
     // TRANSFER API

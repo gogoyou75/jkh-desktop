@@ -3529,6 +3529,9 @@
     };
   }
 
+  if (typeof window.JKH_SNAPSHOT_COMPARE_INCREMENTAL === "undefined") window.JKH_SNAPSHOT_COMPARE_INCREMENTAL = false;
+  if (typeof window.JKH_SNAPSHOT_USE_INCREMENTAL_ROWS === "undefined") window.JKH_SNAPSHOT_USE_INCREMENTAL_ROWS = false;
+
   function buildRowsByIdFromLedgerForSnapshot(ledgerRows, context) {
     var t0 = (window.performance && performance.now) ? performance.now() : Date.now();
     var rowProfileSteps = [];
@@ -3870,6 +3873,167 @@
       estimatedIncrementalSteps: estimatedIncrementalSteps,
       possibleGain: estimatedIncrementalSteps > 0 ? Math.round((estimatedCurrentCalls / estimatedIncrementalSteps) * 100) / 100 : 0
     };
+  }
+
+  function _readExperimentalGlobalCalcPeriod(abonentOrId) {
+    try {
+      var activeKey = resolveCalcPeriodActiveStorageKey(abonentOrId);
+      if (!activeKey || String(_getProjectRaw(activeKey) || "0") !== "1") return null;
+      var periodKey = resolveCalcPeriodStorageKey(abonentOrId);
+      var raw = periodKey ? _getProjectRaw(periodKey) : null;
+      if (!raw) return null;
+      var obj = JSON.parse(String(raw));
+      if (!obj || typeof obj !== "object") return null;
+      return { from: String(obj.from || ""), to: String(obj.to || "") };
+    } catch(e) {
+      return null;
+    }
+  }
+
+  function _readExperimentalFreezeTo(abonentId) {
+    try {
+      var raw = _getProjectRaw("jkh_freeze_to_v1:" + String(abonentId || ""));
+      var v = String(raw || "").trim();
+      return /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : "";
+    } catch(e) {
+      return "";
+    }
+  }
+
+  function _readExperimentalTransferBalance(abonentId, regnum) {
+    try {
+      var id = String(abonentId || "").trim();
+      var rn = String(regnum || "").trim();
+      if (!id || !rn) return null;
+      var raw = _getProjectRaw("jkh_transfer_balance_v1:" + id + ":" + rn);
+      if (!raw) return null;
+      var obj = JSON.parse(String(raw));
+      if (!obj || typeof obj !== "object" || Array.isArray(obj)) return null;
+      var startDate = String(obj.startDate || "").trim();
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(startDate)) return null;
+      return {
+        startDate: startDate,
+        principal: Number(obj.principal || 0),
+        penalty: Number(obj.penalty || 0),
+        regnum: String(obj.regnum || rn),
+        fromAbonentId: String(obj.fromAbonentId || ""),
+        mode: String(obj.mode || "")
+      };
+    } catch(e) {
+      return null;
+    }
+  }
+
+  function experimentalBuildRowsByIdIncremental(ledgerRows, context) {
+    var ctx = context || {};
+    var uid = String(ctx.uid || "").trim();
+    var abonentId = String(ctx.abonentId || "").trim();
+    var regnum = String(ctx.regnum || "").trim();
+    var t0 = (window.performance && performance.now) ? performance.now() : Date.now();
+    if (!window.JKHCalcEngine || typeof window.JKHCalcEngine.computeRowsStateIncremental !== "function") {
+      return { ok: false, rowsById: {}, reason: "INCREMENTAL_ENGINE_UNAVAILABLE", profile: { totalMs: 0, steps: [] }, diagnostics: {} };
+    }
+    var result = null;
+    try {
+      var options = {
+        uid: uid,
+        abonentId: abonentId,
+        period: ctx.period || null,
+        responsibilityRange: ctx.period || null,
+        excludes: typeof window.JKHCalcEngine.loadExcludes === "function" ? window.JKHCalcEngine.loadExcludes(abonentId) : [],
+        rates: typeof window.JKHCalcEngine.loadRates === "function" ? window.JKHCalcEngine.loadRates(abonentId) : [],
+        globalPeriod: _readExperimentalGlobalCalcPeriod(ctx.abonentOrId || uid || abonentId),
+        freezeTo: _readExperimentalFreezeTo(abonentId),
+        transferBalance: _readExperimentalTransferBalance(abonentId, regnum),
+        applyAdvanceOffset: true,
+        allowNegativePrincipal: true
+      };
+      result = window.JKHCalcEngine.computeRowsStateIncremental(ledgerRows, options);
+    } catch(e) {
+      result = { ok: false, rowsById: {}, reason: String(e && (e.code || e.message) || e || "INCREMENTAL_ROWS_BUILD_FAILED"), profile: { totalMs: Math.round(((window.performance && performance.now) ? performance.now() : Date.now()) - t0), steps: [] }, diagnostics: {} };
+    }
+    var rowsById = result && result.rowsById && typeof result.rowsById === "object" && !Array.isArray(result.rowsById) ? result.rowsById : {};
+    var totalMs = Math.round(((window.performance && performance.now) ? performance.now() : Date.now()) - t0);
+    var out = {
+      ok: !!(result && result.ok === true),
+      rowsById: rowsById,
+      rowsCount: Array.isArray(ledgerRows) ? ledgerRows.length : 0,
+      rowsByIdCount: _cardSnapshotRowsByIdCount(rowsById),
+      reason: String(result && result.reason || ""),
+      profile: result && result.profile || { totalMs: totalMs, steps: [] },
+      diagnostics: result && result.diagnostics || {}
+    };
+    try {
+      console.log("[snapshot][incremental-profile]", {
+        uid: uid,
+        totalMs: Number(out.profile && out.profile.totalMs || totalMs),
+        ledgerRowsCount: out.rowsCount,
+        rowsByIdCount: out.rowsByIdCount,
+        oldTotalMs: Number(ctx.oldTotalMs || 0),
+        speedupEstimate: Number(ctx.oldTotalMs || 0) > 0 && Number(out.profile && out.profile.totalMs || totalMs) > 0
+          ? Math.round((Number(ctx.oldTotalMs || 0) / Number(out.profile && out.profile.totalMs || totalMs)) * 100) / 100
+          : 0
+      });
+    } catch(eLog) {}
+    return out;
+  }
+
+  function compareRowsByIdForSnapshot(uid, abonentId, oldRowsById, newRowsById, ledgerRows) {
+    var oldRows = oldRowsById && typeof oldRowsById === "object" && !Array.isArray(oldRowsById) ? oldRowsById : {};
+    var newRows = newRowsById && typeof newRowsById === "object" && !Array.isArray(newRowsById) ? newRowsById : {};
+    var rowById = {};
+    (Array.isArray(ledgerRows) ? ledgerRows : []).forEach(function(row) {
+      var id = String(row && row.id || "").trim();
+      if (id) rowById[id] = row;
+    });
+    var idsMap = {};
+    Object.keys(oldRows).forEach(function(id) { idsMap[id] = true; });
+    Object.keys(newRows).forEach(function(id) { idsMap[id] = true; });
+    var ids = Object.keys(idsMap);
+    var diff = {
+      uid: String(uid || ""),
+      abonentId: String(abonentId || ""),
+      totalRows: ids.length,
+      matchedRows: 0,
+      mismatchedRows: 0,
+      missingInOld: [],
+      missingInNew: [],
+      maxDelta: 0,
+      samples: []
+    };
+    var fields = ["pay_main", "pay_penalty", "total"];
+    ids.forEach(function(id) {
+      var oldItem = oldRows[id];
+      var newItem = newRows[id];
+      if (!oldItem) {
+        diff.missingInOld.push(id);
+        diff.mismatchedRows += 1;
+        if (diff.samples.length < 20) diff.samples.push({ rowId: id, field: "row", oldValue: null, newValue: newItem, delta: null, row: rowById[id] || null });
+        return;
+      }
+      if (!newItem) {
+        diff.missingInNew.push(id);
+        diff.mismatchedRows += 1;
+        if (diff.samples.length < 20) diff.samples.push({ rowId: id, field: "row", oldValue: oldItem, newValue: null, delta: null, row: rowById[id] || null });
+        return;
+      }
+      var rowMismatch = false;
+      fields.forEach(function(field) {
+        var oldValue = Number(oldItem && oldItem[field]);
+        var newValue = Number(newItem && newItem[field]);
+        var delta = Math.abs((Number.isFinite(oldValue) ? oldValue : 0) - (Number.isFinite(newValue) ? newValue : 0));
+        if (delta > diff.maxDelta) diff.maxDelta = delta;
+        if (delta > 0.01) {
+          rowMismatch = true;
+          if (diff.samples.length < 20) {
+            diff.samples.push({ rowId: id, field: field, oldValue: oldValue, newValue: newValue, delta: delta, row: rowById[id] || null });
+          }
+        }
+      });
+      if (rowMismatch) diff.mismatchedRows += 1;
+      else diff.matchedRows += 1;
+    });
+    return diff;
   }
 
   // Stage 19.4E design note:
@@ -4920,6 +5084,44 @@
         responsibility: responsibility
       }, { ledgerRowsCount: ledgerRows.length, rowsByIdCount: 0, rowsBuildDurationMs: Number(rowsResult && rowsResult.durationMs || 0), responsibility: responsibility });
     }
+    var incrementalCompare = null;
+    var incrementalResult = null;
+    var compareIncremental = window.JKH_SNAPSHOT_COMPARE_INCREMENTAL === true || window.JKH_SNAPSHOT_USE_INCREMENTAL_ROWS === true;
+    if (compareIncremental) {
+      incrementalResult = experimentalBuildRowsByIdIncremental(ledgerRows, {
+        uid: uid,
+        abonentId: abonentId,
+        abonentOrId: abonentOrId,
+        regnum: responsibility && responsibility.regnum || resolveAbonentRegnumForSummary(abonentId, abonent),
+        period: periodDescriptor,
+        oldTotalMs: Number(rowsResult && rowsResult.durationMs || 0)
+      });
+      incrementalCompare = compareRowsByIdForSnapshot(uid, abonentId, rowsResult.rowsById, incrementalResult && incrementalResult.rowsById, ledgerRows);
+      var incrementalSummary = {
+        uid: uid,
+        abonentId: abonentId,
+        oldRowsByIdCount: _cardSnapshotRowsByIdCount(rowsResult.rowsById),
+        newRowsByIdCount: incrementalResult ? incrementalResult.rowsByIdCount : 0,
+        oldTotalMs: Number(rowsResult && rowsResult.durationMs || 0),
+        newTotalMs: Number(incrementalResult && incrementalResult.profile && incrementalResult.profile.totalMs || 0),
+        diffCount: Number(incrementalCompare && incrementalCompare.mismatchedRows || 0),
+        maxDelta: Number(incrementalCompare && incrementalCompare.maxDelta || 0)
+      };
+      if (incrementalCompare && incrementalCompare.mismatchedRows > 0) {
+        try { console.error("[snapshot][incremental-compare-failed]", incrementalCompare); } catch(eIncFail) {}
+      } else {
+        try { console.log("[snapshot][incremental-compare-ok]", incrementalSummary); } catch(eIncOk) {}
+      }
+      if (window.JKH_SNAPSHOT_USE_INCREMENTAL_ROWS === true && incrementalResult && incrementalResult.ok === true && incrementalCompare && incrementalCompare.mismatchedRows === 0) {
+        rowsResult = Object.assign({}, rowsResult, {
+          rowsById: incrementalResult.rowsById,
+          rowsByIdSource: "experimental_incremental_rows_builder",
+          durationMs: Number(incrementalResult.profile && incrementalResult.profile.totalMs || rowsResult.durationMs || 0),
+          profileTotalMs: Number(incrementalResult.profile && incrementalResult.profile.totalMs || rowsResult.profileTotalMs || 0),
+          profileSteps: incrementalResult.profile && Array.isArray(incrementalResult.profile.steps) ? incrementalResult.profile.steps : rowsResult.profileSteps
+        });
+      }
+    }
     var runtimePayload = {
       ledgerVersion: ledgerVersion,
       runtimeSignature: _runtimeCacheSignature(ledgerVersion, false, null),
@@ -4954,6 +5156,8 @@
         rowsBuildDurationMs: Number(rowsResult && rowsResult.durationMs || 0),
         rowsBuildProfileTotalMs: Number(rowsResult && rowsResult.profileTotalMs || rowsResult && rowsResult.durationMs || 0),
         rowsBuildProfileSteps: Array.isArray(rowsResult && rowsResult.profileSteps) ? rowsResult.profileSteps : [],
+        incrementalCompare: incrementalCompare,
+        incrementalProfile: incrementalResult && incrementalResult.profile || null,
         calcTotalsAsOfAdjustedCallCount: Number(rowsResult && rowsResult.calcTotalsAsOfAdjustedCallCount || 0),
         calcTotalsAsOfAdjustedCacheHits: Number(rowsResult && rowsResult.calcTotalsAsOfAdjustedCacheHits || 0),
         calcTotalsAsOfAdjustedTotalMs: Number(rowsResult && rowsResult.calcTotalsAsOfAdjustedTotalMs || 0),
@@ -4962,7 +5166,7 @@
         uniqueAsOfKeys: Number(rowsResult && rowsResult.uniqueAsOfKeys || 0),
         filteredRowsCount: Number(rowsResult && (rowsResult.filteredRowsCount || rowsResult.rowsCount) || 0),
         rowsByIdCount: _cardSnapshotRowsByIdCount(rowsResult.rowsById),
-        rowsByIdSource: "datajs_batch_rows_builder",
+        rowsByIdSource: String(rowsResult && rowsResult.rowsByIdSource || "datajs_batch_rows_builder"),
         runtimeCacheHit: false,
         runtimeCacheReason: cacheFastPath && cacheFastPath.reason || "RUNTIME_CACHE_MISSING",
         responsibility: responsibility
@@ -5020,6 +5224,7 @@
     diagnoseCardSnapshotBuildFromCurrentResult: diagnoseCardSnapshotBuildFromCurrentResult,
     buildRowsByIdFromLedgerForSnapshot: buildRowsByIdFromLedgerForSnapshot,
     experimentalPlanRowsByIdIncrementalInputs: experimentalPlanRowsByIdIncrementalInputs,
+    experimentalBuildRowsByIdIncremental: experimentalBuildRowsByIdIncremental,
     readLedgerRuntimeCache: readLedgerRuntimeCache,
     getRuntimeCache: getRuntimeCache,
     writeLedgerRuntimeCache: writeLedgerRuntimeCache,
