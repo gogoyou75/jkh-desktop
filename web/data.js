@@ -3531,6 +3531,7 @@
 
   if (typeof window.JKH_SNAPSHOT_COMPARE_INCREMENTAL === "undefined") window.JKH_SNAPSHOT_COMPARE_INCREMENTAL = false;
   if (typeof window.JKH_SNAPSHOT_USE_INCREMENTAL_ROWS === "undefined") window.JKH_SNAPSHOT_USE_INCREMENTAL_ROWS = false;
+  if (typeof window.JKH_SNAPSHOT_COMPARE_INCREMENTAL_V2 === "undefined") window.JKH_SNAPSHOT_COMPARE_INCREMENTAL_V2 = false;
 
   function buildRowsByIdFromLedgerForSnapshot(ledgerRows, context) {
     var t0 = (window.performance && performance.now) ? performance.now() : Date.now();
@@ -3978,9 +3979,83 @@
     return out;
   }
 
-  function compareRowsByIdForSnapshot(uid, abonentId, oldRowsById, newRowsById, ledgerRows) {
+  function experimentalBuildRowsByIdIncrementalV2(ledgerRows, context) {
+    var ctx = context || {};
+    var uid = String(ctx.uid || "").trim();
+    var abonentId = String(ctx.abonentId || "").trim();
+    var regnum = String(ctx.regnum || "").trim();
+    var t0 = (window.performance && performance.now) ? performance.now() : Date.now();
+    if (!window.JKHCalcEngine || typeof window.JKHCalcEngine.computeRowsStateIncrementalV2 !== "function") {
+      var failed = { ok: false, rowsById: {}, rowsCount: Array.isArray(ledgerRows) ? ledgerRows.length : 0, rowsByIdCount: 0, reason: "INCREMENTAL_V2_ENGINE_UNAVAILABLE", profile: { totalMs: 0, steps: [] }, diagnostics: {} };
+      try {
+        console.error("[snapshot][incremental-v2-profile-failed]", {
+          uid: uid,
+          reason: failed.reason,
+          ledgerRowsCount: failed.rowsCount,
+          oldTotalMs: Number(ctx.oldTotalMs || 0)
+        });
+      } catch(eFailedLog) {}
+      return failed;
+    }
+    var result = null;
+    try {
+      var options = {
+        uid: uid,
+        abonentId: abonentId,
+        period: ctx.period || null,
+        responsibilityRange: ctx.period || null,
+        excludes: typeof window.JKHCalcEngine.loadExcludes === "function" ? window.JKHCalcEngine.loadExcludes(abonentId) : [],
+        rates: typeof window.JKHCalcEngine.loadRates === "function" ? window.JKHCalcEngine.loadRates(abonentId) : [],
+        globalPeriod: _readExperimentalGlobalCalcPeriod(ctx.abonentOrId || uid || abonentId),
+        freezeTo: _readExperimentalFreezeTo(abonentId),
+        transferBalance: _readExperimentalTransferBalance(abonentId, regnum),
+        applyAdvanceOffset: true,
+        allowNegativePrincipal: true
+      };
+      result = window.JKHCalcEngine.computeRowsStateIncrementalV2(ledgerRows, options);
+    } catch(e) {
+      result = { ok: false, rowsById: {}, reason: String(e && (e.code || e.message) || e || "INCREMENTAL_V2_ROWS_BUILD_FAILED"), profile: { totalMs: Math.round(((window.performance && performance.now) ? performance.now() : Date.now()) - t0), steps: [] }, diagnostics: {} };
+    }
+    var rowsById = result && result.rowsById && typeof result.rowsById === "object" && !Array.isArray(result.rowsById) ? result.rowsById : {};
+    var totalMs = Math.round(((window.performance && performance.now) ? performance.now() : Date.now()) - t0);
+    var out = {
+      ok: !!(result && result.ok === true),
+      rowsById: rowsById,
+      rowsCount: Array.isArray(ledgerRows) ? ledgerRows.length : 0,
+      rowsByIdCount: _cardSnapshotRowsByIdCount(rowsById),
+      reason: String(result && result.reason || ""),
+      profile: result && result.profile || { totalMs: totalMs, steps: [] },
+      diagnostics: result && result.diagnostics || {}
+    };
+    try {
+      console.log("[snapshot][incremental-v2-profile]", {
+        uid: uid,
+        totalMs: Number(out.profile && out.profile.totalMs || totalMs),
+        ledgerRowsCount: out.rowsCount,
+        rowsByIdCount: out.rowsByIdCount,
+        diagnostics: out.diagnostics,
+        oldTotalMs: Number(ctx.oldTotalMs || 0)
+      });
+    } catch(eLog) {}
+    if (out.ok !== true) {
+      try {
+        console.error("[snapshot][incremental-v2-profile-failed]", {
+          uid: uid,
+          reason: out.reason,
+          ledgerRowsCount: out.rowsCount,
+          rowsByIdCount: out.rowsByIdCount,
+          diagnostics: out.diagnostics,
+          oldTotalMs: Number(ctx.oldTotalMs || 0)
+        });
+      } catch(eFailed) {}
+    }
+    return out;
+  }
+
+  function compareRowsByIdForSnapshot(uid, abonentId, oldRowsById, newRowsById, ledgerRows, logLabel) {
     var oldRows = oldRowsById && typeof oldRowsById === "object" && !Array.isArray(oldRowsById) ? oldRowsById : {};
     var newRows = newRowsById && typeof newRowsById === "object" && !Array.isArray(newRowsById) ? newRowsById : {};
+    var singleMismatchLabel = String(logLabel || "incremental-compare");
     var rowById = {};
     (Array.isArray(ledgerRows) ? ledgerRows : []).forEach(function(row) {
       var id = String(row && row.id || "").trim();
@@ -4008,13 +4083,13 @@
       if (!oldItem) {
         diff.missingInOld.push(id);
         diff.mismatchedRows += 1;
-        if (diff.samples.length < 20) diff.samples.push({ rowId: id, field: "row", oldValue: null, newValue: newItem, delta: null, row: rowById[id] || null });
+        if (diff.samples.length < 20) diff.samples.push({ rowId: id, field: "row", oldValue: null, newValue: newItem, delta: null, oldRow: null, newRow: newItem, ledgerRow: rowById[id] || null, row: rowById[id] || null });
         return;
       }
       if (!newItem) {
         diff.missingInNew.push(id);
         diff.mismatchedRows += 1;
-        if (diff.samples.length < 20) diff.samples.push({ rowId: id, field: "row", oldValue: oldItem, newValue: null, delta: null, row: rowById[id] || null });
+        if (diff.samples.length < 20) diff.samples.push({ rowId: id, field: "row", oldValue: oldItem, newValue: null, delta: null, oldRow: oldItem, newRow: null, ledgerRow: rowById[id] || null, row: rowById[id] || null });
         return;
       }
       var rowMismatch = false;
@@ -4026,7 +4101,7 @@
         if (delta > 0.01) {
           rowMismatch = true;
           if (diff.samples.length < 20) {
-            diff.samples.push({ rowId: id, field: field, oldValue: oldValue, newValue: newValue, delta: delta, row: rowById[id] || null });
+            diff.samples.push({ rowId: id, field: field, oldValue: oldValue, newValue: newValue, delta: delta, oldRow: oldItem, newRow: newItem, ledgerRow: rowById[id] || null, row: rowById[id] || null });
           }
         }
       });
@@ -4035,7 +4110,7 @@
     });
     if (diff && diff.mismatchedRows === 1 && Array.isArray(diff.samples) && diff.samples.length) {
       try {
-        console.error("[incremental-compare] single mismatch", {
+        console.error("[" + singleMismatchLabel + "] single mismatch", {
           uid: String(uid || ""),
           rowId: diff.samples[0].rowId,
           field: diff.samples[0].field,
@@ -5099,8 +5174,11 @@
         responsibility: responsibility
       }, { ledgerRowsCount: ledgerRows.length, rowsByIdCount: 0, rowsBuildDurationMs: Number(rowsResult && rowsResult.durationMs || 0), responsibility: responsibility });
     }
+    var rowsResultBaseline = rowsResult;
     var incrementalCompare = null;
     var incrementalResult = null;
+    var incrementalV2Compare = null;
+    var incrementalV2Result = null;
     var compareIncremental = window.JKH_SNAPSHOT_COMPARE_INCREMENTAL === true || window.JKH_SNAPSHOT_USE_INCREMENTAL_ROWS === true;
     if (compareIncremental) {
       incrementalResult = experimentalBuildRowsByIdIncremental(ledgerRows, {
@@ -5135,6 +5213,33 @@
           profileTotalMs: Number(incrementalResult.profile && incrementalResult.profile.totalMs || rowsResult.profileTotalMs || 0),
           profileSteps: incrementalResult.profile && Array.isArray(incrementalResult.profile.steps) ? incrementalResult.profile.steps : rowsResult.profileSteps
         });
+      }
+    }
+    if (window.JKH_SNAPSHOT_COMPARE_INCREMENTAL_V2 === true) {
+      incrementalV2Result = experimentalBuildRowsByIdIncrementalV2(ledgerRows, {
+        uid: uid,
+        abonentId: abonentId,
+        abonentOrId: abonentOrId,
+        regnum: responsibility && responsibility.regnum || resolveAbonentRegnumForSummary(abonentId, abonent),
+        period: periodDescriptor,
+        oldTotalMs: Number(rowsResultBaseline && rowsResultBaseline.durationMs || 0)
+      });
+      incrementalV2Compare = compareRowsByIdForSnapshot(uid, abonentId, rowsResultBaseline.rowsById, incrementalV2Result && incrementalV2Result.rowsById, ledgerRows, "incremental-v2-compare");
+      var incrementalV2Summary = {
+        uid: uid,
+        abonentId: abonentId,
+        oldRowsByIdCount: _cardSnapshotRowsByIdCount(rowsResultBaseline.rowsById),
+        newRowsByIdCount: incrementalV2Result ? incrementalV2Result.rowsByIdCount : 0,
+        oldTotalMs: Number(rowsResultBaseline && rowsResultBaseline.durationMs || 0),
+        newTotalMs: Number(incrementalV2Result && incrementalV2Result.profile && incrementalV2Result.profile.totalMs || 0),
+        diffCount: Number(incrementalV2Compare && incrementalV2Compare.mismatchedRows || 0),
+        maxDelta: Number(incrementalV2Compare && incrementalV2Compare.maxDelta || 0),
+        diagnostics: incrementalV2Result && incrementalV2Result.diagnostics || {}
+      };
+      if (incrementalV2Compare && incrementalV2Compare.mismatchedRows > 0) {
+        try { console.error("[snapshot][incremental-v2-compare-failed]", incrementalV2Compare); } catch(eIncV2Fail) {}
+      } else {
+        try { console.log("[snapshot][incremental-v2-compare-ok]", incrementalV2Summary); } catch(eIncV2Ok) {}
       }
     }
     var runtimePayload = {
@@ -5173,6 +5278,9 @@
         rowsBuildProfileSteps: Array.isArray(rowsResult && rowsResult.profileSteps) ? rowsResult.profileSteps : [],
         incrementalCompare: incrementalCompare,
         incrementalProfile: incrementalResult && incrementalResult.profile || null,
+        incrementalV2Compare: incrementalV2Compare,
+        incrementalV2Profile: incrementalV2Result && incrementalV2Result.profile || null,
+        incrementalV2Diagnostics: incrementalV2Result && incrementalV2Result.diagnostics || null,
         calcTotalsAsOfAdjustedCallCount: Number(rowsResult && rowsResult.calcTotalsAsOfAdjustedCallCount || 0),
         calcTotalsAsOfAdjustedCacheHits: Number(rowsResult && rowsResult.calcTotalsAsOfAdjustedCacheHits || 0),
         calcTotalsAsOfAdjustedTotalMs: Number(rowsResult && rowsResult.calcTotalsAsOfAdjustedTotalMs || 0),
@@ -5240,6 +5348,7 @@
     buildRowsByIdFromLedgerForSnapshot: buildRowsByIdFromLedgerForSnapshot,
     experimentalPlanRowsByIdIncrementalInputs: experimentalPlanRowsByIdIncrementalInputs,
     experimentalBuildRowsByIdIncremental: experimentalBuildRowsByIdIncremental,
+    experimentalBuildRowsByIdIncrementalV2: experimentalBuildRowsByIdIncrementalV2,
     readLedgerRuntimeCache: readLedgerRuntimeCache,
     getRuntimeCache: getRuntimeCache,
     writeLedgerRuntimeCache: writeLedgerRuntimeCache,

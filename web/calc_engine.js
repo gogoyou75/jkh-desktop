@@ -1494,6 +1494,207 @@
     }
   }
 
+  function computeRowsStateIncrementalV2(ledgerRows, options) {
+    const opts = options || {};
+    const t0 = (window.performance && performance.now) ? performance.now() : Date.now();
+    const steps = [];
+    function now(){ return (window.performance && performance.now) ? performance.now() : Date.now(); }
+    function step(name, fn){
+      const s0 = now();
+      try{
+        const value = fn();
+        steps.push({ name, ms: Math.round(now() - s0), ok: true });
+        return value;
+      }catch(e){
+        steps.push({ name, ms: Math.round(now() - s0), ok: false, error: String(e && e.message || e) });
+        throw e;
+      }
+    }
+    function rowAsOfDate(row){
+      const paid = parseDateAnyToDate(row && row.paid_date);
+      if (paid) return startOfDay(paid);
+      const y = parseInt(row && row.year, 10);
+      const m = parseInt(row && row.month, 10);
+      if (Number.isFinite(y) && Number.isFinite(m) && y > 0 && m >= 1 && m <= 12) return endOfMonthDate(y, m);
+      return parseDateAnyToDate(opts.period && opts.period.to);
+    }
+    function monthKeyFromRow(row){
+      const y = parseInt(row && row.year, 10);
+      const m = parseInt(row && row.month, 10);
+      if (!Number.isFinite(y) || !Number.isFinite(m) || y <= 0 || m < 1 || m > 12) return "";
+      return y + "-" + pad2(m);
+    }
+    function eventDateKey(date){
+      if (!date || date.toString() === "Invalid Date") return "";
+      return date.getFullYear() + "-" + pad2(date.getMonth() + 1) + "-" + pad2(date.getDate());
+    }
+    function emptyResult(reason){
+      return {
+        ok: false,
+        rowsById: {},
+        rowsCount: Array.isArray(ledgerRows) ? ledgerRows.length : 0,
+        rowsByIdCount: 0,
+        reason: String(reason || "INCREMENTAL_V2_ROWS_BUILD_FAILED"),
+        profile: { totalMs: Math.round(now() - t0), steps: steps },
+        diagnostics: {
+          algorithm: "rolling_state_v2_skeleton",
+          ledgerRowsCount: Array.isArray(ledgerRows) ? ledgerRows.length : 0,
+          asOfCount: 0,
+          obligationsCount: 0,
+          paymentsCount: 0,
+          penaltyMode: "legacy_per_obligation",
+          penaltyCalls: 0,
+          optimizationReady: false,
+          note: "V2 skeleton uses legacy penalty calculation; speedup is not expected in this stage."
+        }
+      };
+    }
+
+    try{
+      const rows = step("normalize rows", function(){
+        return Array.isArray(ledgerRows) ? ledgerRows.slice() : [];
+      });
+      const events = step("build event model", function(){
+        const out = [];
+        for (let i = 0; i < rows.length; i++){
+          const row = rows[i] || {};
+          const rowId = String(row.id || "").trim();
+          const monthKey = monthKeyFromRow(row);
+          const accrued = r2(toNum(row.accrued));
+          const paid = r2(toNum(row.paid));
+          if (monthKey){
+            const parts = monthKey.split("-");
+            out.push({
+              type: "accrual",
+              date: endOfMonthDate(parseInt(parts[0], 10), parseInt(parts[1], 10)),
+              rowId: rowId,
+              monthKey: monthKey,
+              amount: accrued,
+              sourceRow: row,
+              index: i
+            });
+          }
+          const paidDate = parseDateAnyToDate(row.paid_date);
+          if (paid > 0 && paidDate){
+            out.push({
+              type: "payment",
+              date: startOfDay(paidDate),
+              rowId: rowId,
+              monthKey: monthKey,
+              amount: paid,
+              sourceRow: row,
+              index: i
+            });
+          }
+          const snapshotDate = rowAsOfDate(row);
+          if (rowId && snapshotDate && snapshotDate.toString() !== "Invalid Date"){
+            out.push({
+              type: "snapshot",
+              date: startOfDay(snapshotDate),
+              rowId: rowId,
+              monthKey: monthKey,
+              amount: 0,
+              sourceRow: row,
+              index: i
+            });
+          }
+        }
+        const typeOrder = { accrual: 1, payment: 2, snapshot: 3 };
+        out.sort(function(a, b){
+          return a.date - b.date ||
+            (typeOrder[a.type] || 99) - (typeOrder[b.type] || 99) ||
+            String(a.monthKey || "").localeCompare(String(b.monthKey || "")) ||
+            (Number(a.index) || 0) - (Number(b.index) || 0) ||
+            String(a.rowId || "").localeCompare(String(b.rowId || ""));
+        });
+        return out;
+      });
+      const state = step("initialize rolling state skeleton", function(){
+        return {
+          currentDate: null,
+          obligations: new Map(),
+          totalPrincipal: 0,
+          totalPenalty: 0,
+          advance: 0
+        };
+      });
+      step("walk event model skeleton", function(){
+        for (const ev of events){
+          state.currentDate = ev.date || state.currentDate;
+          if (ev.type === "accrual" && ev.monthKey && !state.obligations.has(ev.monthKey)){
+            state.obligations.set(ev.monthKey, {
+              monthKey: ev.monthKey,
+              amount: r2(toNum(ev.amount)),
+              dueDate: ev.date,
+              remainingPrincipal: r2(toNum(ev.amount)),
+              penaltyAccrued: 0,
+              lastPenaltyDate: ev.date,
+              overdueIndex: 0,
+              applications: []
+            });
+            state.totalPrincipal = r2(state.totalPrincipal + toNum(ev.amount));
+          } else if (ev.type === "payment"){
+            state.advance = r2(state.advance + toNum(ev.amount));
+          }
+        }
+        return state;
+      });
+      const legacyResult = step("legacy rowsById compatibility path", function(){
+        return computeRowsStateIncremental(rows, opts);
+      }) || {};
+      const rowsById = legacyResult.rowsById && typeof legacyResult.rowsById === "object" && !Array.isArray(legacyResult.rowsById) ? legacyResult.rowsById : {};
+      const uniqueEventDates = {};
+      let accrualEventsCount = 0;
+      let paymentEventsCount = 0;
+      let snapshotEventsCount = 0;
+      for (const ev of events){
+        if (ev.type === "accrual") accrualEventsCount += 1;
+        else if (ev.type === "payment") paymentEventsCount += 1;
+        else if (ev.type === "snapshot") snapshotEventsCount += 1;
+        const key = eventDateKey(ev.date);
+        if (key) uniqueEventDates[key] = true;
+      }
+      const legacyDiagnostics = legacyResult && legacyResult.diagnostics || {};
+      const penaltyCalls = Number(legacyDiagnostics.calcPenaltyForObligationCalls || legacyDiagnostics.penaltyCalls || 0);
+      const totalMs = Math.round(now() - t0);
+      return {
+        ok: legacyResult && legacyResult.ok === true,
+        rowsById: rowsById,
+        rowsCount: rows.length,
+        rowsByIdCount: Object.keys(rowsById).length,
+        reason: String(legacyResult && legacyResult.reason || "OK"),
+        profile: {
+          totalMs: totalMs,
+          steps: steps.concat(legacyResult && legacyResult.profile && Array.isArray(legacyResult.profile.steps) ? [{
+            name: "legacy profile",
+            ms: Number(legacyResult.profile.totalMs || 0),
+            ok: legacyResult.ok === true,
+            steps: legacyResult.profile.steps
+          }] : []),
+          legacyTotalMs: Number(legacyResult && legacyResult.profile && legacyResult.profile.totalMs || 0)
+        },
+        diagnostics: {
+          algorithm: "rolling_state_v2_skeleton",
+          ledgerRowsCount: rows.length,
+          asOfCount: Number(legacyDiagnostics.uniqueAsOfCount || snapshotEventsCount || 0),
+          obligationsCount: Number(state.obligations.size || legacyDiagnostics.obligationsCount || 0),
+          paymentsCount: paymentEventsCount,
+          penaltyMode: "legacy_per_obligation",
+          penaltyCalls: penaltyCalls,
+          optimizationReady: false,
+          note: "V2 skeleton uses legacy penalty calculation; speedup is not expected in this stage.",
+          accrualEventsCount: accrualEventsCount,
+          paymentEventsCount: paymentEventsCount,
+          snapshotEventsCount: snapshotEventsCount,
+          uniqueEventDatesCount: Object.keys(uniqueEventDates).length,
+          legacyDiagnostics: legacyDiagnostics
+        }
+      };
+    }catch(e){
+      return emptyResult(String(e && (e.code || e.message) || e || "INCREMENTAL_V2_ROWS_BUILD_FAILED"));
+    }
+  }
+
 
   window.JKHCalcEngine = {
     pad2, r2, toNum,
@@ -1511,6 +1712,7 @@
     calcTotalsAsOfAdjusted,
     calcTotalsAsOfCore,
     computeRowsStateIncremental,
+    computeRowsStateIncrementalV2,
     buildCourtViewRows,
     calcPenaltyBreakdownBySourceMonth,
     // TRANSFER API
