@@ -1106,7 +1106,24 @@
     const opts = options || {};
     const t0 = (window.performance && performance.now) ? performance.now() : Date.now();
     const steps = [];
+    const deepCounters = {
+      asOfCount: 0,
+      obligationsCount: 0,
+      paymentsCount: 0,
+      allocatePaymentsFIFOCalls: 0,
+      calcPenaltyForObligationCalls: 0
+    };
+    const deepMs = {
+      filterObligations: 0,
+      cloneObligations: 0,
+      filterPayments: 0,
+      allocatePaymentsFIFO: 0,
+      sumAppliedUpTo: 0,
+      calcPenaltyForObligation: 0,
+      finalRowsByIdWrite: 0
+    };
     function now(){ return (window.performance && performance.now) ? performance.now() : Date.now(); }
+    function addMs(bucket, startedAt){ deepMs[bucket] += Math.round(now() - startedAt); }
     function step(name, fn){
       const s0 = now();
       try{
@@ -1240,16 +1257,29 @@
       };
       step("compute rowsById by asOf", function(){
         const dates = Array.from(byAsOf.keys()).sort();
+        deepCounters.asOfCount = dates.length;
+        deepCounters.obligationsCount = allObligations.length;
+        deepCounters.paymentsCount = paymentsAll.length;
         for (const key of dates){
           const events = byAsOf.get(key) || [];
           const asOfRaw = events[0] && events[0].asOf;
           const asOfEff = freezeDate ? minDateObj(asOfRaw, freezeDate) : asOfRaw;
           const asOfDay = startOfDay(asOfEff);
           const asOfYm = `${asOfEff.getFullYear()}-${pad2(asOfEff.getMonth()+1)}`;
-          const obligations = allObligations.filter(ob => String(ob.key || "") <= asOfYm).map(cloneObligation);
+          let tm = now();
+          const filteredObligations = allObligations.filter(ob => String(ob.key || "") <= asOfYm);
+          addMs("filterObligations", tm);
+          tm = now();
+          const obligations = filteredObligations.map(cloneObligation);
+          addMs("cloneObligations", tm);
+          tm = now();
           const payments = paymentsAll.filter(p => p && p.date && p.date.getTime() <= asOfDay.getTime());
+          addMs("filterPayments", tm);
           // Payments are applied FIFO to principal with the same use_period month limits.
+          tm = now();
           const advances = allocatePaymentsFIFO(obligations, payments);
+          deepCounters.allocatePaymentsFIFOCalls += 1;
+          addMs("allocatePaymentsFIFO", tm);
           const advanceUpTo = r2((advances || []).reduce((sum, a) => {
             if (a && a.date && a.date.getTime() <= asOfDay.getTime()) return sum + toNum(a.amount);
             return sum;
@@ -1258,11 +1288,16 @@
           let penaltyTotal = 0;
           for (const ob of obligations){
             sortApplications(ob);
+            tm = now();
             const applied = sumAppliedUpTo(ob, asOfDay);
+            addMs("sumAppliedUpTo", tm);
             principalTotal += Math.max(ob.amount - applied, 0);
             // Penalty accrual uses exact day iteration, excludes, moratorium rates,
             // and the 30/90 day denominator rules from calcPenaltyForObligation.
+            tm = now();
             penaltyTotal += calcPenaltyForObligation(ob, asOfEff, excludes, rates);
+            deepCounters.calcPenaltyForObligationCalls += 1;
+            addMs("calcPenaltyForObligation", tm);
             state.obligations.set(ob.key, {
               monthKey: ob.key,
               amount: ob.amount,
@@ -1278,6 +1313,7 @@
           state.currentPrincipal = adjusted.principal;
           state.currentPenalty = adjusted.penaltyDebt;
           state.remainingAdvance = r2(advanceUpTo || 0);
+          tm = now();
           for (const ev of events){
             rowsById[ev.rowId] = {
               pay_main: adjusted.principal,
@@ -1285,21 +1321,43 @@
               total: adjusted.total
             };
           }
+          addMs("finalRowsByIdWrite", tm);
         }
         return rowsById;
       });
       const totalMs = Math.round(now() - t0);
+      const deepSteps = [
+        { name: "filter obligations", ms: deepMs.filterObligations, ok: true },
+        { name: "clone obligations", ms: deepMs.cloneObligations, ok: true },
+        { name: "filter payments", ms: deepMs.filterPayments, ok: true },
+        { name: "allocatePaymentsFIFO", ms: deepMs.allocatePaymentsFIFO, ok: true, calls: deepCounters.allocatePaymentsFIFOCalls },
+        { name: "sumAppliedUpTo", ms: deepMs.sumAppliedUpTo, ok: true },
+        { name: "calcPenaltyForObligation", ms: deepMs.calcPenaltyForObligation, ok: true, calls: deepCounters.calcPenaltyForObligationCalls },
+        { name: "final rowsById write", ms: deepMs.finalRowsByIdWrite, ok: true }
+      ];
+      for (const item of deepSteps) steps.push(item);
+      try {
+        console.log("[snapshot][incremental-deep-profile]", {
+          uid: String(opts.uid || ""),
+          totalMs,
+          steps,
+          counters: deepCounters
+        });
+      } catch(eDeepLog) {}
+      try { console.table(steps); } catch(eDeepTable) {}
       return {
         ok: true,
         rowsById,
         rowsCount: rows.length,
         reason: "OK",
-        profile: { totalMs, steps },
+        profile: { totalMs, steps, counters: deepCounters },
         diagnostics: {
           ledgerRowsCount: rows.length,
           uniqueAsOfCount: byAsOf.size,
           obligationsCount: allObligations.length,
-          paymentsCount: paymentsAll.length
+          paymentsCount: paymentsAll.length,
+          allocatePaymentsFIFOCalls: deepCounters.allocatePaymentsFIFOCalls,
+          calcPenaltyForObligationCalls: deepCounters.calcPenaltyForObligationCalls
         }
       };
     }catch(e){
