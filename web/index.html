@@ -1887,6 +1887,34 @@ function summaryBatchRowsBuildSlowestProfileText(steps){
     return "\n  rows-build slowest: " + slowest.name + " " + Number(slowest.ms || 0) + "ms";
 }
 
+function summaryBatchCalcTotalsStats(s){
+    var steps = Array.isArray(s && s.rowsBuildProfileSteps) ? s.rowsBuildProfileSteps : [];
+    var calcStep = null;
+    for (var i = 0; i < steps.length; i++) {
+        if (steps[i] && steps[i].name === "JKHCalcEngine.calcTotalsAsOfAdjusted") {
+            calcStep = steps[i];
+            break;
+        }
+    }
+    return {
+        calls: Number(s && s.calcTotalsAsOfAdjustedCallCount || calcStep && calcStep.calls || 0),
+        avgMs: Number(s && s.calcTotalsAsOfAdjustedAvgMs || calcStep && calcStep.avgMs || 0),
+        maxMs: Number(s && s.calcTotalsAsOfAdjustedMaxMs || calcStep && calcStep.maxMs || 0),
+        cacheHits: Number(s && s.calcTotalsAsOfAdjustedCacheHits || calcStep && calcStep.cacheHits || 0),
+        uniqueAsOfKeys: Number(s && s.uniqueAsOfKeys || calcStep && calcStep.uniqueAsOfKeys || 0)
+    };
+}
+
+function summaryBatchCalcTotalsStatsText(s){
+    var stats = summaryBatchCalcTotalsStats(s || {});
+    if (!stats.calls && !stats.cacheHits) return "";
+    return "\n  calls: " + stats.calls +
+        ", cache hits: " + stats.cacheHits +
+        ", unique asOf: " + stats.uniqueAsOfKeys +
+        ", avg: " + stats.avgMs + "ms" +
+        ", max: " + stats.maxMs + "ms";
+}
+
 function renderSummaryBatchPerfTop10(){
     if (!Array.isArray(summaryBatchPerfStats) || !summaryBatchPerfStats.length) return "";
     var top10 = summaryBatchPerfStats
@@ -1902,7 +1930,8 @@ function renderSummaryBatchPerfTop10(){
                 durationMs: Number(s.durationMs || 0),
                 profileTotalMs: Number(s.profileTotalMs || 0),
                 slowest: summaryBatchSlowestProfileStep(s.profileSteps || []),
-                rowsBuildSlowest: summaryBatchSlowestProfileStep(s.rowsBuildProfileSteps || [])
+                rowsBuildSlowest: summaryBatchSlowestProfileStep(s.rowsBuildProfileSteps || []),
+                calcTotalsAsOfAdjusted: summaryBatchCalcTotalsStats(s)
             });
             if (Array.isArray(s.profileSteps) && s.profileSteps.length) console.table(s.profileSteps);
             if (Array.isArray(s.rowsBuildProfileSteps) && s.rowsBuildProfileSteps.length) console.table(s.rowsBuildProfileSteps);
@@ -1914,6 +1943,7 @@ function renderSummaryBatchPerfTop10(){
             ": " + Number(s.profileTotalMs || s.durationMs || 0) + "ms" +
             summaryBatchSlowestProfileText(s.profileSteps || []) +
             summaryBatchRowsBuildSlowestProfileText(s.rowsBuildProfileSteps || []) +
+            summaryBatchCalcTotalsStatsText(s) +
             " (" + Number(s.ledgerRowsCount || 0) + " ledger rows" +
             ", " + Number(s.rowsByIdCount || 0) + " rowsById)";
     }).join("\n");
@@ -2009,6 +2039,11 @@ async function processClientSummaryBatchJob(jobId, totalAccepted, mode){
                         profileSteps: Array.isArray(result && result.profileSteps) ? result.profileSteps : [],
                         rowsBuildProfileTotalMs: Number(result && result.rowsBuildProfileTotalMs || 0),
                         rowsBuildProfileSteps: Array.isArray(result && result.rowsBuildProfileSteps) ? result.rowsBuildProfileSteps : [],
+                        calcTotalsAsOfAdjustedCallCount: Number(result && result.calcTotalsAsOfAdjustedCallCount || 0),
+                        calcTotalsAsOfAdjustedCacheHits: Number(result && result.calcTotalsAsOfAdjustedCacheHits || 0),
+                        calcTotalsAsOfAdjustedAvgMs: Number(result && result.calcTotalsAsOfAdjustedAvgMs || 0),
+                        calcTotalsAsOfAdjustedMaxMs: Number(result && result.calcTotalsAsOfAdjustedMaxMs || 0),
+                        uniqueAsOfKeys: Number(result && result.uniqueAsOfKeys || 0),
                         ledgerRowsCount: Number(result && result.ledgerRowsCount || 0),
                         filteredRowsCount: Number(result && result.filteredRowsCount || 0),
                         rowsByIdCount: Number(result && result.rowsByIdCount || 0),

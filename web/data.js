@@ -3536,7 +3536,9 @@
     var rows = Array.isArray(ledgerRows) ? ledgerRows : [];
     var period = ctx.period && typeof ctx.period === "object" ? ctx.period : {};
     var abonentId = String(ctx.abonentId || "").trim();
+    var uid = String(ctx.uid || "").trim();
     var ledgerVersion = String(ctx.ledgerVersion || "");
+    var inputHash = String(ctx.inputHash || "");
     function rowsNow() {
       return (window.performance && performance.now) ? performance.now() : Date.now();
     }
@@ -3597,6 +3599,8 @@
     if (!filteredRows.length) {
       return finishRowsBuild({ ok: false, rowsById: {}, reason: "ROWS_BY_ID_BUILD_FAILED", rowsCount: rows.length, filteredRowsCount: 0, ledgerVersion: ledgerVersion, periodActive: false, period: period });
     }
+    var asOfKeys = {};
+    var asOfKeyCount = 0;
     rowProfileSteps.push({ name: "sort rows", ms: 0, ok: true, skipped: true, reason: "NO_SORT_IN_EXISTING_ROWS_BUILD_PATH" });
     rowsStep("build month/index structures", function() {
       var monthKeys = {};
@@ -3610,7 +3614,30 @@
     var calcAdjustedMs = 0;
     var calcAdjustedCalls = 0;
     var calcAdjustedMaxMs = 0;
+    var calcAdjustedCacheHits = 0;
     var assembleMs = 0;
+    var totalsCache = {};
+    function asOfCacheKeyFromDate(asOf) {
+      if (!asOf || asOf.toString() === "Invalid Date") return "";
+      return asOf.getFullYear() + "-" + String(asOf.getMonth() + 1).padStart(2, "0") + "-" + String(asOf.getDate()).padStart(2, "0");
+    }
+    function getAdjustedTotalsCached(asOfKey, computeFn) {
+      var cacheKey = [
+        uid,
+        asOfKey,
+        String(period && period.from || ""),
+        String(period && period.to || ""),
+        ledgerVersion,
+        inputHash
+      ].join("|");
+      if (Object.prototype.hasOwnProperty.call(totalsCache, cacheKey)) {
+        calcAdjustedCacheHits += 1;
+        return totalsCache[cacheKey];
+      }
+      var value = computeFn();
+      totalsCache[cacheKey] = value;
+      return value;
+    }
     rowsStep("loop rows", function() {
       for (var i = 0; i < filteredRows.length; i++) {
         var row = filteredRows[i] || {};
@@ -3618,16 +3645,25 @@
         if (!rowId) continue;
         var asOf = _snapshotAsOfDateForRow(row, period);
         if (!asOf || asOf.toString() === "Invalid Date") continue;
-        var calcStart = rowsNow();
-        var totals = window.JKHCalcEngine.calcTotalsAsOfAdjusted(filteredRows, asOf, {
-          abonentId: abonentId,
-          applyAdvanceOffset: true,
-          allowNegativePrincipal: true
+        var asOfKey = asOfCacheKeyFromDate(asOf);
+        if (!asOfKey) continue;
+        if (!Object.prototype.hasOwnProperty.call(asOfKeys, asOfKey)) {
+          asOfKeys[asOfKey] = true;
+          asOfKeyCount += 1;
+        }
+        var totals = getAdjustedTotalsCached(asOfKey, function() {
+          var calcStart = rowsNow();
+          var computed = window.JKHCalcEngine.calcTotalsAsOfAdjusted(filteredRows, asOf, {
+            abonentId: abonentId,
+            applyAdvanceOffset: true,
+            allowNegativePrincipal: true
+          });
+          var calcMs = Math.round(rowsNow() - calcStart);
+          calcAdjustedMs += calcMs;
+          calcAdjustedCalls += 1;
+          if (calcMs > calcAdjustedMaxMs) calcAdjustedMaxMs = calcMs;
+          return computed;
         });
-        var calcMs = Math.round(rowsNow() - calcStart);
-        calcAdjustedMs += calcMs;
-        calcAdjustedCalls += 1;
-        if (calcMs > calcAdjustedMaxMs) calcAdjustedMaxMs = calcMs;
         var principal = Number(totals && totals.principal);
         var penalty = Number(totals && totals.penaltyDebt);
         var total = Number(totals && totals.total);
@@ -3647,12 +3683,60 @@
       ms: calcAdjustedMs,
       ok: true,
       calls: calcAdjustedCalls,
+      cacheHits: calcAdjustedCacheHits,
+      uniqueAsOfKeys: asOfKeyCount,
+      expectedCallsAfterCache: asOfKeyCount,
       maxMs: calcAdjustedMaxMs,
       avgMs: calcAdjustedCalls ? Math.round(calcAdjustedMs / calcAdjustedCalls) : 0
     });
     rowProfileSteps.push({ name: "final rowsById assemble", ms: assembleMs, ok: true, rowsByIdCount: _cardSnapshotRowsByIdCount(rowsById) });
+    try {
+      console.log("[snapshot][calcTotalsAsOfAdjusted-calls]", {
+        uid: uid,
+        ledgerRowsCount: rows.length,
+        filteredRowsCount: filteredRows.length,
+        rows: filteredRows.length,
+        uniqueAsOfKeys: asOfKeyCount,
+        callCountBeforeCache: calcAdjustedCalls + calcAdjustedCacheHits,
+        expectedCallsAfterCache: asOfKeyCount,
+        callCount: calcAdjustedCalls,
+        cacheHits: calcAdjustedCacheHits,
+        totalMs: calcAdjustedMs,
+        avgMs: calcAdjustedCalls ? Math.round(calcAdjustedMs / calcAdjustedCalls) : 0,
+        maxMs: calcAdjustedMaxMs
+      });
+    } catch(e) {}
+    if (window.JKH_SNAPSHOT_VERIFY_OPTIMIZATION === true && filteredRows.length <= 40) {
+      try {
+        var sampleKeys = Object.keys(rowsById);
+        var sampleIndexes = [0, Math.floor((sampleKeys.length - 1) / 2), sampleKeys.length - 1];
+        console.log("[snapshot][memoization-verify]", {
+          uid: uid,
+          rowsByIdCount: sampleKeys.length,
+          sample: sampleIndexes.map(function(sampleIndex) {
+            var key = sampleKeys[sampleIndex];
+            return key ? { rowId: key, totals: rowsById[key] } : null;
+          }).filter(Boolean)
+        });
+      } catch(eVerify) {}
+    }
     if (!_cardSnapshotRowsByIdCount(rowsById)) {
-      return finishRowsBuild({ ok: false, rowsById: {}, reason: "ROWS_BY_ID_EMPTY_AFTER_WITH_ROWS_RECALC", rowsCount: rows.length, filteredRowsCount: filteredRows.length, ledgerVersion: ledgerVersion, periodActive: false, period: period });
+      return finishRowsBuild({
+        ok: false,
+        rowsById: {},
+        reason: "ROWS_BY_ID_EMPTY_AFTER_WITH_ROWS_RECALC",
+        rowsCount: rows.length,
+        filteredRowsCount: filteredRows.length,
+        calcTotalsAsOfAdjustedCallCount: calcAdjustedCalls,
+        calcTotalsAsOfAdjustedCacheHits: calcAdjustedCacheHits,
+        calcTotalsAsOfAdjustedTotalMs: calcAdjustedMs,
+        calcTotalsAsOfAdjustedMaxMs: calcAdjustedMaxMs,
+        calcTotalsAsOfAdjustedAvgMs: calcAdjustedCalls ? Math.round(calcAdjustedMs / calcAdjustedCalls) : 0,
+        uniqueAsOfKeys: asOfKeyCount,
+        ledgerVersion: ledgerVersion,
+        periodActive: false,
+        period: period
+      });
     }
     return finishRowsBuild({
       ok: true,
@@ -3660,6 +3744,12 @@
       reason: "OK",
       rowsCount: rows.length,
       filteredRowsCount: filteredRows.length,
+      calcTotalsAsOfAdjustedCallCount: calcAdjustedCalls,
+      calcTotalsAsOfAdjustedCacheHits: calcAdjustedCacheHits,
+      calcTotalsAsOfAdjustedTotalMs: calcAdjustedMs,
+      calcTotalsAsOfAdjustedMaxMs: calcAdjustedMaxMs,
+      calcTotalsAsOfAdjustedAvgMs: calcAdjustedCalls ? Math.round(calcAdjustedMs / calcAdjustedCalls) : 0,
+      uniqueAsOfKeys: asOfKeyCount,
       ledgerVersion: ledgerVersion,
       periodActive: false,
       period: period
@@ -4636,6 +4726,12 @@
         rowsBuildDurationMs: Number(rowsResult && rowsResult.durationMs || 0),
         rowsBuildProfileTotalMs: Number(rowsResult && rowsResult.profileTotalMs || rowsResult && rowsResult.durationMs || 0),
         rowsBuildProfileSteps: Array.isArray(rowsResult && rowsResult.profileSteps) ? rowsResult.profileSteps : [],
+        calcTotalsAsOfAdjustedCallCount: Number(rowsResult && rowsResult.calcTotalsAsOfAdjustedCallCount || 0),
+        calcTotalsAsOfAdjustedCacheHits: Number(rowsResult && rowsResult.calcTotalsAsOfAdjustedCacheHits || 0),
+        calcTotalsAsOfAdjustedTotalMs: Number(rowsResult && rowsResult.calcTotalsAsOfAdjustedTotalMs || 0),
+        calcTotalsAsOfAdjustedMaxMs: Number(rowsResult && rowsResult.calcTotalsAsOfAdjustedMaxMs || 0),
+        calcTotalsAsOfAdjustedAvgMs: Number(rowsResult && rowsResult.calcTotalsAsOfAdjustedAvgMs || 0),
+        uniqueAsOfKeys: Number(rowsResult && rowsResult.uniqueAsOfKeys || 0),
         filteredRowsCount: Number(rowsResult && (rowsResult.filteredRowsCount || rowsResult.rowsCount) || 0),
         rowsByIdCount: 0,
         rowsByIdSource: "datajs_batch_rows_builder",
@@ -4675,6 +4771,12 @@
         rowsBuildDurationMs: Number(rowsResult && rowsResult.durationMs || 0),
         rowsBuildProfileTotalMs: Number(rowsResult && rowsResult.profileTotalMs || rowsResult && rowsResult.durationMs || 0),
         rowsBuildProfileSteps: Array.isArray(rowsResult && rowsResult.profileSteps) ? rowsResult.profileSteps : [],
+        calcTotalsAsOfAdjustedCallCount: Number(rowsResult && rowsResult.calcTotalsAsOfAdjustedCallCount || 0),
+        calcTotalsAsOfAdjustedCacheHits: Number(rowsResult && rowsResult.calcTotalsAsOfAdjustedCacheHits || 0),
+        calcTotalsAsOfAdjustedTotalMs: Number(rowsResult && rowsResult.calcTotalsAsOfAdjustedTotalMs || 0),
+        calcTotalsAsOfAdjustedMaxMs: Number(rowsResult && rowsResult.calcTotalsAsOfAdjustedMaxMs || 0),
+        calcTotalsAsOfAdjustedAvgMs: Number(rowsResult && rowsResult.calcTotalsAsOfAdjustedAvgMs || 0),
+        uniqueAsOfKeys: Number(rowsResult && rowsResult.uniqueAsOfKeys || 0),
         filteredRowsCount: Number(rowsResult && (rowsResult.filteredRowsCount || rowsResult.rowsCount) || 0),
         rowsByIdCount: _cardSnapshotRowsByIdCount(rowsResult.rowsById),
         rowsByIdSource: "datajs_batch_rows_builder",
