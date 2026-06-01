@@ -1868,17 +1868,52 @@ async function collectSnapshotBackfillDiagnostic(uid, result, stage, extra){
     };
 }
 
+function summaryBatchSlowestProfileStep(steps){
+    if (!Array.isArray(steps) || !steps.length) return null;
+    return steps.slice().sort(function(a, b){
+        return Number(b && b.ms || 0) - Number(a && a.ms || 0);
+    })[0] || null;
+}
+
+function summaryBatchSlowestProfileText(steps){
+    var slowest = summaryBatchSlowestProfileStep(steps || []);
+    if (!slowest || !slowest.name) return "";
+    return "\n  slowest: " + slowest.name + " " + Number(slowest.ms || 0) + "ms";
+}
+
+function summaryBatchRowsBuildSlowestProfileText(steps){
+    var slowest = summaryBatchSlowestProfileStep(steps || []);
+    if (!slowest || !slowest.name) return "";
+    return "\n  rows-build slowest: " + slowest.name + " " + Number(slowest.ms || 0) + "ms";
+}
+
 function renderSummaryBatchPerfTop10(){
     if (!Array.isArray(summaryBatchPerfStats) || !summaryBatchPerfStats.length) return "";
     var top10 = summaryBatchPerfStats
         .slice()
-        .sort(function(a, b){ return Number(b.durationMs || 0) - Number(a.durationMs || 0); })
+        .sort(function(a, b){ return Number(b.profileTotalMs || b.durationMs || 0) - Number(a.profileTotalMs || a.durationMs || 0); })
         .slice(0, 10);
     try { console.table(top10); } catch(e) {}
+    try {
+        top10.slice(0, 3).forEach(function(s){
+            console.log("[snapshot][profile][top-slow]", {
+                uid: s.uid,
+                account: s.account,
+                durationMs: Number(s.durationMs || 0),
+                profileTotalMs: Number(s.profileTotalMs || 0),
+                slowest: summaryBatchSlowestProfileStep(s.profileSteps || []),
+                rowsBuildSlowest: summaryBatchSlowestProfileStep(s.rowsBuildProfileSteps || [])
+            });
+            if (Array.isArray(s.profileSteps) && s.profileSteps.length) console.table(s.profileSteps);
+            if (Array.isArray(s.rowsBuildProfileSteps) && s.rowsBuildProfileSteps.length) console.table(s.rowsBuildProfileSteps);
+        });
+    } catch(e) {}
     return "\n\nТоп-10 медленных UID:\n" + top10.map(function(s){
         return "ЛС " + (s.account || "") +
             " / " + s.uid +
-            ": " + Number(s.durationMs || 0) + "ms" +
+            ": " + Number(s.profileTotalMs || s.durationMs || 0) + "ms" +
+            summaryBatchSlowestProfileText(s.profileSteps || []) +
+            summaryBatchRowsBuildSlowestProfileText(s.rowsBuildProfileSteps || []) +
             " (" + Number(s.ledgerRowsCount || 0) + " ledger rows" +
             ", " + Number(s.rowsByIdCount || 0) + " rowsById)";
     }).join("\n");
@@ -1970,6 +2005,10 @@ async function processClientSummaryBatchJob(jobId, totalAccepted, mode){
                         uid: uid,
                         account: summaryBatchAccountLabel(uid),
                         durationMs: Number(result && result.rowsBuildDurationMs || 0),
+                        profileTotalMs: Number(result && result.profileTotalMs || 0),
+                        profileSteps: Array.isArray(result && result.profileSteps) ? result.profileSteps : [],
+                        rowsBuildProfileTotalMs: Number(result && result.rowsBuildProfileTotalMs || 0),
+                        rowsBuildProfileSteps: Array.isArray(result && result.rowsBuildProfileSteps) ? result.rowsBuildProfileSteps : [],
                         ledgerRowsCount: Number(result && result.ledgerRowsCount || 0),
                         filteredRowsCount: Number(result && result.filteredRowsCount || 0),
                         rowsByIdCount: Number(result && result.rowsByIdCount || 0),

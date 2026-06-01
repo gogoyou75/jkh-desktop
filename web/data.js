@@ -3485,17 +3485,78 @@
     return _dateFromIsoLocal(period && period.to);
   }
 
+  function createStageProfiler(label, context) {
+    var marks = [];
+    var totalStart = (window.performance && performance.now) ? performance.now() : Date.now();
+
+    function now() {
+      return (window.performance && performance.now) ? performance.now() : Date.now();
+    }
+
+    return {
+      step: async function(name, fn) {
+        var t0 = now();
+        try {
+          var result = await fn();
+          marks.push({ name: name, ms: Math.round(now() - t0), ok: true });
+          return result;
+        } catch (e) {
+          marks.push({ name: name, ms: Math.round(now() - t0), ok: false, error: String(e && e.message || e) });
+          throw e;
+        }
+      },
+      syncStep: function(name, fn) {
+        var t0 = now();
+        try {
+          var result = fn();
+          marks.push({ name: name, ms: Math.round(now() - t0), ok: true });
+          return result;
+        } catch (e) {
+          marks.push({ name: name, ms: Math.round(now() - t0), ok: false, error: String(e && e.message || e) });
+          throw e;
+        }
+      },
+      done: function(extra) {
+        var payload = Object.assign({}, context || {}, extra || {}, {
+          label: label,
+          totalMs: Math.round(now() - totalStart),
+          steps: marks
+        });
+        try { console.log("[snapshot][profile]", payload); } catch(e) {}
+        try { console.table(marks); } catch(e) {}
+        return payload;
+      }
+    };
+  }
+
   function buildRowsByIdFromLedgerForSnapshot(ledgerRows, context) {
     var t0 = (window.performance && performance.now) ? performance.now() : Date.now();
+    var rowProfileSteps = [];
     var ctx = context || {};
     var rows = Array.isArray(ledgerRows) ? ledgerRows : [];
     var period = ctx.period && typeof ctx.period === "object" ? ctx.period : {};
     var abonentId = String(ctx.abonentId || "").trim();
     var ledgerVersion = String(ctx.ledgerVersion || "");
+    function rowsNow() {
+      return (window.performance && performance.now) ? performance.now() : Date.now();
+    }
+    function rowsStep(name, fn) {
+      var stepStart = rowsNow();
+      try {
+        var value = fn();
+        rowProfileSteps.push({ name: name, ms: Math.round(rowsNow() - stepStart), ok: true });
+        return value;
+      } catch (e) {
+        rowProfileSteps.push({ name: name, ms: Math.round(rowsNow() - stepStart), ok: false, error: String(e && e.message || e) });
+        throw e;
+      }
+    }
     function finishRowsBuild(result) {
       var durationMs = Math.round(((window.performance && performance.now) ? performance.now() : Date.now()) - t0);
       result = result && typeof result === "object" ? result : { ok: false, rowsById: {}, reason: "ROWS_BY_ID_BUILD_FAILED" };
       result.durationMs = durationMs;
+      result.profileTotalMs = durationMs;
+      result.profileSteps = rowProfileSteps.slice();
       try {
         console.log("[snapshot][rows-build]", {
           uid: String(ctx && ctx.uid || ""),
@@ -3505,6 +3566,16 @@
           rowsByIdCount: result.rowsById ? Object.keys(result.rowsById).length : 0,
           timeMs: durationMs,
           reason: String(result.reason || "")
+        });
+      } catch(e) {}
+      try {
+        console.log("[snapshot][rows-build-profile]", {
+          uid: String(ctx && ctx.uid || ""),
+          ledgerRows: rows.length,
+          filteredRows: Number(result.filteredRowsCount || result.rowsCount || 0),
+          rowsByIdCount: result.rowsById ? Object.keys(result.rowsById).length : 0,
+          totalMs: durationMs,
+          steps: rowProfileSteps
         });
       } catch(e) {}
       return result;
@@ -3518,34 +3589,68 @@
     if (!period.from || !period.to || !_isValidIsoPeriod(period.from, period.to)) {
       return finishRowsBuild({ ok: false, rowsById: {}, reason: "PERIOD_RESOLUTION_FAILED", rowsCount: rows.length, ledgerVersion: ledgerVersion, periodActive: false, period: period });
     }
-    var filteredRows = rows.filter(function(row) {
-      return _snapshotRowInResponsibilityPeriod(row, period);
+    var filteredRows = rowsStep("normalize/filter ledger rows", function() {
+      return rows.filter(function(row) {
+        return _snapshotRowInResponsibilityPeriod(row, period);
+      });
     });
     if (!filteredRows.length) {
       return finishRowsBuild({ ok: false, rowsById: {}, reason: "ROWS_BY_ID_BUILD_FAILED", rowsCount: rows.length, filteredRowsCount: 0, ledgerVersion: ledgerVersion, periodActive: false, period: period });
     }
+    rowProfileSteps.push({ name: "sort rows", ms: 0, ok: true, skipped: true, reason: "NO_SORT_IN_EXISTING_ROWS_BUILD_PATH" });
+    rowsStep("build month/index structures", function() {
+      var monthKeys = {};
+      for (var idx = 0; idx < filteredRows.length; idx++) {
+        var key = _snapshotRowMonthKey(filteredRows[idx]);
+        if (key) monthKeys[key] = true;
+      }
+      return monthKeys;
+    });
     var rowsById = {};
-    for (var i = 0; i < filteredRows.length; i++) {
-      var row = filteredRows[i] || {};
-      var rowId = String(row.id || "").trim();
-      if (!rowId) continue;
-      var asOf = _snapshotAsOfDateForRow(row, period);
-      if (!asOf || asOf.toString() === "Invalid Date") continue;
-      var totals = window.JKHCalcEngine.calcTotalsAsOfAdjusted(filteredRows, asOf, {
-        abonentId: abonentId,
-        applyAdvanceOffset: true,
-        allowNegativePrincipal: true
-      });
-      var principal = Number(totals && totals.principal);
-      var penalty = Number(totals && totals.penaltyDebt);
-      var total = Number(totals && totals.total);
-      if (!Number.isFinite(principal) || !Number.isFinite(penalty) || !Number.isFinite(total)) continue;
-      rowsById[rowId] = {
-        pay_main: principal,
-        pay_penalty: penalty,
-        total: total
-      };
-    }
+    var calcAdjustedMs = 0;
+    var calcAdjustedCalls = 0;
+    var calcAdjustedMaxMs = 0;
+    var assembleMs = 0;
+    rowsStep("loop rows", function() {
+      for (var i = 0; i < filteredRows.length; i++) {
+        var row = filteredRows[i] || {};
+        var rowId = String(row.id || "").trim();
+        if (!rowId) continue;
+        var asOf = _snapshotAsOfDateForRow(row, period);
+        if (!asOf || asOf.toString() === "Invalid Date") continue;
+        var calcStart = rowsNow();
+        var totals = window.JKHCalcEngine.calcTotalsAsOfAdjusted(filteredRows, asOf, {
+          abonentId: abonentId,
+          applyAdvanceOffset: true,
+          allowNegativePrincipal: true
+        });
+        var calcMs = Math.round(rowsNow() - calcStart);
+        calcAdjustedMs += calcMs;
+        calcAdjustedCalls += 1;
+        if (calcMs > calcAdjustedMaxMs) calcAdjustedMaxMs = calcMs;
+        var principal = Number(totals && totals.principal);
+        var penalty = Number(totals && totals.penaltyDebt);
+        var total = Number(totals && totals.total);
+        if (!Number.isFinite(principal) || !Number.isFinite(penalty) || !Number.isFinite(total)) continue;
+        var assembleStart = rowsNow();
+        rowsById[rowId] = {
+          pay_main: principal,
+          pay_penalty: penalty,
+          total: total
+        };
+        assembleMs += Math.round(rowsNow() - assembleStart);
+      }
+      return rowsById;
+    });
+    rowProfileSteps.push({
+      name: "JKHCalcEngine.calcTotalsAsOfAdjusted",
+      ms: calcAdjustedMs,
+      ok: true,
+      calls: calcAdjustedCalls,
+      maxMs: calcAdjustedMaxMs,
+      avgMs: calcAdjustedCalls ? Math.round(calcAdjustedMs / calcAdjustedCalls) : 0
+    });
+    rowProfileSteps.push({ name: "final rowsById assemble", ms: assembleMs, ok: true, rowsByIdCount: _cardSnapshotRowsByIdCount(rowsById) });
     if (!_cardSnapshotRowsByIdCount(rowsById)) {
       return finishRowsBuild({ ok: false, rowsById: {}, reason: "ROWS_BY_ID_EMPTY_AFTER_WITH_ROWS_RECALC", rowsCount: rows.length, filteredRowsCount: filteredRows.length, ledgerVersion: ledgerVersion, periodActive: false, period: period });
     }
@@ -4401,52 +4506,83 @@
 
   async function recalculateAbonentCardWithRows(abonentOrId, options) {
     var opts = options || {};
-    var ready = await waitForServerFirstDataReady({ timeoutMs: opts.timeoutMs || opts.timeout || 8000 });
-    if (!ready || ready.ok !== true) {
-      return { ok: false, uid: "", summary_status: "error", summary_reason: "SERVER_FIRST_DATA_NOT_READY", reason: "SERVER_FIRST_DATA_NOT_READY", rowsById: {} };
+    var profileContext = {};
+    var profiler = createStageProfiler("recalculateAbonentCardWithRows", profileContext);
+    function attachProfile(payload, extra) {
+      var profile = profiler.done(extra || {});
+      return Object.assign({}, payload || {}, {
+        profile: profile,
+        profileTotalMs: profile.totalMs,
+        profileSteps: profile.steps
+      });
     }
-    var found = _findAbonentByIdOrUid(abonentOrId);
-    var abonent = found && found.abonent ? found.abonent : null;
-    var abonentId = String(found && found.id || (abonent && abonent.id) || (typeof abonentOrId === "object" ? abonentOrId && abonentOrId.id : abonentOrId) || "").trim();
-    var uid = String(abonent && (abonent.uid || abonent.account_uid || abonent.accountUid) || (typeof abonentOrId === "object" ? abonentOrId && abonentOrId.uid : "") || "").trim();
+    var ready = await profiler.step("wait server-first data", async function() {
+      return await waitForServerFirstDataReady({ timeoutMs: opts.timeoutMs || opts.timeout || 8000 });
+    });
+    if (!ready || ready.ok !== true) {
+      return attachProfile({ ok: false, uid: "", summary_status: "error", summary_reason: "SERVER_FIRST_DATA_NOT_READY", reason: "SERVER_FIRST_DATA_NOT_READY", rowsById: {} });
+    }
+    var foundInfo = profiler.syncStep("find abonent", function() {
+      var foundLocal = _findAbonentByIdOrUid(abonentOrId);
+      var abonentLocal = foundLocal && foundLocal.abonent ? foundLocal.abonent : null;
+      var abonentIdLocal = String(foundLocal && foundLocal.id || (abonentLocal && abonentLocal.id) || (typeof abonentOrId === "object" ? abonentOrId && abonentOrId.id : abonentOrId) || "").trim();
+      var uidLocal = String(abonentLocal && (abonentLocal.uid || abonentLocal.account_uid || abonentLocal.accountUid) || (typeof abonentOrId === "object" ? abonentOrId && abonentOrId.uid : "") || "").trim();
+      var accountLocal = String(abonentLocal && (abonentLocal.account || abonentLocal.ls || abonentLocal.account_number || abonentLocal.accountNumber || abonentLocal.id) || "").trim();
+      return { found: foundLocal, abonent: abonentLocal, abonentId: abonentIdLocal, uid: uidLocal, account: accountLocal };
+    });
+    var found = foundInfo.found;
+    var abonent = foundInfo.abonent;
+    var abonentId = foundInfo.abonentId;
+    var uid = foundInfo.uid;
+    profileContext.uid = uid;
+    profileContext.abonentId = abonentId;
+    profileContext.account = foundInfo.account;
     if (!abonent || !abonentId) {
-      return { ok: false, uid: uid, abonentId: abonentId, summary_status: "error", summary_reason: "ABONENT_NOT_FOUND", reason: "ABONENT_NOT_FOUND", rowsById: {} };
+      return attachProfile({ ok: false, uid: uid, abonentId: abonentId, summary_status: "error", summary_reason: "ABONENT_NOT_FOUND", reason: "ABONENT_NOT_FOUND", rowsById: {} });
     }
     if (!isValidUid(uid)) {
-      return { ok: false, uid: uid, abonentId: abonentId, summary_status: "error", summary_reason: "UID_REQUIRED", reason: "UID_REQUIRED", rowsById: {} };
+      return attachProfile({ ok: false, uid: uid, abonentId: abonentId, summary_status: "error", summary_reason: "UID_REQUIRED", reason: "UID_REQUIRED", rowsById: {} });
     }
-    var period = await _resolveAbonentSummaryRecalcPeriod(abonentOrId, opts.period, {
-      mode: SUMMARY_RECALC_MODE_FULL,
-      summaryScope: "full",
-      saveSummary: opts.saveSummary
+    var period = await profiler.step("resolve responsibility period", async function() {
+      return await _resolveAbonentSummaryRecalcPeriod(abonentOrId, opts.period, {
+        mode: SUMMARY_RECALC_MODE_FULL,
+        summaryScope: "full",
+        saveSummary: opts.saveSummary
+      });
     });
     var responsibility = _snapshotResponsibilityDiagnostics(abonentOrId, period);
     if (!period || period.ok !== true) {
       var periodReason = String(period && (period.error || period.reason) || "PERIOD_RESOLUTION_FAILED");
-      return { ok: false, uid: uid, abonentId: abonentId, summary_status: "error", summary_reason: periodReason, reason: periodReason, rowsById: {}, responsibility: responsibility };
+      return attachProfile({ ok: false, uid: uid, abonentId: abonentId, summary_status: "error", summary_reason: periodReason, reason: periodReason, rowsById: {}, responsibility: responsibility }, { responsibility: responsibility });
     }
-    var ledgerKey = resolvePaymentLedgerKey(abonentOrId);
+    var ledgerKey = profiler.syncStep("resolve ledger key", function() {
+      return resolvePaymentLedgerKey(abonentOrId);
+    });
     if (ledgerKey !== ("payments_" + uid)) {
-      return { ok: false, uid: uid, abonentId: abonentId, summary_status: "error", summary_reason: "UID_LEDGER_PATH_REQUIRED", reason: "UID_LEDGER_PATH_REQUIRED", rowsById: {}, responsibility: responsibility };
+      return attachProfile({ ok: false, uid: uid, abonentId: abonentId, summary_status: "error", summary_reason: "UID_LEDGER_PATH_REQUIRED", reason: "UID_LEDGER_PATH_REQUIRED", rowsById: {}, responsibility: responsibility }, { responsibility: responsibility });
     }
     var ledgerRows = [];
     try {
-      ledgerRows = readPaymentLedger(abonentOrId);
+      ledgerRows = profiler.syncStep("read ledger", function() {
+        return readPaymentLedger(abonentOrId);
+      });
     } catch (eLedger) {
       var ledgerReason = _summaryCalcErrorCode(eLedger);
-      return { ok: false, uid: uid, abonentId: abonentId, summary_status: "error", summary_reason: ledgerReason, reason: ledgerReason, rowsById: {}, responsibility: responsibility };
+      return attachProfile({ ok: false, uid: uid, abonentId: abonentId, summary_status: "error", summary_reason: ledgerReason, reason: ledgerReason, rowsById: {}, responsibility: responsibility }, { responsibility: responsibility });
     }
-    var summaryResult = await recalculateAbonentCard(abonentOrId, Object.assign({}, opts, {
-      saveSummary: opts.saveSummary === true,
-      summaryScope: "full",
-      recalcMode: SUMMARY_RECALC_MODE_FULL,
-      mode: SUMMARY_RECALC_MODE_FULL
-    }));
+    var summaryResult = await profiler.step("summary recalc", async function() {
+      return await recalculateAbonentCard(abonentOrId, Object.assign({}, opts, {
+        saveSummary: opts.saveSummary === true,
+        summaryScope: "full",
+        recalcMode: SUMMARY_RECALC_MODE_FULL,
+        mode: SUMMARY_RECALC_MODE_FULL
+      }));
+    });
     var summary = summaryResult && summaryResult.summary && typeof summaryResult.summary === "object" ? summaryResult.summary : null;
     var summaryStatus = String(summaryResult && (summaryResult.summary_status || summaryResult.status) || "");
     var summaryReason = String(summaryResult && (summaryResult.summary_reason || summaryResult.reason) || "");
     if (!summaryResult || summaryResult.ok !== true || summaryStatus !== "fresh" || !summary) {
-      return Object.assign({}, summaryResult || {}, {
+      return attachProfile(Object.assign({}, summaryResult || {}, {
         ok: false,
         uid: uid,
         abonentId: abonentId,
@@ -4459,23 +4595,31 @@
         rowsByIdCount: 0,
         rowsByIdSource: "",
         responsibility: responsibility
-      });
+      }), { ledgerRowsCount: ledgerRows.length, rowsByIdCount: 0, responsibility: responsibility });
     }
-    var ledgerVersion = computeLedgerRuntimeVersion(abonentOrId);
-    var versions = computeFinancialInputVersions(abonentOrId);
-    var rowsResult = buildRowsByIdFromLedgerForSnapshot(ledgerRows, {
-      uid: uid,
-      abonentId: abonentId,
-      regnum: responsibility && responsibility.regnum || resolveAbonentRegnumForSummary(abonentId, abonent),
-      period: { from: String(period.from || ""), to: String(period.to || "") },
-      ledgerRows: ledgerRows,
-      summary: summary,
-      ledgerVersion: ledgerVersion,
-      inputHash: versions.input_hash
+    var versionInfo = profiler.syncStep("compute versions/input hash", function() {
+      return {
+        ledgerVersion: computeLedgerRuntimeVersion(abonentOrId),
+        versions: computeFinancialInputVersions(abonentOrId)
+      };
+    });
+    var ledgerVersion = versionInfo.ledgerVersion;
+    var versions = versionInfo.versions;
+    var rowsResult = profiler.syncStep("buildRowsByIdFromLedgerForSnapshot", function() {
+      return buildRowsByIdFromLedgerForSnapshot(ledgerRows, {
+        uid: uid,
+        abonentId: abonentId,
+        regnum: responsibility && responsibility.regnum || resolveAbonentRegnumForSummary(abonentId, abonent),
+        period: { from: String(period.from || ""), to: String(period.to || "") },
+        ledgerRows: ledgerRows,
+        summary: summary,
+        ledgerVersion: ledgerVersion,
+        inputHash: versions.input_hash
+      });
     });
     if (!rowsResult || rowsResult.ok !== true) {
       var rowsReason = String(rowsResult && rowsResult.reason || "ROWS_BY_ID_BUILD_FAILED");
-      return {
+      return attachProfile({
         ok: false,
         uid: uid,
         abonentId: abonentId,
@@ -4490,11 +4634,13 @@
         period: { from: String(period.from || ""), to: String(period.to || "") },
         ledgerRowsCount: ledgerRows.length,
         rowsBuildDurationMs: Number(rowsResult && rowsResult.durationMs || 0),
+        rowsBuildProfileTotalMs: Number(rowsResult && rowsResult.profileTotalMs || rowsResult && rowsResult.durationMs || 0),
+        rowsBuildProfileSteps: Array.isArray(rowsResult && rowsResult.profileSteps) ? rowsResult.profileSteps : [],
         filteredRowsCount: Number(rowsResult && (rowsResult.filteredRowsCount || rowsResult.rowsCount) || 0),
         rowsByIdCount: 0,
         rowsByIdSource: "datajs_batch_rows_builder",
         responsibility: responsibility
-      };
+      }, { ledgerRowsCount: ledgerRows.length, rowsByIdCount: 0, rowsBuildDurationMs: Number(rowsResult && rowsResult.durationMs || 0), responsibility: responsibility });
     }
     var runtimePayload = {
       ledgerVersion: ledgerVersion,
@@ -4504,29 +4650,43 @@
       rowsById: rowsResult.rowsById,
       updatedAt: (new Date()).toISOString()
     };
-    try { writeLedgerRuntimeCache(abonentOrId, runtimePayload); } catch (eRuntimeWrite) {}
-    return {
-      ok: true,
-      uid: uid,
-      abonentId: abonentId,
-      summary_status: summaryStatus,
-      summary_reason: summaryReason || "OK",
-      summary: summary,
-      save: summaryResult && summaryResult.save,
-      status: summaryStatus,
-      reason: summaryReason || "OK",
-      rowsById: rowsResult.rowsById,
-      ledgerVersion: ledgerVersion,
-      inputHash: versions.input_hash,
-      periodActive: false,
-      period: { from: String(period.from || ""), to: String(period.to || "") },
+    try {
+      profiler.syncStep("write runtime cache", function() {
+        return writeLedgerRuntimeCache(abonentOrId, runtimePayload);
+      });
+    } catch (eRuntimeWrite) {}
+    var payload = profiler.syncStep("return/build payload", function() {
+      return {
+        ok: true,
+        uid: uid,
+        abonentId: abonentId,
+        summary_status: summaryStatus,
+        summary_reason: summaryReason || "OK",
+        summary: summary,
+        save: summaryResult && summaryResult.save,
+        status: summaryStatus,
+        reason: summaryReason || "OK",
+        rowsById: rowsResult.rowsById,
+        ledgerVersion: ledgerVersion,
+        inputHash: versions.input_hash,
+        periodActive: false,
+        period: { from: String(period.from || ""), to: String(period.to || "") },
+        ledgerRowsCount: ledgerRows.length,
+        rowsBuildDurationMs: Number(rowsResult && rowsResult.durationMs || 0),
+        rowsBuildProfileTotalMs: Number(rowsResult && rowsResult.profileTotalMs || rowsResult && rowsResult.durationMs || 0),
+        rowsBuildProfileSteps: Array.isArray(rowsResult && rowsResult.profileSteps) ? rowsResult.profileSteps : [],
+        filteredRowsCount: Number(rowsResult && (rowsResult.filteredRowsCount || rowsResult.rowsCount) || 0),
+        rowsByIdCount: _cardSnapshotRowsByIdCount(rowsResult.rowsById),
+        rowsByIdSource: "datajs_batch_rows_builder",
+        responsibility: responsibility
+      };
+    });
+    return attachProfile(payload, {
       ledgerRowsCount: ledgerRows.length,
-      rowsBuildDurationMs: Number(rowsResult && rowsResult.durationMs || 0),
-      filteredRowsCount: Number(rowsResult && (rowsResult.filteredRowsCount || rowsResult.rowsCount) || 0),
-      rowsByIdCount: _cardSnapshotRowsByIdCount(rowsResult.rowsById),
-      rowsByIdSource: "datajs_batch_rows_builder",
+      rowsByIdCount: payload.rowsByIdCount,
+      rowsBuildDurationMs: payload.rowsBuildDurationMs,
       responsibility: responsibility
-    };
+    });
   }
 
 
