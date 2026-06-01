@@ -863,9 +863,95 @@
     return s;
   }
 
+  function penaltyNowMs(){
+    return (typeof window !== "undefined" && window.performance && performance.now) ? performance.now() : Date.now();
+  }
+
+  function ensurePenaltyProfiler(){
+    if (typeof window === "undefined") return null;
+    if (!window.__penaltyProfiler) {
+      window.__penaltyProfiler = {
+        reset: function() {
+          this.calls = 0;
+          this.totalMs = 0;
+          this.breakdown = {
+            dayLoop: 0,
+            rateLookup: 0,
+            excludedCheck: 0,
+            sumApplied: 0,
+            penaltyCalc: 0,
+            other: 0
+          };
+          this.top10 = [];
+        },
+        record: function(obKey, asOfISO, totalMs, breakdown) {
+          if (!this.breakdown) this.reset();
+          this.calls += 1;
+          this.totalMs += Number(totalMs || 0);
+          this.breakdown.dayLoop += Number(breakdown.dayLoop || 0);
+          this.breakdown.rateLookup += Number(breakdown.rateLookup || 0);
+          this.breakdown.excludedCheck += Number(breakdown.excludedCheck || 0);
+          this.breakdown.sumApplied += Number(breakdown.sumApplied || 0);
+          this.breakdown.penaltyCalc += Number(breakdown.penaltyCalc || 0);
+          this.breakdown.other += Number(breakdown.other || 0);
+          this.top10.push({
+            obKey: String(obKey || ""),
+            asOf: String(asOfISO || ""),
+            totalMs: Math.round(Number(totalMs || 0)),
+            dayLoop: Math.round(Number(breakdown.dayLoop || 0)),
+            rateLookup: Math.round(Number(breakdown.rateLookup || 0)),
+            excludedCheck: Math.round(Number(breakdown.excludedCheck || 0)),
+            sumApplied: Math.round(Number(breakdown.sumApplied || 0)),
+            penaltyCalc: Math.round(Number(breakdown.penaltyCalc || 0)),
+            other: Math.round(Number(breakdown.other || 0)),
+            days: Number(breakdown.days || 0)
+          });
+          this.top10.sort(function(a, b){ return b.totalMs - a.totalMs; });
+          if (this.top10.length > 10) this.top10.length = 10;
+        },
+        report: function(extra) {
+          if (!this.breakdown) this.reset();
+          var avg = this.calls ? Math.round(this.totalMs / this.calls) : 0;
+          var payload = Object.assign({}, extra || {}, {
+            calls: this.calls,
+            totalMs: Math.round(this.totalMs),
+            avgMs: avg,
+            breakdown: {
+              dayLoop: Math.round(this.breakdown.dayLoop || 0),
+              rateLookup: Math.round(this.breakdown.rateLookup || 0),
+              excludedCheck: Math.round(this.breakdown.excludedCheck || 0),
+              sumApplied: Math.round(this.breakdown.sumApplied || 0),
+              penaltyCalc: Math.round(this.breakdown.penaltyCalc || 0),
+              other: Math.round(this.breakdown.other || 0)
+            }
+          });
+          try { console.log("[penalty-profiler] summary", payload); } catch(e) {}
+          try { console.table(this.top10); } catch(e) {}
+          return payload;
+        }
+      };
+      window.__penaltyProfiler.reset();
+    }
+    return window.__penaltyProfiler;
+  }
+
   function calcPenaltyForObligation(ob, asOf, excludes, rates){
+    const profiler = ensurePenaltyProfiler();
+    const tTotal = penaltyNowMs();
+    let dayLoopMs = 0;
+    let excludedCheckMs = 0;
+    let sumAppliedMs = 0;
+    let rateLookupMs = 0;
+    let penaltyCalcMs = 0;
+    let loopDays = 0;
     const asOfDay = startOfDay(asOf);
-    if (asOfDay <= ob.dueDate) return 0;
+    if (asOfDay <= ob.dueDate) {
+      if (profiler && typeof profiler.record === "function") {
+        const totalMsEarly = penaltyNowMs() - tTotal;
+        profiler.record(ob && ob.key, toISODateString(asOfDay), totalMsEarly, { dayLoop: 0, rateLookup: 0, excludedCheck: 0, sumApplied: 0, penaltyCalc: 0, other: totalMsEarly, days: 0 });
+      }
+      return 0;
+    }
 
     sortApplications(ob);
 
@@ -877,14 +963,22 @@
     const end = (asOfDay < hardLimit) ? asOfDay : hardLimit;
 
     while (day <= end){
-      if (!isExcludedDay(day, excludes)){
+      const tLoop = penaltyNowMs();
+      const tExcl = penaltyNowMs();
+      const excluded = isExcludedDay(day, excludes);
+      excludedCheckMs += penaltyNowMs() - tExcl;
+      if (!excluded){
         overdueIndex += 1;
+        const tApplied = penaltyNowMs();
         const applied = sumAppliedUpTo(ob, day);
+        sumAppliedMs += penaltyNowMs() - tApplied;
         const principal = Math.max(ob.amount - applied, 0);
 
         if (principal > 0.0000001 && overdueIndex > 30){
           const denom = (overdueIndex <= 90) ? 300 : 130;
+          const tRate = penaltyNowMs();
           const rawRate = rateOnDate(day, rates);
+          rateLookupMs += penaltyNowMs() - tRate;
           if (!Number.isFinite(rawRate)) {
             const err = makeRatesFatalError("MISSING_REQUIRED_RATE", "", {
               date: toISODateString(day),
@@ -904,10 +998,27 @@
 
           // CRITICAL: применяем ограничение ставки до 01.01.2027 перед расчётом пени.
           const rate = capRateUntil2027(day, rawRate);
+          const tPen = penaltyNowMs();
           penalty += principal * (rate / 100) / denom;
+          penaltyCalcMs += penaltyNowMs() - tPen;
         }
       }
       day = addDays(day, 1);
+      loopDays += 1;
+      dayLoopMs += penaltyNowMs() - tLoop;
+    }
+    if (profiler && typeof profiler.record === "function") {
+      const totalMs = penaltyNowMs() - tTotal;
+      const measured = excludedCheckMs + sumAppliedMs + rateLookupMs + penaltyCalcMs;
+      profiler.record(ob && ob.key, toISODateString(asOfDay), totalMs, {
+        dayLoop: dayLoopMs,
+        rateLookup: rateLookupMs,
+        excludedCheck: excludedCheckMs,
+        sumApplied: sumAppliedMs,
+        penaltyCalc: penaltyCalcMs,
+        other: Math.max(totalMs - measured, 0),
+        days: loopDays
+      });
     }
     return penalty;
   }
@@ -1124,6 +1235,8 @@
     };
     function now(){ return (window.performance && performance.now) ? performance.now() : Date.now(); }
     function addMs(bucket, startedAt){ deepMs[bucket] += Math.round(now() - startedAt); }
+    const penaltyProfiler = ensurePenaltyProfiler();
+    if (penaltyProfiler && typeof penaltyProfiler.reset === "function") penaltyProfiler.reset();
     function step(name, fn){
       const s0 = now();
       try{
@@ -1326,6 +1439,14 @@
         return rowsById;
       });
       const totalMs = Math.round(now() - t0);
+      let penaltyProfile = null;
+      if (penaltyProfiler && typeof penaltyProfiler.report === "function") {
+        penaltyProfile = penaltyProfiler.report({
+          uid: String(opts.uid || ""),
+          ledgerRowsCount: rows.length,
+          rowsByIdCount: Object.keys(rowsById || {}).length
+        });
+      }
       const deepSteps = [
         { name: "filter obligations", ms: deepMs.filterObligations, ok: true },
         { name: "clone obligations", ms: deepMs.cloneObligations, ok: true },
@@ -1357,7 +1478,8 @@
           obligationsCount: allObligations.length,
           paymentsCount: paymentsAll.length,
           allocatePaymentsFIFOCalls: deepCounters.allocatePaymentsFIFOCalls,
-          calcPenaltyForObligationCalls: deepCounters.calcPenaltyForObligationCalls
+          calcPenaltyForObligationCalls: deepCounters.calcPenaltyForObligationCalls,
+          penaltyProfile: penaltyProfile
         }
       };
     }catch(e){

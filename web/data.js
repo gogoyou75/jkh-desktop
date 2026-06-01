@@ -4033,6 +4033,21 @@
       if (rowMismatch) diff.mismatchedRows += 1;
       else diff.matchedRows += 1;
     });
+    if (diff && diff.mismatchedRows === 1 && Array.isArray(diff.samples) && diff.samples.length) {
+      try {
+        console.error("[incremental-compare] single mismatch", {
+          uid: String(uid || ""),
+          rowId: diff.samples[0].rowId,
+          field: diff.samples[0].field,
+          oldValue: diff.samples[0].oldValue,
+          newValue: diff.samples[0].newValue,
+          delta: diff.samples[0].delta,
+          oldRow: oldRows && oldRows[diff.samples[0].rowId],
+          newRow: newRows && newRows[diff.samples[0].rowId],
+          ledgerRow: rowById[diff.samples[0].rowId] || null
+        });
+      } catch(eSingleMismatch) {}
+    }
     return diff;
   }
 
