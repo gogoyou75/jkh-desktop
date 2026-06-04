@@ -3532,6 +3532,7 @@
   if (typeof window.JKH_SNAPSHOT_COMPARE_INCREMENTAL === "undefined") window.JKH_SNAPSHOT_COMPARE_INCREMENTAL = false;
   if (typeof window.JKH_SNAPSHOT_USE_INCREMENTAL_ROWS === "undefined") window.JKH_SNAPSHOT_USE_INCREMENTAL_ROWS = false;
   if (typeof window.JKH_SNAPSHOT_COMPARE_INCREMENTAL_V2 === "undefined") window.JKH_SNAPSHOT_COMPARE_INCREMENTAL_V2 = false;
+  if (typeof window.JKH_SNAPSHOT_FORCE_INCREMENTAL_V2_HEAVY === "undefined") window.JKH_SNAPSHOT_FORCE_INCREMENTAL_V2_HEAVY = false;
 
   function buildRowsByIdFromLedgerForSnapshot(ledgerRows, context) {
     var t0 = (window.performance && performance.now) ? performance.now() : Date.now();
@@ -5216,30 +5217,43 @@
       }
     }
     if (window.JKH_SNAPSHOT_COMPARE_INCREMENTAL_V2 === true) {
-      incrementalV2Result = experimentalBuildRowsByIdIncrementalV2(ledgerRows, {
-        uid: uid,
-        abonentId: abonentId,
-        abonentOrId: abonentOrId,
-        regnum: responsibility && responsibility.regnum || resolveAbonentRegnumForSummary(abonentId, abonent),
-        period: periodDescriptor,
-        oldTotalMs: Number(rowsResultBaseline && rowsResultBaseline.durationMs || 0)
-      });
-      incrementalV2Compare = compareRowsByIdForSnapshot(uid, abonentId, rowsResultBaseline.rowsById, incrementalV2Result && incrementalV2Result.rowsById, ledgerRows, "incremental-v2-compare");
-      var incrementalV2Summary = {
-        uid: uid,
-        abonentId: abonentId,
-        oldRowsByIdCount: _cardSnapshotRowsByIdCount(rowsResultBaseline.rowsById),
-        newRowsByIdCount: incrementalV2Result ? incrementalV2Result.rowsByIdCount : 0,
-        oldTotalMs: Number(rowsResultBaseline && rowsResultBaseline.durationMs || 0),
-        newTotalMs: Number(incrementalV2Result && incrementalV2Result.profile && incrementalV2Result.profile.totalMs || 0),
-        diffCount: Number(incrementalV2Compare && incrementalV2Compare.mismatchedRows || 0),
-        maxDelta: Number(incrementalV2Compare && incrementalV2Compare.maxDelta || 0),
-        diagnostics: incrementalV2Result && incrementalV2Result.diagnostics || {}
-      };
-      if (incrementalV2Compare && incrementalV2Compare.mismatchedRows > 0) {
-        try { console.error("[snapshot][incremental-v2-compare-failed]", incrementalV2Compare); } catch(eIncV2Fail) {}
+      var skipHeavyIncrementalV2 = ledgerRows.length > 30 && window.JKH_SNAPSHOT_FORCE_INCREMENTAL_V2_HEAVY !== true;
+      if (skipHeavyIncrementalV2) {
+        try {
+          console.warn("[snapshot][incremental-v2-skipped-heavy-ledger]", {
+            uid: uid,
+            abonentId: abonentId,
+            ledgerRowsCount: ledgerRows.length,
+            threshold: 30,
+            forceFlag: "JKH_SNAPSHOT_FORCE_INCREMENTAL_V2_HEAVY"
+          });
+        } catch(eIncV2Skip) {}
       } else {
-        try { console.log("[snapshot][incremental-v2-compare-ok]", incrementalV2Summary); } catch(eIncV2Ok) {}
+        incrementalV2Result = experimentalBuildRowsByIdIncrementalV2(ledgerRows, {
+          uid: uid,
+          abonentId: abonentId,
+          abonentOrId: abonentOrId,
+          regnum: responsibility && responsibility.regnum || resolveAbonentRegnumForSummary(abonentId, abonent),
+          period: periodDescriptor,
+          oldTotalMs: Number(rowsResultBaseline && rowsResultBaseline.durationMs || 0)
+        });
+        incrementalV2Compare = compareRowsByIdForSnapshot(uid, abonentId, rowsResultBaseline.rowsById, incrementalV2Result && incrementalV2Result.rowsById, ledgerRows, "incremental-v2-compare");
+        var incrementalV2Summary = {
+          uid: uid,
+          abonentId: abonentId,
+          oldRowsByIdCount: _cardSnapshotRowsByIdCount(rowsResultBaseline.rowsById),
+          newRowsByIdCount: incrementalV2Result ? incrementalV2Result.rowsByIdCount : 0,
+          oldTotalMs: Number(rowsResultBaseline && rowsResultBaseline.durationMs || 0),
+          newTotalMs: Number(incrementalV2Result && incrementalV2Result.profile && incrementalV2Result.profile.totalMs || 0),
+          diffCount: Number(incrementalV2Compare && incrementalV2Compare.mismatchedRows || 0),
+          maxDelta: Number(incrementalV2Compare && incrementalV2Compare.maxDelta || 0),
+          diagnostics: incrementalV2Result && incrementalV2Result.diagnostics || {}
+        };
+        if (incrementalV2Compare && incrementalV2Compare.mismatchedRows > 0) {
+          try { console.error("[snapshot][incremental-v2-compare-failed]", incrementalV2Compare); } catch(eIncV2Fail) {}
+        } else {
+          try { console.log("[snapshot][incremental-v2-compare-ok]", incrementalV2Summary); } catch(eIncV2Ok) {}
+        }
       }
     }
     var runtimePayload = {
