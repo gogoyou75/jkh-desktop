@@ -2140,6 +2140,8 @@ function evaluatePrimaryRow(db, row){
   } else if (found.type === 'FOUND_BY_LS_FAM'){
     status='UPDATED';
     warnings.push('Абонент найден по ЛС/Фамилии. UID будет присвоен при применении первички.');
+  } else if (found.type === 'UID_OK'){
+    messages.push('Абонент найден по UID. Можно обновить данные.');
   } else if (found.type === 'UID_SOFT_MISMATCH'){
     status='UPDATED';
     warnings.push(UID_SOFT_MISMATCH_TEXT);
