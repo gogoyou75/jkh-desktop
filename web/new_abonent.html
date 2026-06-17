@@ -580,6 +580,64 @@ function activeLinkForRegnumLocal(db, regnum){
   const r = String(regnum || '').trim();
   return (db && Array.isArray(db.links) ? db.links : []).find(l => String(l?.regnum || '').trim()===r && !String(l?.dateTo || '').trim()) || null;
 }
+function getActiveLinkForCreatedAbonentContext(db, ls, regnum){
+  const id = String(ls || '').trim();
+  const r = String(regnum || '').trim();
+  if (!id || !r || !db || !Array.isArray(db.links)) return null;
+  return db.links.find(l =>
+    String(l?.abonentId || '').trim() === id &&
+    String(l?.regnum || '').trim() === r &&
+    !String(l?.dateTo || '').trim()
+  ) || null;
+}
+function getFirstActiveLinkForCreatedRegnum(db, regnum){
+  const r = String(regnum || '').trim();
+  if (!r || !db || !Array.isArray(db.links)) return null;
+  return db.links.find(l =>
+    String(l?.regnum || '').trim() === r &&
+    !String(l?.dateTo || '').trim()
+  ) || null;
+}
+function ensureCreatedAbonentImportContext(db, ls, uid, regnum, dateFrom){
+  const id = String(ls || '').trim();
+  const u = String(uid || '').trim();
+  const r = String(regnum || '').trim();
+  if (!db || !id || !u || !r || !db.abonents || !db.abonents[id]) return false;
+
+  if (!db.premises || typeof db.premises !== 'object') db.premises = {};
+  if (!db.premises[r]) return false;
+
+  db.abonents[id].regnum = r;
+  db.abonents[id].premiseRegnum = r;
+  db.abonents[id].uid = u;
+
+  if (!Array.isArray(db.links)) db.links = [];
+  if (!getActiveLinkForCreatedAbonentContext(db, id, r)) {
+    if (!(window.Data && typeof window.Data.linkAbonentToPremise === 'function')) return false;
+    const linked = window.Data.linkAbonentToPremise(id, r, String(dateFrom || ''), '');
+    if (linked !== true) return false;
+  }
+
+  const premiseExists = !!(db.premises && db.premises[r]);
+  const activeRegnumLink = getFirstActiveLinkForCreatedRegnum(db, r);
+  const activeLinkExists = !!(
+    activeRegnumLink &&
+    String(activeRegnumLink?.abonentId || '').trim() === id &&
+    String(activeRegnumLink?.regnum || '').trim() === r &&
+    !String(activeRegnumLink?.dateTo || '').trim()
+  );
+  if (isImportReturnScenario()) {
+    console.log('[import_xls][created-abonent-context-ok]', {
+      uid: u,
+      ls: id,
+      regnum: r,
+      premiseExists,
+      activeLinkExists
+    });
+  }
+
+  return premiseExists && activeLinkExists;
+}
 function findAbonentByLinkId(db, abonentId){
   const id = String(abonentId || '').trim();
   if (!id) return null;
@@ -1026,6 +1084,7 @@ async function createAbonent() {
     dbRoot.abonents[ls] = {
       fio,
       regnum,
+      premiseRegnum: regnum,
       city, street, house, flat,
       square,
 
@@ -1107,6 +1166,13 @@ async function createAbonent() {
     }
 
     // ✅ если из импорта — переносим оплаты
+    if (!ensureCreatedAbonentImportContext(dbRoot, String(ls), uid, regnum, respStart)) {
+      window.AbonentsDB = dbSnapshotBeforeCreate;
+      try { if (window.saveAbonentsDB) window.saveAbonentsDB(); } catch(e) {}
+      setCreateStatus('Не удалось создать полный контекст абонента: premise/link/regnum не согласованы. Абонент не создан.');
+      return;
+    }
+
     const src = String(document.getElementById("na_src").value || "").trim();
     if (src === 'import_xls') {
       try { importPaymentsFromDraftForNewAbonent(String(ls), dbRoot.abonents[ls]); } catch (e) {}
