@@ -2141,7 +2141,13 @@ function evaluatePrimaryRow(db, row){
     if (!normStr(row.ls) || !normStr(row.fam)) messages.push('Для создания нужны непустые ФИО/ЛС.');
   } else if (found.type === 'FOUND_BY_LS_FAM'){
     status='UPDATED';
-    warnings.push('Абонент найден по ЛС/Фамилии. UID будет присвоен при применении первички.');
+    const existingUid = normStr(found.abonent && found.abonent.uid);
+    if (!getExcelUid(row) && existingUid){
+      setResolvedUidForRow(row, existingUid);
+      warnings.push('Абонент найден по ЛС/Фамилии. UID уже есть в базе.');
+    } else {
+      warnings.push('Абонент найден по ЛС/Фамилии. UID будет присвоен при применении первички.');
+    }
   } else if (found.type === 'UID_OK'){
     messages.push('Абонент найден по UID. Можно обновить данные.');
   } else if (found.type === 'UID_SOFT_MISMATCH'){
@@ -2159,7 +2165,11 @@ function evaluatePrimaryRow(db, row){
       if ($('optAllowSquareUpdate').checked && mode==='primary' && premise){
         warnings.push('Площадь будет обновлена: было ' + dbSq + ', станет ' + row.square + '.');
       }
-      if (!isStoppedAbonent && premise && found.type !== 'UID_STRUCTURAL_CONFLICT' && found.type !== 'UID_MISMATCH'){
+      const canVerifyPremiseOpen = !!(getResolvedUid(row) || normStr(found.abonent && found.abonent.uid));
+      if (canVerifyPremiseOpen && !getResolvedUid(row) && normStr(found.abonent && found.abonent.uid)){
+        setResolvedUidForRow(row, normStr(found.abonent.uid));
+      }
+      if (canVerifyPremiseOpen && !isStoppedAbonent && premise && found.type !== 'UID_STRUCTURAL_CONFLICT' && found.type !== 'UID_MISMATCH'){
         const openCheck = verifyPremiseOpenContext(db, row, found, reg);
         logImportPremiseOpenCheck(row, reg, openCheck.ok ? (openCheck.result || 'ok') : 'blocked', openCheck.reason);
         if (openCheck.ok){
