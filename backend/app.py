@@ -16,6 +16,13 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from werkzeug.security import generate_password_hash, check_password_hash
 from openpyxl import load_workbook, Workbook
 
+ENV_TYPE = os.getenv("ENV_TYPE")
+DB_HOST = os.getenv("DB_HOST")
+
+if ENV_TYPE == "LAB":
+    if DB_HOST != "lab-mysql":
+        raise Exception("❌ LAB SECURITY BLOCK: invalid DB_HOST")
+
 app = Flask(__name__)
 
 DB_USER = os.getenv("DB_USER", "jkh")
