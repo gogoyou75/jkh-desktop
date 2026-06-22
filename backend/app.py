@@ -16,7 +16,7 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from werkzeug.security import generate_password_hash, check_password_hash
 from openpyxl import load_workbook, Workbook
 
-ENV_TYPE = os.getenv("ENV_TYPE")
+ENV_TYPE = os.getenv("ENV_TYPE", "PROD").strip().upper()
 DB_HOST = os.getenv("DB_HOST")
 
 if ENV_TYPE == "LAB":
@@ -696,14 +696,35 @@ def _require_admin():
     return user, None
 
 
+def _environment_owner_id(user_id: str) -> str:
+    """Keep legacy PROD owners intact while isolating all new LAB API data."""
+    owner = str(user_id or "").strip()
+    if not owner or ENV_TYPE != "LAB":
+        return owner
+    prefix = "LAB:"
+    return owner if owner.startswith(prefix) else f"{prefix}{owner}"
+
+
+def _owner_belongs_to_current_environment(owner: str) -> bool:
+    value = str(owner or "").strip()
+    is_lab = ENV_TYPE == "LAB"
+    return value.startswith("LAB:") if is_lab else not value.startswith("LAB:")
+
+
 def _resolve_owner(explicit_owner: str | None = None, allow_admin_override: bool = False):
     user, err = _require_user()
     if err:
         return None, err
     wanted = str(explicit_owner or "").strip()
     if allow_admin_override and user.role == "admin" and wanted:
-        return wanted, None
-    return user.id, None
+        return _environment_owner_id(wanted), None
+    return _environment_owner_id(user.id), None
+
+
+def _user_can_access_owner(user: User, owner: str) -> bool:
+    if not _owner_belongs_to_current_environment(owner):
+        return False
+    return user.role == "admin" or str(owner or "").strip() == _environment_owner_id(user.id)
 
 
 def _sync_log(action: str, owner: str, **extra):
@@ -796,8 +817,8 @@ def _check_store_write_access(user: User, owner: str, base_key: str):
 
     if _is_protected_owner_level_key(key):
         if key.startswith("tariffs_") and user.role == "user":
-            expected_key = f"tariffs_{target_owner}"
-            if target_owner == user.id and key == expected_key:
+            expected_key = f"tariffs_{user.id}"
+            if target_owner == _environment_owner_id(user.id) and key == expected_key:
                 return True, "ok"
             return False, "tariffs_owner_mismatch"
         if user.role != "admin":
@@ -1931,7 +1952,8 @@ def client_recalc_batch_job_next_uid(job_id: int):
     user, err = _require_user()
     if err:
         return err
-    job = RecalcBatchJob.query.filter_by(id=job_id, owner_id=user.id).first()
+    owner = _environment_owner_id(user.id)
+    job = RecalcBatchJob.query.filter_by(id=job_id, owner_id=owner).first()
     if not job:
         return jsonify(ok=False, error="job_not_found"), 404
     if job.status not in {"queued", "running"}:
@@ -1944,7 +1966,7 @@ def client_recalc_batch_job_next_uid(job_id: int):
 
     item = (
         RecalcBatchJobItem.query
-        .filter_by(job_id=job.id, owner_id=user.id, status="queued")
+        .filter_by(job_id=job.id, owner_id=owner, status="queued")
         .order_by(RecalcBatchJobItem.id.asc())
         .first()
     )
@@ -1952,7 +1974,7 @@ def client_recalc_batch_job_next_uid(job_id: int):
         item.status = "running"
         item.started_at = datetime.utcnow()
         db.session.commit()
-        targets_by_uid = _owner_recalc_targets_by_uid(user.id)
+        targets_by_uid = _owner_recalc_targets_by_uid(owner)
         target = targets_by_uid.get(_norm_text(item.account_uid)) or {}
         return jsonify(
             ok=True,
@@ -1962,7 +1984,7 @@ def client_recalc_batch_job_next_uid(job_id: int):
             account_number=_norm_text(target.get("account_number")),
         )
 
-    running = RecalcBatchJobItem.query.filter_by(job_id=job.id, owner_id=user.id, status="running").count()
+    running = RecalcBatchJobItem.query.filter_by(job_id=job.id, owner_id=owner, status="running").count()
     if running:
         db.session.commit()
         return jsonify(ok=True, status="retry", reason="no_available_uid", job_id=int(job.id))
@@ -1979,7 +2001,8 @@ def client_recalc_batch_job_complete_uid(job_id: int):
     user, err = _require_user()
     if err:
         return err
-    job = RecalcBatchJob.query.filter_by(id=job_id, owner_id=user.id).first()
+    owner = _environment_owner_id(user.id)
+    job = RecalcBatchJob.query.filter_by(id=job_id, owner_id=owner).first()
     if not job:
         return jsonify(ok=False, error="job_not_found"), 404
 
@@ -1991,7 +2014,7 @@ def client_recalc_batch_job_complete_uid(job_id: int):
     except (TypeError, ValueError):
         return jsonify(ok=False, error="item_id_required"), 400
 
-    item = RecalcBatchJobItem.query.filter_by(id=item_id, job_id=job.id, owner_id=user.id).first()
+    item = RecalcBatchJobItem.query.filter_by(id=item_id, job_id=job.id, owner_id=owner).first()
     if not item:
         return jsonify(ok=False, error="item_not_found"), 404
     if item.status != "running":
@@ -2006,9 +2029,9 @@ def client_recalc_batch_job_complete_uid(job_id: int):
     if summary_uid and summary_uid != _norm_text(item.account_uid):
         return jsonify(ok=False, error="uid_mismatch"), 400
 
-    targets_by_uid = _owner_recalc_targets_by_uid(user.id)
+    targets_by_uid = _owner_recalc_targets_by_uid(owner)
     target = targets_by_uid.get(_norm_text(item.account_uid)) or {
-        "owner_id": user.id,
+        "owner_id": owner,
         "account_uid": item.account_uid,
         "account_number": "",
         "abonent_id": "",
@@ -2024,13 +2047,13 @@ def client_recalc_batch_job_complete_uid(job_id: int):
     )
 
     if summary_status in {"fresh", "error"}:
-        row = AbonentSummary.query.filter_by(owner_id=user.id, account_uid=item.account_uid).order_by(AbonentSummary.id.asc()).first()
+        row = AbonentSummary.query.filter_by(owner_id=owner, account_uid=item.account_uid).order_by(AbonentSummary.id.asc()).first()
         if row:
             row.abonent_id = _norm_text(target.get("abonent_id")) or row.abonent_id
             row.account_number = _norm_text(target.get("account_number")) or row.account_number
         else:
             row = AbonentSummary(
-                owner_id=user.id,
+                owner_id=owner,
                 abonent_id=_norm_text(target.get("abonent_id")),
                 account_uid=_norm_text(item.account_uid),
                 account_number=_norm_text(target.get("account_number")),
@@ -2051,7 +2074,7 @@ def client_recalc_batch_job_complete_uid(job_id: int):
     else:
         job.error_count = int(job.error_count or 0) + 1
 
-    remaining = RecalcBatchJobItem.query.filter_by(job_id=job.id, owner_id=user.id).filter(RecalcBatchJobItem.status.in_(["queued", "running"])).count()
+    remaining = RecalcBatchJobItem.query.filter_by(job_id=job.id, owner_id=owner).filter(RecalcBatchJobItem.status.in_(["queued", "running"])).count()
     if remaining == 0:
         job.status = "done"
         job.finished_at = datetime.utcnow()
@@ -2928,7 +2951,7 @@ def abonents_index_list():
     if err:
         return err
 
-    owner = user.id
+    owner = _environment_owner_id(user.id)
     page, limit = _parse_pagination_args(default_per_page=50, max_per_page=200)
     query_text = request.args.get("query", request.args.get("search", ""))
 
@@ -2983,7 +3006,9 @@ def abonent_summary_list():
     if err:
         return err
 
-    owner = request.args.get("owner") if user.role == "admin" else user.id
+    owner, owner_err = _resolve_owner(request.args.get("owner"), allow_admin_override=True)
+    if owner_err:
+        return owner_err
     page, per_page = _parse_pagination_args()
 
     q = AbonentSummary.query
@@ -3022,7 +3047,7 @@ def abonent_summary_mark_dirty():
     if err:
         return err
 
-    owner = user.id
+    owner = _environment_owner_id(user.id)
     counters = {"created": 0, "updated": 0, "skipped": 0, "errors": 0}
     body = request.get_json(silent=True) or {}
     if not isinstance(body, dict):
@@ -3123,7 +3148,8 @@ def abonent_summary_recalc_batch():
     if not requested:
         return jsonify(ok=False, error="account_uids_required"), 400
 
-    targets = _owner_abonent_summary_targets(user.id)
+    owner = _environment_owner_id(user.id)
+    targets = _owner_abonent_summary_targets(owner)
     targets_by_uid = {_norm_text(t.get("account_uid")): t for t in targets if _norm_text(t.get("account_uid"))}
 
     items = []
@@ -3151,7 +3177,8 @@ def abonent_summary_recalc_batch_job_create():
         raw_uids = [raw_uids]
     if not isinstance(raw_uids, list):
         return jsonify(ok=False, error="account_uids_required"), 400
-    job, counters = _recalc_batch_create_job(user.id, user.id, raw_uids, body.get("reason"))
+    owner = _environment_owner_id(user.id)
+    job, counters = _recalc_batch_create_job(owner, user.id, raw_uids, body.get("reason"))
     if job == "TOO_MANY_UIDS":
         return jsonify(ok=False, error="TOO_MANY_UIDS", details={"max_uids": counters.get("max_uids"), "requested": counters.get("requested")}), 400
     if not job:
@@ -3164,12 +3191,13 @@ def abonent_summary_recalc_batch_job_run(job_id: int):
     user, err = _require_user()
     if err:
         return err
-    job = RecalcBatchJob.query.filter_by(id=job_id, owner_id=user.id).first()
+    owner = _environment_owner_id(user.id)
+    job = RecalcBatchJob.query.filter_by(id=job_id, owner_id=owner).first()
     if not job:
         return jsonify(ok=False, error="job_not_found"), 404
     if job.status in {"completed", "failed", "stale"}:
         return jsonify(**_batch_job_status_response(job))
-    _recalc_batch_process_job(user.id, job, step_limit=1)
+    _recalc_batch_process_job(owner, job, step_limit=1)
     db.session.refresh(job)
     return jsonify(**_batch_job_status_response(job))
 
@@ -3179,7 +3207,8 @@ def abonent_summary_recalc_batch_job_latest():
     user, err = _require_user()
     if err:
         return err
-    job = RecalcBatchJob.query.filter_by(owner_id=user.id).order_by(RecalcBatchJob.id.desc()).first()
+    owner = _environment_owner_id(user.id)
+    job = RecalcBatchJob.query.filter_by(owner_id=owner).order_by(RecalcBatchJob.id.desc()).first()
     if not job:
         return jsonify(ok=True, job=None)
     return jsonify(ok=True, job=_batch_job_payload(job))
@@ -3190,10 +3219,11 @@ def abonent_summary_recalc_batch_job_status(job_id: int):
     user, err = _require_user()
     if err:
         return err
-    job = RecalcBatchJob.query.filter_by(id=job_id, owner_id=user.id).first()
+    owner = _environment_owner_id(user.id)
+    job = RecalcBatchJob.query.filter_by(id=job_id, owner_id=owner).first()
     if not job:
         return jsonify(ok=False, error="job_not_found"), 404
-    _recalc_batch_process_job(user.id, job, step_limit=10)
+    _recalc_batch_process_job(owner, job, step_limit=10)
     db.session.refresh(job)
     return jsonify(**_batch_job_status_response(job))
 
@@ -3211,7 +3241,8 @@ def abonent_summary_bulk_calc_verify_create():
         raw_uids = [raw_uids]
     if not isinstance(raw_uids, list):
         return jsonify(success=False, error="uids_required"), 400
-    job, counters = _bulk_verify_create_job(user.id, user.id, raw_uids, body.get("reason"))
+    owner = _environment_owner_id(user.id)
+    job, counters = _bulk_verify_create_job(owner, user.id, raw_uids, body.get("reason"))
     if job == "TOO_MANY_UIDS":
         return jsonify(success=False, error="TOO_MANY_UIDS", details={"max_uids": counters.get("max_uids"), "requested": counters.get("requested")}), 400
     if not job:
@@ -3225,10 +3256,11 @@ def abonent_summary_bulk_calc_verify_status(job_id: int):
     user, err = _require_user()
     if err:
         return err
-    job = BulkCalcVerifyJob.query.filter_by(id=job_id, owner_id=user.id).first()
+    owner = _environment_owner_id(user.id)
+    job = BulkCalcVerifyJob.query.filter_by(id=job_id, owner_id=owner).first()
     if not job:
         return jsonify(success=False, error="job_not_found"), 404
-    _bulk_verify_process_job(user.id, job, step_limit=10)
+    _bulk_verify_process_job(owner, job, step_limit=10)
     db.session.refresh(job)
     return jsonify(**_bulk_verify_job_response(job))
 
@@ -3239,7 +3271,7 @@ def abonent_summary_rebuild():
     if err:
         return err
 
-    owner = user.id
+    owner = _environment_owner_id(user.id)
     counters = {"created": 0, "updated": 0, "skipped": 0, "errors": 0}
     body = request.get_json(silent=True)
 
@@ -3610,7 +3642,8 @@ def audit_snapshot_summary_endpoint():
     admin, err = _require_admin()
     if err:
         return err
-    owner = _norm_text(request.args.get("owner") or request.args.get("owner_id") or "")
+    requested_owner = _norm_text(request.args.get("owner") or request.args.get("owner_id") or "")
+    owner = _environment_owner_id(requested_owner) if requested_owner else ""
     try:
         return jsonify(build_snapshot_summary_audit(owner))
     except SQLAlchemyError as exc:
@@ -3627,7 +3660,8 @@ def card_snapshot_get(account_uid: str):
     uid = _norm_text(account_uid)
     if not uid:
         return jsonify(ok=False, error="account_uid_required"), 400
-    row = CardSnapshot.query.filter_by(owner_id=user.id, abonent_uid=uid).first()
+    owner = _environment_owner_id(user.id)
+    row = CardSnapshot.query.filter_by(owner_id=owner, abonent_uid=uid).first()
     if not row:
         return jsonify(ok=True, snapshot_status="missing", snapshot_reason="SNAPSHOT_NOT_BUILT", snapshot=None)
     return jsonify(ok=True, **_card_snapshot_payload(row))
@@ -3650,7 +3684,8 @@ def card_snapshot_put(account_uid: str):
     snapshot_uid = _snapshot_uid_from_payload(snapshot) or _norm_text(body.get("abonent_uid") or body.get("account_uid"))
     if snapshot_uid and snapshot_uid != uid:
         return jsonify(ok=False, error="uid_mismatch"), 400
-    target = _snapshot_target_for_owner(user.id, uid)
+    owner = _environment_owner_id(user.id)
+    target = _snapshot_target_for_owner(owner, uid)
     if not target:
         return jsonify(ok=False, error="uid_not_found"), 404
     status = "fresh"
@@ -3662,9 +3697,9 @@ def card_snapshot_put(account_uid: str):
     snapshot["summary_status"] = status
     snapshot["snapshot_reason"] = reason
     snapshot["summary_reason"] = reason
-    row = CardSnapshot.query.filter_by(owner_id=user.id, abonent_uid=uid).first()
+    row = CardSnapshot.query.filter_by(owner_id=owner, abonent_uid=uid).first()
     if not row:
-        row = CardSnapshot(owner_id=user.id, abonent_uid=uid)
+        row = CardSnapshot(owner_id=owner, abonent_uid=uid)
         db.session.add(row)
     row.abonent_id = _norm_text(body.get("abonent_id") or snapshot.get("abonentId") or snapshot.get("abonent_id") or target.get("abonent_id"))
     row.snapshot_status = status
@@ -3692,7 +3727,8 @@ def recalc_lock_begin(account_uid: str):
         return jsonify(ok=False, error="account_uid_required"), 400
     now = datetime.utcnow()
     token = secrets.token_hex(16)
-    existing = RecalcUidLock.query.filter_by(owner_id=user.id, abonent_uid=uid).first()
+    owner = _environment_owner_id(user.id)
+    existing = RecalcUidLock.query.filter_by(owner_id=owner, abonent_uid=uid).first()
     if existing and existing.status == "running":
         age = (now - (existing.started_at or now)).total_seconds()
         if age <= RECALC_BATCH_RUNNING_TTL_SECONDS:
@@ -3703,15 +3739,15 @@ def recalc_lock_begin(account_uid: str):
         existing.status = "running"
         existing.started_at = now
     else:
-        db.session.add(RecalcUidLock(owner_id=user.id, abonent_uid=uid, lock_token=token, status="running", started_at=now))
+        db.session.add(RecalcUidLock(owner_id=owner, abonent_uid=uid, lock_token=token, status="running", started_at=now))
     try:
         db.session.commit()
     except IntegrityError:
         db.session.rollback()
-        raced = RecalcUidLock.query.filter_by(owner_id=user.id, abonent_uid=uid).first()
+        raced = RecalcUidLock.query.filter_by(owner_id=owner, abonent_uid=uid).first()
         if raced and raced.status == "running":
             return jsonify(ok=True, status="already_running", account_uid=uid)
-        app.logger.exception("recalc lock duplicate race recovery failed owner=%s uid=%s", user.id, uid)
+        app.logger.exception("recalc lock duplicate race recovery failed owner=%s uid=%s", owner, uid)
         return jsonify(ok=False, error="recalc_lock_race_recovery_failed", account_uid=uid), 409
     return jsonify(ok=True, status="started", account_uid=uid, lock_token=token)
 
@@ -3724,7 +3760,8 @@ def recalc_lock_finish(account_uid: str):
     uid = _norm_text(account_uid)
     body = request.get_json(silent=True) or {}
     token = _norm_text(body.get("lock_token"))
-    row = RecalcUidLock.query.filter_by(owner_id=user.id, abonent_uid=uid).first()
+    owner = _environment_owner_id(user.id)
+    row = RecalcUidLock.query.filter_by(owner_id=owner, abonent_uid=uid).first()
     if row and (not token or row.lock_token == token):
         row.status = "finished"
         db.session.commit()
@@ -4101,7 +4138,7 @@ def import_payments_parse(batch_id):
     batch = ImportBatch.query.filter_by(id=batch_id).first()
     if not batch:
         return _json_error("batch_not_found", 404)
-    if user.role != "admin" and batch.owner_id != user.id:
+    if not _user_can_access_owner(user, batch.owner_id):
         return _json_error("forbidden", 403)
     transition_err = _ensure_batch_transition(batch, "parse")
     if transition_err:
@@ -4209,7 +4246,7 @@ def import_payments_validate(batch_id):
     batch = ImportBatch.query.filter_by(id=batch_id).first()
     if not batch:
         return _json_error("batch_not_found", 404)
-    if user.role != "admin" and batch.owner_id != user.id:
+    if not _user_can_access_owner(user, batch.owner_id):
         return _json_error("forbidden", 403)
     transition_err = _ensure_batch_transition(batch, "validate")
     if transition_err:
@@ -4394,7 +4431,7 @@ def import_payments_rows(batch_id):
     batch = ImportBatch.query.filter_by(id=batch_id).first()
     if not batch:
         return _json_error("batch_not_found", 404)
-    if user.role != "admin" and batch.owner_id != user.id:
+    if not _user_can_access_owner(user, batch.owner_id):
         return _json_error("forbidden", 403)
 
     q = ImportBatchRow.query.filter_by(batch_id=batch.id)
@@ -4413,7 +4450,7 @@ def import_payments_apply(batch_id):
     batch = ImportBatch.query.filter_by(id=batch_id).first()
     if not batch:
         return _json_error("batch_not_found", 404)
-    if user.role != "admin" and batch.owner_id != user.id:
+    if not _user_can_access_owner(user, batch.owner_id):
         return _json_error("forbidden", 403)
     transition_err = _ensure_batch_transition(batch, "apply")
     if transition_err:
@@ -4668,7 +4705,9 @@ def import_payments_batches():
     user, err = _require_user()
     if err:
         return err
-    owner = request.args.get("owner") if user.role == "admin" else user.id
+    owner, owner_err = _resolve_owner(request.args.get("owner"), allow_admin_override=True)
+    if owner_err:
+        return owner_err
     q = ImportBatch.query
     if owner:
         q = q.filter_by(owner_id=owner)
@@ -4684,7 +4723,7 @@ def import_payments_summary(batch_id):
     batch = ImportBatch.query.filter_by(id=batch_id).first()
     if not batch:
         return _json_error("batch_not_found", 404)
-    if user.role != "admin" and batch.owner_id != user.id:
+    if not _user_can_access_owner(user, batch.owner_id):
         return _json_error("forbidden", 403)
 
     return jsonify(
@@ -4712,7 +4751,7 @@ def import_payments_errors(batch_id):
     batch = ImportBatch.query.filter_by(id=batch_id).first()
     if not batch:
         return _json_error("batch_not_found", 404)
-    if user.role != "admin" and batch.owner_id != user.id:
+    if not _user_can_access_owner(user, batch.owner_id):
         return _json_error("forbidden", 403)
 
     bad = ImportBatchRow.query.filter(
@@ -4737,7 +4776,7 @@ def import_payments_errors_export(batch_id):
     batch = ImportBatch.query.filter_by(id=batch_id).first()
     if not batch:
         return _json_error("batch_not_found", 404)
-    if user.role != "admin" and batch.owner_id != user.id:
+    if not _user_can_access_owner(user, batch.owner_id):
         return _json_error("forbidden", 403)
 
     bad = ImportBatchRow.query.filter(
