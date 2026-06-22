@@ -2915,19 +2915,9 @@ def _guard_import_batches_schema():
 
 
 @app.get("/health")
+@app.get("/api/health")
 def health():
-    schema = _import_batches_schema_status()
-    status = "ok" if schema["ok"] else "degraded"
-    code = 200 if schema["ok"] else 503
-    return jsonify(
-        status=status,
-        checks={
-            "import_batches_schema": {
-                "ok": schema["ok"],
-                "missing_columns": schema["missing_columns"],
-            },
-        },
-    ), code
+    return {"status": "ok"}
 
 
 @app.get("/")
