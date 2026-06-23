@@ -829,7 +829,7 @@ window.PremisesAdmin = (function () {
                 method: 'POST',
                 credentials: 'include',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ owner: oid, key: KEY_DB, value: String(raw || '') })
+                body: JSON.stringify({ client_owner_hint: oid, key: KEY_DB, value: String(raw || '') })
             });
         } catch (e) {
             throw new Error('SERVER_UPLOAD_FAILED');

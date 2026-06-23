@@ -716,7 +716,7 @@
       throw new Error('PAYMENT_SOURCES_UPLOAD_FORBIDDEN_OWNER');
     }
     const payload = {
-      owner: ownerId,
+      client_owner_hint: ownerId,
       key: PAYMENT_SOURCES_KEY,
       value: String(value ?? '')
     };

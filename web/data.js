@@ -567,7 +567,7 @@
       method: "DELETE",
       headers: { "Content-Type": "application/json" },
       credentials: "include",
-      body: JSON.stringify({ owner: ownerId, key: key })
+      body: JSON.stringify({ client_owner_hint: ownerId, key: key })
     });
     var txt = await res.text();
     var data = null;
@@ -580,7 +580,7 @@
       method: "POST",
       headers: { "Content-Type": "application/json" },
       credentials: "include",
-      body: JSON.stringify({ owner: ownerId, key: key, value: String(value == null ? "" : value) })
+      body: JSON.stringify({ client_owner_hint: ownerId, key: key, value: String(value == null ? "" : value) })
     });
     var txt = await res.text();
     var data = null;
@@ -589,7 +589,7 @@
   }
 
   async function _serverStoreGet(ownerId, key) {
-    var url = "/api/store?owner=" + encodeURIComponent(ownerId) + "&key=" + encodeURIComponent(key);
+    var url = "/api/store?key=" + encodeURIComponent(key) + "&client_owner_hint=" + encodeURIComponent(ownerId);
     var res = await fetch(url, { method: "GET", credentials: "include" });
     var txt = await res.text();
     var data = null;

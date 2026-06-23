@@ -403,8 +403,8 @@ function addRow(bodyId){
 }
 
 async function apiGetStore(key){
-    const owner = activeOwnerId();
-    const q = owner ? ("?owner=" + encodeURIComponent(owner) + "&key=" + encodeURIComponent(key)) : ("?key=" + encodeURIComponent(key));
+    const ownerHint = activeOwnerId();
+    const q = ownerHint ? ("?key=" + encodeURIComponent(key) + "&client_owner_hint=" + encodeURIComponent(ownerHint)) : ("?key=" + encodeURIComponent(key));
     const res = await fetch("/api/store" + q, { method:"GET", credentials:"include" });
     const txt = await res.text();
     let data = null;
@@ -419,12 +419,12 @@ async function apiGetStore(key){
 }
 
 async function apiSetStore(key, value){
-    const owner = activeOwnerId();
+    const ownerHint = activeOwnerId();
     const res = await fetch("/api/store", {
         method:"POST",
         headers:{ "Content-Type":"application/json" },
         credentials:"include",
-        body: JSON.stringify({ owner: owner, key: key, value: String(value || "") })
+        body: JSON.stringify({ client_owner_hint: ownerHint, key: key, value: String(value || "") })
     });
     const txt = await res.text();
     let data = null;

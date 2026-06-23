@@ -734,6 +734,45 @@ def _sync_log(action: str, owner: str, **extra):
     app.logger.info("[JKH sync] %s", " ".join(parts))
 
 
+def _client_owner_hint_from_request(data: dict | None = None) -> str:
+    payload = data if isinstance(data, dict) else {}
+    return str(
+        request.args.get("client_owner_hint")
+        or request.args.get("owner")
+        or request.args.get("owner_id")
+        or payload.get("client_owner_hint")
+        or payload.get("owner")
+        or payload.get("owner_id")
+        or ""
+    ).strip()
+
+
+def _session_store_owner(client_owner_hint: str = ""):
+    user, err = _require_user()
+    if err:
+        return None, None, err
+    server_owner = _environment_owner_id(user.id)
+    hint = str(client_owner_hint or "").strip()
+    normalized_hint = _environment_owner_id(hint) if hint else ""
+    if normalized_hint and normalized_hint != server_owner:
+        app.logger.warning(
+            "[store][owner-mismatch] server_owner=%s client_owner_hint=%s user_id=%s role=%s",
+            server_owner,
+            hint,
+            user.id,
+            user.role,
+        )
+    elif hint:
+        app.logger.info(
+            "[store][owner-hint] server_owner=%s client_owner_hint=%s user_id=%s role=%s",
+            server_owner,
+            hint,
+            user.id,
+            user.role,
+        )
+    return user, server_owner, None
+
+
 GLOBAL_OWNER = "GLOBAL"
 GLOBAL_KEYS = {
     "refinancing_rates_normal_v1",
@@ -4846,8 +4885,8 @@ def import_payments_errors_export(batch_id):
 
 @app.get("/api/store_keys")
 def store_keys():
-    requested_owner = request.args.get("owner") or request.args.get("owner_id")
-    owner, err = _resolve_owner(requested_owner, allow_admin_override=True)
+    client_owner_hint = _client_owner_hint_from_request()
+    user, owner, err = _session_store_owner(client_owner_hint)
     if err:
         return err
 
@@ -4863,14 +4902,14 @@ def store_keys():
         {"owner": GLOBAL_OWNER},
     ).all()
     keys = sorted({r[0] for r in rows_owner}.union({r[0] for r in rows_global}))
-    _sync_log("list_keys", owner, count=len(keys))
+    _sync_log("list_keys", owner, server_owner=owner, client_owner_hint=client_owner_hint, count=len(keys))
     return jsonify(ok=True, keys=keys, owner=owner)
 
 
 @app.get("/api/store")
 def store_get():
-    requested_owner = request.args.get("owner") or request.args.get("owner_id")
-    owner, err = _resolve_owner(requested_owner, allow_admin_override=True)
+    client_owner_hint = _client_owner_hint_from_request()
+    user, owner, err = _session_store_owner(client_owner_hint)
     if err:
         return err
 
@@ -4881,19 +4920,17 @@ def store_get():
     owner_eff = _effective_owner_for_key(owner, key)
     row = KVStore.query.filter_by(owner=owner_eff, k=key).first()
     if not row:
-        _sync_log("load", owner_eff, key=key, status="not_found")
+        _sync_log("load", owner_eff, server_owner=owner, client_owner_hint=client_owner_hint, key=key, status="not_found")
         return jsonify(ok=False, error="not_found", value=None), 404
-    _sync_log("load", owner_eff, key=key, size=len(row.v or ""), status="ok")
+    _sync_log("load", owner_eff, server_owner=owner, client_owner_hint=client_owner_hint, key=key, size=len(row.v or ""), status="ok")
     return jsonify(ok=True, value=row.v, owner=owner_eff)
 
 
 @app.post("/api/store")
 def store_set():
     data = request.get_json(silent=True) or {}
-    user, user_err = _require_user()
-    if user_err:
-        return user_err
-    owner, err = _resolve_owner(data.get("owner"), allow_admin_override=True)
+    client_owner_hint = _client_owner_hint_from_request(data)
+    user, owner, err = _session_store_owner(client_owner_hint)
     if err:
         return err
 
@@ -4917,17 +4954,15 @@ def store_set():
     else:
         db.session.add(KVStore(owner=owner_eff, k=key, v=value))
     db.session.commit()
-    _sync_log("save", owner_eff, key=key, size=len(value or ""), status="ok")
+    _sync_log("save", owner_eff, server_owner=owner, client_owner_hint=client_owner_hint, key=key, size=len(value or ""), status="ok")
     return jsonify(ok=True, owner=owner_eff)
 
 
 @app.delete("/api/store")
 def store_delete():
     data = request.get_json(silent=True) or {}
-    user, user_err = _require_user()
-    if user_err:
-        return user_err
-    owner, err = _resolve_owner(data.get("owner"), allow_admin_override=True)
+    client_owner_hint = _client_owner_hint_from_request(data)
+    user, owner, err = _session_store_owner(client_owner_hint)
     if err:
         return err
 
@@ -4942,19 +4977,19 @@ def store_delete():
     owner_eff = _effective_owner_for_key(owner, key)
     row = KVStore.query.filter_by(owner=owner_eff, k=key).first()
     if not row:
-        _sync_log("delete", owner_eff, key=key, status="not_found")
+        _sync_log("delete", owner_eff, server_owner=owner, client_owner_hint=client_owner_hint, key=key, status="not_found")
         return jsonify(ok=True, deleted=False)
 
     db.session.delete(row)
     db.session.commit()
-    _sync_log("delete", owner_eff, key=key, status="ok")
+    _sync_log("delete", owner_eff, server_owner=owner, client_owner_hint=client_owner_hint, key=key, status="ok")
     return jsonify(ok=True, deleted=True)
 
 
 @app.get("/api/store_dump")
 def store_dump():
-    requested_owner = request.args.get("owner") or request.args.get("owner_id")
-    owner, err = _resolve_owner(requested_owner, allow_admin_override=True)
+    client_owner_hint = _client_owner_hint_from_request()
+    user, owner, err = _session_store_owner(client_owner_hint)
     if err:
         return err
 
@@ -4972,7 +5007,7 @@ def store_dump():
     data = {r[0]: r[1] for r in rows_owner}
     for r in rows_global:
         data[r[0]] = r[1]
-    _sync_log("dump", owner, keys=len(data), status="ok")
+    _sync_log("dump", owner, server_owner=owner, client_owner_hint=client_owner_hint, keys=len(data), status="ok")
     return jsonify(ok=True, owner=owner, data=data)
 
 

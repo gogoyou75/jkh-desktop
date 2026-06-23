@@ -21,7 +21,7 @@
     var res = await fetch('/api/store', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ owner: ownerId, key: key, value: value })
+      body: JSON.stringify({ client_owner_hint: ownerId, key: key, value: value })
     });
 
     var data = null;
