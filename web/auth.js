@@ -295,6 +295,15 @@ function _isNetworkOrTimeoutError(err) {
     return String(email || "").trim().toLowerCase();
   }
 
+  function applyServerEnvType(data) {
+    try {
+      var env = data && (data.env_type || data.env || data.environment);
+      if (env && window.JKHStore && typeof JKHStore.setEnvType === "function") JKHStore.setEnvType(env);
+      else if (env && window.JKHStorage && typeof JKHStorage.setEnvType === "function") JKHStorage.setEnvType(env);
+      else if (env) window.JKH_ENV_TYPE = String(env || "").trim().toUpperCase();
+    } catch (e) {}
+  }
+
   function getCachedSession() {
     return safeJsonParse(localStorage.getItem(K_SESS) || "null", null);
   }
@@ -372,6 +381,7 @@ function _isNetworkOrTimeoutError(err) {
 
   async function fetchMe() {
     var data = await api("/api/auth/me", { method: "GET" });
+    applyServerEnvType(data);
     cacheSessionUser(data.user);
     return data.user;
   }
@@ -612,6 +622,7 @@ function _isNetworkOrTimeoutError(err) {
       })
     });
 
+    applyServerEnvType(data);
     cacheSessionUser(data.user);
     _sessionReady = true;
     _setUIState({
@@ -645,6 +656,7 @@ function _isNetworkOrTimeoutError(err) {
       })
     });
 
+    applyServerEnvType(data);
     cacheSessionUser(data.user);
     _sessionReady = true;
     _setUIState({

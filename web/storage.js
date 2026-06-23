@@ -42,6 +42,60 @@
   // ============================================================
   // 🔑 Scoped localStorage keys (per-user базы)
   // ============================================================
+  var ENV_UNBOUND = "UNBOUND";
+
+  function _normalizeEnvType(value) {
+    var env = String(value || "").trim().toUpperCase();
+    return (env === "LAB" || env === "PROD") ? env : "";
+  }
+
+  function setEnvType(value) {
+    var env = _normalizeEnvType(value);
+    if (!env) return false;
+    window.JKH_ENV_TYPE = env;
+    try { window.JKHBoot?.markReady?.("env"); } catch (e) {}
+    return true;
+  }
+
+  function getEnvType() {
+    return _normalizeEnvType(window.JKH_ENV_TYPE || "");
+  }
+
+  function hasServerEnvType() {
+    return !!getEnvType();
+  }
+
+  async function fetchEnvType() {
+    if (hasServerEnvType()) return getEnvType();
+    try {
+      var r = await fetch("/api/env", { method: "GET", credentials: "include" });
+      var data = await r.json();
+      if (data && setEnvType(data.env_type || data.env || data.environment)) return getEnvType();
+    } catch (e) {}
+    return "";
+  }
+
+  function isHostedMode() {
+    try {
+      var p = String(window.location && window.location.protocol || "");
+      return p === "http:" || p === "https:";
+    } catch (e) {
+      return true;
+    }
+  }
+
+  function isExplicitOfflineMode() {
+    try {
+      return Storage.prototype.getItem.call(localStorage, "jkh_sync_mode_v1") === "offline";
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function allowLocalCacheReadBeforeServer() {
+    return !isHostedMode() || isExplicitOfflineMode();
+  }
+
   function _getSessionUser() {
     try {
       return (window.Auth && typeof Auth.getCurrentUser === "function") ? Auth.getCurrentUser() : null;
@@ -80,7 +134,8 @@
   }
 
   function scopePrefixFor(ownerId) {
-    return "jkhdb::" + String(ownerId || "guest") + "::";
+    var env = getEnvType() || ENV_UNBOUND;
+    return "jkhdb::" + env + "::" + String(ownerId || "guest") + "::";
   }
 
   var GLOBAL_PROJECT_EXACT = [
@@ -144,6 +199,11 @@
   // global helper (used by data.js / pages)
   window.JKHStorage = {
     getActiveOwnerId: getActiveOwnerId,
+    getEnvType: getEnvType,
+    hasServerEnvType: hasServerEnvType,
+    setEnvType: setEnvType,
+    fetchEnvType: fetchEnvType,
+    allowLocalCacheReadBeforeServer: allowLocalCacheReadBeforeServer,
     isAllMode: isAllMode,
     isGuestMode: isGuestMode,
     k: k,
@@ -469,6 +529,13 @@
     return out;
   }
 
+  function _baseKeyFromScopedForOwner(scopedKey, ownerId) {
+    var full = String(scopedKey || "");
+    var pref = scopePrefixFor(ownerId || getActiveOwnerId());
+    if (pref && full.indexOf(pref) === 0) return full.slice(pref.length);
+    return "";
+  }
+
   function _adminGetItemForOwner(ownerId, baseKey) {
     var u = _getSessionUser();
     if (!u || u.role !== "admin") throw new Error("ADMIN_ONLY");
@@ -489,6 +556,12 @@
   window.JKHStore = {
     // identity/scope
     getOwnerId: function () { return getActiveOwnerId(); },
+    getEnvType: getEnvType,
+    hasServerEnvType: hasServerEnvType,
+    setEnvType: setEnvType,
+    fetchEnvType: fetchEnvType,
+    allowLocalCacheReadBeforeServer: allowLocalCacheReadBeforeServer,
+    key: k,
     isGuestMode: isGuestMode,
     isAllMode: isAllMode,
     scopePrefixFor: scopePrefixFor,
@@ -979,10 +1052,11 @@
 
   function _clearAllProjectScopes() {
     var removed = 0;
+    var envPrefix = "jkhdb::" + (getEnvType() || ENV_UNBOUND) + "::";
     for (var i = localStorage.length - 1; i >= 0; i--) {
       var full = String(localStorage.key(i) || "");
-      if (full.indexOf("jkhdb::") !== 0) continue;
-      var p = full.indexOf("::", 7);
+      if (full.indexOf(envPrefix) !== 0) continue;
+      var p = full.indexOf("::", envPrefix.length);
       if (p < 0) continue;
       var baseKey = full.slice(p + 2);
       if (!_isProjectDataKeyLocal(baseKey)) continue;
@@ -1079,9 +1153,13 @@
 
 
   function _replaceOwnerProjectScopeFromDump(ownerId, dumpObj) {
-    if (!window.JKHStore) return { removed: 0, written: 0, invalidAbonentsDb: false };
+    if (!window.JKHStore) return { removed: 0, written: 0, invalidAbonentsDb: false, serverDbEmpty: true };
     dumpObj = _normalizeCalcPeriodKeysInDump(dumpObj, ownerId);
     var dumpKeys = _projectKeysFromDump(dumpObj);
+    var hasServerDbKey = Object.prototype.hasOwnProperty.call(dumpObj || {}, KEY_DB);
+    var serverRawDb = hasServerDbKey ? ((dumpObj[KEY_DB] === null || dumpObj[KEY_DB] === undefined) ? "" : String(dumpObj[KEY_DB])) : "";
+    var serverDbValid = hasServerDbKey && _validateAbonentsDbRaw(serverRawDb);
+    var serverDbEmpty = !serverDbValid || _isDbEffectivelyEmpty(serverRawDb);
     var keep = {};
     var i;
     for (i = 0; i < dumpKeys.length; i++) keep[dumpKeys[i]] = true;
@@ -1117,7 +1195,7 @@
       var baseKey = sk.indexOf(pref) === 0 ? sk.slice(pref.length) : sk;
       if (!_isProjectDataKeyLocal(baseKey)) continue;
       if (keep[baseKey]) continue;
-      if (baseKey.indexOf("card_snapshot_") === 0) {
+      if (!serverDbEmpty && baseKey.indexOf("card_snapshot_") === 0) {
         try {
           console.log("[store-dump][preserve-local-card-snapshot]", {
             ownerId: ownerId,
@@ -1147,6 +1225,7 @@
         var rawDb = (val === null || val === undefined) ? "" : String(val);
         if (!_validateAbonentsDbRaw(rawDb)) {
           invalidAbonentsDb = true;
+          try { window.JKHStore.removeRaw(KEY_DB, ownerId); } catch (eDbRemove) {}
           console.error("[JKH sync][load] owner=%s key=%s status=invalid_schema_from_server raw_preview=%s", ownerId, kx, _rawPreview(rawDb, 500));
           continue;
         }
@@ -1158,7 +1237,7 @@
         throw eWrite;
       }
     }
-    return { removed: removed, written: written, invalidAbonentsDb: invalidAbonentsDb };
+    return { removed: removed, written: written, invalidAbonentsDb: invalidAbonentsDb, serverDbEmpty: serverDbEmpty };
   }
 
   function _isDbEffectivelyEmpty(rawDb) {
@@ -1498,6 +1577,15 @@
         }
 
         var responseOwner = String((resDump.data && resDump.data.owner) || "");
+        var responseEnv = String((resDump.data && (resDump.data.env_type || resDump.data.env || resDump.data.environment)) || "");
+        if (!setEnvType(responseEnv) && isHostedMode()) {
+          _setUIState({
+            server: { status: "online", checkedAt: _nowISO(), message: "" },
+            data: { status: "invalid", source: "server", message: "ENV_TYPE missing from /api/store_dump" }
+          });
+          _setStatus({ lastAction: "Ошибка загрузки", lastError: "ENV_TYPE_MISSING_STORE_DUMP" });
+          return { ok: false, status: "invalid", serverStatus: "online", message: "ENV_TYPE_MISSING_STORE_DUMP" };
+        }
         console.info("[JKH sync][load] requested_owner=%s response_owner=%s", ownerId, responseOwner);
         if (responseOwner !== String(ownerId)) {
           console.warn("[JKH sync][load] server_owner differs from client_owner_hint", {
@@ -1527,8 +1615,13 @@
         }
 
         var applied = replaced.written;
-        var status = applied > 0 ? "ready" : "empty";
+        var status = replaced.serverDbEmpty ? "empty" : "ready";
         var loadedAt = _nowISO();
+        if (status === "empty") {
+          try {
+            window.AbonentsDB = { orgName: "", orgInn: "", chairman: "", premises: {}, links: [], premiseEvents: [], abonents: {} };
+          } catch (eRuntimeEmpty) {}
+        }
         _setUIState({
           server: { status: "online", checkedAt: _nowISO(), message: "" },
           data: { status: status, loadedAt: loadedAt, source: "server", message: (status === "empty" ? "Серверный dump пуст" : "") }

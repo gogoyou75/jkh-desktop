@@ -88,7 +88,7 @@ window.PremisesAdmin = (function () {
 
     function kScoped(key, ownerId) {
         try { if (window.JKHStorage && typeof JKHStorage.k === "function") return JKHStorage.k(key, ownerId); } catch (e) {}
-        return "jkhdb::" + String(ownerId || getActiveOwnerId()) + "::" + key;
+        return "jkhdb::UNBOUND::" + String(ownerId || getActiveOwnerId()) + "::" + key;
     }
 
     function safeParse(raw, fallback) {

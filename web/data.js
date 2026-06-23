@@ -49,7 +49,51 @@
   }
 
   function _canWriteStorage() {
+    if (_isHostedMode()) {
+      try {
+        var hasEnv = !!(window.JKHStore && typeof JKHStore.hasServerEnvType === "function" && JKHStore.hasServerEnvType());
+        if (!hasEnv) return false;
+      } catch (e) {
+        return false;
+      }
+    }
     return !_isGuest() && !_isAllMode();
+  }
+
+  function _isHostedMode() {
+    try {
+      var p = String(window.location && window.location.protocol || "");
+      return p === "http:" || p === "https:";
+    } catch (e) {
+      return true;
+    }
+  }
+
+  function _allowLocalCacheReadBeforeServer() {
+    try {
+      if (window.JKHStore && typeof JKHStore.allowLocalCacheReadBeforeServer === "function") {
+        return JKHStore.allowLocalCacheReadBeforeServer();
+      }
+      if (window.JKHStorage && typeof JKHStorage.allowLocalCacheReadBeforeServer === "function") {
+        return JKHStorage.allowLocalCacheReadBeforeServer();
+      }
+    } catch (e) {}
+    return !_isHostedMode();
+  }
+
+  function _serverFirstDataReady() {
+    try {
+      var st = window.JKH_UI_STATE && window.JKH_UI_STATE.data;
+      return !!(st && (st.status === "ready" || st.status === "empty") && st.source === "server");
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function _canReadLocalCacheAsSource() {
+    if (_allowLocalCacheReadBeforeServer()) return true;
+    if (!_isHostedMode()) return true;
+    return _serverFirstDataReady();
   }
 
   function _explainWriteBlocked() {
@@ -73,7 +117,12 @@
       if (window.JKHStore && typeof JKHStore.key === "function") return JKHStore.key(key, ownerId);
       if (window.JKHStorage && typeof JKHStorage.k === "function") return JKHStorage.k(key, ownerId);
     } catch (e) { }
-    return "jkhdb::" + String(ownerId || _ownerId()) + "::" + key;
+    var env = "";
+    try {
+      env = (window.JKHStore && typeof JKHStore.getEnvType === "function") ? JKHStore.getEnvType() : "";
+      if (!env && window.JKHStorage && typeof JKHStorage.getEnvType === "function") env = JKHStorage.getEnvType();
+    } catch (e) {}
+    return "jkhdb::" + String(env || "UNBOUND") + "::" + String(ownerId || _ownerId()) + "::" + key;
   }
 
   function _getRawScoped(key, ownerId) {
@@ -2290,7 +2339,7 @@
       // prefixes (scoped)
       var pref = (window.JKHStorage && typeof JKHStorage.scopePrefixFor === "function")
         ? JKHStorage.scopePrefixFor(owner)
-        : ("jkhdb::" + String(owner) + "::");
+        : ("jkhdb::UNBOUND::" + String(owner) + "::");
 
       var ownerKeys = [];
       try { ownerKeys = _adminKeysForOwner(owner); } catch (e2) { ownerKeys = []; }
@@ -2364,6 +2413,11 @@
   }
 
   function loadFromStorage() {
+    if (!_canReadLocalCacheAsSource()) {
+      try { console.warn("[data][server-first-block-local-cache]", { ownerId: _ownerId(), hosted: _isHostedMode() }); } catch (eBlockLog) {}
+      return null;
+    }
+
     // admin ALL-mode: объединённый просмотр всех баз (READONLY)
     if (_isAllMode()) {
       var merged = { version: 1, premises: {}, links: [], abonents: {} };
@@ -6358,7 +6412,7 @@
       var keys = _adminKeysForOwner(_ownerId()) || [];
       var prefix = (window.JKHStorage && typeof JKHStorage.scopePrefixFor === "function")
         ? JKHStorage.scopePrefixFor(_ownerId())
-        : ("jkhdb::" + String(_ownerId()) + "::");
+        : ("jkhdb::UNBOUND::" + String(_ownerId()) + "::");
       keys.forEach(function(scopedKey){
         var key = String(scopedKey || "");
         if (prefix && key.indexOf(prefix) === 0) key = key.slice(prefix.length);

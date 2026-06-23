@@ -1136,6 +1136,10 @@ async function renderIndexRowsLegacyFallback(reason){
         loading: false,
         error: String(reason || "")
     });
+    if (!isExplicitLocalOrOfflineModeForIndex()) {
+        try { console.warn("[index][abonents-api-fallback-blocked]", { reason: String(reason || "api_unavailable") }); } catch(eBlockedLog) {}
+        return false;
+    }
     if (window.AbonentsDB && window.AbonentsDB.abonents) {
         try { console.warn("[index][abonents-api-fallback]", { reason: String(reason || "api_unavailable") }); } catch(eLog) {}
         rebuildIndexRows();
@@ -1143,6 +1147,19 @@ async function renderIndexRowsLegacyFallback(reason){
         return true;
     }
     return false;
+}
+
+function isExplicitLocalOrOfflineModeForIndex(){
+    try {
+        var p = String(window.location && window.location.protocol || "");
+        if (p === "file:") return true;
+        if (window.JKHStore && typeof JKHStore.allowLocalCacheReadBeforeServer === "function") {
+            return !!JKHStore.allowLocalCacheReadBeforeServer();
+        }
+        return localStorage.getItem("jkh_sync_mode_v1") === "offline";
+    } catch(e) {
+        return false;
+    }
 }
 
 function getIndexServerSummaryStatusFilter(){
@@ -1256,6 +1273,10 @@ async function renderIndexRowsReadonly(){
 let __indexExcludeRepairOwnerKey = "";
 
 function isIndexDataReadyForCalc(){
+    if (!isExplicitLocalOrOfflineModeForIndex()) {
+        var stHosted = window.JKH_UI_STATE && window.JKH_UI_STATE.data;
+        return !!(stHosted && (stHosted.status === "ready" || stHosted.status === "empty") && stHosted.source === "server");
+    }
     var st = window.JKH_UI_STATE && window.JKH_UI_STATE.data;
     if (st && (st.status === "ready" || st.status === "empty")) return true;
 

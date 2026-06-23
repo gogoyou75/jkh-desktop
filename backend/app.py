@@ -17,6 +17,8 @@ from werkzeug.security import generate_password_hash, check_password_hash
 from openpyxl import load_workbook, Workbook
 
 ENV_TYPE = os.getenv("ENV_TYPE", "PROD").strip().upper()
+if ENV_TYPE not in {"LAB", "PROD"}:
+    ENV_TYPE = "PROD"
 DB_HOST = os.getenv("DB_HOST")
 
 if ENV_TYPE == "LAB":
@@ -2956,7 +2958,12 @@ def _guard_import_batches_schema():
 @app.get("/health")
 @app.get("/api/health")
 def health():
-    return {"status": "ok"}
+    return {"status": "ok", "env_type": ENV_TYPE}
+
+
+@app.get("/api/env")
+def api_env():
+    return jsonify(ok=True, env_type=ENV_TYPE)
 
 
 @app.get("/")
@@ -3827,7 +3834,7 @@ def auth_register():
 
     session.clear()
     session["user_id"] = user.id
-    return jsonify(ok=True, user=_user_payload(user))
+    return jsonify(ok=True, user=_user_payload(user), env_type=ENV_TYPE)
 
 
 @app.post("/api/auth/login")
@@ -3855,7 +3862,7 @@ def auth_login():
     session.clear()
     session["user_id"] = user.id
     app.logger.info("[auth] login_ok user_id=%s email=%s role=%s", user.id, user.email, user.role)
-    return jsonify(ok=True, user=_user_payload(user))
+    return jsonify(ok=True, user=_user_payload(user), env_type=ENV_TYPE)
 
 
 @app.get("/api/auth/me")
@@ -3864,7 +3871,7 @@ def auth_me():
     if not user:
         return _json_error("not_authenticated", 401)
     app.logger.info("[auth] me_ok user_id=%s email=%s role=%s", user.id, user.email, user.role)
-    return jsonify(ok=True, user=_user_payload(user))
+    return jsonify(ok=True, user=_user_payload(user), env_type=ENV_TYPE)
 
 
 @app.post("/api/auth/logout")
@@ -5008,7 +5015,7 @@ def store_dump():
     for r in rows_global:
         data[r[0]] = r[1]
     _sync_log("dump", owner, server_owner=owner, client_owner_hint=client_owner_hint, keys=len(data), status="ok")
-    return jsonify(ok=True, owner=owner, data=data)
+    return jsonify(ok=True, owner=owner, env_type=ENV_TYPE, data=data)
 
 
 @app.get("/api/admin/session_debug")

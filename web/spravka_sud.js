@@ -240,8 +240,8 @@
   }
 
   function extractOwnerFromScopedDbKey(scoped){
-    const m = String(scoped || "").match(/^jkhdb::(.+?)::abonents_db_v1$/);
-    return m ? String(m[1] || "") : "";
+    const m = String(scoped || "").match(/^jkhdb::(?:(LAB|PROD)::)?(.+?)::abonents_db_v1$/);
+    return m ? String(m[2] || "") : "";
   }
 
   function getContext(){
