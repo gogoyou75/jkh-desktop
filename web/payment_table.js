@@ -711,7 +711,8 @@
   let __paymentSourcesLastValueForUpload = '';
 
   async function uploadPaymentSourcesKeyToServer(value){
-    const ownerId = (window.JKHStore && typeof JKHStore.getOwnerId === 'function') ? String(JKHStore.getOwnerId() || '').trim() : '';
+    const rawOwnerId = (window.JKHStore && typeof JKHStore.getOwnerId === 'function') ? String(JKHStore.getOwnerId() || '').trim() : '';
+    const ownerId = (window.JKHStore && typeof JKHStore.normalizeOwnerId === 'function') ? JKHStore.normalizeOwnerId(rawOwnerId) : rawOwnerId.replace(/^(LAB|PROD):/i, '');
     if (!ownerId || ownerId === 'guest' || ownerId === 'ALL') {
       throw new Error('PAYMENT_SOURCES_UPLOAD_FORBIDDEN_OWNER');
     }

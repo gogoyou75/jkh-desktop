@@ -26,15 +26,27 @@
     try{ Promise.resolve(p).catch(function(e){ try{ console.warn("[remote] failed", e); }catch(_){ } }); }catch(e){}
   }
 
+  function normalizeOwnerId(owner) {
+    try {
+      if (window.JKHStore && typeof JKHStore.normalizeOwnerId === "function") return JKHStore.normalizeOwnerId(owner);
+      if (window.Auth && typeof Auth.normalizeOwnerId === "function") return Auth.normalizeOwnerId(owner);
+    } catch (e) {}
+    var value = String(owner || "").trim();
+    var upper = value.toUpperCase();
+    if (upper.indexOf("LAB:") === 0) return value.slice(4).trim();
+    if (upper.indexOf("PROD:") === 0) return value.slice(5).trim();
+    return value;
+  }
+
 
   // ============================================================
   // Scoped storage helpers (per-user базы + admin "ALL")
   // ============================================================
   function _ownerId() {
     try {
-      if (window.Auth && typeof Auth.getActiveDbOwnerId === "function") return Auth.getActiveDbOwnerId();
-      if (window.JKHStore && typeof JKHStore.getOwnerId === "function") return JKHStore.getOwnerId();
-      if (window.JKHStorage && typeof JKHStorage.getActiveOwnerId === "function") return JKHStorage.getActiveOwnerId();
+      if (window.Auth && typeof Auth.getActiveDbOwnerId === "function") return normalizeOwnerId(Auth.getActiveDbOwnerId());
+      if (window.JKHStore && typeof JKHStore.getOwnerId === "function") return normalizeOwnerId(JKHStore.getOwnerId());
+      if (window.JKHStorage && typeof JKHStorage.getActiveOwnerId === "function") return normalizeOwnerId(JKHStorage.getActiveOwnerId());
     } catch (e) { }
     return "guest";
   }

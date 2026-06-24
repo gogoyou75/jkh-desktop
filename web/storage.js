@@ -61,6 +61,14 @@
     return _normalizeEnvType(window.JKH_ENV_TYPE || "");
   }
 
+  function normalizeOwnerId(owner) {
+    var value = String(owner || "").trim();
+    var upper = value.toUpperCase();
+    if (upper.indexOf("LAB:") === 0) return value.slice(4).trim();
+    if (upper.indexOf("PROD:") === 0) return value.slice(5).trim();
+    return value;
+  }
+
   function hasServerEnvType() {
     return !!getEnvType();
   }
@@ -114,15 +122,15 @@
       var u = _getSessionUser();
       if (!u || u.role !== "admin") return null;
       var v = localStorage.getItem(k);
-      return v || u.id;
+      return normalizeOwnerId(v || u.id);
     } catch (e) { return null; }
   }
 
   function getActiveOwnerId() {
     var u = _getSessionUser();
     if (!u) return "guest";
-    if (u.role === "admin") return _getAdminViewScope() || u.id;
-    return u.id;
+    if (u.role === "admin") return _getAdminViewScope() || normalizeOwnerId(u.id);
+    return normalizeOwnerId(u.id);
   }
 
   function isAllMode() {
@@ -135,7 +143,7 @@
 
   function scopePrefixFor(ownerId) {
     var env = getEnvType() || ENV_UNBOUND;
-    return "jkhdb::" + env + "::" + String(ownerId || "guest") + "::";
+    return "jkhdb::" + env + "::" + normalizeOwnerId(ownerId || "guest") + "::";
   }
 
   var GLOBAL_PROJECT_EXACT = [
@@ -200,6 +208,7 @@
   window.JKHStorage = {
     getActiveOwnerId: getActiveOwnerId,
     getEnvType: getEnvType,
+    normalizeOwnerId: normalizeOwnerId,
     hasServerEnvType: hasServerEnvType,
     setEnvType: setEnvType,
     fetchEnvType: fetchEnvType,
@@ -557,6 +566,7 @@
     // identity/scope
     getOwnerId: function () { return getActiveOwnerId(); },
     getEnvType: getEnvType,
+    normalizeOwnerId: normalizeOwnerId,
     hasServerEnvType: hasServerEnvType,
     setEnvType: setEnvType,
     fetchEnvType: fetchEnvType,
@@ -724,7 +734,7 @@
 
   function _ownerId() {
     if (!window.JKHStore) return "guest";
-    return window.JKHStore.getOwnerId();
+    return normalizeOwnerId(window.JKHStore.getOwnerId());
   }
 
   function _isGuestOrAll() {

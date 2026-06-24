@@ -16,10 +16,11 @@ class EnvironmentOwnerIsolationTest(unittest.TestCase):
         with patch.object(app_module, "ENV_TYPE", None):
             self.assertEqual(app_module._environment_owner_id("user-1"), "user-1")
 
-    def test_lab_owner_is_namespaced_and_idempotent(self):
+    def test_lab_owner_is_clean_and_legacy_prefix_is_stripped(self):
         with patch.object(app_module, "ENV_TYPE", "LAB"):
-            self.assertEqual(app_module._environment_owner_id("user-1"), "LAB:user-1")
-            self.assertEqual(app_module._environment_owner_id("LAB:user-1"), "LAB:user-1")
+            self.assertEqual(app_module._environment_owner_id("user-1"), "user-1")
+            self.assertEqual(app_module._environment_owner_id("LAB:user-1"), "user-1")
+            self.assertEqual(app_module._environment_owner_id("PROD:user-1"), "user-1")
 
     def test_resolve_owner_namespaces_admin_override_in_lab(self):
         admin = type("U", (), {"id": "admin-1", "role": "admin"})()
@@ -28,16 +29,16 @@ class EnvironmentOwnerIsolationTest(unittest.TestCase):
                 with patch.object(app_module, "_require_user", return_value=(admin, None)):
                     owner, error = app_module._resolve_owner("user-2", allow_admin_override=True)
         self.assertIsNone(error)
-        self.assertEqual(owner, "LAB:user-2")
+        self.assertEqual(owner, "user-2")
 
-    def test_direct_owner_access_cannot_cross_environment(self):
+    def test_direct_owner_access_normalizes_legacy_environment_prefix(self):
         admin = type("U", (), {"id": "admin-1", "role": "admin"})()
         with patch.object(app_module, "ENV_TYPE", "LAB"):
-            self.assertFalse(app_module._user_can_access_owner(admin, "user-1"))
+            self.assertTrue(app_module._user_can_access_owner(admin, "user-1"))
             self.assertTrue(app_module._user_can_access_owner(admin, "LAB:user-1"))
         with patch.object(app_module, "ENV_TYPE", "PROD"):
             self.assertTrue(app_module._user_can_access_owner(admin, "user-1"))
-            self.assertFalse(app_module._user_can_access_owner(admin, "LAB:user-1"))
+            self.assertTrue(app_module._user_can_access_owner(admin, "LAB:user-1"))
 
 
 if __name__ == "__main__":

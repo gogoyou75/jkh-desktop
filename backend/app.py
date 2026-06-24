@@ -698,19 +698,22 @@ def _require_admin():
     return user, None
 
 
+def normalize_owner_id(owner: str) -> str:
+    """Server-side owners are raw user ids; ENV_TYPE is only a browser storage namespace."""
+    value = str(owner or "").strip()
+    for prefix in ("LAB:", "PROD:"):
+        if value.upper().startswith(prefix):
+            return value[len(prefix):].strip()
+    return value
+
+
 def _environment_owner_id(user_id: str) -> str:
-    """Keep legacy PROD owners intact while isolating all new LAB API data."""
-    owner = str(user_id or "").strip()
-    if not owner or ENV_TYPE != "LAB":
-        return owner
-    prefix = "LAB:"
-    return owner if owner.startswith(prefix) else f"{prefix}{owner}"
+    """Compatibility wrapper: never scope server/KV owners by ENV_TYPE."""
+    return normalize_owner_id(user_id)
 
 
 def _owner_belongs_to_current_environment(owner: str) -> bool:
-    value = str(owner or "").strip()
-    is_lab = ENV_TYPE == "LAB"
-    return value.startswith("LAB:") if is_lab else not value.startswith("LAB:")
+    return bool(normalize_owner_id(owner))
 
 
 def _resolve_owner(explicit_owner: str | None = None, allow_admin_override: bool = False):
@@ -719,14 +722,15 @@ def _resolve_owner(explicit_owner: str | None = None, allow_admin_override: bool
         return None, err
     wanted = str(explicit_owner or "").strip()
     if allow_admin_override and user.role == "admin" and wanted:
-        return _environment_owner_id(wanted), None
-    return _environment_owner_id(user.id), None
+        return normalize_owner_id(wanted), None
+    return normalize_owner_id(user.id), None
 
 
 def _user_can_access_owner(user: User, owner: str) -> bool:
-    if not _owner_belongs_to_current_environment(owner):
+    normalized_owner = normalize_owner_id(owner)
+    if not _owner_belongs_to_current_environment(normalized_owner):
         return False
-    return user.role == "admin" or str(owner or "").strip() == _environment_owner_id(user.id)
+    return user.role == "admin" or normalized_owner == normalize_owner_id(user.id)
 
 
 def _sync_log(action: str, owner: str, **extra):
@@ -753,14 +757,14 @@ def _session_store_owner(client_owner_hint: str = ""):
     user, err = _require_user()
     if err:
         return None, None, err
-    server_owner = _environment_owner_id(user.id)
+    server_owner = normalize_owner_id(user.id)
     hint = str(client_owner_hint or "").strip()
-    normalized_hint = _environment_owner_id(hint) if hint else ""
+    normalized_hint = normalize_owner_id(hint) if hint else ""
     if normalized_hint and normalized_hint != server_owner:
         app.logger.warning(
             "[store][owner-mismatch] server_owner=%s client_owner_hint=%s user_id=%s role=%s",
             server_owner,
-            hint,
+            normalized_hint or hint,
             user.id,
             user.role,
         )
@@ -768,7 +772,7 @@ def _session_store_owner(client_owner_hint: str = ""):
         app.logger.info(
             "[store][owner-hint] server_owner=%s client_owner_hint=%s user_id=%s role=%s",
             server_owner,
-            hint,
+            normalized_hint or hint,
             user.id,
             user.role,
         )
@@ -859,7 +863,7 @@ def _check_store_write_access(user: User, owner: str, base_key: str):
     if _is_protected_owner_level_key(key):
         if key.startswith("tariffs_") and user.role == "user":
             expected_key = f"tariffs_{user.id}"
-            if target_owner == _environment_owner_id(user.id) and key == expected_key:
+            if target_owner == normalize_owner_id(user.id) and key == expected_key:
                 return True, "ok"
             return False, "tariffs_owner_mismatch"
         if user.role != "admin":

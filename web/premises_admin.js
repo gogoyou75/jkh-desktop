@@ -819,7 +819,10 @@ window.PremisesAdmin = (function () {
     }
 
     async function uploadOnlyAbonentsDbToServer(ownerId) {
-        const oid = String(ownerId || '').trim();
+        const rawOid = String(ownerId || '').trim();
+        const oid = (window.JKHStore && typeof JKHStore.normalizeOwnerId === 'function')
+            ? JKHStore.normalizeOwnerId(rawOid)
+            : rawOid.replace(/^(LAB|PROD):/i, '');
         if (!oid || oid === 'guest' || oid === 'ALL') throw new Error('SERVER_UPLOAD_FAILED');
         const raw = JSON.stringify(window.AbonentsDB || { premises: {}, links: [], abonents: {} });
 

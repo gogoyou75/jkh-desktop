@@ -106,11 +106,18 @@ function canEditRefRates(){
 }
 
 function activeOwnerId(){
+    function norm(owner){
+        try{
+            if (window.JKHStore && typeof JKHStore.normalizeOwnerId === "function") return JKHStore.normalizeOwnerId(owner);
+            if (window.Auth && typeof Auth.normalizeOwnerId === "function") return Auth.normalizeOwnerId(owner);
+        }catch(e){}
+        return String(owner || "").trim().replace(/^(LAB|PROD):/i, "");
+    }
     try{
-        if (window.Auth && typeof Auth.getActiveDbOwnerId === "function") return Auth.getActiveDbOwnerId();
+        if (window.Auth && typeof Auth.getActiveDbOwnerId === "function") return norm(Auth.getActiveDbOwnerId());
     }catch(e){}
     try{
-        if (window.JKHStore && typeof JKHStore.getOwnerId === "function") return JKHStore.getOwnerId();
+        if (window.JKHStore && typeof JKHStore.getOwnerId === "function") return norm(JKHStore.getOwnerId());
     }catch(e){}
     return "";
 }
