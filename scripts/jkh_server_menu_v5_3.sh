@@ -405,7 +405,7 @@ services:
       - .env
     environment:
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
-      MYSQL_DATABASE: jkh_lab
+      MYSQL_DATABASE: ${DB_NAME}
       MYSQL_USER: ${MYSQL_USER}
       MYSQL_PASSWORD: ${MYSQL_PASSWORD}
     volumes:
@@ -424,13 +424,13 @@ services:
     env_file:
       - .env
     environment:
-      DB_HOST: mysql
-      DB_PORT: ${DB_PORT:-3306}
+      DB_HOST: ${DB_HOST}
+      DB_PORT: ${DB_PORT}
       DB_USER: ${DB_USER}
       DB_PASSWORD: ${DB_PASSWORD}
-      DB_NAME: jkh_lab
-      ENV_TYPE: LAB
-      ALLOWED_DB_HOST: mysql
+      DB_NAME: ${DB_NAME}
+      ENV_TYPE: ${ENV_TYPE}
+      ALLOWED_DB_HOST: ${ALLOWED_DB_HOST}
     ports:
       - "5001:5000"
     depends_on:
@@ -464,6 +464,8 @@ EOF
 }
 
 lab_compose_guard() {
+  local config_file pattern
+
   [ "$ENVIRONMENT" = "LAB" ] || return 0
 
   if [ ! -f docker-compose.yml ]; then
@@ -478,26 +480,42 @@ lab_compose_guard() {
     return 1
   fi
 
-  local required_patterns=(
+  config_file="$(mktemp)" || {
+    echo "ОШИБКА: не удалось создать временный файл для docker compose config."
+    LAST_ERROR=1
+    return 1
+  }
+
+  if ! docker compose config > "$config_file"; then
+    echo "ОШИБКА: docker compose config не прошёл для LAB."
+    rm -f "$config_file"
+    LAST_ERROR=1
+    return 1
+  fi
+
+  local required_config_patterns=(
     'container_name:[[:space:]]*jkh_lab_nginx'
     'container_name:[[:space:]]*jkh_lab_mysql'
     'container_name:[[:space:]]*jkh_lab_api'
-    '"8080:80"'
-    '"5001:5000"'
-    '"3307:3306"'
-    'DB_HOST:[[:space:]]*mysql'
-    'DB_NAME:[[:space:]]*jkh_lab'
-    'ENV_TYPE:[[:space:]]*LAB'
+    'published:[[:space:]]*"*8080"*'
+    'published:[[:space:]]*"*5001"*'
+    'published:[[:space:]]*"*3307"*'
+    'DB_HOST([:=][[:space:]]*|=)mysql'
+    'DB_NAME([:=][[:space:]]*|=)jkh_lab'
+    'ENV_TYPE([:=][[:space:]]*|=)LAB'
+    'ALLOWED_DB_HOST([:=][[:space:]]*|=)mysql'
     'jkh_lab_mysql_data'
   )
-  local pattern
-  for pattern in "${required_patterns[@]}"; do
-    if ! grep -Eq "$pattern" docker-compose.yml; then
-      echo "ОШИБКА: LAB docker-compose.yml не содержит обязательный шаблон: $pattern"
+  for pattern in "${required_config_patterns[@]}"; do
+    if ! grep -Eq "$pattern" "$config_file"; then
+      echo "ОШИБКА: LAB docker compose config не содержит обязательный шаблон: $pattern"
+      rm -f "$config_file"
       LAST_ERROR=1
       return 1
     fi
   done
+
+  rm -f "$config_file"
 }
 
 lab_compose_self_heal_and_guard() {

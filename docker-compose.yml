@@ -3,9 +3,9 @@ version: "3.8"
 services:
   nginx:
     image: nginx:stable
-    container_name: jkh_nginx
+    container_name: jkh_lab_nginx
     ports:
-      - "80:80"
+      - "8080:80"
     volumes:
       - ./web:/usr/share/nginx/html:ro
       - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
@@ -15,7 +15,7 @@ services:
 
   mysql:
     image: mysql:8.0
-    container_name: jkh_mysql
+    container_name: jkh_lab_mysql
     command: >
       --default-authentication-plugin=mysql_native_password
       --character-set-server=utf8mb4
@@ -24,18 +24,19 @@ services:
       - .env
     environment:
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
-      MYSQL_DATABASE: ${MYSQL_DATABASE}
+      MYSQL_DATABASE: ${DB_NAME}
       MYSQL_USER: ${MYSQL_USER}
       MYSQL_PASSWORD: ${MYSQL_PASSWORD}
     volumes:
-      - mysql_data:/var/lib/mysql
+      - jkh_lab_mysql_data:/var/lib/mysql
     ports:
-      - "3306:3306"
+      - "3307:3306"
     restart: unless-stopped
 
   api:
-    image: jkh-api
-    container_name: jkh_api
+    build: ./backend
+    image: jkh-lab-api
+    container_name: jkh_lab_api
     volumes:
       - ./backend:/app
       - ./web:/app/web:ro
@@ -47,9 +48,13 @@ services:
       DB_USER: ${DB_USER}
       DB_PASSWORD: ${DB_PASSWORD}
       DB_NAME: ${DB_NAME}
+      ENV_TYPE: ${ENV_TYPE}
+      ALLOWED_DB_HOST: ${ALLOWED_DB_HOST}
+    ports:
+      - "5001:5000"
     depends_on:
       - mysql
     restart: unless-stopped
 
 volumes:
-  mysql_data:
+  jkh_lab_mysql_data:
