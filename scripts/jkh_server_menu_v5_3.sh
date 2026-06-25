@@ -16,8 +16,10 @@ MYSQL_CONTAINER=""
 BACKUP_DIR="/root/jkh_backups"
 LOCK_FILE="/tmp/jkh_server_menu_v5_3.lock"
 SELECTED_BRANCH=""
+SELECTED_COMMIT=""
 LAST_ERROR=0
 LAST_BLOCKED=0
+BLOCKED_MESSAGE=""
 LOCK_HELD=0
 
 print_line() {
@@ -42,8 +44,18 @@ fail() {
 blocked() {
   echo
   print_line
-  echo "BLOCKED: сценарий запрещён для этой среды"
+  if [ -n "$BLOCKED_MESSAGE" ]; then
+    echo "$BLOCKED_MESSAGE"
+  else
+    echo "BLOCKED: сценарий запрещён для этой среды"
+  fi
   print_line
+}
+
+block_operation() {
+  BLOCKED_MESSAGE="$1"
+  LAST_ERROR=1
+  LAST_BLOCKED=1
 }
 
 run() {
@@ -367,8 +379,7 @@ require_main_scenario_prod() {
   fi
 
   echo "Main-сценарии в LAB запрещены. Используй пункт 4/5 для тестовой ветки."
-  LAST_ERROR=1
-  LAST_BLOCKED=1
+  block_operation "BLOCKED: сценарий запрещён для этой среды"
   return 1
 }
 
@@ -631,7 +642,34 @@ prod_compose_guard() {
   rm -f "$config_file"
 }
 
+environment_guard() {
+  case "$ENVIRONMENT" in
+    LAB)
+      if [ "$PROJECT_DIR" != "/root/jkh-lab" ] || [ "$MYSQL_CONTAINER" != "jkh_lab_mysql" ]; then
+        echo "ОШИБКА: LAB environment guard не пройден."
+        LAST_ERROR=1
+        return 1
+      fi
+      ;;
+    PROD)
+      if [ "$PROJECT_DIR" != "/root/jkh" ] || [ "$MYSQL_CONTAINER" != "jkh_mysql" ]; then
+        echo "ОШИБКА: PROD environment guard не пройден."
+        LAST_ERROR=1
+        return 1
+      fi
+      ;;
+    *)
+      echo "ОШИБКА: неизвестная среда для environment guard: $ENVIRONMENT"
+      LAST_ERROR=1
+      return 1
+      ;;
+  esac
+
+  echo "OK: environment guard пройден для $ENVIRONMENT."
+}
+
 environment_compose_guard() {
+  environment_guard || return 1
   lab_compose_guard || return 1
   prod_compose_guard || return 1
 }
@@ -988,6 +1026,202 @@ select_branch() {
   echo "Выбрана ветка: $SELECTED_BRANCH"
 }
 
+show_cherry_pick_context() {
+  local current_branch current_commit upstream
+
+  current_branch="$(git branch --show-current 2>/dev/null || true)"
+  current_commit="$(git rev-parse --short HEAD 2>/dev/null || true)"
+  upstream="$(git rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null || true)"
+
+  echo
+  print_line
+  echo "CHERRY-PICK CONTEXT"
+  print_line
+  echo "Среда:          $ENVIRONMENT"
+  echo "Текущая ветка:  ${current_branch:-unknown}"
+  echo "Текущий commit: ${current_commit:-unknown}"
+  echo "Upstream:       ${upstream:-нет upstream}"
+  print_line
+}
+
+require_clean_git_status() {
+  local changes
+
+  changes="$(git status --porcelain)"
+  if [ -z "$changes" ]; then
+    echo "OK: git status чистый."
+    return 0
+  fi
+
+  echo "ОШИБКА: перед cherry-pick git status должен быть чистым."
+  echo "$changes"
+  LAST_ERROR=1
+  return 1
+}
+
+branch_guard() {
+  local current_branch
+
+  current_branch="$(git branch --show-current 2>/dev/null || true)"
+  if [ -z "$current_branch" ]; then
+    echo "ОШИБКА: не удалось определить текущую ветку."
+    LAST_ERROR=1
+    return 1
+  fi
+
+  if [ "$current_branch" = "main" ] && [ "$ENVIRONMENT" != "PROD" ]; then
+    echo "ОШИБКА: ветка main разрешена только для PROD main-сценариев."
+    LAST_ERROR=1
+    return 1
+  fi
+
+  echo "OK: branch guard пройден. Текущая ветка: $current_branch"
+}
+
+select_cherry_pick_source_branch() {
+  local branches=()
+  local num manual_branch manual_confirm i b
+
+  echo
+  print_line
+  echo "SOURCE BRANCH ДЛЯ CHERRY-PICK"
+  print_line
+
+  run git fetch origin --prune || return 1
+
+  mapfile -t branches < <(
+    git branch -r \
+      | sed 's#^[[:space:]]*origin/##' \
+      | grep -v '^HEAD ' \
+      | sort
+  )
+
+  if [ "${#branches[@]}" -eq 0 ]; then
+    echo "ОШИБКА: не найдено remote-веток origin/*"
+    LAST_ERROR=1
+    return 1
+  fi
+
+  echo "Показаны remote-ветки origin/*."
+  echo "0) Ручной ввод ветки"
+  i=1
+  for b in "${branches[@]}"; do
+    echo "$i) $b"
+    i=$((i + 1))
+  done
+
+  echo
+  read -rp "Выбери номер ветки или 0 для ручного ввода: " num
+  if ! [[ "$num" =~ ^[0-9]+$ ]]; then
+    echo "ОШИБКА: нужно ввести номер."
+    LAST_ERROR=1
+    return 1
+  fi
+
+  if [ "$num" -eq 0 ]; then
+    read -rp "Для ручного ввода ветки напиши MANUAL_BRANCH: " manual_confirm
+    if [ "$manual_confirm" != "MANUAL_BRANCH" ]; then
+      echo "Операция отменена до выбора ветки."
+      LAST_ERROR=1
+      return 1
+    fi
+
+    read -rp "Введи имя ветки без origin/: " manual_branch
+    manual_branch="$(echo "$manual_branch" | sed 's#^[[:space:]]*##;s#[[:space:]]*$##;s#^origin/##')"
+    if [ -z "$manual_branch" ]; then
+      echo "ОШИБКА: имя ветки пустое."
+      LAST_ERROR=1
+      return 1
+    fi
+    if ! git show-ref --verify --quiet "refs/remotes/origin/$manual_branch"; then
+      echo "ОШИБКА: origin/$manual_branch не найдена."
+      LAST_ERROR=1
+      return 1
+    fi
+    SELECTED_BRANCH="$manual_branch"
+    echo "Выбрана ветка: $SELECTED_BRANCH"
+    return 0
+  fi
+
+  if [ "$num" -lt 1 ] || [ "$num" -gt "${#branches[@]}" ]; then
+    echo "ОШИБКА: такого номера нет."
+    LAST_ERROR=1
+    return 1
+  fi
+
+  SELECTED_BRANCH="${branches[$((num - 1))]}"
+  echo "Выбрана ветка: $SELECTED_BRANCH"
+}
+
+validate_commit_hash() {
+  local hash="$1"
+
+  if ! [[ "$hash" =~ ^[0-9a-fA-F]{7,40}$ ]]; then
+    block_operation "BLOCKED: невалидный commit hash"
+    return 1
+  fi
+
+  if ! git cat-file -e "${hash}^{commit}" 2>/dev/null; then
+    block_operation "BLOCKED: невалидный commit hash"
+    return 1
+  fi
+}
+
+select_cherry_pick_commit() {
+  local commits=()
+  local choice manual_hash i line full_hash short_hash subject
+
+  run git fetch origin || return 1
+
+  echo
+  print_line
+  echo "ПОСЛЕДНИЕ 20 КОММИТОВ origin/$SELECTED_BRANCH"
+  print_line
+  git log --oneline "origin/$SELECTED_BRANCH" -20 || return 1
+
+  mapfile -t commits < <(git log --format='%H%x09%h%x09%s' "origin/$SELECTED_BRANCH" -20)
+  if [ "${#commits[@]}" -eq 0 ]; then
+    echo "ОШИБКА: в origin/$SELECTED_BRANCH не найдено коммитов."
+    LAST_ERROR=1
+    return 1
+  fi
+
+  echo
+  echo "Выбор commit:"
+  echo "0) Ручной ввод hash"
+  i=1
+  for line in "${commits[@]}"; do
+    IFS=$'\t' read -r full_hash short_hash subject <<< "$line"
+    echo "$i) $short_hash $subject"
+    i=$((i + 1))
+  done
+
+  echo
+  read -rp "Выбери номер commit или 0 для ручного hash: " choice
+  if ! [[ "$choice" =~ ^[0-9]+$ ]]; then
+    echo "ОШИБКА: нужно ввести номер."
+    LAST_ERROR=1
+    return 1
+  fi
+
+  if [ "$choice" -eq 0 ]; then
+    read -rp "Commit hash: " manual_hash
+    validate_commit_hash "$manual_hash" || return 1
+    SELECTED_COMMIT="$manual_hash"
+    return 0
+  fi
+
+  if [ "$choice" -lt 1 ] || [ "$choice" -gt "${#commits[@]}" ]; then
+    echo "ОШИБКА: такого номера commit нет."
+    LAST_ERROR=1
+    return 1
+  fi
+
+  IFS=$'\t' read -r full_hash short_hash subject <<< "${commits[$((choice - 1))]}"
+  validate_commit_hash "$full_hash" || return 1
+  SELECTED_COMMIT="$full_hash"
+}
+
 show_logs() {
   echo
   print_line
@@ -1235,19 +1469,23 @@ safe_main_deploy() {
 }
 
 cherry_pick_commit() {
-  local hash answer
+  local answer build_answer
 
-  prepare_deploy "Cherry-pick одного коммита с docker build" "yes" || return 1
-
-  run git fetch origin || return 1
-  read -rp "Хеш коммита: " hash
-  if [ -z "$hash" ]; then
-    echo "ОШИБКА: хеш не задан."
-    LAST_ERROR=1
-    return 1
+  require_prod_confirmation "Cherry-pick одного коммита" || return 1
+  show_cherry_pick_context
+  require_clean_git_status || return 1
+  environment_compose_guard || return 1
+  branch_guard || return 1
+  if [ "$ENVIRONMENT" = "PROD" ]; then
+    create_mysql_backup || return 1
+    run mysql_app_check || return 1
+    check_api || return 1
   fi
 
-  run git show --stat "$hash" || return 1
+  select_cherry_pick_source_branch || return 1
+  select_cherry_pick_commit || return 1
+
+  run git show --stat "$SELECTED_COMMIT" || return 1
   read -rp "Применить этот коммит? Напиши y: " answer
   if [ "$answer" != "y" ]; then
     echo "Операция отменена до cherry-pick и Docker build."
@@ -1255,12 +1493,35 @@ cherry_pick_commit() {
     return 1
   fi
 
-  run git cherry-pick "$hash" || {
-    echo "Cherry-pick не завершён."
-    echo "Если был конфликт и нужно отменить: git cherry-pick --abort"
+  echo
+  echo ">>> git cherry-pick $SELECTED_COMMIT"
+  git cherry-pick "$SELECTED_COMMIT"
+  local code=$?
+  if [ "$code" -ne 0 ]; then
+    if [ -f .git/CHERRY_PICK_HEAD ] || [ -n "$(git diff --name-only --diff-filter=U)" ]; then
+      echo "git cherry-pick --abort"
+      echo "git status -sb"
+      block_operation "BLOCKED: cherry-pick требует ручного разрешения конфликта"
+    else
+      LAST_ERROR=$code
+    fi
     return 1
-  }
-  lab_compose_self_heal_and_guard || return 1
+  fi
+
+  echo
+  echo "git status после cherry-pick:"
+  git status -sb || true
+  echo
+  echo "Новый HEAD:"
+  git log --oneline -n 1 || true
+
+  environment_compose_guard || return 1
+  read -rp "Запускать build после успешного cherry-pick? Напиши y: " build_answer
+  if [ "$build_answer" != "y" ]; then
+    echo "Build не запускался."
+    return 0
+  fi
+
   compose_up_build || return 1
 }
 
@@ -1318,8 +1579,10 @@ safe_rollback() {
 }
 
 run_case() {
+  SELECTED_COMMIT=""
   LAST_ERROR=0
   LAST_BLOCKED=0
+  BLOCKED_MESSAGE=""
   go_project || {
     show_final_status
     check_result
