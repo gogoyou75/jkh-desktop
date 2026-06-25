@@ -17,6 +17,7 @@ BACKUP_DIR="/root/jkh_backups"
 LOCK_FILE="/tmp/jkh_server_menu_v5_3.lock"
 SELECTED_BRANCH=""
 LAST_ERROR=0
+LAST_BLOCKED=0
 LOCK_HELD=0
 
 print_line() {
@@ -35,6 +36,13 @@ fail() {
   print_line
   echo "ERROR: операция НЕ завершена"
   echo "Смотри сообщение об ошибке выше."
+  print_line
+}
+
+blocked() {
+  echo
+  print_line
+  echo "BLOCKED: сценарий запрещён для этой среды"
   print_line
 }
 
@@ -360,6 +368,7 @@ require_main_scenario_prod() {
 
   echo "Main-сценарии в LAB запрещены. Используй пункт 4/5 для тестовой ветки."
   LAST_ERROR=1
+  LAST_BLOCKED=1
   return 1
 }
 
@@ -680,7 +689,9 @@ show_final_status() {
 }
 
 check_result() {
-  if [ "$LAST_ERROR" -eq 0 ]; then
+  if [ "$LAST_BLOCKED" -eq 1 ]; then
+    blocked
+  elif [ "$LAST_ERROR" -eq 0 ]; then
     success
   else
     fail
@@ -1308,6 +1319,7 @@ safe_rollback() {
 
 run_case() {
   LAST_ERROR=0
+  LAST_BLOCKED=0
   go_project || {
     show_final_status
     check_result
