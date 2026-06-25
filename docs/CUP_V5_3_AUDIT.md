@@ -8,11 +8,16 @@
 
 CRITICAL-риски: не найдено.
 
+Найден HIGH-риск практической проверкой и исправлен:
+- LAB пункт 3 `Main с build` мог переключить рабочую копию на `main`, выполнить `git pull origin main`, восстановить LAB `docker-compose.yml`, выполнить `docker compose up -d --build`, завершиться SUCCESS и оставить LAB на ветке `main` с `M docker-compose.yml`.
+
 Найдены MEDIUM-риски, которые являются осознанным поведением меню:
 - LAB self-heal может перезаписать `docker-compose.yml` после Git checkout/pull/reset.
 - `git reset --hard` может удалить tracked-изменения после явного подтверждения.
 
 Добавлены безопасные guard-исправления:
+- Main-сценарии в LAB запрещены до любых Git/Docker/self-heal действий. Для LAB нужно использовать пункты 4/5 с тестовой веткой.
+- PROD main-сценарии требуют `YES_PROD`, backup MySQL, environment guard и branch guard `main == origin/main`.
 - LAB блокирует PROD `container_name`.
 - LAB блокирует запрещённые volume-имена `jkh_lab_mysql_data` и `jkh_mysql_data`.
 - LAB требует существующее compose-volume имя `mysql_data`.
@@ -27,16 +32,19 @@ CRITICAL-риски: не найдено.
 - LAB MySQL container: `scripts/jkh_server_menu_v5_3.sh:96` -> `jkh_lab_mysql`
 - PROD MySQL container: `scripts/jkh_server_menu_v5_3.sh:102` -> `jkh_mysql`
 - `.env` path строится от выбранной среды: `scripts/jkh_server_menu_v5_3.sh:111`
-- LAB compose self-heal: `scripts/jkh_server_menu_v5_3.sh:370`
-- LAB compose file replacement: `scripts/jkh_server_menu_v5_3.sh:456`
-- LAB guard: `scripts/jkh_server_menu_v5_3.sh:466`
-- PROD guard: `scripts/jkh_server_menu_v5_3.sh:534`
-- общий compose guard: `scripts/jkh_server_menu_v5_3.sh:585`
-- Docker restart wrapper: `scripts/jkh_server_menu_v5_3.sh:597`
-- Docker build wrapper: `scripts/jkh_server_menu_v5_3.sh:602`
-- `git checkout`: `scripts/jkh_server_menu_v5_3.sh:1100`, `1126`, `1134`, `1147`, `1169`
-- `git pull`: `scripts/jkh_server_menu_v5_3.sh:1101`, `1135`, `1170`
-- `git reset --hard`: `scripts/jkh_server_menu_v5_3.sh:1127`, `1250`
+- LAB compose self-heal: `scripts/jkh_server_menu_v5_3.sh:410`
+- LAB compose file replacement: `scripts/jkh_server_menu_v5_3.sh:496`
+- LAB guard: `scripts/jkh_server_menu_v5_3.sh:506`
+- PROD guard: `scripts/jkh_server_menu_v5_3.sh:574`
+- общий compose guard: `scripts/jkh_server_menu_v5_3.sh:625`
+- Docker restart wrapper: `scripts/jkh_server_menu_v5_3.sh:635`
+- Docker build wrapper: `scripts/jkh_server_menu_v5_3.sh:640`
+- LAB запрет main-сценариев: `scripts/jkh_server_menu_v5_3.sh:356`
+- PROD branch guard для main-сценариев: `scripts/jkh_server_menu_v5_3.sh:366`
+- пункт 3 `Main с build`: `scripts/jkh_server_menu_v5_3.sh:1176`
+- `git checkout`: `scripts/jkh_server_menu_v5_3.sh:1141`, `1169`, `1179`, `1193`, `1216`
+- `git pull`: `scripts/jkh_server_menu_v5_3.sh:1142`, `1180`, `1217`
+- `git reset --hard`: `scripts/jkh_server_menu_v5_3.sh:1170`, `1298`
 
 Не найдено как исполняемая команда:
 - `git clean`
@@ -46,6 +54,25 @@ CRITICAL-риски: не найдено.
 - `docker volume rm`
 
 ## Находки
+
+### 0. LAB пункт 3 `Main с build` оставляет LAB на main и dirty compose
+
+Статус: найдено практической проверкой и заблокировано.
+Файл и строки: `scripts/jkh_server_menu_v5_3.sh:356`, `1176`.
+Риск до guard: HIGH.
+Риск после guard: LOW.
+
+Объяснение:
+При запуске пункта 3 в LAB сценарий переключал рабочую копию с `test-pr` на `main`, выполнял `git pull origin main`, восстанавливал LAB `docker-compose.yml`, запускал `docker compose up -d --build`, завершался SUCCESS, но оставлял LAB на ветке `main` и с `M docker-compose.yml`. Это неверно для LAB-аудита: LAB должен оставаться на тестовой ветке, а main-сценарии не должны менять состояние LAB.
+
+Исправление:
+Добавлен guard `require_main_scenario_prod`: main-сценарии в LAB завершаются сообщением `Main-сценарии в LAB запрещены. Используй пункт 4/5 для тестовой ветки.` до `prepare_deploy`, `git checkout`, `git pull`, LAB self-heal и Docker. Для PROD добавлен `prod_main_branch_guard`, проверяющий ветку `main` и соответствие `HEAD == origin/main` перед Docker-действиями.
+
+Рекомендация:
+Оставить пункт 3 заблокированным в LAB. Для LAB-аудита использовать только пункты 4/5 с `test-pr` и выбранной веткой.
+
+Нужно ли чинить сейчас:
+Уже исправлено.
 
 ### 1. Разделение LAB/PROD путей и контейнеров
 
@@ -65,7 +92,7 @@ CRITICAL-риски: не найдено.
 ### 2. LAB self-heal перезаписывает docker-compose.yml
 
 Статус: найдено.
-Файл и строки: `scripts/jkh_server_menu_v5_3.sh:370`, `450`, `456`.
+Файл и строки: `scripts/jkh_server_menu_v5_3.sh:410`, `490`, `496`.
 Риск: MEDIUM.
 
 Объяснение:
@@ -80,7 +107,7 @@ CRITICAL-риски: не найдено.
 ### 3. LAB может увидеть PROD compose
 
 Статус: найдено и заблокировано.
-Файл и строки: `scripts/jkh_server_menu_v5_3.sh:477`, `489`, `510`.
+Файл и строки: `scripts/jkh_server_menu_v5_3.sh:517`, `529`, `550`.
 Риск до guard: HIGH.
 Риск после guard: LOW.
 
@@ -96,7 +123,7 @@ CRITICAL-риски: не найдено.
 ### 4. LAB volume должен быть mysql_data
 
 Статус: найдено и заблокировано.
-Файл и строки: `scripts/jkh_server_menu_v5_3.sh:412`, `441`, `483`, `502`, `520`.
+Файл и строки: `scripts/jkh_server_menu_v5_3.sh:452`, `481`, `523`, `542`, `560`.
 Риск до guard: HIGH.
 Риск после guard: LOW.
 
@@ -112,7 +139,7 @@ Volume `jkh_lab_mysql_data` создаёт новый пустой Docker volume
 ### 5. PROD может увидеть LAB compose
 
 Статус: найдено и заблокировано.
-Файл и строки: `scripts/jkh_server_menu_v5_3.sh:534`, `545`, `557`, `564`.
+Файл и строки: `scripts/jkh_server_menu_v5_3.sh:574`, `585`, `597`, `604`.
 Риск до guard: HIGH.
 Риск после guard: LOW.
 
@@ -128,7 +155,7 @@ Volume `jkh_lab_mysql_data` создаёт новый пустой Docker volume
 ### 6. docker compose restart/up/build
 
 Статус: найдено, теперь обёрнуто guard.
-Файл и строки: `scripts/jkh_server_menu_v5_3.sh:596`, `597`, `601`, `602`.
+Файл и строки: `scripts/jkh_server_menu_v5_3.sh:635`, `636`, `640`, `641`.
 Риск: LOW.
 
 Объяснение:
@@ -158,7 +185,7 @@ Volume `jkh_lab_mysql_data` создаёт новый пустой Docker volume
 ### 8. git reset --hard
 
 Статус: найдено.
-Файл и строки: `scripts/jkh_server_menu_v5_3.sh:1127`, `1250`.
+Файл и строки: `scripts/jkh_server_menu_v5_3.sh:1170`, `1298`.
 Риск: MEDIUM.
 
 Объяснение:
@@ -173,7 +200,7 @@ Volume `jkh_lab_mysql_data` создаёт новый пустой Docker volume
 ### 9. git clean / docker down / docker volume rm
 
 Статус: не найдено как исполняемая команда.
-Файл и строки: упоминания только в описаниях `scripts/jkh_server_menu_v5_3.sh:321`, `714`, `725`, `1214`, `1227`, `1228`.
+Файл и строки: упоминания только в описаниях `scripts/jkh_server_menu_v5_3.sh:321`, `743`, `765`, `1262`, `1275`, `1276`.
 Риск: LOW.
 
 Объяснение:
@@ -188,7 +215,7 @@ Volume `jkh_lab_mysql_data` создаёт новый пустой Docker volume
 ### 10. Локальные незакоммиченные изменения
 
 Статус: найдено, частично контролируется.
-Файл и строки: `scripts/jkh_server_menu_v5_3.sh:303`, `321`, `1127`, `1250`.
+Файл и строки: `scripts/jkh_server_menu_v5_3.sh:306`, `321`, `1170`, `1298`.
 Риск: MEDIUM.
 
 Объяснение:

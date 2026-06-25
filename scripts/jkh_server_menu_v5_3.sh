@@ -353,6 +353,46 @@ create_mysql_backup() {
   run ls -lh "$backup_file" || return 1
 }
 
+require_main_scenario_prod() {
+  if [ "$ENVIRONMENT" = "PROD" ]; then
+    return 0
+  fi
+
+  echo "Main-сценарии в LAB запрещены. Используй пункт 4/5 для тестовой ветки."
+  LAST_ERROR=1
+  return 1
+}
+
+prod_main_branch_guard() {
+  local current_branch head_commit origin_main_commit
+
+  [ "$ENVIRONMENT" = "PROD" ] || return 0
+
+  current_branch="$(git branch --show-current 2>/dev/null || true)"
+  if [ "$current_branch" != "main" ]; then
+    echo "ОШИБКА: PROD main-сценарий должен выполняться только на ветке main."
+    echo "Текущая ветка: ${current_branch:-unknown}"
+    LAST_ERROR=1
+    return 1
+  fi
+
+  if ! git rev-parse --verify --quiet origin/main >/dev/null; then
+    echo "ОШИБКА: origin/main не найден. Branch guard не пройден."
+    LAST_ERROR=1
+    return 1
+  fi
+
+  head_commit="$(git rev-parse HEAD)"
+  origin_main_commit="$(git rev-parse origin/main)"
+  if [ "$head_commit" != "$origin_main_commit" ]; then
+    echo "ОШИБКА: PROD main-сценарий должен быть на origin/main."
+    echo "HEAD:        $head_commit"
+    echo "origin/main: $origin_main_commit"
+    LAST_ERROR=1
+    return 1
+  fi
+}
+
 prepare_deploy() {
   local action="$1"
   local needs_prod_backup="$2"
@@ -719,12 +759,12 @@ explain() {
     3)
       scenario_header 3 "Main с build"
       scenario_block \
-        "Переключается на main, забирает свежие изменения и запускает docker compose up -d --build." \
-        "Когда менялись Dockerfile, requirements.txt, backend-зависимости или нужно гарантированно пересобрать контейнеры." \
+        "Только в PROD: переключается на main, забирает свежие изменения и запускает docker compose up -d --build." \
+        "Когда в PROD менялись Dockerfile, requirements.txt, backend-зависимости или нужно гарантированно пересобрать контейнеры. В LAB main-сценарии запрещены." \
         "Git-ветку, Docker-образы и контейнеры выбранной среды." \
         "Базу данных и локальные untracked-файлы. git clean и docker compose down в PROD не выполняются." \
-        "Средний. В PROD перед запуском нужен YES_PROD и backup MySQL." \
-        "Это полное обновление main с пересборкой приложения." \
+        "Опасный. Разрешён только в PROD после YES_PROD, backup MySQL, environment guard и branch guard." \
+        "Это полное PROD-обновление main с пересборкой приложения. В LAB используй пункт 4/5 для тестовой ветки." \
         "[GitHub main]\n|\nv\n[$ENVIRONMENT $PROJECT_DIR]\n|\nv\n[Docker build + запуск]"
       ;;
     4)
@@ -1096,9 +1136,11 @@ dashboard() {
 }
 
 deploy_main_no_build() {
+  require_main_scenario_prod || return 1
   prepare_deploy "Обновление main без build" "yes" || return 1
   run git checkout main || return 1
   run git pull --ff-only origin main || return 1
+  prod_main_branch_guard || return 1
   lab_compose_self_heal_and_guard || return 1
   compose_restart || return 1
 }
@@ -1106,6 +1148,7 @@ deploy_main_no_build() {
 hard_reset_main() {
   local answer
 
+  require_main_scenario_prod || return 1
   require_prod_confirmation "Жёсткий возврат на чистый main" || return 1
   echo
   echo "Это действие выполнит git reset --hard origin/main."
@@ -1125,14 +1168,17 @@ hard_reset_main() {
   run git fetch origin || return 1
   run git checkout main || return 1
   run git reset --hard origin/main || return 1
+  prod_main_branch_guard || return 1
   lab_compose_self_heal_and_guard || return 1
   compose_restart || return 1
 }
 
 deploy_main_with_build() {
+  require_main_scenario_prod || return 1
   prepare_deploy "Обновление main с docker build" "yes" || return 1
   run git checkout main || return 1
   run git pull --ff-only origin main || return 1
+  prod_main_branch_guard || return 1
   lab_compose_self_heal_and_guard || return 1
   compose_up_build || return 1
 }
@@ -1160,6 +1206,7 @@ restart_services() {
 }
 
 safe_main_deploy() {
+  require_main_scenario_prod || return 1
   prepare_deploy "Безопасное обновление main: backup + build + проверки" "yes" || return 1
   if [ "$ENVIRONMENT" = "LAB" ]; then
     load_env || return 1
@@ -1168,6 +1215,7 @@ safe_main_deploy() {
   fi
   run git checkout main || return 1
   run git pull --ff-only origin main || return 1
+  prod_main_branch_guard || return 1
   lab_compose_self_heal_and_guard || return 1
   compose_up_build || return 1
   wait_for_containers
