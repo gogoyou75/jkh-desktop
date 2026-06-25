@@ -480,6 +480,12 @@ lab_compose_guard() {
     return 1
   fi
 
+  if grep -Eq 'jkh_lab_mysql_data|jkh_mysql_data' docker-compose.yml; then
+    echo "ОШИБКА: LAB compose должен использовать существующий volume mysql_data."
+    LAST_ERROR=1
+    return 1
+  fi
+
   config_file="$(mktemp)" || {
     echo "ОШИБКА: не удалось создать временный файл для docker compose config."
     LAST_ERROR=1
@@ -488,6 +494,13 @@ lab_compose_guard() {
 
   if ! docker compose config > "$config_file"; then
     echo "ОШИБКА: docker compose config не прошёл для LAB."
+    rm -f "$config_file"
+    LAST_ERROR=1
+    return 1
+  fi
+
+  if grep -Eq 'jkh_lab_mysql_data|jkh_mysql_data' "$config_file"; then
+    echo "ОШИБКА: LAB docker compose config содержит запрещённый volume."
     rm -f "$config_file"
     LAST_ERROR=1
     return 1
@@ -518,18 +531,74 @@ lab_compose_guard() {
   rm -f "$config_file"
 }
 
+prod_compose_guard() {
+  local config_file pattern
+
+  [ "$ENVIRONMENT" = "PROD" ] || return 0
+
+  if [ ! -f docker-compose.yml ]; then
+    echo "ОШИБКА: docker-compose.yml не найден."
+    LAST_ERROR=1
+    return 1
+  fi
+
+  if grep -Eq 'container_name:[[:space:]]*jkh_lab_(nginx|mysql|api)([[:space:]]*)$' docker-compose.yml; then
+    echo "PROD compose содержит LAB container_name. Deploy запрещён."
+    LAST_ERROR=1
+    return 1
+  fi
+
+  config_file="$(mktemp)" || {
+    echo "ОШИБКА: не удалось создать временный файл для docker compose config."
+    LAST_ERROR=1
+    return 1
+  }
+
+  if ! docker compose config > "$config_file"; then
+    echo "ОШИБКА: docker compose config не прошёл для PROD."
+    rm -f "$config_file"
+    LAST_ERROR=1
+    return 1
+  fi
+
+  local forbidden_config_patterns=(
+    'container_name:[[:space:]]*jkh_lab_'
+    'published:[[:space:]]*"*8080"*'
+    'published:[[:space:]]*"*5001"*'
+    'published:[[:space:]]*"*3307"*'
+    'DB_NAME([:=][[:space:]]*|=)jkh_lab'
+    'ENV_TYPE([:=][[:space:]]*|=)LAB'
+    'jkh_lab_mysql_data'
+  )
+  for pattern in "${forbidden_config_patterns[@]}"; do
+    if grep -Eq "$pattern" "$config_file"; then
+      echo "ОШИБКА: PROD docker compose config содержит LAB-шаблон: $pattern"
+      rm -f "$config_file"
+      LAST_ERROR=1
+      return 1
+    fi
+  done
+
+  rm -f "$config_file"
+}
+
+environment_compose_guard() {
+  lab_compose_guard || return 1
+  prod_compose_guard || return 1
+}
+
 lab_compose_self_heal_and_guard() {
   lab_compose_self_heal || return 1
-  lab_compose_guard || return 1
+  environment_compose_guard || return 1
 }
 
 compose_restart() {
-  lab_compose_guard || return 1
+  environment_compose_guard || return 1
   run docker compose restart
 }
 
 compose_up_build() {
-  lab_compose_guard || return 1
+  environment_compose_guard || return 1
   run docker compose up -d --build
 }
 
@@ -933,7 +1002,7 @@ full_stage_verification() {
   echo "ФИНАЛЬНАЯ ТЕХНИЧЕСКАЯ ПРОВЕРКА"
   print_line
 
-  lab_compose_guard || return 1
+  environment_compose_guard || return 1
 
   run docker compose exec api sh -lc \
     "cd /app && python -m unittest discover -s tests" || return 1
@@ -974,7 +1043,7 @@ lab_prod_readiness_stub() {
 }
 
 run_basic_checks() {
-  lab_compose_guard || return 1
+  environment_compose_guard || return 1
   run docker compose config --quiet || return 1
   load_env || return 1
   run mysql_app_check || return 1
