@@ -367,6 +367,154 @@ prepare_deploy() {
   fi
 }
 
+lab_compose_self_heal() {
+  local tmp_file
+
+  [ "$ENVIRONMENT" = "LAB" ] || return 0
+
+  tmp_file="$(mktemp)" || {
+    echo "ОШИБКА: не удалось создать временный файл для LAB docker-compose.yml."
+    LAST_ERROR=1
+    return 1
+  }
+
+  if ! cat > "$tmp_file" <<'EOF'
+version: "3.8"
+
+services:
+  nginx:
+    image: nginx:stable
+    container_name: jkh_lab_nginx
+    ports:
+      - "8080:80"
+    volumes:
+      - ./web:/usr/share/nginx/html:ro
+      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - api
+    restart: unless-stopped
+
+  mysql:
+    image: mysql:8.0
+    container_name: jkh_lab_mysql
+    command: >
+      --default-authentication-plugin=mysql_native_password
+      --character-set-server=utf8mb4
+      --collation-server=utf8mb4_unicode_ci
+    env_file:
+      - .env
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: jkh_lab
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+    volumes:
+      - jkh_lab_mysql_data:/var/lib/mysql
+    ports:
+      - "3307:3306"
+    restart: unless-stopped
+
+  api:
+    build: ./backend
+    image: jkh-lab-api
+    container_name: jkh_lab_api
+    volumes:
+      - ./backend:/app
+      - ./web:/app/web:ro
+    env_file:
+      - .env
+    environment:
+      DB_HOST: mysql
+      DB_PORT: ${DB_PORT:-3306}
+      DB_USER: ${DB_USER}
+      DB_PASSWORD: ${DB_PASSWORD}
+      DB_NAME: jkh_lab
+      ENV_TYPE: LAB
+      ALLOWED_DB_HOST: mysql
+    ports:
+      - "5001:5000"
+    depends_on:
+      - mysql
+    restart: unless-stopped
+
+volumes:
+  jkh_lab_mysql_data:
+EOF
+  then
+    echo "ОШИБКА: не удалось подготовить LAB docker-compose.yml."
+    rm -f "$tmp_file"
+    LAST_ERROR=1
+    return 1
+  fi
+
+  if [ -f docker-compose.yml ] && cmp -s "$tmp_file" docker-compose.yml; then
+    rm -f "$tmp_file"
+    echo "OK: LAB docker-compose.yml уже корректный."
+    return 0
+  fi
+
+  if ! mv "$tmp_file" docker-compose.yml; then
+    echo "ОШИБКА: не удалось восстановить LAB docker-compose.yml."
+    rm -f "$tmp_file"
+    LAST_ERROR=1
+    return 1
+  fi
+
+  echo "OK: LAB docker-compose.yml восстановлен."
+}
+
+lab_compose_guard() {
+  [ "$ENVIRONMENT" = "LAB" ] || return 0
+
+  if [ ! -f docker-compose.yml ]; then
+    echo "ОШИБКА: docker-compose.yml не найден."
+    LAST_ERROR=1
+    return 1
+  fi
+
+  if grep -Eq 'container_name:[[:space:]]*jkh_(nginx|mysql|api)([[:space:]]*)$' docker-compose.yml; then
+    echo "LAB compose содержит PROD container_name. Deploy запрещён."
+    LAST_ERROR=1
+    return 1
+  fi
+
+  local required_patterns=(
+    'container_name:[[:space:]]*jkh_lab_nginx'
+    'container_name:[[:space:]]*jkh_lab_mysql'
+    'container_name:[[:space:]]*jkh_lab_api'
+    '"8080:80"'
+    '"5001:5000"'
+    '"3307:3306"'
+    'DB_HOST:[[:space:]]*mysql'
+    'DB_NAME:[[:space:]]*jkh_lab'
+    'ENV_TYPE:[[:space:]]*LAB'
+    'jkh_lab_mysql_data'
+  )
+  local pattern
+  for pattern in "${required_patterns[@]}"; do
+    if ! grep -Eq "$pattern" docker-compose.yml; then
+      echo "ОШИБКА: LAB docker-compose.yml не содержит обязательный шаблон: $pattern"
+      LAST_ERROR=1
+      return 1
+    fi
+  done
+}
+
+lab_compose_self_heal_and_guard() {
+  lab_compose_self_heal || return 1
+  lab_compose_guard || return 1
+}
+
+compose_restart() {
+  lab_compose_guard || return 1
+  run docker compose restart
+}
+
+compose_up_build() {
+  lab_compose_guard || return 1
+  run docker compose up -d --build
+}
+
 show_final_status() {
   echo
   print_line
@@ -613,6 +761,17 @@ explain() {
         "Это управляемый возврат к прошлому коду без удаления базы и без остановки compose через down." \
         "[Предыдущее состояние]\n|\nv\n[$ENVIRONMENT $PROJECT_DIR]\n\nВ PROD требуется отдельное YES_PROD."
       ;;
+    15)
+      scenario_header 15 "Проверка готовности LAB -> PROD"
+      scenario_block \
+        "Заглушка будущей проверки готовности переноса LAB в PROD. Сейчас ничего не сравнивает и не переносит." \
+        "Когда позже потребуется отдельный безопасный preflight перед переносом из LAB в PROD." \
+        "Ничего. Пункт пока только показывает описание будущей проверки." \
+        "LAB, PROD, Git, Docker, базу данных, файлы и контейнеры." \
+        "Безопасный." \
+        "Позже здесь будет отчёт по различиям LAB/PROD: файлы, миграции, hash calc_engine и риски переноса." \
+        "[LAB]\n|\nv\n[Будущая проверка]\n|\nv\n[PROD]\n\nПеренос сейчас НЕ реализован."
+      ;;
     *)
       echo "Нет такого пункта."
       return 1
@@ -756,6 +915,8 @@ full_stage_verification() {
   echo "ФИНАЛЬНАЯ ТЕХНИЧЕСКАЯ ПРОВЕРКА"
   print_line
 
+  lab_compose_guard || return 1
+
   run docker compose exec api sh -lc \
     "cd /app && python -m unittest discover -s tests" || return 1
 
@@ -777,7 +938,25 @@ full_stage_verification() {
   check_api || return 1
 }
 
+lab_prod_readiness_stub() {
+  echo
+  print_line
+  echo "Проверка готовности LAB -> PROD"
+  print_line
+  echo "Заглушка будущего пункта. Перенос LAB -> PROD сейчас не реализован."
+  echo
+  echo "Позже здесь нужно проверить:"
+  echo "- текущие ветки и commits LAB/PROD;"
+  echo "- список файлов, которые отличаются;"
+  echo "- миграции и совместимость схемы БД;"
+  echo "- sha256sum web/calc_engine.js в LAB и PROD;"
+  echo "- docker-compose различия и риски переноса."
+  echo
+  echo "Текущий запуск ничего не меняет."
+}
+
 run_basic_checks() {
+  lab_compose_guard || return 1
   run docker compose config --quiet || return 1
   load_env || return 1
   run mysql_app_check || return 1
@@ -833,7 +1012,8 @@ deploy_main_no_build() {
   prepare_deploy "Обновление main без build" "yes" || return 1
   run git checkout main || return 1
   run git pull --ff-only origin main || return 1
-  run docker compose restart || return 1
+  lab_compose_self_heal_and_guard || return 1
+  compose_restart || return 1
 }
 
 hard_reset_main() {
@@ -858,14 +1038,16 @@ hard_reset_main() {
   run git fetch origin || return 1
   run git checkout main || return 1
   run git reset --hard origin/main || return 1
-  run docker compose restart || return 1
+  lab_compose_self_heal_and_guard || return 1
+  compose_restart || return 1
 }
 
 deploy_main_with_build() {
   prepare_deploy "Обновление main с docker build" "yes" || return 1
   run git checkout main || return 1
   run git pull --ff-only origin main || return 1
-  run docker compose up -d --build || return 1
+  lab_compose_self_heal_and_guard || return 1
+  compose_up_build || return 1
 }
 
 deploy_test_branch() {
@@ -876,17 +1058,18 @@ deploy_test_branch() {
   prepare_deploy "$description" "yes" || return 1
   select_branch || return 1
   run git checkout -B test-pr "origin/$SELECTED_BRANCH" || return 1
+  lab_compose_self_heal_and_guard || return 1
 
   if [ "$with_build" = "yes" ]; then
-    run docker compose up -d --build || return 1
+    compose_up_build || return 1
   else
-    run docker compose restart || return 1
+    compose_restart || return 1
   fi
 }
 
 restart_services() {
   require_prod_confirmation "Restart контейнеров PROD" || return 1
-  run docker compose restart
+  compose_restart
 }
 
 safe_main_deploy() {
@@ -898,7 +1081,8 @@ safe_main_deploy() {
   fi
   run git checkout main || return 1
   run git pull --ff-only origin main || return 1
-  run docker compose up -d --build || return 1
+  lab_compose_self_heal_and_guard || return 1
+  compose_up_build || return 1
   wait_for_containers
   run mysql_app_check || return 1
   health_check || return 1
@@ -930,7 +1114,8 @@ cherry_pick_commit() {
     echo "Если был конфликт и нужно отменить: git cherry-pick --abort"
     return 1
   }
-  run docker compose up -d --build || return 1
+  lab_compose_self_heal_and_guard || return 1
+  compose_up_build || return 1
 }
 
 safe_rollback() {
@@ -976,12 +1161,13 @@ safe_rollback() {
 
   run git rev-parse --verify "$target" || return 1
   run git reset --hard "$target" || return 1
+  lab_compose_self_heal_and_guard || return 1
 
   read -rp "Нужен build после rollback? Напиши y для build, Enter для restart: " build_answer
   if [ "$build_answer" = "y" ]; then
-    run docker compose up -d --build || return 1
+    compose_up_build || return 1
   else
-    run docker compose restart || return 1
+    compose_restart || return 1
   fi
 }
 
@@ -1013,6 +1199,7 @@ run_case() {
     11) cherry_pick_commit || true ;;
     13) dashboard ;;
     14) safe_rollback || true ;;
+    15) lab_prod_readiness_stub ;;
     *)
       echo "Нет такого пункта."
       LAST_ERROR=1
@@ -1044,6 +1231,7 @@ menu() {
   echo "12) Сменить LAB/PROD"
   echo "13) Dashboard среды"
   echo "14) Rollback"
+  echo "15) Проверка готовности LAB -> PROD (заглушка)"
   echo "0) Выход"
   echo
 }

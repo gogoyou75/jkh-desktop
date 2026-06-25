@@ -19,17 +19,17 @@ from openpyxl import load_workbook, Workbook
 ENV_TYPE = os.getenv("ENV_TYPE", "PROD").strip().upper()
 if ENV_TYPE not in {"LAB", "PROD"}:
     ENV_TYPE = "PROD"
-DB_HOST = os.getenv("DB_HOST")
+DB_HOST = os.getenv("DB_HOST", "mysql")
 
 if ENV_TYPE == "LAB":
-    if DB_HOST != "lab-mysql":
-        raise Exception("❌ LAB SECURITY BLOCK: invalid DB_HOST")
+    allowed_db_host = os.getenv("ALLOWED_DB_HOST", "mysql")
+    if DB_HOST != allowed_db_host:
+        raise Exception("LAB SECURITY BLOCK: invalid DB_HOST")
 
 app = Flask(__name__)
 
 DB_USER = os.getenv("DB_USER", "jkh")
 DB_PASSWORD = os.getenv("DB_PASSWORD", "")
-DB_HOST = os.getenv("DB_HOST", "mysql")
 DB_PORT = os.getenv("DB_PORT", "3306")
 DB_NAME = os.getenv("DB_NAME", "jkh")
 
