@@ -28,7 +28,7 @@ services:
       MYSQL_USER: ${MYSQL_USER}
       MYSQL_PASSWORD: ${MYSQL_PASSWORD}
     volumes:
-      - jkh_lab_mysql_data:/var/lib/mysql
+      - mysql_data:/var/lib/mysql
     ports:
       - "3307:3306"
     restart: unless-stopped
@@ -57,4 +57,4 @@ services:
     restart: unless-stopped
 
 volumes:
-  jkh_lab_mysql_data:
+  mysql_data:

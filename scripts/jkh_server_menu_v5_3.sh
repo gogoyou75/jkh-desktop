@@ -409,7 +409,7 @@ services:
       MYSQL_USER: ${MYSQL_USER}
       MYSQL_PASSWORD: ${MYSQL_PASSWORD}
     volumes:
-      - jkh_lab_mysql_data:/var/lib/mysql
+      - mysql_data:/var/lib/mysql
     ports:
       - "3307:3306"
     restart: unless-stopped
@@ -438,7 +438,7 @@ services:
     restart: unless-stopped
 
 volumes:
-  jkh_lab_mysql_data:
+  mysql_data:
 EOF
   then
     echo "ОШИБКА: не удалось подготовить LAB docker-compose.yml."
@@ -504,7 +504,7 @@ lab_compose_guard() {
     'DB_NAME([:=][[:space:]]*|=)jkh_lab'
     'ENV_TYPE([:=][[:space:]]*|=)LAB'
     'ALLOWED_DB_HOST([:=][[:space:]]*|=)mysql'
-    'jkh_lab_mysql_data'
+    'mysql_data'
   )
   for pattern in "${required_config_patterns[@]}"; do
     if ! grep -Eq "$pattern" "$config_file"; then
