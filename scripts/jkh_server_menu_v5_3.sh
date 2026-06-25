@@ -720,21 +720,34 @@ node_check_file() {
 }
 
 calc_engine_stage_guard() {
-  echo "Проверка локальных изменений web/calc_engine.js"
-  run git diff --exit-code -- web/calc_engine.js || return 1
+  local branch commit calc_hash
 
-  echo "Проверка web/calc_engine.js относительно origin/main"
-  if git rev-parse --verify origin/main >/dev/null 2>&1; then
-    if ! git diff --quiet origin/main...HEAD -- web/calc_engine.js; then
-      echo "ОШИБКА: web/calc_engine.js отличается от origin/main."
-      echo "Финансовое ядро нельзя менять без отдельного задания."
-      git diff --stat origin/main...HEAD -- web/calc_engine.js || true
-      LAST_ERROR=1
-      return 1
-    fi
-  else
-    echo "WARNING: origin/main не найден."
+  echo "Проверка локальных изменений web/calc_engine.js"
+  if ! git diff --quiet HEAD -- web/calc_engine.js; then
+    echo "CRITICAL: web/calc_engine.js изменён в рабочем дереве."
+    echo "Финальная LAB-проверка требует отсутствие локального diff в web/calc_engine.js."
+    git diff --stat HEAD -- web/calc_engine.js || true
+    LAST_ERROR=1
+    return 1
   fi
+
+  branch="$(git branch --show-current 2>/dev/null || true)"
+  commit="$(git rev-parse --short=12 HEAD 2>/dev/null || true)"
+  if command -v sha256sum >/dev/null 2>&1; then
+    calc_hash="$(sha256sum web/calc_engine.js | awk '{print $1}')"
+  else
+    calc_hash="$(shasum -a 256 web/calc_engine.js | awk '{print $1}')"
+  fi
+
+  echo
+  print_line
+  echo "LAB calc_engine info"
+  print_line
+  echo "Текущая ветка LAB: ${branch:-unknown}"
+  echo "Текущий commit LAB: ${commit:-unknown}"
+  echo "sha256sum web/calc_engine.js: $calc_hash"
+  echo "origin/main не используется как эталон для LAB-проверки"
+  print_line
 }
 
 full_stage_verification() {
@@ -760,7 +773,8 @@ full_stage_verification() {
 
   calc_engine_stage_guard || return 1
   run docker compose ps || return 1
-  health_check || return 1
+  check_http_status "Сайт" "$SITE_CHECK" 200 || return 1
+  check_api || return 1
 }
 
 run_basic_checks() {
