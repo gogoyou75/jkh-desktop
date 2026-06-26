@@ -1103,10 +1103,18 @@ function loadImportResumeState(){
   if (!window.JKHStore || !JKHStore.getJSON) return null;
   try{
     const resume = JKHStore.getJSON('import_xls_resume_v1', null, null);
+    const hasData = Array.isArray(resume && resume.dataRows) && resume.dataRows.length > 0;
+    console.log('[import_xls][draft-load-shape]', {
+      kind: 'resume',
+      ownerId: getCurrentOwnerId(),
+      hasData: hasData,
+      dataRows: hasData ? resume.dataRows.length : 0,
+      draftOwner: normStr(resume && resume.ownerId)
+    });
     console.log('[import_xls][draft-load]', {
       kind: 'resume',
       ownerId: getCurrentOwnerId(),
-      hasData: !!resume
+      hasData: hasData
     });
     return resume;
   }catch(e){ return null; }
@@ -1149,10 +1157,18 @@ function loadImportDraftState(){
   if (!window.JKHStore || !JKHStore.getJSON) return null;
   try{
     const draft = JKHStore.getJSON('import_xls_draft_v1', null, null);
+    const hasData = Array.isArray(draft && draft.dataRows) && draft.dataRows.length > 0;
+    console.log('[import_xls][draft-load-shape]', {
+      kind: 'preview',
+      ownerId: getCurrentOwnerId(),
+      hasData: hasData,
+      dataRows: hasData ? draft.dataRows.length : 0,
+      draftOwner: normStr(draft && draft.ownerId)
+    });
     console.log('[import_xls][draft-load]', {
       kind: 'preview',
       ownerId: getCurrentOwnerId(),
-      hasData: !!draft,
+      hasData: hasData,
       draftOwner: normStr(draft && draft.ownerId)
     });
     return draft;
@@ -1190,76 +1206,85 @@ function saveDraftNewAbonent(row){
     return true;
   }catch(e){ return false; }
 }
-function tryResumeFromHash(){
-  if (location.hash !== '#resume=1') return false;
-  const resume = loadImportResumeState();
-  if (!resume) return false;
+function restoreImportDraftOrResume(reason){
+  const useResume = location.hash === '#resume=1';
+  const source = useResume ? loadImportResumeState() : loadImportDraftState();
+  const sourceHasData = Array.isArray(source && source.dataRows) && source.dataRows.length > 0;
+  if (!source || !sourceHasData) return false;
 
-  if ((!Array.isArray(dataRows) || !dataRows.length) && Array.isArray(resume.dataRows) && resume.dataRows.length){
-    dataRows = normalizeImportRowsUidFields(resume.dataRows);
-    primaryApplied = !!resume.primaryApplied;
-    primaryBlocked = !!resume.primaryBlocked;
-    mode = resume.mode === 'payments' ? 'payments' : 'primary';
-    serverPaymentBatchId = Number(resume.serverPaymentBatchId) || 0;
-    serverPaymentRows = Array.isArray(resume.serverPaymentRows) ? resume.serverPaymentRows : [];
-    conflictDecision = resume.conflictDecision || {};
+  const sourceOwner = normStr(source.ownerId);
+  const currentOwner = getCurrentOwnerId();
+  if (sourceOwner && sourceOwner !== currentOwner){
+    console.warn('[import_xls][draft-owner-mismatch]', {
+      reason: normStr(reason || ''),
+      draftOwner: sourceOwner,
+      currentOwner: currentOwner,
+      source: useResume ? 'resume' : 'draft'
+    });
+    return false;
   }
-  if (resume.parseMeta && typeof resume.parseMeta === 'object') parseMeta = resume.parseMeta;
-  if (resume.fileYearValidation && typeof resume.fileYearValidation === 'object') fileYearValidation = resume.fileYearValidation;
-  fileYearBlockReason = normStr(resume.fileYearBlockReason);
-  if (resume.fileName) currentFileName = normStr(resume.fileName);
-  if (!fileYearValidation && Array.isArray(dataRows) && dataRows.length){
+
+  dataRows = normalizeImportRowsUidFields(source.dataRows);
+  mode = source.mode === 'payments' ? 'payments' : 'primary';
+  primaryApplied = !!source.primaryApplied;
+  primaryBlocked = !!source.primaryBlocked;
+  serverPaymentBatchId = Number(source.serverPaymentBatchId) || 0;
+  serverPaymentRows = Array.isArray(source.serverPaymentRows) ? source.serverPaymentRows : [];
+  conflictDecision = source.conflictDecision || {};
+  if (typeof source.allowCreate !== 'undefined') $('optAllowCreate').checked = !!source.allowCreate;
+  if (typeof source.allowSquareUpdate !== 'undefined') $('optAllowSquareUpdate').checked = !!source.allowSquareUpdate;
+  if (source.parseMeta && typeof source.parseMeta === 'object') parseMeta = source.parseMeta;
+  currentFileName = normStr(source.fileName);
+  if (source.fileYearValidation && typeof source.fileYearValidation === 'object'){
+    fileYearValidation = source.fileYearValidation;
+    fileYearBlockReason = normStr(source.fileYearBlockReason);
+    setFileYearAnalysis(fileYearValidation, currentFileName, '');
+  } else {
+    fileYearValidation = null;
     fileYearBlockReason = 'Черновик устарел. Требуется повторная загрузка файла для проверки года.';
+    setFileYearAnalysis(null, currentFileName, fileYearBlockReason);
   }
-  if (fileYearValidation) setFileYearAnalysis(fileYearValidation, currentFileName, '');
-  else if (fileYearBlockReason) setFileYearAnalysis(null, currentFileName, fileYearBlockReason);
-  if (typeof resume.allowCreate !== 'undefined') $('optAllowCreate').checked = !!resume.allowCreate;
-  if (typeof resume.allowSquareUpdate !== 'undefined') $('optAllowSquareUpdate').checked = !!resume.allowSquareUpdate;
 
-  const db = getDB();
-  const target = Number(resume.targetExcelRow) || 0;
-  let resumedUid = normStr(resume.createdUid || resume.uid);
-  if (db && db.abonents && target){
-    const row = dataRows.find(x => Number(x.excelRow)===target);
-    if (row){
-      if (!resumedUid){
+  if (useResume){
+    const target = Number(source.targetExcelRow) || 0;
+    let resumedUid = normStr(source.createdUid || source.uid);
+    const row = target ? dataRows.find(function(x){ return Number(x.excelRow) === target; }) : null;
+    if (row && !resumedUid){
+      const db = getDB();
+      if (db && db.abonents){
         const found = findAbonentByRules(db, row);
-        if (found && found.abonent){
-          resumedUid = normStr(found.abonent.uid || "");
-        }
-      }
-      if (resumedUid){
-        setCreatedUidForRow(row, resumedUid);
+        if (found && found.abonent) resumedUid = normStr(found.abonent.uid || '');
       }
     }
-  }
-
-  if (Array.isArray(dataRows) && dataRows.length){
-    buildPreview();
-  }
-  if (target){
-    const row = dataRows.find(function(x){ return Number(x.excelRow)===target; });
-    const uid = normStr((row && getResolvedUid(row)) || resumedUid);
-    const excelUid = row ? getExcelUid(row) : "";
+    if (row && resumedUid){
+      setCreatedUidForRow(row, resumedUid);
+    }
     console.log('[import_xls][resume-restored]', {
       targetExcelRow: target,
-      uid: uid,
-      excelUid: excelUid,
+      uid: resumedUid,
+      excelUid: row ? getExcelUid(row) : '',
       hasRow: !!row
     });
-    if (uid){
-      if (excelUid){
-        setImportStatus('Абонент создан. Строка Excel: ' + target + '. UID: ' + uid + '.', 'ok');
-      } else {
-        setImportStatus('Абонент создан. Строка Excel: ' + target + '. UID создан в базе: ' + uid + '. В исходном Excel UID отсутствовал.', 'ok');
-      }
-    } else {
-      setImportStatus('Абонент создан. Строка Excel: ' + target + '. UID не найден — проверьте карточку абонента.', 'warn');
-    }
+    clearImportResumeState();
   }
-  clearImportResumeState();
-  history.replaceState(null, '', location.pathname + location.search);
-  return true;
+
+  return __waitForImportDbReady('draft-restore').then(function(ok){
+    if (!ok) return false;
+    buildPreview();
+    console.log('[import_xls][draft-restored]', {
+      ownerId: currentOwner,
+      rows: Array.isArray(dataRows) ? dataRows.length : 0,
+      mode: mode,
+      fileName: normStr(currentFileName)
+    });
+    setImportStatus(fileYearBlockReason || 'Предпросмотр восстановлен. Исходный файл не выбран, но можно продолжать работу.', fileYearBlockReason ? 'err' : 'info');
+    if (useResume) history.replaceState(null, '', location.pathname + location.search);
+    return true;
+  });
+}
+function tryResumeFromHash(){
+  if (location.hash !== '#resume=1') return false;
+  return restoreImportDraftOrResume('hash');
 }
 
 function normalizeHeaderCell(v){
@@ -3442,6 +3467,19 @@ $('previewBody').addEventListener('click', function(ev){
       setImportStatus('Не удалось сохранить draft для создания абонента.', 'err');
       return;
     }
+    const readBackDraft = loadDraftNewAbonent();
+    console.log('[import_xls][new-abonent-draft-readback]', {
+      excelRow: excelRow,
+      ok: !!(readBackDraft && normStr(readBackDraft.ls || readBackDraft.fam || readBackDraft.name || readBackDraft.otch)),
+      hasDraft: !!readBackDraft,
+      ls: normStr(readBackDraft && readBackDraft.ls),
+      regnum: normStr(readBackDraft && readBackDraft.regnum)
+    });
+    if (!(readBackDraft && normStr(readBackDraft.ls || readBackDraft.fam || readBackDraft.name || readBackDraft.otch))){
+      if (window.JKHBusy && typeof JKHBusy.hide === 'function') JKHBusy.hide();
+      setImportStatus('Не удалось проверить draft_new_abonent_v1 после сохранения.', 'err');
+      return;
+    }
 
     saveImportResumeState({
       dataRows: dataRows,
@@ -3561,56 +3599,14 @@ $('previewBody').addEventListener('click', function(ev){
 (function init(){
   try {
   refreshWho();
-
-  const draft = loadImportDraftState();
-  if (draft && Array.isArray(draft.dataRows) && draft.dataRows.length){
-    const draftOwner = normStr(draft.ownerId);
-    const currentOwner = getCurrentOwnerId();
-    if (!draftOwner || draftOwner === currentOwner){
-      dataRows = normalizeImportRowsUidFields(draft.dataRows);
-      mode = draft.mode === 'payments' ? 'payments' : 'primary';
-      primaryApplied = !!draft.primaryApplied;
-      primaryBlocked = !!draft.primaryBlocked;
-      serverPaymentBatchId = Number(draft.serverPaymentBatchId) || 0;
-      serverPaymentRows = Array.isArray(draft.serverPaymentRows) ? draft.serverPaymentRows : [];
-      conflictDecision = draft.conflictDecision || {};
-      if (typeof draft.allowCreate !== 'undefined') $('optAllowCreate').checked = !!draft.allowCreate;
-      if (typeof draft.allowSquareUpdate !== 'undefined') $('optAllowSquareUpdate').checked = !!draft.allowSquareUpdate;
-      if (draft.parseMeta && typeof draft.parseMeta === 'object') parseMeta = draft.parseMeta;
-      currentFileName = normStr(draft.fileName);
-      if (draft.fileYearValidation && typeof draft.fileYearValidation === 'object'){
-        fileYearValidation = draft.fileYearValidation;
-        fileYearBlockReason = normStr(draft.fileYearBlockReason);
-        setFileYearAnalysis(fileYearValidation, currentFileName, '');
-      } else {
-        fileYearValidation = null;
-        fileYearBlockReason = 'Черновик устарел. Требуется повторная загрузка файла для проверки года.';
-        setFileYearAnalysis(null, currentFileName, fileYearBlockReason);
-      }
-      restoredFromDraft = true;
-      __waitForImportDbReady('draft-restore').then(function(ok){
-        if (!ok){
-          setImportStatus('База абонентов не готова.', 'err');
-          return;
-        }
-        buildPreview();
-        console.log('[import_xls][draft-restored]', {
-          ownerId: currentOwner,
-          rows: Array.isArray(dataRows) ? dataRows.length : 0,
-          mode: mode,
-          fileName: normStr(currentFileName)
-        });
-        setImportStatus(fileYearBlockReason || 'Предпросмотр восстановлен. Исходный файл не выбран, но можно продолжать работу.', fileYearBlockReason ? 'err' : 'info');
-      });
-    } else {
-      console.warn('[import_xls][draft-owner-mismatch]', {
-        draftOwner: draftOwner,
-        currentOwner: currentOwner
-      });
-    }
+  const restored = restoreImportDraftOrResume('init');
+  if (restored && typeof restored.then === 'function'){
+    restored.then(function(ok){
+      restoredFromDraft = !!ok;
+    });
+  } else {
+    restoredFromDraft = !!restored;
   }
-
-  tryResumeFromHash();
 
   $('fileInput').addEventListener('change', function(){ setButtons(); });
   $('optAllowCreate').addEventListener('change', function(){ renderPreview(); saveImportDraftState(); });

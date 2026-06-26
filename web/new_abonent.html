@@ -685,6 +685,14 @@ function loadDraftNewAbonent(){
   if (!window.JKHStore || !JKHStore.getJSON) return null;
   try{
     const draft = JKHStore.getJSON('draft_new_abonent_v1', null, null);
+    const hasData = !!(draft && (String(draft.ls || '').trim() || String(draft.fam || '').trim() || String(draft.name || '').trim() || String(draft.otch || '').trim()));
+    console.log('[new_abonent][draft-load-shape]', {
+      hasDraft: !!draft,
+      hasData: hasData,
+      ls: String(draft && draft.ls || ''),
+      regnum: String(draft && draft.regnum || ''),
+      excelRow: Number(draft && draft.excelRow) || 0
+    });
     console.log('[new_abonent][draft-load]', {
       hasDraft: !!draft,
       ls: String(draft && draft.ls || ''),
@@ -929,6 +937,7 @@ function prefillFromQueryParams() {
       reason: 'draft_not_found',
       href: String(window.location.href || '')
     });
+    if (typeof setCreateStatus === 'function') setCreateStatus('draft_new_abonent_v1 не найден');
   }
 
   document.getElementById("na_src").value = src;
