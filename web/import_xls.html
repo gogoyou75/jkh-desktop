@@ -1612,6 +1612,56 @@ function logUidSoftMismatch(row, uid, abonent, key, info){
   } catch (e) {}
 }
 
+function logImportResolveExisting(row, hit, reason){
+  try {
+    console.log('[import_xls][resolve-existing]', {
+      excelRow: row && row.excelRow,
+      reason: reason || '',
+      excelUid: getExcelUid(row),
+      resolvedUid: normStr((hit && hit.abonent && hit.abonent.uid) || (hit && hit.uid)),
+      excelLs: normStr(row && row.ls),
+      dbKey: normStr(hit && hit.key),
+      dbLs: normStr(hit && hit.abonent && hit.abonent.id),
+      excelFio: getExcelFio(row),
+      dbFio: getDbFio(hit && hit.abonent),
+      linkRegnum: normStr(hit && hit.link && hit.link.regnum)
+    });
+  } catch (e) {}
+}
+
+function logImportResolveMiss(row, reason){
+  try {
+    console.warn('[import_xls][resolve-miss]', {
+      excelRow: row && row.excelRow,
+      reason: reason || '',
+      excelUid: getExcelUid(row),
+      excelLs: normStr(row && row.ls),
+      excelFio: getExcelFio(row)
+    });
+  } catch (e) {}
+}
+
+function logImportResolveConflict(row, hits, reason){
+  try {
+    console.warn('[import_xls][resolve-conflict]', {
+      excelRow: row && row.excelRow,
+      reason: reason || '',
+      excelUid: getExcelUid(row),
+      excelLs: normStr(row && row.ls),
+      excelFio: getExcelFio(row),
+      hits: (hits || []).map(function(hit){
+        return {
+          key: normStr(hit && hit.key),
+          uid: normStr(hit && hit.abonent && hit.abonent.uid),
+          ls: normStr(hit && hit.abonent && hit.abonent.id),
+          fio: getDbFio(hit && hit.abonent),
+          linkRegnum: normStr(hit && hit.link && hit.link.regnum)
+        };
+      })
+    });
+  } catch (e) {}
+}
+
 function abonentMatchesExcelRow(abonent, row, requireUid){
   if (!abonent || !row) return { ok:false, reason:'NO_ABONENT' };
   const uidExcel = getExcelUid(row);
@@ -1647,6 +1697,90 @@ function activeLinkForRegnumImport(db, regnum){
     if (normStr(l && l.regnum) === r && !normStr(l && l.dateTo)) return l;
   }
   return null;
+}
+
+function isImportLinkActive(link){
+  return !normStr(link && (link.dateTo || link.to || link.end || link.endDate || link.date_end || link.respTo));
+}
+
+function importLinkAbonentId(link){
+  return normStr(link && (link.abonentId || link.abonent_id || link.abonent || link.accountId || link.ls || link.personalAccount));
+}
+
+function importLinkRegnum(link){
+  return normStr(link && (link.regnum || link.premiseRegnum || link.premise_regnum || link.regNumber || link.reg_no));
+}
+
+function activeLinkForAbonentImport(db, key, abonent){
+  if (!db || !Array.isArray(db.links)) return null;
+  const k = normStr(key);
+  const ls = normStr(abonent && abonent.id);
+  const reg = normStr(abonent && (abonent.premiseRegnum || abonent.regnum));
+  for (let i=0;i<db.links.length;i++){
+    const link = db.links[i] || {};
+    if (!isImportLinkActive(link)) continue;
+    const linkId = importLinkAbonentId(link);
+    const linkReg = importLinkRegnum(link);
+    const idMatch = !!linkId && (linkId === k || (!!ls && linkId === ls));
+    const regMatch = !reg || !linkReg || linkReg === reg;
+    if (linkReg && db.premises && db.premises[linkReg]){
+      const premiseStatus = normStr(db.premises[linkReg].status || 'active').toLowerCase();
+      if (premiseStatus && premiseStatus !== 'active') continue;
+    }
+    if (idMatch && regMatch) return link;
+  }
+  return null;
+}
+
+function findExistingAbonentWithoutUidExcel(db, row){
+  const ls = normStr(row && row.ls);
+  if (!ls || !db || !db.abonents) {
+    logImportResolveMiss(row, 'NO_LS_OR_DB');
+    return { type:'NO_ID', msg:'Нет ЛС/Фамилии — идентификация невозможна.' };
+  }
+
+  const candidates = [];
+  const keys = Object.keys(db.abonents || {});
+  for (let i=0;i<keys.length;i++){
+    const key = keys[i];
+    const abonent = db.abonents[key];
+    if (!abonent) continue;
+    const abonentLs = normStr(abonent.id || key);
+    if (abonentLs !== ls && normStr(key) !== ls) continue;
+    const fioOk = softFioMatch(row || {}, abonent || {});
+    if (!fioOk) continue;
+    const link = activeLinkForAbonentImport(db, key, abonent);
+    candidates.push({ key:key, abonent:abonent, link:link, hasActiveLink:!!link });
+  }
+
+  if (!candidates.length){
+    logImportResolveMiss(row, 'NO_LS_ACTIVE_LINK_FIO_MATCH');
+    return null;
+  }
+
+  const activeCandidates = candidates.filter(function(hit){ return hit.hasActiveLink; });
+  if (db && Array.isArray(db.links) && db.links.length && !activeCandidates.length){
+    logImportResolveConflict(row, candidates, 'NO_ACTIVE_LINK_FOR_LS_FIO_MATCH');
+    return {
+      type:'AMBIG',
+      msg:'Абонент найден по ЛС/ФИО, но активная связь premise/link не найдена. Проверьте карточку вручную.'
+    };
+  }
+  const hits = activeCandidates.length ? activeCandidates : candidates;
+  if (hits.length > 1){
+    logImportResolveConflict(row, hits, activeCandidates.length ? 'MULTIPLE_ACTIVE_LINK_MATCHES' : 'MULTIPLE_LS_FIO_MATCHES');
+    return { type:'AMBIG', msg:'Неоднозначность: найдено ' + hits.length + ' абонента(ов) по ЛС/active link/ФИО.' };
+  }
+
+  logImportResolveExisting(row, hits[0], hits[0].hasActiveLink ? 'LS_ACTIVE_LINK_FIO' : 'LS_FIO_NO_LINKS');
+  return {
+    type:'FOUND_EXISTING_NEEDS_UID_IN_EXCEL',
+    key:hits[0].key,
+    abonent:hits[0].abonent,
+    uid:normStr(hits[0].abonent && hits[0].abonent.uid),
+    link:hits[0].link,
+    msg:'Абонент найден, требуется вставить UID в Excel.'
+  };
 }
 
 function verifyPremiseOpenContext(db, row, abonentHit, regnum){
@@ -1694,9 +1828,16 @@ function findAbonentByRules(db, row){
       }
       return { type:'UID_OK', key:foundU.key, abonent:foundU.abonent, uid: normStr(foundU.abonent.uid || uid) };
     }
+    logImportResolveMiss(row, 'UID_NOT_FOUND');
     return { type:'UID_MISSING', msg:'UID из Excel не найден в базе. Нельзя применить первичку.' };
   }
-  if (!ls || !fam) return { type:'NO_ID', msg:'Нет ЛС/Фамилии — идентификация невозможна.' };
+  if (!ls || !fam) {
+    logImportResolveMiss(row, 'NO_LS_OR_FAM');
+    return { type:'NO_ID', msg:'Нет ЛС/Фамилии — идентификация невозможна.' };
+  }
+
+  const existingWithoutUid = findExistingAbonentWithoutUidExcel(db, row);
+  if (existingWithoutUid) return existingWithoutUid;
 
   const hits = [];
   const keys = Object.keys(db.abonents || {});
@@ -1709,9 +1850,14 @@ function findAbonentByRules(db, row){
   }
   if (hits.length === 1){
     const h = hits[0];
+    logImportResolveExisting(row, h, 'LEGACY_LS_FAM');
     return { type:'FOUND_BY_LS_FAM', key:h.key, abonent:h.abonent, uid:normStr(h.abonent.uid || h.key) };
   }
-  if (hits.length === 0) return { type:'NOT_FOUND', msg:'Абонент не найден. Можно создать (если включено "Разрешить создание абонента").' };
+  if (hits.length === 0) {
+    logImportResolveMiss(row, 'NOT_FOUND');
+    return { type:'NOT_FOUND', msg:'Абонент не найден. Можно создать (если включено "Разрешить создание абонента").' };
+  }
+  logImportResolveConflict(row, hits, 'LEGACY_MULTIPLE_LS_FAM');
   return { type:'AMBIG', msg:'Неоднозначность: найдено ' + hits.length + ' абонента(ов) по ЛС+Фамилии.' };
 }
 
@@ -2139,6 +2285,17 @@ function evaluatePrimaryRow(db, row){
     status='ERROR'; critical=true; messages.push(found.msg);
     if (!getExcelUid(row) && !getCreatedUid(row)) action = { type:'ADD_ABONENT' };
     if (!normStr(row.ls) || !normStr(row.fam)) messages.push('Для создания нужны непустые ФИО/ЛС.');
+  } else if (found.type === 'FOUND_EXISTING_NEEDS_UID_IN_EXCEL'){
+    status='UPDATED';
+    critical=true;
+    messages.push('Абонент найден, требуется вставить UID в Excel.');
+    const existingUidForExcel = normStr(found.abonent && found.abonent.uid);
+    if (existingUidForExcel){
+      warnings.push('UID в базе: ' + existingUidForExcel);
+      action = { type:'COPY_UID', uid: existingUidForExcel };
+    } else {
+      warnings.push('У найденного абонента UID в базе пустой. Сначала присвойте UID в карточке абонента.');
+    }
   } else if (found.type === 'FOUND_BY_LS_FAM'){
     status='UPDATED';
     const existingUid = normStr(found.abonent && found.abonent.uid);
@@ -2890,6 +3047,7 @@ async function applyPrimary(){
     const row = dataRows[i];
     const found = findAbonentByRules(db, row);
     if (found.type==='UID_STRUCTURAL_CONFLICT' || found.type==='UID_MISMATCH' || found.type==='UID_MISSING' || found.type==='NO_ID' || found.type==='AMBIG' || found.type==='NOT_FOUND') continue;
+    if (found.type==='FOUND_EXISTING_NEEDS_UID_IN_EXCEL') continue;
     if (!Number.isFinite(row.square) || row.square<=0) continue;
 
     let a = found.abonent;
