@@ -1861,6 +1861,13 @@ async function __rollbackAfterFlushError(snapshot, options){
   try{
     if (snapshot && snapshot.db && typeof window.AbonentsDB === 'object'){
       window.AbonentsDB = __deepCloneJSONSafe(snapshot.db) || snapshot.db;
+      console.log("[runtime-db-keys]", Object.keys(window.AbonentsDB || {}));
+      console.log(
+        "[runtime-abonents-count]",
+        window.AbonentsDB && window.AbonentsDB.abonents
+          ? Object.keys(window.AbonentsDB.abonents).length
+          : "missing"
+      );
       if (typeof window.saveAbonentsDB === 'function') window.saveAbonentsDB();
       restored = true;
     }
@@ -2120,6 +2127,13 @@ function __restoreDeletedRuntimeState(snapshot){
     try{
         if (snapshot && snapshot.db && typeof window.AbonentsDB === 'object'){
             window.AbonentsDB = __deepCloneJSONSafe(snapshot.db) || snapshot.db;
+            console.log("[runtime-db-keys]", Object.keys(window.AbonentsDB || {}));
+            console.log(
+                "[runtime-abonents-count]",
+                window.AbonentsDB && window.AbonentsDB.abonents
+                    ? Object.keys(window.AbonentsDB.abonents).length
+                    : "missing"
+            );
             if (typeof window.saveAbonentsDB === 'function') window.saveAbonentsDB();
         }
         const keys = (snapshot && snapshot.keys) ? Object.keys(snapshot.keys) : [];

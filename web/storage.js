@@ -1646,6 +1646,15 @@
         if (!replaced.serverDbEmpty && parsedHasContent) {
           window.AbonentsDB = parsedRuntimeDb;
           try {
+            console.log("[runtime-db-keys]", Object.keys(window.AbonentsDB || {}));
+            console.log(
+              "[runtime-abonents-count]",
+              window.AbonentsDB && window.AbonentsDB.abonents
+                ? Object.keys(window.AbonentsDB.abonents).length
+                : "missing"
+            );
+          } catch (shapeLogErr) {}
+          try {
             console.info("[data][runtime-hydrate-ok]", {
               ownerId: ownerId,
               reason: String(options && options.reason || "server-first"),
@@ -1665,6 +1674,15 @@
           } catch (emptyBlockedLogErr) {}
           if (parsedHasContent && !runtimeHadContent) {
             window.AbonentsDB = parsedRuntimeDb;
+            try {
+              console.log("[runtime-db-keys]", Object.keys(window.AbonentsDB || {}));
+              console.log(
+                "[runtime-abonents-count]",
+                window.AbonentsDB && window.AbonentsDB.abonents
+                  ? Object.keys(window.AbonentsDB.abonents).length
+                  : "missing"
+              );
+            } catch (shapeLogErr2) {}
           }
         }
         var status = (!replaced.serverDbEmpty || runtimeHadContent || parsedHasContent) ? "ready" : "empty";

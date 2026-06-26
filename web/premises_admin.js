@@ -821,6 +821,13 @@ window.PremisesAdmin = (function () {
     function restoreFromTxSnapshot(snapshot) {
         if (!snapshot || !snapshot.db) return;
         window.AbonentsDB = deepCloneRuntimeDb(snapshot.db);
+        console.log("[runtime-db-keys]", Object.keys(window.AbonentsDB || {}));
+        console.log(
+            "[runtime-abonents-count]",
+            window.AbonentsDB && window.AbonentsDB.abonents
+                ? Object.keys(window.AbonentsDB.abonents).length
+                : "missing"
+        );
         state.editingRegnum = snapshot.editingRegnum ?? null;
         renderTable();
         refreshAddressDatalists();
@@ -1726,6 +1733,13 @@ function onSave() {
                 window.AbonentsDB.premises = window.AbonentsDB.premises || {};
                 window.AbonentsDB.links = window.AbonentsDB.links || [];
             }
+            console.log("[runtime-db-keys]", Object.keys(window.AbonentsDB || {}));
+            console.log(
+                "[runtime-abonents-count]",
+                window.AbonentsDB && window.AbonentsDB.abonents
+                    ? Object.keys(window.AbonentsDB.abonents).length
+                    : "missing"
+            );
 
             // ALL-mode: только просмотр — блокируем форму добавления/редактирования
             if (isAllMode()) {

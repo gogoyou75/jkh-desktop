@@ -2424,6 +2424,26 @@
     return out;
   }
 
+  function logRuntimeDbShape(reason) {
+    try {
+      console.log("[runtime-db-keys]", Object.keys(window.AbonentsDB || {}));
+      console.log(
+        "[runtime-abonents-count]",
+        window.AbonentsDB && window.AbonentsDB.abonents
+          ? Object.keys(window.AbonentsDB.abonents).length
+          : "missing"
+      );
+      if (reason) {
+        console.log("[runtime-db-shape]", {
+          reason: String(reason || ""),
+          hasAbonents: !!(window.AbonentsDB && window.AbonentsDB.abonents && typeof window.AbonentsDB.abonents === "object"),
+          hasPremises: !!(window.AbonentsDB && window.AbonentsDB.premises && typeof window.AbonentsDB.premises === "object"),
+          hasLinks: !!(window.AbonentsDB && Array.isArray(window.AbonentsDB.links))
+        });
+      }
+    } catch (e) {}
+  }
+
   function loadFromStorage() {
     if (!_canReadLocalCacheAsSource()) {
       try {
@@ -2854,6 +2874,7 @@
   if (!_isAllMode()) window.JKH_DATA_READY = !!storedHasContent;
   window.AbonentsDB = storedHasContent ? mergePreferStored(BASE_DB, stored) : deepClone(BASE_DB);
   normalizeDb(window.AbonentsDB);
+  logRuntimeDbShape("bootstrap-init");
   scanAndRepairInvalidUids(window.AbonentsDB);
   migrateLegacyCalcPeriodKeysForDb(window.AbonentsDB);
   if (storedHasContent && _canWriteStorage()) saveToStorage(window.AbonentsDB);
