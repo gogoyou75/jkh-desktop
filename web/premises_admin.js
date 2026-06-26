@@ -155,20 +155,11 @@ window.PremisesAdmin = (function () {
         return !!(c.abonentsCount || c.premisesCount || c.linksCount);
     }
 
-    async function ensureRuntimeHydration(reason) {
-        if (hasDbContent(window.AbonentsDB)) {
-            const readyNow = countDb(window.AbonentsDB);
-            console.log('[premises][db-ready]', readyNow);
-            return readyNow;
+    async function hydrateRuntimeDbFromStore(reason) {
+        const current = window.AbonentsDB;
+        if (hasDbContent(current)) {
+            return countDb(current);
         }
-
-        try {
-            if (window.Data && typeof Data.waitForServerFirstDataReady === 'function') {
-                await Data.waitForServerFirstDataReady({ timeoutMs: 8000 });
-            } else if (window.JKHDataLoader && typeof window.JKHDataLoader.loadFromServer === 'function') {
-                await window.JKHDataLoader.loadFromServer({ force: false, reason: reason || 'premises_init' });
-            }
-        } catch (e) {}
 
         const raw = (window.JKHStore && typeof JKHStore.getRaw === "function")
             ? JKHStore.getRaw(KEY_DB, getActiveOwnerId())
@@ -176,11 +167,26 @@ window.PremisesAdmin = (function () {
         const parsed = safeParse(raw, null);
         if (parsed && typeof parsed === 'object' && !Array.isArray(parsed) && hasDbContent(parsed)) {
             window.AbonentsDB = parsed;
+        } else if (!hasDbContent(current)) {
+            window.AbonentsDB = current && typeof current === 'object'
+                ? current
+                : { abonents: {}, premises: {}, links: [] };
         }
 
         const ready = countDb(window.AbonentsDB);
         console.log('[premises][db-ready]', ready);
         return ready;
+    }
+
+    async function ensureRuntimeHydration(reason) {
+        try {
+            if (window.Data && typeof Data.waitForServerFirstDataReady === 'function') {
+                await Data.waitForServerFirstDataReady({ timeoutMs: 8000 });
+            } else if (window.JKHDataLoader && typeof window.JKHDataLoader.loadFromServer === 'function') {
+                await window.JKHDataLoader.loadFromServer({ force: false, reason: reason || 'premises_init' });
+            }
+        } catch (e) {}
+        return await hydrateRuntimeDbFromStore(reason);
     }
 
     const GROUP_COLORS = [
@@ -1701,48 +1707,58 @@ function onSave() {
     }
 
     async function init() {
-        await ensureRuntimeHydration('init');
-        window.AbonentsDB = window.AbonentsDB || { abonents: {}, premises: {}, links: [] };
-        window.AbonentsDB.premises = window.AbonentsDB.premises || {};
-        window.AbonentsDB.links = window.AbonentsDB.links || [];
-
-        // ALL-mode: только просмотр — блокируем форму добавления/редактирования
-        if (isAllMode()) {
-            try {
-                const saveBtn = q('btnPremSave');
-                if (saveBtn) { saveBtn.disabled = true; saveBtn.style.opacity = '0.6'; saveBtn.title = 'Режим "все базы" — только просмотр'; }
-                const resetBtn = q('btnPremReset');
-                if (resetBtn) { resetBtn.disabled = true; resetBtn.style.opacity = '0.6'; }
-                const formTitle = q('premFormTitle');
-                if (formTitle) formTitle.textContent = 'Добавить квартиру (объект) — недоступно в режиме "все базы"';
-                const warn = q('premFormWarn');
-                if (warn) { warn.textContent = 'Режим "все базы" — только просмотр. Выберите конкретную базу (админ/юзер), чтобы добавлять/редактировать.'; warn.style.display = 'block'; }
-                // поля формы
-                ['p_regnum','p_official_regnum','p_created','p_city','p_street','p_house','p_flat','p_square','p_regnum_unknown'].forEach(id=>{
-                    const el = q(id);
-                    if (el) { el.disabled = true; el.style.opacity = '0.7'; }
-                });
-            } catch (e) {}
-        }
-
-        bind();
-        importOpenContext = readImportOpenContext();
-        setFormModeAdd();
-        await renderTable();
-        if (importOpenContext && importOpenContext.regnum) {
-            const ctxCheck = checkImportOpenContext(importOpenContext);
-            logPremisesImportContextCheck(importOpenContext, ctxCheck.ok ? (ctxCheck.result || 'ok') : 'blocked', ctxCheck.reason);
-            if (ctxCheck.ok) {
-                setFormModeEdit(importOpenContext.regnum);
+        try {
+            await hydrateRuntimeDbFromStore('init');
+            console.log('[premises][init-enter]');
+            if (!hasDbContent(window.AbonentsDB)) {
+                window.AbonentsDB = { abonents: {}, premises: {}, links: [] };
             } else {
-                importOpenContextBlocked = true;
-                setWarn(getImportContextBlockedMessage(), false);
+                window.AbonentsDB.abonents = window.AbonentsDB.abonents || {};
+                window.AbonentsDB.premises = window.AbonentsDB.premises || {};
+                window.AbonentsDB.links = window.AbonentsDB.links || [];
             }
-        }
 
-        // ✅ первичная загрузка подсказок
-        refreshAddressDatalists();
-        refreshHouseChoices();
+            // ALL-mode: только просмотр — блокируем форму добавления/редактирования
+            if (isAllMode()) {
+                try {
+                    const saveBtn = q('btnPremSave');
+                    if (saveBtn) { saveBtn.disabled = true; saveBtn.style.opacity = '0.6'; saveBtn.title = 'Режим "все базы" — только просмотр'; }
+                    const resetBtn = q('btnPremReset');
+                    if (resetBtn) { resetBtn.disabled = true; resetBtn.style.opacity = '0.6'; }
+                    const formTitle = q('premFormTitle');
+                    if (formTitle) formTitle.textContent = 'Добавить квартиру (объект) — недоступно в режиме "все базы"';
+                    const warn = q('premFormWarn');
+                    if (warn) { warn.textContent = 'Режим "все базы" — только просмотр. Выберите конкретную базу (админ/юзер), чтобы добавлять/редактировать.'; warn.style.display = 'block'; }
+                    // поля формы
+                    ['p_regnum','p_official_regnum','p_created','p_city','p_street','p_house','p_flat','p_square','p_regnum_unknown'].forEach(id=>{
+                        const el = q(id);
+                        if (el) { el.disabled = true; el.style.opacity = '0.7'; }
+                    });
+                } catch (e) {}
+            }
+
+            bind();
+            importOpenContext = readImportOpenContext();
+            setFormModeAdd();
+            await renderTable();
+            if (importOpenContext && importOpenContext.regnum) {
+                const ctxCheck = checkImportOpenContext(importOpenContext);
+                logPremisesImportContextCheck(importOpenContext, ctxCheck.ok ? (ctxCheck.result || 'ok') : 'blocked', ctxCheck.reason);
+                if (ctxCheck.ok) {
+                    setFormModeEdit(importOpenContext.regnum);
+                } else {
+                    importOpenContextBlocked = true;
+                    setWarn(getImportContextBlockedMessage(), false);
+                }
+            }
+
+            // ✅ первичная загрузка подсказок
+            refreshAddressDatalists();
+            refreshHouseChoices();
+        } catch (e) {
+            console.warn('[premises][init-error]', e);
+            throw e;
+        }
     }
 
     return { init };
