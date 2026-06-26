@@ -1184,18 +1184,65 @@ function getCurrentOwnerId(){
 }
 function saveDraftNewAbonent(row){
   if (!window.JKHStore || !JKHStore.setJSON) return false;
+  const ownerId = getCurrentOwnerId();
+  const envType = normStr(window.JKH_ENV_TYPE || window.ENV_TYPE || '');
+  const fam = normStr(row && row.fam);
+  const name = normStr(row && row.name);
+  const otch = normStr(row && row.otch);
+  const ls = normStr(row && row.ls);
+  const square = Number.isFinite(row && row.square) ? row.square : '';
+  const regnum = normStr(row && (row.regnum || row.premiseRegnum || ''));
+  const excelRow = Number(row && row.excelRow) || 0;
+  const excelUid = normStr(row && (row.uid || row.excelUid || ''));
   const draft = {
-    fam: normStr(row && row.fam),
-    name: normStr(row && row.name),
-    otch: normStr(row && row.otch),
-    ls: normStr(row && row.ls),
-    square: Number.isFinite(row && row.square) ? row.square : '',
-    regnum: normStr(row && (row.regnum || row.premiseRegnum || '')),
-    excelRow: Number(row && row.excelRow) || 0,
-    uid_import: normStr(row && (row.uid || row.excelUid || row.createdUid || row.resolvedUid))
+    ownerId: ownerId,
+    envType: envType,
+    excelRow: excelRow,
+    ls: ls,
+    fam: fam,
+    name: name,
+    otch: otch,
+    fio: [fam, name, otch].filter(Boolean).join(' ').trim(),
+    square: square,
+    regnum: regnum,
+    excelUid: excelUid,
+    source: 'import_xls'
   };
   try{
+    console.log('[import_xls][draft-before-save]', {
+      ownerId: ownerId,
+      envType: envType,
+      excelRow: draft.excelRow,
+      ls: draft.ls,
+      fam: draft.fam,
+      name: draft.name,
+      otch: draft.otch,
+      fio: draft.fio,
+      square: draft.square,
+      regnum: draft.regnum,
+      excelUid: draft.excelUid,
+      source: draft.source
+    });
     JKHStore.setJSON('draft_new_abonent_v1', draft, null);
+    let rawKey = '';
+    let rawVal = null;
+    try{
+      const scopedEnv = envType || 'LAB';
+      const scopedOwner = ownerId || '';
+      rawKey = 'jkhdb::' + scopedEnv + '::' + scopedOwner + '::draft_new_abonent_v1';
+      rawVal = window.localStorage ? window.localStorage.getItem(rawKey) : null;
+    }catch(e){}
+    console.log('[import_xls][draft-after-save]', {
+      ownerId: ownerId,
+      envType: envType,
+      key: rawKey,
+      rawLength: rawVal ? String(rawVal).length : 0
+    });
+    console.log('[import_xls][draft-localstorage-value]', {
+      key: rawKey,
+      rawLength: rawVal ? String(rawVal).length : 0,
+      hasValue: !!rawVal
+    });
     console.log('[import_xls][draft-save]', {
       kind: 'new_abonent',
       excelRow: draft.excelRow,
@@ -3470,6 +3517,14 @@ $('previewBody').addEventListener('click', function(ev){
     const readBackDraft = (window.JKHStore && typeof JKHStore.getJSON === 'function')
       ? JKHStore.getJSON('draft_new_abonent_v1', null, null)
       : null;
+    let readBackRaw = null;
+    let readBackKey = '';
+    try{
+      const ownerId = getCurrentOwnerId();
+      const envType = normStr(window.JKH_ENV_TYPE || window.ENV_TYPE || '');
+      readBackKey = 'jkhdb::' + (envType || 'LAB') + '::' + (ownerId || '') + '::draft_new_abonent_v1';
+      readBackRaw = window.localStorage ? window.localStorage.getItem(readBackKey) : null;
+    }catch(e){}
     console.log('[import_xls][new-abonent-draft-readback]', {
       excelRow: excelRow,
       ok: !!(readBackDraft && normStr(readBackDraft.ls || readBackDraft.fam || readBackDraft.name || readBackDraft.otch)),
@@ -3477,8 +3532,14 @@ $('previewBody').addEventListener('click', function(ev){
       ls: normStr(readBackDraft && readBackDraft.ls),
       regnum: normStr(readBackDraft && readBackDraft.regnum)
     });
+    console.log('[import_xls][draft-readback]', {
+      key: readBackKey,
+      hasDraft: !!readBackDraft,
+      rawLength: readBackRaw ? String(readBackRaw).length : 0
+    });
     if (!(readBackDraft && normStr(readBackDraft.ls || readBackDraft.fam || readBackDraft.name || readBackDraft.otch))){
       if (window.JKHBusy && typeof JKHBusy.hide === 'function') JKHBusy.hide();
+      alert('Не удалось сохранить draft_new_abonent_v1');
       setImportStatus('Не удалось проверить draft_new_abonent_v1 после сохранения.', 'err');
       return;
     }
