@@ -576,6 +576,31 @@ function refreshWho(){
 
 function getDB(){ return window.AbonentsDB || null; }
 function saveDB(){ try{ if (typeof window.saveAbonentsDB === 'function') return window.saveAbonentsDB(); }catch(e){} }
+async function __waitForImportDbReady(reason){
+  const current = getDB();
+  const currentCount = current && current.abonents && typeof current.abonents === 'object' ? Object.keys(current.abonents).length : 0;
+  if (currentCount > 0){
+    console.log('[import_xls][db-ready]', { reason: reason || '', dbCount: currentCount, source: 'runtime' });
+    return true;
+  }
+
+  try{
+    if (window.Data && typeof Data.waitForServerFirstDataReady === 'function'){
+      await Data.waitForServerFirstDataReady({ timeoutMs: 8000 });
+    } else if (window.JKHDataLoader && typeof window.JKHDataLoader.loadFromServer === 'function'){
+      await window.JKHDataLoader.loadFromServer({ force: false, reason: reason || 'import_xls_db_ready' });
+    }
+  }catch(e){}
+
+  const db = getDB();
+  const dbCount = db && db.abonents && typeof db.abonents === 'object' ? Object.keys(db.abonents).length : 0;
+  if (dbCount > 0){
+    console.log('[import_xls][db-ready]', { reason: reason || '', dbCount: dbCount, source: 'server-first' });
+    return true;
+  }
+  console.warn('[import_xls][db-ready]', { reason: reason || '', ready: false, dbCount: dbCount });
+  return false;
+}
 const LEDGER_FATAL_MESSAGE = 'Данные платежей повреждены. Расчёт/импорт остановлен, чтобы не потерять историю платежей.';
 function makeLedgerJsonInvalidError(key, cause){
   const err = new Error(LEDGER_FATAL_MESSAGE);
@@ -3067,6 +3092,11 @@ async function onParse(){
   clearFileYearAnalysis();
   refreshWho();
 
+  if (!await __waitForImportDbReady('parse')) {
+    setImportStatus('База абонентов не готова.', 'err');
+    return;
+  }
+
   const file = $('fileInput').files[0];
   if (!file) return;
   const parsedFileName = normStr(file.name);
@@ -3506,8 +3536,14 @@ $('previewBody').addEventListener('click', function(ev){
         setFileYearAnalysis(null, currentFileName, fileYearBlockReason);
       }
       restoredFromDraft = true;
-      buildPreview();
-      setImportStatus(fileYearBlockReason || 'Предпросмотр восстановлен. Исходный файл не выбран, но можно продолжать работу.', fileYearBlockReason ? 'err' : 'info');
+      __waitForImportDbReady('draft-restore').then(function(ok){
+        if (!ok){
+          setImportStatus('База абонентов не готова.', 'err');
+          return;
+        }
+        buildPreview();
+        setImportStatus(fileYearBlockReason || 'Предпросмотр восстановлен. Исходный файл не выбран, но можно продолжать работу.', fileYearBlockReason ? 'err' : 'info');
+      });
     }
   }
 

@@ -1363,6 +1363,15 @@ function __waitForAbonentCardDataReady(cb) {
         if (done) return;
         done = true;
         try { window.removeEventListener("JKH_UI_STATE_CHANGED", onState); } catch(e) {}
+        try {
+            const db = (window.Data && typeof Data.getDb === "function") ? Data.getDb() : null;
+            console.log("[abonent_card][db-ready]", {
+                reason: reason,
+                dbCount: db && db.abonents && typeof db.abonents === "object" ? Object.keys(db.abonents).length : 0,
+                premiseCount: db && db.premises && typeof db.premises === "object" ? Object.keys(db.premises).length : 0,
+                linkCount: db && Array.isArray(db.links) ? db.links.length : 0
+            });
+        } catch(eDbReady) {}
         console.log("[abonent_card] server data ready init", reason);
         cb();
     }

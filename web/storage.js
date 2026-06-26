@@ -1262,6 +1262,14 @@
     } catch (e) { return true; }
   }
 
+  function _isDbObjectEffectivelyEmpty(db) {
+    if (!db || typeof db !== "object") return true;
+    var ab = db.abonents && typeof db.abonents === "object" ? Object.keys(db.abonents).length : 0;
+    var pr = db.premises && typeof db.premises === "object" ? Object.keys(db.premises).length : 0;
+    var ln = Array.isArray(db.links) ? db.links.length : 0;
+    return (ab + pr + ln) === 0;
+  }
+
   function _validateAbonentsDbRaw(rawDb) {
     if (!rawDb || !String(rawDb).trim()) return false;
     try {
@@ -1625,13 +1633,37 @@
         }
 
         var applied = replaced.written;
-        var status = replaced.serverDbEmpty ? "empty" : "ready";
-        var loadedAt = _nowISO();
-        if (status === "empty") {
+        var runtimeBefore = window.AbonentsDB || null;
+        var rawRuntimeDb = _readLocalCompat(KEY_DB, ownerId);
+        var parsedRuntimeDb = safeJsonParse(rawRuntimeDb, null);
+        var runtimeHydrated = false;
+        var runtimeHadContent = !_isDbObjectEffectivelyEmpty(runtimeBefore);
+        var parsedHasContent = !!(parsedRuntimeDb && typeof parsedRuntimeDb === "object" && !Array.isArray(parsedRuntimeDb) && !_isDbObjectEffectivelyEmpty(parsedRuntimeDb));
+        if (!replaced.serverDbEmpty && parsedHasContent) {
+          window.AbonentsDB = parsedRuntimeDb;
+          runtimeHydrated = true;
           try {
-            window.AbonentsDB = { orgName: "", orgInn: "", chairman: "", premises: {}, links: [], premiseEvents: [], abonents: {} };
-          } catch (eRuntimeEmpty) {}
+            console.info("[data][runtime-hydrate-ok]", {
+              ownerId: ownerId,
+              reason: String(options && options.reason || "server-first"),
+              hydratedFrom: "storage.raw",
+              dbCount: Object.keys(parsedRuntimeDb.abonents || {}).length,
+              premiseCount: Object.keys(parsedRuntimeDb.premises || {}).length,
+              linkCount: Array.isArray(parsedRuntimeDb.links) ? parsedRuntimeDb.links.length : 0
+            });
+          } catch (hydrateLogErr) {}
+        } else if (replaced.serverDbEmpty && runtimeHadContent) {
+          try {
+            console.warn("[data][runtime-hydrate-empty-blocked]", {
+              ownerId: ownerId,
+              reason: String(options && options.reason || "server-first"),
+              runtimeCount: Object.keys(runtimeBefore && runtimeBefore.abonents || {}).length,
+              serverDbEmpty: true
+            });
+          } catch (emptyBlockedLogErr) {}
         }
+        var status = (!replaced.serverDbEmpty || runtimeHadContent || runtimeHydrated) ? "ready" : "empty";
+        var loadedAt = _nowISO();
         _setUIState({
           server: { status: "online", checkedAt: _nowISO(), message: "" },
           data: { status: status, loadedAt: loadedAt, source: "server", message: (status === "empty" ? "Серверный dump пуст" : "") }
