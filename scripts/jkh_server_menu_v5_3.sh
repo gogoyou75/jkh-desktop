@@ -1188,7 +1188,7 @@ select_cherry_pick_commit() {
 
   echo
   echo "Выбор commit:"
-  echo "0) Ручной ввод hash"
+  echo "MANUAL_HASH) Ручной ввод hash"
   i=1
   for line in "${commits[@]}"; do
     IFS=$'\t' read -r full_hash short_hash subject <<< "$line"
@@ -1197,18 +1197,17 @@ select_cherry_pick_commit() {
   done
 
   echo
-  read -rp "Выбери номер commit или 0 для ручного hash: " choice
-  if ! [[ "$choice" =~ ^[0-9]+$ ]]; then
-    echo "ОШИБКА: нужно ввести номер."
-    LAST_ERROR=1
-    return 1
-  fi
-
-  if [ "$choice" -eq 0 ]; then
+  read -rp "Выбери номер commit или MANUAL_HASH для ручного hash: " choice
+  if [ "$choice" = "MANUAL_HASH" ]; then
     read -rp "Commit hash: " manual_hash
     validate_commit_hash "$manual_hash" || return 1
     SELECTED_COMMIT="$manual_hash"
     return 0
+  fi
+
+  if ! [[ "$choice" =~ ^[0-9]+$ ]]; then
+    validate_commit_hash "$choice" || return 1
+    return 1
   fi
 
   if [ "$choice" -lt 1 ] || [ "$choice" -gt "${#commits[@]}" ]; then
