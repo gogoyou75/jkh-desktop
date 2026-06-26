@@ -1636,12 +1636,15 @@
         var runtimeBefore = window.AbonentsDB || null;
         var rawRuntimeDb = _readLocalCompat(KEY_DB, ownerId);
         var parsedRuntimeDb = safeJsonParse(rawRuntimeDb, null);
-        var runtimeHydrated = false;
+        var runtimeCounts = {
+          abonents: runtimeBefore && runtimeBefore.abonents && typeof runtimeBefore.abonents === "object" ? Object.keys(runtimeBefore.abonents).length : 0,
+          premises: runtimeBefore && runtimeBefore.premises && typeof runtimeBefore.premises === "object" ? Object.keys(runtimeBefore.premises).length : 0,
+          links: runtimeBefore && Array.isArray(runtimeBefore.links) ? runtimeBefore.links.length : 0
+        };
         var runtimeHadContent = !_isDbObjectEffectivelyEmpty(runtimeBefore);
         var parsedHasContent = !!(parsedRuntimeDb && typeof parsedRuntimeDb === "object" && !Array.isArray(parsedRuntimeDb) && !_isDbObjectEffectivelyEmpty(parsedRuntimeDb));
         if (!replaced.serverDbEmpty && parsedHasContent) {
           window.AbonentsDB = parsedRuntimeDb;
-          runtimeHydrated = true;
           try {
             console.info("[data][runtime-hydrate-ok]", {
               ownerId: ownerId,
@@ -1652,17 +1655,19 @@
               linkCount: Array.isArray(parsedRuntimeDb.links) ? parsedRuntimeDb.links.length : 0
             });
           } catch (hydrateLogErr) {}
-        } else if (replaced.serverDbEmpty && runtimeHadContent) {
+        } else if (replaced.serverDbEmpty && (parsedHasContent || runtimeHadContent)) {
           try {
             console.warn("[data][runtime-hydrate-empty-blocked]", {
-              ownerId: ownerId,
-              reason: String(options && options.reason || "server-first"),
-              runtimeCount: Object.keys(runtimeBefore && runtimeBefore.abonents || {}).length,
-              serverDbEmpty: true
+              status: "empty",
+              rawLen: String(rawRuntimeDb || "").length,
+              runtimeCounts: runtimeCounts
             });
           } catch (emptyBlockedLogErr) {}
+          if (parsedHasContent && !runtimeHadContent) {
+            window.AbonentsDB = parsedRuntimeDb;
+          }
         }
-        var status = (!replaced.serverDbEmpty || runtimeHadContent || runtimeHydrated) ? "ready" : "empty";
+        var status = (!replaced.serverDbEmpty || runtimeHadContent || parsedHasContent) ? "ready" : "empty";
         var loadedAt = _nowISO();
         _setUIState({
           server: { status: "online", checkedAt: _nowISO(), message: "" },

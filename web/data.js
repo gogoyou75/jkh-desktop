@@ -2426,6 +2426,23 @@
 
   function loadFromStorage() {
     if (!_canReadLocalCacheAsSource()) {
+      try {
+        var blockedRaw = _getRawScoped(KEY_DB, _ownerId());
+        var blockedParsed = safeJsonParse(blockedRaw, null);
+        if (blockedParsed && typeof blockedParsed === "object" && !Array.isArray(blockedParsed) && !_isDbEffectivelyEmpty(blockedParsed)) {
+          try {
+            console.info("[data][runtime-hydrate-ok]", {
+              ownerId: _ownerId(),
+              reason: "bootstrap-blocked-local-cache",
+              hydratedFrom: "storage.raw",
+              dbCount: Object.keys(blockedParsed.abonents || {}).length,
+              premiseCount: Object.keys(blockedParsed.premises || {}).length,
+              linkCount: Array.isArray(blockedParsed.links) ? blockedParsed.links.length : 0
+            });
+          } catch (hydrateLogErr) {}
+          return blockedParsed;
+        }
+      } catch (eBlockedHydrate) {}
       try { console.warn("[data][server-first-block-local-cache]", { ownerId: _ownerId(), hosted: _isHostedMode() }); } catch (eBlockLog) {}
       return null;
     }
@@ -2490,6 +2507,18 @@
     window.JKH_DB_READONLY = false;
     const raw = _getRawScoped(KEY_DB);
     const parsed = safeJsonParse(raw, null);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed) && !_isDbEffectivelyEmpty(parsed)) {
+      try {
+        console.info("[data][runtime-hydrate-ok]", {
+          ownerId: _ownerId(),
+          reason: "bootstrap-local-cache",
+          hydratedFrom: "storage.raw",
+          dbCount: Object.keys(parsed.abonents || {}).length,
+          premiseCount: Object.keys(parsed.premises || {}).length,
+          linkCount: Array.isArray(parsed.links) ? parsed.links.length : 0
+        });
+      } catch (hydrateLogErr2) {}
+    }
     return parsed && typeof parsed === "object" ? parsed : null;
   }
 
@@ -2821,12 +2850,13 @@
   // INIT global DB
   // ============================================================
   const stored = loadFromStorage();
-  if (!_isAllMode()) window.JKH_DATA_READY = !!stored;
-  window.AbonentsDB = stored ? mergePreferStored(BASE_DB, stored) : deepClone(BASE_DB);
+  const storedHasContent = !!(stored && stored.abonents && typeof stored.abonents === "object" && Object.keys(stored.abonents).length || stored && stored.premises && typeof stored.premises === "object" && Object.keys(stored.premises).length || stored && Array.isArray(stored.links) && stored.links.length);
+  if (!_isAllMode()) window.JKH_DATA_READY = !!storedHasContent;
+  window.AbonentsDB = storedHasContent ? mergePreferStored(BASE_DB, stored) : deepClone(BASE_DB);
   normalizeDb(window.AbonentsDB);
   scanAndRepairInvalidUids(window.AbonentsDB);
   migrateLegacyCalcPeriodKeysForDb(window.AbonentsDB);
-  if (stored && _canWriteStorage()) saveToStorage(window.AbonentsDB);
+  if (storedHasContent && _canWriteStorage()) saveToStorage(window.AbonentsDB);
   _resetPaymentKeyResolveCache('initial-load');
 
   window.saveAbonentsDB = function () {
