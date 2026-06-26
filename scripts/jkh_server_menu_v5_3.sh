@@ -21,6 +21,7 @@ SELECTED_COMMIT=""
 LAST_ERROR=0
 LAST_BLOCKED=0
 BLOCKED_MESSAGE=""
+LAST_BLOCK_REASONS=()
 LOCK_HELD=0
 
 print_line() {
@@ -49,6 +50,10 @@ blocked() {
     echo "$BLOCKED_MESSAGE"
   else
     echo "BLOCKED: сценарий запрещён для этой среды"
+  fi
+  if [ "${#LAST_BLOCK_REASONS[@]}" -gt 0 ]; then
+    echo
+    print_block_reasons
   fi
   print_line
 }
@@ -1426,6 +1431,36 @@ preflight_add_reason() {
   PREFLIGHT_REASONS+=("$1")
 }
 
+print_block_reasons() {
+  local i=1
+  local reason
+
+  for reason in "${LAST_BLOCK_REASONS[@]}"; do
+    echo "$i) $reason"
+    i=$((i + 1))
+  done
+}
+
+print_preflight_next_steps_ready() {
+  echo
+  echo "Следующие шаги:"
+  echo "1) merge LAB branch -> main через GitHub"
+  echo "2) backup PROD через пункт 16"
+  echo "3) deploy PROD из main"
+  echo "4) health-check PROD"
+}
+
+print_preflight_next_steps_blocked() {
+  echo
+  echo "Что делать дальше:"
+  echo "1) Перейти в PROD:"
+  echo "   cd /root/jkh"
+  echo "2) Проверить:"
+  echo "   git status -sb"
+  echo "3) Исправить причины из списка."
+  echo "4) Потом снова запустить пункт 15 из LAB."
+}
+
 preflight_http_check() {
   local label="$1"
   local url="$2"
@@ -1561,15 +1596,15 @@ lab_prod_readiness_preflight() {
   print_line
   if [ "${#PREFLIGHT_REASONS[@]}" -eq 0 ]; then
     echo "READY: можно готовить merge в main"
+    print_preflight_next_steps_ready
     return 0
   fi
 
-  echo "BLOCKED: список причин"
-  local reason
-  for reason in "${PREFLIGHT_REASONS[@]}"; do
-    echo "- $reason"
-  done
-  block_operation "BLOCKED: список причин"
+  LAST_BLOCK_REASONS=("${PREFLIGHT_REASONS[@]}")
+  echo "BLOCKED:"
+  print_block_reasons
+  print_preflight_next_steps_blocked
+  block_operation "BLOCKED:"
   return 1
 }
 
@@ -1834,6 +1869,7 @@ run_case() {
   LAST_ERROR=0
   LAST_BLOCKED=0
   BLOCKED_MESSAGE=""
+  LAST_BLOCK_REASONS=()
   go_project || {
     show_final_status
     check_result
