@@ -1056,6 +1056,8 @@ function saveImportResumeState(payload){
   if (!window.JKHStore || !JKHStore.setJSON) return;
   try{
     const next = payload || {};
+    next.serverPaymentBatchId = Number(serverPaymentBatchId) || 0;
+    next.serverPaymentRows = Array.isArray(serverPaymentRows) ? serverPaymentRows : [];
     next.allowCreate = !!$('optAllowCreate').checked;
     next.allowSquareUpdate = !!$('optAllowSquareUpdate').checked;
     next.parseMeta = parseMeta || null;
@@ -1081,6 +1083,8 @@ function saveImportDraftState(){
       mode: mode === 'payments' ? 'payments' : 'primary',
       primaryApplied: !!primaryApplied,
       primaryBlocked: !!primaryBlocked,
+      serverPaymentBatchId: Number(serverPaymentBatchId) || 0,
+      serverPaymentRows: Array.isArray(serverPaymentRows) ? serverPaymentRows : [],
       conflictDecision: conflictDecision || {},
       allowCreate: !!$('optAllowCreate').checked,
       allowSquareUpdate: !!$('optAllowSquareUpdate').checked,
@@ -1128,6 +1132,8 @@ function tryResumeFromHash(){
     primaryApplied = !!resume.primaryApplied;
     primaryBlocked = !!resume.primaryBlocked;
     mode = resume.mode === 'payments' ? 'payments' : 'primary';
+    serverPaymentBatchId = Number(resume.serverPaymentBatchId) || 0;
+    serverPaymentRows = Array.isArray(resume.serverPaymentRows) ? resume.serverPaymentRows : [];
     conflictDecision = resume.conflictDecision || {};
   }
   if (resume.parseMeta && typeof resume.parseMeta === 'object') parseMeta = resume.parseMeta;
@@ -1662,6 +1668,68 @@ function logImportResolveConflict(row, hits, reason){
   } catch (e) {}
 }
 
+function getImportRowLsValues(row){
+  const values = [];
+  ['key', 'id', 'ls', 'accountNumber', 'personalAccount', 'account_number'].forEach(function(field){
+    const v = normStr(row && row[field]);
+    if (v && values.indexOf(v) < 0) values.push(v);
+  });
+  return values;
+}
+
+function getImportAbonentLsValues(key, abonent){
+  const values = [];
+  [key].concat(['key', 'id', 'ls', 'accountNumber', 'personalAccount', 'account_number'].map(function(field){
+    return abonent && abonent[field];
+  })).forEach(function(v){
+    const n = normStr(v);
+    if (n && values.indexOf(n) < 0) values.push(n);
+  });
+  return values;
+}
+
+function logImportLsCandidates(row, rowLsValues, candidates){
+  try {
+    console.log('[import_xls][ls-candidates]', {
+      excelRow: row && row.excelRow,
+      excelUid: getExcelUid(row),
+      rowLsValues: rowLsValues || [],
+      excelFio: getExcelFio(row),
+      candidates: (candidates || []).map(function(hit){
+        return {
+          key: normStr(hit && hit.key),
+          uid: normStr(hit && hit.abonent && hit.abonent.uid),
+          lsValues: hit && hit.lsValues || [],
+          fio: getDbFio(hit && hit.abonent),
+          fioMatch: !!(hit && hit.fioMatch),
+          hasActiveLink: !!(hit && hit.hasActiveLink),
+          confidence: hit && hit.confidence || ''
+        };
+      })
+    });
+  } catch (e) {}
+}
+
+function logImportRowFinalStatus(previewRow, sourceRow, source){
+  try {
+    console.log('[import_xls][row-final-status]', {
+      source: source || '',
+      parseMode: parseMeta && parseMeta.mode,
+      mode: mode,
+      excelRow: previewRow && previewRow.excelRow,
+      status: previewRow && previewRow.status,
+      critical: !!(previewRow && previewRow.critical),
+      uid: normStr(previewRow && previewRow.uid),
+      matchedUid: normStr(previewRow && previewRow.matchedUid),
+      resolvedUid: normStr(previewRow && previewRow.resolvedUid),
+      ls: normStr((previewRow && previewRow.ls) || (sourceRow && sourceRow.ls)),
+      fio: normStr((previewRow && previewRow.fio) || getExcelFio(sourceRow)),
+      action: normStr(previewRow && previewRow.action && previewRow.action.type),
+      details: previewRow && previewRow.details || []
+    });
+  } catch (e) {}
+}
+
 function abonentMatchesExcelRow(abonent, row, requireUid){
   if (!abonent || !row) return { ok:false, reason:'NO_ABONENT' };
   const uidExcel = getExcelUid(row);
@@ -1733,8 +1801,9 @@ function activeLinkForAbonentImport(db, key, abonent){
 }
 
 function findExistingAbonentWithoutUidExcel(db, row){
-  const ls = normStr(row && row.ls);
-  if (!ls || !db || !db.abonents) {
+  const rowLsValues = getImportRowLsValues(row);
+  if (!rowLsValues.length || !db || !db.abonents) {
+    logImportLsCandidates(row, rowLsValues, []);
     logImportResolveMiss(row, 'NO_LS_OR_DB');
     return { type:'NO_ID', msg:'Нет ЛС/Фамилии — идентификация невозможна.' };
   }
@@ -1745,36 +1814,45 @@ function findExistingAbonentWithoutUidExcel(db, row){
     const key = keys[i];
     const abonent = db.abonents[key];
     if (!abonent) continue;
-    const abonentLs = normStr(abonent.id || key);
-    if (abonentLs !== ls && normStr(key) !== ls) continue;
+    const abonentLsValues = getImportAbonentLsValues(key, abonent);
+    const lsOk = rowLsValues.some(function(v){ return abonentLsValues.indexOf(v) >= 0; });
+    if (!lsOk) continue;
     const fioOk = softFioMatch(row || {}, abonent || {});
-    if (!fioOk) continue;
     const link = activeLinkForAbonentImport(db, key, abonent);
-    candidates.push({ key:key, abonent:abonent, link:link, hasActiveLink:!!link });
+    candidates.push({
+      key:key,
+      abonent:abonent,
+      link:link,
+      hasActiveLink:!!link,
+      fioMatch:fioOk,
+      lsValues:abonentLsValues,
+      confidence:(fioOk ? 'LS_FIO' : 'LS_ONLY') + (link ? '_ACTIVE_LINK' : '')
+    });
   }
+  logImportLsCandidates(row, rowLsValues, candidates);
 
-  if (!candidates.length){
-    logImportResolveMiss(row, 'NO_LS_ACTIVE_LINK_FIO_MATCH');
+  const fioCandidates = candidates.filter(function(hit){ return hit.fioMatch; });
+  const uidCandidates = fioCandidates.filter(function(hit){ return normStr(hit && hit.abonent && hit.abonent.uid); });
+
+  if (!uidCandidates.length){
+    logImportResolveMiss(row, candidates.length ? 'NO_LS_FIO_UID_MATCH' : 'NO_LS_MATCH');
     return null;
   }
 
-  const activeCandidates = candidates.filter(function(hit){ return hit.hasActiveLink; });
-  if (db && Array.isArray(db.links) && db.links.length && !activeCandidates.length){
-    logImportResolveConflict(row, candidates, 'NO_ACTIVE_LINK_FOR_LS_FIO_MATCH');
-    return {
-      type:'AMBIG',
-      msg:'Абонент найден по ЛС/ФИО, но активная связь premise/link не найдена. Проверьте карточку вручную.'
-    };
-  }
-  const hits = activeCandidates.length ? activeCandidates : candidates;
+  const byUid = {};
+  uidCandidates.forEach(function(hit){
+    const uid = normStr(hit && hit.abonent && hit.abonent.uid);
+    if (uid && !byUid[uid]) byUid[uid] = hit;
+  });
+  const hits = Object.keys(byUid).map(function(uid){ return byUid[uid]; });
   if (hits.length > 1){
-    logImportResolveConflict(row, hits, activeCandidates.length ? 'MULTIPLE_ACTIVE_LINK_MATCHES' : 'MULTIPLE_LS_FIO_MATCHES');
-    return { type:'AMBIG', msg:'Неоднозначность: найдено ' + hits.length + ' абонента(ов) по ЛС/active link/ФИО.' };
+    logImportResolveConflict(row, hits, 'MULTIPLE_LS_FIO_UID_MATCHES');
+    return { type:'AMBIG', msg:'Неоднозначность: найдено ' + hits.length + ' абонента(ов) по ЛС/ФИО.' };
   }
 
   logImportResolveExisting(row, hits[0], hits[0].hasActiveLink ? 'LS_ACTIVE_LINK_FIO' : 'LS_FIO_NO_LINKS');
   return {
-    type:'FOUND_EXISTING_NEEDS_UID_IN_EXCEL',
+    type:'FOUND_NEEDS_EXCEL_UID',
     key:hits[0].key,
     abonent:hits[0].abonent,
     uid:normStr(hits[0].abonent && hits[0].abonent.uid),
@@ -1810,6 +1888,7 @@ function verifyPremiseOpenContext(db, row, abonentHit, regnum){
 
 function findAbonentByRules(db, row){
   const uid = getExcelUid(row), ls = normStr(row.ls), fam = normStr(row.fam);
+  const rowLsValues = getImportRowLsValues(row);
   if (uid){
     const foundU = findAbonentByUid(db, uid);
     if (foundU && foundU.abonent){
@@ -1831,13 +1910,18 @@ function findAbonentByRules(db, row){
     logImportResolveMiss(row, 'UID_NOT_FOUND');
     return { type:'UID_MISSING', msg:'UID из Excel не найден в базе. Нельзя применить первичку.' };
   }
-  if (!ls || !fam) {
+  if (!rowLsValues.length) {
     logImportResolveMiss(row, 'NO_LS_OR_FAM');
     return { type:'NO_ID', msg:'Нет ЛС/Фамилии — идентификация невозможна.' };
   }
 
   const existingWithoutUid = findExistingAbonentWithoutUidExcel(db, row);
   if (existingWithoutUid) return existingWithoutUid;
+
+  if (!fam) {
+    logImportResolveMiss(row, 'NO_FAM');
+    return { type:'NO_ID', msg:'Нет ЛС/Фамилии — идентификация невозможна.' };
+  }
 
   const hits = [];
   const keys = Object.keys(db.abonents || {});
@@ -2282,11 +2366,11 @@ function evaluatePrimaryRow(db, row){
   } else if (found.type === 'UID_STRUCTURAL_CONFLICT' || found.type === 'UID_MISMATCH' || found.type === 'UID_MISSING' || found.type === 'NO_ID' || found.type === 'AMBIG'){
     status='ERROR'; critical=true; messages.push(found.msg);
   } else if (found.type === 'NOT_FOUND'){
-    status='ERROR'; critical=true; messages.push(found.msg);
+    status='NOT_FOUND'; critical=true; messages.push(found.msg);
     if (!getExcelUid(row) && !getCreatedUid(row)) action = { type:'ADD_ABONENT' };
     if (!normStr(row.ls) || !normStr(row.fam)) messages.push('Для создания нужны непустые ФИО/ЛС.');
-  } else if (found.type === 'FOUND_EXISTING_NEEDS_UID_IN_EXCEL'){
-    status='UPDATED';
+  } else if (found.type === 'FOUND_NEEDS_EXCEL_UID' || found.type === 'FOUND_EXISTING_NEEDS_UID_IN_EXCEL'){
+    status='FOUND_NEEDS_EXCEL_UID';
     critical=true;
     messages.push('Абонент найден, требуется вставить UID в Excel.');
     const existingUidForExcel = normStr(found.abonent && found.abonent.uid);
@@ -2635,6 +2719,7 @@ function buildPreview(){
 
   if (!db || !db.abonents){
     preview = [{ excelRow:'—', uid:'', ls:'', fio:'', square:'', paymentsBrief:'—', status:'ERROR', details:['База абонентов не загружена (AbonentsDB отсутствует).'], critical:true }];
+    logImportRowFinalStatus(preview[0], null, 'buildPreview');
     renderPreview();
     return;
   }
@@ -2653,7 +2738,7 @@ function buildPreview(){
 
     if (mode === 'primary'){
       preview.push({
-        excelRow:r.excelRow, uid:getExcelUid(r), excelUid:getExcelUid(r), createdUid:getCreatedUid(r), resolvedUid:getResolvedUid(r), ls:normStr(r.ls), fio:toFio(r.fam,r.name,r.otch),
+        excelRow:r.excelRow, uid:getExcelUid(r), excelUid:getExcelUid(r), createdUid:getCreatedUid(r), resolvedUid:getResolvedUid(r), matchedUid:normStr(p1.found && (p1.found.uid || (p1.found.abonent && p1.found.abonent.uid))), ls:normStr(r.ls), fio:toFio(r.fam,r.name,r.otch),
         square:asSquare(r.square), paymentsBrief: formatPaymentListHtml(r),
         status:p1.status, critical:p1.critical, action:p1.action, details:p1.details
       });
@@ -2661,17 +2746,27 @@ function buildPreview(){
       if (serverPaymentRows.length){
         const rr = serverPaymentRows[i] || {};
         const rowStatusMap = { ready:'OK', applied:'OK', duplicate:'SKIP_DUPLICATE', invalid:'ERROR', failed:'ERROR', skipped:'SKIP_DUPLICATE' };
-        const st = rowStatusMap[normStr(rr.status)] || 'UPDATED';
+        let st = rowStatusMap[normStr(rr.status)] || 'UPDATED';
+        let action = null;
+        let matchedUid = normStr(rr.account_uid || getResolvedUid(r));
+        let details = [normStr(rr.reason_text) || ('Статус: ' + normStr(rr.status))];
+        if (p1 && p1.found && (p1.found.type === 'FOUND_NEEDS_EXCEL_UID' || p1.found.type === 'FOUND_EXISTING_NEEDS_UID_IN_EXCEL')){
+          st = 'FOUND_NEEDS_EXCEL_UID';
+          action = p1.action;
+          matchedUid = normStr(p1.found.uid || (p1.found.abonent && p1.found.abonent.uid));
+          details = p1.details;
+        }
         preview.push({
           excelRow: rr.excel_row_ref || r.excelRow,
-          uid:getExcelUid(r), excelUid:getExcelUid(r), createdUid:getCreatedUid(r), resolvedUid:normStr(rr.account_uid || getResolvedUid(r)),
+          uid:getExcelUid(r), excelUid:getExcelUid(r), createdUid:getCreatedUid(r), resolvedUid:normStr(rr.account_uid || getResolvedUid(r)), matchedUid:matchedUid,
           ls:normStr(rr.account_number || r.ls),
           fio:toFio(r.fam,r.name,r.otch),
           square:asSquare(r.square),
           paymentsBrief: rr.payment_period ? escHtml(rr.payment_period) : '—',
           status:st,
-          critical: st === 'ERROR',
-          details:[normStr(rr.reason_text) || ('Статус: ' + normStr(rr.status))]
+          critical: st === 'ERROR' || st === 'FOUND_NEEDS_EXCEL_UID',
+          action:action,
+          details:details
         });
       } else {
         const p2 = evaluatePaymentsRow(db, r);
@@ -2685,14 +2780,23 @@ function buildPreview(){
     }
   }
 
+  for (let pi=0; pi<preview.length; pi++){
+    const pr = preview[pi] || {};
+    const sourceRow = dataRows.find(function(row){ return String(row && row.excelRow) === String(pr.excelRow); }) || dataRows[pi] || {};
+    logImportRowFinalStatus(pr, sourceRow, 'buildPreview');
+  }
+
+  const foundNeedsUidCount = preview.filter(function(row){ return row && row.status === 'FOUND_NEEDS_EXCEL_UID'; }).length;
   $('uidHint').innerHTML = noUidCount > 0
-    ? 'Найдено строк без UID в Excel: <b>' + noUidCount + '</b>.' + (createdUidCount ? ' Создано программой: <b>' + createdUidCount + '</b>.' : ' Нажмите "Создать абонента" в нужной строке.')
+    ? 'Найдено строк без UID в Excel: <b>' + noUidCount + '</b>.' +
+      (foundNeedsUidCount ? ' Найдено существующих абонентов без UID в Excel: <b>' + foundNeedsUidCount + '</b>.' : '') +
+      (createdUidCount ? ' Создано программой: <b>' + createdUidCount + '</b>.' : (foundNeedsUidCount ? ' Скопируйте UID в Excel для найденных абонентов.' : ' Нажмите "Создать абонента" в нужной строке.'))
     : 'Строк без UID в Excel не найдено.';
   renderPreview();
 }
 
-function statusRU(s){ return ({OK:'ОК', ERROR:'ОШИБКА', UPDATED:'ПРЕДУПРЕЖДЕНИЕ', STOPPED:'УЧТЁН / РАСЧЁТ ОСТАНОВЛЕН', WARNING_CREATED:'СОЗДАН', SKIP_DUPLICATE:'ДУБЛИКАТ', CONFLICT:'КОНФЛИКТ', APPLIED:'ПРИМЕНЕНО'})[s] || s; }
-function statusClass(s){ return ({OK:'status-ok', ERROR:'status-err', UPDATED:'status-warn', STOPPED:'status-warn', WARNING_CREATED:'status-created', SKIP_DUPLICATE:'status-skip', CONFLICT:'status-conflict', APPLIED:'status-ok'})[s] || ''; }
+function statusRU(s){ return ({OK:'ОК', ERROR:'ОШИБКА', NOT_FOUND:'НЕ НАЙДЕН', FOUND_NEEDS_EXCEL_UID:'НАЙДЕН / НУЖЕН UID В EXCEL', UPDATED:'ПРЕДУПРЕЖДЕНИЕ', STOPPED:'УЧТЁН / РАСЧЁТ ОСТАНОВЛЕН', WARNING_CREATED:'СОЗДАН', SKIP_DUPLICATE:'ДУБЛИКАТ', CONFLICT:'КОНФЛИКТ', APPLIED:'ПРИМЕНЕНО'})[s] || s; }
+function statusClass(s){ return ({OK:'status-ok', ERROR:'status-err', NOT_FOUND:'status-err', FOUND_NEEDS_EXCEL_UID:'status-warn', UPDATED:'status-warn', STOPPED:'status-warn', WARNING_CREATED:'status-created', SKIP_DUPLICATE:'status-skip', CONFLICT:'status-conflict', APPLIED:'status-ok'})[s] || ''; }
 
 function renderPreview(){
   const body = $('previewBody');
@@ -2703,14 +2807,14 @@ function renderPreview(){
   for (let i=0;i<preview.length;i++){
     const r = preview[i];
     if (r.status==='OK') ok++;
-    if (r.status==='ERROR') err++;
-    if (r.status==='UPDATED' || r.status==='WARNING_CREATED') warn++;
+    if (r.status==='ERROR' || r.status==='NOT_FOUND') err++;
+    if (r.status==='UPDATED' || r.status==='WARNING_CREATED' || r.status==='FOUND_NEEDS_EXCEL_UID') warn++;
     if (r.status==='STOPPED') stopped++;
     if (r.status==='SKIP_DUPLICATE') dup++;
     if (r.status==='CONFLICT') conf++;
 
     let actionsHTML = '';
-    if (mode==='primary' && r.action && r.action.type==='ADD_ABONENT'){
+    if (mode==='primary' && r.action && r.action.type==='ADD_ABONENT' && r.status==='NOT_FOUND' && !normStr(r.matchedUid)){
       const allow = $('optAllowCreate').checked;
       actionsHTML = '<button class="action-btn" data-act="add" data-excelrow="' + r.excelRow + '" ' + (allow?'':'disabled') + '>Создать абонента</button>' +
         '<span class="small ' + (allow?'':'danger') + '">' + (allow?'':'Включи "Разрешить создание абонента"') + '</span>';
@@ -2834,7 +2938,7 @@ function isApplyBlockedByTemplateMode(){
   const allowed = parseMeta && (parseMeta.mode === 'strict-template' || parseMeta.mode === 'strict-template-customer-2009');
   return !!(parseMeta && dataRows.length > 0 && !allowed);
 }
-function hasPrimaryCritical(){ return preview.some(r => r.critical && r.status==='ERROR'); }
+function hasPrimaryCritical(){ return preview.some(r => r.critical && (r.status==='ERROR' || r.status==='NOT_FOUND' || r.status==='FOUND_NEEDS_EXCEL_UID')); }
 function hasPaymentsCritical(){ return preview.some(r => r.critical && r.status==='ERROR'); }
 function hasRowsWithUid(){
   for (let i=0;i<dataRows.length;i++){
@@ -3047,7 +3151,7 @@ async function applyPrimary(){
     const row = dataRows[i];
     const found = findAbonentByRules(db, row);
     if (found.type==='UID_STRUCTURAL_CONFLICT' || found.type==='UID_MISMATCH' || found.type==='UID_MISSING' || found.type==='NO_ID' || found.type==='AMBIG' || found.type==='NOT_FOUND') continue;
-    if (found.type==='FOUND_EXISTING_NEEDS_UID_IN_EXCEL') continue;
+    if (found.type==='FOUND_NEEDS_EXCEL_UID' || found.type==='FOUND_EXISTING_NEEDS_UID_IN_EXCEL') continue;
     if (!Number.isFinite(row.square) || row.square<=0) continue;
 
     let a = found.abonent;
@@ -3385,6 +3489,8 @@ $('previewBody').addEventListener('click', function(ev){
       mode = draft.mode === 'payments' ? 'payments' : 'primary';
       primaryApplied = !!draft.primaryApplied;
       primaryBlocked = !!draft.primaryBlocked;
+      serverPaymentBatchId = Number(draft.serverPaymentBatchId) || 0;
+      serverPaymentRows = Array.isArray(draft.serverPaymentRows) ? draft.serverPaymentRows : [];
       conflictDecision = draft.conflictDecision || {};
       if (typeof draft.allowCreate !== 'undefined') $('optAllowCreate').checked = !!draft.allowCreate;
       if (typeof draft.allowSquareUpdate !== 'undefined') $('optAllowSquareUpdate').checked = !!draft.allowSquareUpdate;
