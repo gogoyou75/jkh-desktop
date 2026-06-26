@@ -46,14 +46,14 @@ fail() {
 blocked() {
   echo
   print_line
-  if [ -n "$BLOCKED_MESSAGE" ]; then
+  if [ "${#LAST_BLOCK_REASONS[@]}" -gt 0 ]; then
+    echo "BLOCKED:"
+    print_block_reasons
+    print_preflight_next_steps_blocked
+  elif [ -n "$BLOCKED_MESSAGE" ]; then
     echo "$BLOCKED_MESSAGE"
   else
     echo "BLOCKED: сценарий запрещён для этой среды"
-  fi
-  if [ "${#LAST_BLOCK_REASONS[@]}" -gt 0 ]; then
-    echo
-    print_block_reasons
   fi
   print_line
 }
@@ -1453,12 +1453,10 @@ print_preflight_next_steps_ready() {
 print_preflight_next_steps_blocked() {
   echo
   echo "Что делать дальше:"
-  echo "1) Перейти в PROD:"
-  echo "   cd /root/jkh"
-  echo "2) Проверить:"
-  echo "   git status -sb"
-  echo "3) Исправить причины из списка."
-  echo "4) Потом снова запустить пункт 15 из LAB."
+  echo "1) cd /root/jkh"
+  echo "2) git status -sb"
+  echo "3) исправить причины"
+  echo "4) вернуться в LAB и снова запустить пункт 15"
 }
 
 preflight_http_check() {
