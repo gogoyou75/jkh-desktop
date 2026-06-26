@@ -253,6 +253,8 @@ Build после успешного cherry-pick больше не запуска
 
 Дополнительный UX-риск LOW/MEDIUM найден практической проверкой: если выбранный commit уже входит в текущую ветку, `git cherry-pick` возвращал empty cherry-pick (`previous cherry-pick is now empty`), а меню ошибочно показывало конфликт. Исправление: перед cherry-pick выполняется `git merge-base --is-ancestor <commit> HEAD`; уже применённые коммиты помечаются `[ALREADY IN CURRENT BRANCH]` в списке, новые - `[NEW]`. При выборе уже применённого commit меню останавливается с `BLOCKED: этот commit уже есть в текущей ветке`, не запускает cherry-pick/build и не предлагает `git cherry-pick --abort`.
 
+Повторная проверка показала, что кейс `selected commit == HEAD` всё ещё доходил до `git show` и `git cherry-pick`. Guard усилен: выбранный commit и `HEAD` сначала нормализуются через `git rev-parse --verify <rev>^{commit}`, затем явно сравниваются на равенство, и только после этого выполняется `git merge-base --is-ancestor`. Это блокирует exact-HEAD до `git show --stat` и до вопроса `Применить этот коммит?`.
+
 Рекомендация:
 Оставить cherry-pick только через выбор ветки и commit из списка. Ручной hash использовать как аварийный режим с текущей валидацией.
 

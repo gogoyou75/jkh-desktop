@@ -1169,8 +1169,16 @@ validate_commit_hash() {
 
 commit_already_in_head() {
   local commit="$1"
+  local selected_commit head_commit
 
-  git merge-base --is-ancestor "$commit" HEAD 2>/dev/null
+  selected_commit="$(git rev-parse --verify "${commit}^{commit}" 2>/dev/null)" || return 1
+  head_commit="$(git rev-parse --verify "HEAD^{commit}" 2>/dev/null)" || return 1
+
+  if [ "$selected_commit" = "$head_commit" ]; then
+    return 0
+  fi
+
+  git merge-base --is-ancestor "$selected_commit" "$head_commit" 2>/dev/null
 }
 
 select_cherry_pick_commit() {
