@@ -1167,9 +1167,15 @@ validate_commit_hash() {
   fi
 }
 
+commit_already_in_head() {
+  local commit="$1"
+
+  git merge-base --is-ancestor "$commit" HEAD 2>/dev/null
+}
+
 select_cherry_pick_commit() {
   local commits=()
-  local choice manual_hash i line full_hash short_hash subject
+  local choice manual_hash i line full_hash short_hash subject marker
 
   run git fetch origin || return 1
 
@@ -1192,7 +1198,11 @@ select_cherry_pick_commit() {
   i=1
   for line in "${commits[@]}"; do
     IFS=$'\t' read -r full_hash short_hash subject <<< "$line"
-    echo "$i) $short_hash $subject"
+    marker="[NEW]"
+    if commit_already_in_head "$full_hash"; then
+      marker="[ALREADY IN CURRENT BRANCH]"
+    fi
+    echo "$i) $marker $short_hash $subject"
     i=$((i + 1))
   done
 
@@ -1483,6 +1493,11 @@ cherry_pick_commit() {
 
   select_cherry_pick_source_branch || return 1
   select_cherry_pick_commit || return 1
+
+  if commit_already_in_head "$SELECTED_COMMIT"; then
+    block_operation "BLOCKED: этот commit уже есть в текущей ветке"
+    return 1
+  fi
 
   run git show --stat "$SELECTED_COMMIT" || return 1
   read -rp "Применить этот коммит? Напиши y: " answer
