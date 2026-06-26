@@ -1046,6 +1046,17 @@ explain() {
         "Это только backup текущей базы выбранной среды. Восстановление здесь не реализовано." \
         "[$ENVIRONMENT MySQL]\n|\nv\n[/root/backups/${ENVIRONMENT,,}_backup_YYYY-MM-DD_HH-MM-SS.sql]"
       ;;
+    17)
+      scenario_header 17 "LAB -> PROD Deploy Wizard"
+      scenario_block \
+        "Показывает read-only проводник: текущий LAB-контекст, source branch, схему релиза и ручные шаги до PROD." \
+        "Когда LAB проверен и нужно понять безопасный путь к PROD без прямого deploy из тестовой ветки." \
+        "Ничего. Это инструкция и проверка состояния без изменений." \
+        "Git, Docker, backup, deploy, файлы, БД, volumes и конфиги." \
+        "Безопасный." \
+        "Мастер объясняет правильный путь: LAB branch -> GitHub merge в main -> PROD backup -> deploy main -> health-check." \
+        "[LAB test-pr]\n|\nv\n[GitHub source branch]\n|\nv\n[main]\n|\nv\n[PROD deploy from main]"
+      ;;
     *)
       echo "Нет такого пункта."
       return 1
@@ -1606,6 +1617,156 @@ lab_prod_readiness_preflight() {
   return 1
 }
 
+wizard_add_reason_if_dirty_git() {
+  local label="$1"
+  local dir="$2"
+  local status
+
+  status="$(git -C "$dir" status --short 2>/dev/null || true)"
+  if [ -n "$status" ]; then
+    PREFLIGHT_REASONS+=("$label git status не чистый")
+  fi
+}
+
+wizard_collect_visible_blockers() {
+  local lab_dir="/root/jkh-lab"
+  local prod_dir="/root/jkh"
+
+  PREFLIGHT_REASONS=()
+
+  if [ ! -d "$lab_dir/.git" ]; then
+    PREFLIGHT_REASONS+=("LAB git repo не найден: $lab_dir")
+  else
+    wizard_add_reason_if_dirty_git "LAB" "$lab_dir"
+    [ -f "$lab_dir/scripts/jkh_server_menu_v5_3.sh" ] || PREFLIGHT_REASONS+=("LAB scripts/jkh_server_menu_v5_3.sh не найден")
+    [ -f "$lab_dir/web/calc_engine.js" ] || PREFLIGHT_REASONS+=("LAB web/calc_engine.js не найден")
+  fi
+
+  if [ ! -d "$prod_dir/.git" ]; then
+    PREFLIGHT_REASONS+=("PROD git repo не найден: $prod_dir")
+  else
+    wizard_add_reason_if_dirty_git "PROD" "$prod_dir"
+    [ -f "$prod_dir/scripts/jkh_server_menu_v5_3.sh" ] || PREFLIGHT_REASONS+=("PROD scripts/jkh_server_menu_v5_3.sh не найден")
+    [ -f "$prod_dir/web/calc_engine.js" ] || PREFLIGHT_REASONS+=("PROD web/calc_engine.js не найден")
+  fi
+}
+
+lab_prod_deploy_wizard() {
+  local lab_dir="/root/jkh-lab"
+  local branch upstream source_branch head_commit lab_site lab_api
+
+  echo
+  print_line
+  echo "LAB -> PROD DEPLOY WIZARD"
+  print_line
+  echo "Read-only. Wizard НЕ делает git checkout/reset/merge/push, docker compose, backup, deploy, запись файлов или изменение БД."
+  print_line
+
+  if [ ! -d "$lab_dir/.git" ]; then
+    echo "BLOCKED: LAB git repo не найден: $lab_dir"
+    block_operation "BLOCKED: LAB git repo не найден"
+    return 1
+  fi
+
+  branch="$(git -C "$lab_dir" branch --show-current 2>/dev/null || true)"
+  upstream="$(git -C "$lab_dir" rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null || true)"
+  source_branch="${upstream#origin/}"
+  [ -n "$upstream" ] || source_branch="${branch:-unknown}"
+  head_commit="$(git -C "$lab_dir" log --oneline -1 2>/dev/null || true)"
+
+  echo "ТЕКУЩИЙ КОНТЕКСТ LAB"
+  echo "Среда:        LAB"
+  echo "Папка:        $lab_dir"
+  echo "Текущая ветка: ${branch:-unknown}"
+  echo "Upstream:     ${upstream:-нет upstream}"
+  echo "HEAD commit:  ${head_commit:-unknown}"
+  echo "git status:"
+  git -C "$lab_dir" status -sb || true
+
+  echo
+  print_line
+  echo "Health LAB"
+  print_line
+  lab_site="$(curl -sS -o /dev/null -w "%{http_code}" "http://127.0.0.1:8080" 2>/dev/null || true)"
+  lab_api="$(curl -sS -o /dev/null -w "%{http_code}" "http://127.0.0.1:8080/api/auth/me" 2>/dev/null || true)"
+  echo "LAB site: http://127.0.0.1:8080 -> HTTP ${lab_site:-000}"
+  echo "LAB API auth: http://127.0.0.1:8080/api/auth/me -> HTTP ${lab_api:-000}"
+
+  echo
+  print_line
+  echo "ПРАВИЛЬНАЯ СХЕМА"
+  print_line
+  echo "LAB server branch ${branch:-unknown}"
+  echo "-> GitHub branch ${source_branch:-unknown}"
+  echo "-> merge into main on GitHub"
+  echo "-> PROD server deploy from main"
+
+  echo
+  print_line
+  echo "НЕЛЬЗЯ"
+  print_line
+  echo "- НЕЛЬЗЯ переключать LAB-сервер в main."
+  echo "- НЕЛЬЗЯ деплоить PROD напрямую из codex/* ветки."
+  echo "- НЕЛЬЗЯ копировать файлы LAB -> PROD руками."
+  echo "- НЕЛЬЗЯ переносить LAB-базу в PROD."
+  echo "- НЕЛЬЗЯ делать restore LAB backup в PROD."
+  echo "- НЕЛЬЗЯ менять docker-compose.yml вручную ради релиза."
+
+  wizard_collect_visible_blockers
+  if [ "$lab_site" != "200" ] && [ "$lab_site" != "302" ]; then
+    PREFLIGHT_REASONS+=("LAB site health не прошёл: HTTP ${lab_site:-000}")
+  fi
+  if [ "$lab_api" != "401" ]; then
+    PREFLIGHT_REASONS+=("LAB API health не прошёл: HTTP ${lab_api:-000}")
+  fi
+
+  echo
+  print_line
+  echo "СТАТУС ПЕРЕД ШАГАМИ"
+  print_line
+  if [ "${#PREFLIGHT_REASONS[@]}" -gt 0 ]; then
+    LAST_BLOCK_REASONS=("${PREFLIGHT_REASONS[@]}")
+    echo "Сначала исправь причины пункта 15. Merge/deploy пока нельзя."
+    echo
+    echo "BLOCKED:"
+    print_block_reasons
+    block_operation "BLOCKED:"
+    return 1
+  fi
+
+  echo "Можно готовить merge source branch -> main."
+
+  echo
+  print_line
+  echo "ЧТО ДЕЛАТЬ"
+  print_line
+  echo "Шаг 1:"
+  echo "Запустить пункт 15 и добиться READY."
+  echo
+  echo "Шаг 2:"
+  echo "В GitHub Desktop или GitHub Web сделать:"
+  echo "merge ${source_branch:-source-branch} -> main"
+  echo
+  echo "Шаг 3:"
+  echo "Перейти в PROD:"
+  echo "cd /root/jkh"
+  echo "bash scripts/jkh_server_menu_v5_3.sh"
+  echo
+  echo "Шаг 4:"
+  echo "Сделать backup PROD:"
+  echo "пункт 16"
+  echo
+  echo "Шаг 5:"
+  echo "Обновить PROD из main:"
+  echo "пункт 1 — если обычные изменения кода"
+  echo "пункт 3 — если менялись Dockerfile / requirements.txt / зависимости"
+  echo
+  echo "Шаг 6:"
+  echo "Проверить PROD:"
+  echo "пункт 7 или пункт 10"
+  echo "curl -i http://127.0.0.1/api/auth/me"
+}
+
 run_basic_checks() {
   environment_compose_guard || return 1
   run docker compose config --quiet || return 1
@@ -1896,6 +2057,7 @@ run_case() {
     14) safe_rollback || true ;;
     15) lab_prod_readiness_preflight || true ;;
     16) backup_current_environment || true ;;
+    17) lab_prod_deploy_wizard || true ;;
     *)
       echo "Нет такого пункта."
       LAST_ERROR=1
@@ -1929,6 +2091,7 @@ menu() {
   echo "14) Rollback"
   echo "15) Проверка готовности LAB -> PROD"
   echo "16) Backup текущей среды"
+  echo "17) LAB -> PROD Deploy Wizard"
   echo "0) Выход"
   echo
 }

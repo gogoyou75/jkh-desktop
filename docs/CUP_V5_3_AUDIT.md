@@ -22,6 +22,7 @@ CRITICAL-риски: не найдено.
 - Cherry-pick теперь выбирает source branch из `origin/*`, показывает последние 20 коммитов, выбирает commit номером, валидирует ручной hash и запускает build только после второго подтверждения.
 - Добавлен пункт 16 `Backup текущей среды`: dump MySQL выбранной среды в `/root/backups`, без restore, docker down, Git-изменений и правки compose.
 - Пункт 15 заменён на read-only LAB -> PROD preflight без merge/deploy/backup/reset/изменения веток.
+- Добавлен пункт 17 `LAB -> PROD Deploy Wizard`: мастер-инструкция без автоматического deploy и без изменений.
 - LAB блокирует PROD `container_name`.
 - LAB блокирует запрещённые volume-имена `jkh_lab_mysql_data` и `jkh_mysql_data`.
 - LAB требует существующее compose-volume имя `mysql_data`.
@@ -304,6 +305,25 @@ Backup выполняет `mkdir -p /root/backups`, `mysqldump` внутри н�
 
 Правило переноса:
 LAB-ветка не выкатывается напрямую в PROD. Сначала проверка LAB branch, затем merge в `main`, затем PROD backup, deploy `main`, health-check.
+
+Нужно ли чинить сейчас:
+Уже добавлено.
+
+### 14. LAB -> PROD Deploy Wizard
+
+Статус: добавлено.
+Риск: LOW.
+
+Объяснение:
+Пункт 17 является мастер-инструкцией, а не автоматическим deploy. Он читает LAB-контекст: среду, папку, ветку, upstream, HEAD, `git status -sb`, health LAB site/API. Затем определяет source branch из upstream, показывает схему `LAB server branch test-pr -> GitHub branch codex/... -> merge into main on GitHub -> PROD server deploy from main` и выводит ручные шаги.
+
+Пункт 17 не заменяет пункт 15: wizard не запускает `docker compose`, поэтому окончательный READY должен быть получен через пункт 15. Если wizard уже видит причины блокировки из Git/файлов/health, он показывает `Сначала исправь причины пункта 15. Merge/deploy пока нельзя.` и не выводит deploy как следующий шаг.
+
+Запреты:
+Пункт 17 не делает `git checkout`, `git reset`, `git merge`, `git push`, `docker compose`, backup, deploy, запись файлов или изменение БД. Он также явно напоминает, что нельзя переключать LAB-сервер в `main`, нельзя деплоить PROD напрямую из `codex/*`, нельзя копировать файлы LAB -> PROD руками, нельзя переносить LAB-базу в PROD, нельзя делать restore LAB backup в PROD и нельзя менять `docker-compose.yml` вручную ради релиза.
+
+Правило релиза:
+GitHub `main` является релизной точкой. PROD deploy выполняется только из `main`; LAB-сервер остаётся на тестовой ветке. Правильный поток: пункт 15 READY -> merge source branch в `main` через GitHub -> пункт 16 backup PROD -> deploy PROD из `main` -> health-check PROD.
 
 Нужно ли чинить сейчас:
 Уже добавлено.
