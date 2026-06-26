@@ -661,6 +661,45 @@
     return true;
   }
 
+  function tariffAffectedAbonents(){
+    try{
+      const db = window.AbonentsDB || {};
+      const abonents = db && db.abonents && typeof db.abonents === "object" ? db.abonents : {};
+      return Object.keys(abonents).map(id => ({ id: id, abonent: abonents[id] })).filter(item => {
+        const uid = String(item && item.abonent && item.abonent.uid || "").trim();
+        return !!(uid && window.Data && typeof Data.isValidUid === "function" && Data.isValidUid(uid));
+      });
+    }catch(e){
+      console.warn("[tariffs][dirty] failed to collect abonents", e);
+      return [];
+    }
+  }
+
+  async function markTariffSummariesDirty(){
+    const affected = tariffAffectedAbonents();
+    let ok = 0;
+    let failed = 0;
+    for (const item of affected){
+      const uid = String(item && item.abonent && item.abonent.uid || "").trim();
+      try{
+        if (window.Data && typeof Data.markAbonentSummaryDirty === "function"){
+          const res = await Data.markAbonentSummaryDirty(uid, "TARIFFS_CHANGED");
+          if (res && res.ok === false && res.skipped !== true) {
+            failed++;
+            console.warn("[tariffs][dirty] mark rejected", { abonentId: item && item.id, uid: uid, error: res.error || "", status: res.status || 0, payload: res.payload || null });
+          } else {
+            ok++;
+          }
+        }
+      }catch(e){
+        failed++;
+        console.warn("[tariffs][dirty] mark failed", { abonentId: item && item.id, uid: uid, error: String(e && e.message || e), status: e && e.status, payload: e && e.payload });
+      }
+    }
+    try { console.log("[tariffs][dirty]", { reason: "TARIFFS_CHANGED", affected: affected.length, ok: ok, failed: failed }); } catch(e) {}
+    return { affected: affected.length, ok: ok, failed: failed };
+  }
+
   function recalcAll(){
     try{
       if (window.JKHAutoAccrual && typeof window.JKHAutoAccrual.recalcAll === "function"){
@@ -690,25 +729,13 @@
     try{
       if (!(await saveAllFromUI())) return;
 
-      const recalc = recalcAll();
-      if (!recalc.ok) return;
-
-      let uploaded = false;
-      try{
-        uploaded = await persistAccrualsAfterRecalc();
-      }catch(e){
-        console.warn("tariff save upload failed", e);
-        alert("Тарифы и перерасчёт сохранены локально, но выгрузка на сервер не выполнена.");
-        return;
-      }
-
-      if (!uploaded) return;
+      const dirty = await markTariffSummariesDirty();
 
       alert(
         "Тарифы сохранены и выгружены.\n" +
-        "Перерасчёт выполнен.\n" +
-        "Абонентов обработано: " + recalc.total + "\n" +
-        "Изменения в начислениях: " + recalc.changed
+        "Массовый пересчёт не запускался.\n" +
+        "Summary/snapshot dirty: " + dirty.ok + " / " + dirty.affected +
+        (dirty.failed ? ("\nОшибок dirty-mark: " + dirty.failed) : "")
       );
     } finally {
       setButtonsBusy("save", false);

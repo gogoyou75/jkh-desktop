@@ -22,6 +22,14 @@
   // === LocalStorage keys (источники оплат) ===
   C.PAYMENT_SOURCES_KEY = C.PAYMENT_SOURCES_KEY || 'payment_sources_v1';
 
+  w.JKH_SUMMARY_STATUS = w.JKH_SUMMARY_STATUS || {
+    FRESH: "fresh",
+    DIRTY: "dirty",
+    MISSING: "missing",
+    ERROR: "error",
+    CALCULATING: "calculating"
+  };
+
   // Экспорт в глобальные имена для обратной совместимости
   // (если какой-то файл ожидает просто REFI_KEY_NORMAL без JK...)
   if (typeof w.REFI_KEY_NORMAL === 'undefined') w.REFI_KEY_NORMAL = C.REFI_KEY_NORMAL;

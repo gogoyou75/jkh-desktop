@@ -183,6 +183,7 @@ Doc: docs/LOGIC_SPEC_v1.5.3.md
         .summary-status-badge { display:inline-block; padding:2px 6px; border-radius:999px; font-size:11px; font-weight:700; }
         .summary-status-fresh { background:#e7f6e7; color:#116611; }
         .summary-status-dirty { background:#fff3cd; color:#7a5300; }
+        .summary-status-calculating { background:#d9ecff; color:#064f8f; }
         .summary-status-missing { background:#f1f1f1; color:#555; }
         .summary-status-error { background:#fde2e2; color:#9b0015; }
         .summary-reason { display:block; margin-top:3px; font-size:11px; color:#666; }
@@ -494,6 +495,9 @@ Doc: docs/LOGIC_SPEC_v1.5.3.md
         <button class="calc-btn" id="calcRunBtn" type="button">Пересчитать</button>
         <button class="calc-btn" id="calcReportsBtn" type="button">справки</button>
         <button class="calc-btn" id="calcResetBtn" type="button">сбросить</button>
+    </div>
+    <div class="calc-inline-sub" id="calcRunHint">
+        Без дат — пересчитать всю карточку. С датами — пересчитать выбранный период для справки.
     </div>
 </div>
 
@@ -1165,6 +1169,64 @@ function __safeLoadPaymentTableOnce(reason, options){
     }, 0);
 }
 
+function __isCardReturnFromSpravkaUrl(){
+    try {
+        const params = new URLSearchParams(window.location.search || "");
+        return !!(params.get("from") || params.get("to") || (params.get("uid") && (params.get("db") || params.get("owner"))));
+    } catch(e) {
+        return false;
+    }
+}
+
+function __logCardReturnFromSpravkaContext(source){
+    try {
+        if (!__isCardReturnFromSpravkaUrl()) return;
+        const params = new URLSearchParams(window.location.search || "");
+        console.log("[card-return][from-spravka]", {
+            source: String(source || ""),
+            abonentId: String(getAbonentIdFromURL() || ""),
+            uid: String(params.get("uid") || ""),
+            from: String(params.get("from") || ""),
+            to: String(params.get("to") || ""),
+            db: String(params.get("db") || ""),
+            owner: String(params.get("owner") || ""),
+            writes: false
+        });
+    } catch(eLog) {}
+}
+
+async function __retryCardInitAfterReturn(){
+    const box = document.getElementById("cardInitTimeoutAfterReturn");
+    if (box) box.innerHTML = 'Загрузка данных карточки…';
+    try {
+        if (window.JKHDataLoader && typeof window.JKHDataLoader.loadFromServer === "function") {
+            await window.JKHDataLoader.loadFromServer({ force: true, reason: "card_return_refresh" });
+        }
+    } catch(e) {
+        try { console.warn("[card-init][return-refresh-failed]", e); } catch(_) {}
+    }
+    __abonentCardInitStarted = false;
+    __abonentCardServerRepairDone = false;
+    __waitForAbonentCardDataReady(() => {
+        __initAbonentCardSafe();
+    });
+}
+
+function __showCardInitTimeoutAfterReturn(){
+    let box = document.getElementById("cardInitTimeoutAfterReturn");
+    if (!box) {
+        box = document.createElement("div");
+        box.id = "cardInitTimeoutAfterReturn";
+        box.style.cssText = "margin:10px 0;padding:10px 12px;border:1px solid #f0c36d;background:#fff8e1;color:#7a5300;font-size:13px;";
+        const anchor = document.getElementById("abonentSummaryStatusCard") || document.body.firstChild;
+        if (anchor && anchor.parentNode) anchor.parentNode.insertBefore(box, anchor);
+        else document.body.appendChild(box);
+    }
+    box.innerHTML = 'Данные карточки не загрузились. Нажмите Обновить данные. <button type="button" id="cardInitRefreshBtn">Обновить данные</button>';
+    const btn = document.getElementById("cardInitRefreshBtn");
+    if (btn) btn.onclick = function(){ __retryCardInitAfterReturn(); };
+}
+
 function __runAutoAccrualRepairOnce(){
     try {
         if (!__abonentCardServerRepairDone) {
@@ -1239,6 +1301,7 @@ async function __repairEmptyExcludePeriodsKeysAfterServerLoad(){
 
 async function __initAbonentCardSafe(){
     if (__abonentCardInitStarted) return;
+    __logCardReturnFromSpravkaContext("init");
     if (!hasExplicitAbonentCardContext()) {
         __abonentCardInitStarted = true;
         showAbonentCardContextError("missing_abonent");
@@ -1248,12 +1311,18 @@ async function __initAbonentCardSafe(){
 
     await __repairEmptyExcludePeriodsKeysAfterServerLoad();
 
+    try { loadCalcPeriodUI(); } catch(e) { try { console.warn('[card-period][load-after-ready-failed]', e); } catch(_){} }
     try { fillAbonentCard(); } catch(e) { try { console.error('[abonent_card] fill failed', e); } catch(_){} }
     try { loadAbonentSummaryStatus(); } catch(e) { try { console.warn('[summary][status-load-failed]', e); } catch(_){} }
 
     setTimeout(() => {
         // Opening the card is read-only for summary/accrual state: no auto-recalc here.
-        __safeLoadPaymentTableOnce('DOMContentLoaded');
+        const fromSpravka = __isCardReturnFromSpravkaUrl();
+        if (fromSpravka) {
+            try { console.log("[card-init][ready-after-return]", { reason: "server-first-ready", force: true }); } catch(eReturnReady) {}
+        }
+        try { console.log("[card-init][force-payment-table-load]", { reason: fromSpravka ? "return-from-spravka" : "DOMContentLoaded", force: !!fromSpravka }); } catch(eForceLog) {}
+        __safeLoadPaymentTableOnce(fromSpravka ? 'return-from-spravka' : 'DOMContentLoaded', { force: fromSpravka });
     }, 0);
 }
 
@@ -1307,6 +1376,13 @@ function __waitForAbonentCardDataReady(cb) {
         const status = String((st && st.status) || "");
         const serverReady = __isAbonentCardServerFirstReady();
         const abonentReady = __isAbonentCardDataReady();
+        const returnFromSpravka = __isCardReturnFromSpravkaUrl();
+
+        if (returnFromSpravka && abonentReady) {
+            try { console.log("[card-init][data-already-ready]", { reason: reason, status: status }); } catch(eReadyLog) {}
+            finish("data-already-ready");
+            return;
+        }
 
         if (serverReady && (status === "empty" || abonentReady)) {
             finish(reason);
@@ -1316,6 +1392,10 @@ function __waitForAbonentCardDataReady(cb) {
         tries++;
         if (tries > 80) {
             console.warn("[abonent_card] server data not ready after wait, init blocked");
+            if (__isCardReturnFromSpravkaUrl()) {
+                try { console.warn("[card-init][timeout-after-return]", { tries: tries, timeoutMs: 8000 }); } catch(eTimeoutLog) {}
+                __showCardInitTimeoutAfterReturn();
+            }
             return;
         }
 
@@ -1895,6 +1975,7 @@ function __collectAbonentScopedKeysForDelete(abonentId, uid, account){
             matchesSuffix(baseKey, 'calc_period_') ||
             matchesSuffix(baseKey, 'calc_period_active_') ||
             matchesSuffix(baseKey, 'report_period_') ||
+            matchesSuffix(baseKey, 'card_snapshot_') ||
             matchesSuffix(baseKey, 'moratorium_')) {
             add(baseKey);
             continue;
@@ -2478,7 +2559,25 @@ function buildDefaultReportPeriodForCard(abonentId){
             break;
         }
     }
-    const to = __todayISOForCardPeriod();
+    const toCandidates = [
+        { source: "responsibility.dateTo", value: activeLink && activeLink.dateTo },
+        { source: "abonent.calcEndDate", value: abonent && abonent.calcEndDate },
+        { source: "abonent.calc_end_date", value: abonent && abonent.calc_end_date },
+        { source: "abonent.dateTo", value: abonent && (abonent.dateTo || abonent.date_to) }
+    ];
+    let to = "";
+    let toSource = "";
+    for (let j = 0; j < toCandidates.length; j++) {
+        to = __toISODateForCardPeriod(toCandidates[j].value);
+        if (to) {
+            toSource = toCandidates[j].source;
+            break;
+        }
+    }
+    if (!to) {
+        to = __todayISOForCardPeriod();
+        toSource = "today";
+    }
     const result = {
         ok: !!(from && to && isValidPeriod(from, to)),
         abonentId: id,
@@ -2486,11 +2585,35 @@ function buildDefaultReportPeriodForCard(abonentId){
         from: from,
         to: to,
         source: source || "missing",
+        toSource: toSource,
         reason: ""
     };
     if (!result.ok) result.reason = from ? "DEFAULT_PERIOD_INVALID" : "DEFAULT_PERIOD_FROM_MISSING";
     try { console.log("[report-period][default-created]", result); } catch (eLog) {}
     return result;
+}
+
+function autofillFullCardPeriodUI(reason){
+    const fromEl = document.getElementById("calcFrom");
+    const toEl = document.getElementById("calcTo");
+    if (!fromEl || !toEl) return { ok: false, reason: "PERIOD_INPUTS_MISSING" };
+    if (String(fromEl.value || "").trim() || String(toEl.value || "").trim()) return { ok: true, skipped: true, reason: "PERIOD_INPUTS_ALREADY_FILLED" };
+    const period = buildDefaultReportPeriodForCard(getAbonentIdFromURL());
+    if (!period.ok) return period;
+    fromEl.value = period.from;
+    toEl.value = period.to;
+    const hint = document.getElementById("calcRunHint");
+    if (hint) hint.textContent = "Период заполнен по полной карточке.";
+    try {
+        console.log("[card-period][full-autofill]", {
+            reason: String(reason || ""),
+            from: period.from,
+            to: period.to,
+            source: period.source,
+            toSource: period.toSource || ""
+        });
+    } catch(eLog) {}
+    return period;
 }
 
 function saveReportPeriodForSpravka(from, to, options){
@@ -2707,12 +2830,14 @@ function loadCalcPeriodUI(){
         const params = new URLSearchParams(window.location.search || "");
         const urlFrom = String(params.get("from") || "").trim();
         const urlTo = String(params.get("to") || "").trim();
+        const hasUrlPeriod = !!(urlFrom || urlTo);
         if (urlFrom || urlTo) {
             if (isValidPeriod(urlFrom, urlTo)) {
                 fromEl.value = urlFrom;
                 toEl.value = urlTo;
+                window.JKH_CARD_PERIOD_MODE_ACTIVE = true;
+                try { console.log("[card-return][from-spravka]", { from: urlFrom, to: urlTo, requestedId: meta.requestedId, uid: meta.resolvedUid, ownerId: meta.ownerId, writes: false }); } catch(eReturnLog) {}
                 try { console.log("[period][restore-source]", { source: "url", key: "location.search", raw: window.location.search || "", from: urlFrom, to: urlTo, requestedId: meta.requestedId, uid: meta.resolvedUid, ownerId: meta.ownerId }); } catch (eRestoreUrlLog) {}
-                bootstrapActiveCalcPeriod(meta, urlFrom, urlTo, "url");
                 __safeLoadPaymentTableOnce("calc-period-bootstrap-url", { force: true });
                 try {
                     console.log("[card-period][bootstrap-inputs-from-url]", {
@@ -2737,6 +2862,22 @@ function loadCalcPeriodUI(){
                     reason: "INVALID_URL_PERIOD"
                 });
             } catch (eUrlWarn) {}
+        }
+
+        if (!hasUrlPeriod) {
+            fromEl.value = "";
+            toEl.value = "";
+            window.JKH_CARD_PERIOD_MODE_ACTIVE = false;
+            try {
+                console.log("[card-period][full-summary-mode]", {
+                    requestedId: meta.requestedId,
+                    resolvedUid: meta.resolvedUid,
+                    ownerId: meta.ownerId,
+                    reason: "no-url-period",
+                    writes: false
+                });
+            } catch(eFullModeLog) {}
+            return;
         }
 
         const reportKey = getReportPeriodStorageKey(meta);
@@ -2994,26 +3135,76 @@ function isValidPeriod(from, to){
 
 function __normalizeSummaryStatus(status){
     const s = String(status || "missing").trim().toLowerCase();
-    return (s === "fresh" || s === "dirty" || s === "missing" || s === "error") ? s : "error";
+    return (s === "fresh" || s === "dirty" || s === "missing" || s === "error" || s === "invalid" || s === "already_running" || s === "calculating") ? s : "error";
+}
+
+let __lastRenderedSummaryStatusLocal = "missing";
+let __lastRenderedSummaryReasonLocal = "";
+let __runtimeCacheFreshBlocked = false;
+let __lastRuntimeCacheValidation = { valid: false, reason: "RUNTIME_CACHE_NOT_VALIDATED" };
+let __cardSnapshotFreshValidated = false;
+let __lastCardSnapshotValidation = { valid: false, reason: "CARD_SNAPSHOT_NOT_VALIDATED" };
+
+function __summaryTotalsAreFinite(summary){
+    const s = summary && typeof summary === "object" ? summary : null;
+    const t = s && s.totals && typeof s.totals === "object" ? s.totals : null;
+    if (!s && !t) return false;
+    function finite(v){
+        const n = Number(v);
+        return Number.isFinite(n);
+    }
+    const candidates = [
+        t && (t.total != null ? t.total : t.total_debt),
+        t && (t.principal != null ? t.principal : t.total_principal),
+        t && (t.penalty != null ? t.penalty : t.total_penalty),
+        s && (s.total_debt != null ? s.total_debt : s.total),
+        s && (s.total_principal != null ? s.total_principal : s.principal),
+        s && (s.total_penalty != null ? s.total_penalty : s.penalty)
+    ];
+    return candidates.some(finite);
+}
+
+function __freshSummaryVisibleGuard(){
+    if (__cardSnapshotFreshValidated && __lastCardSnapshotValidation.valid) {
+        if (!__summaryTotalsAreFinite(window.__lastCardSummaryForDebug)) return { ok: false, reason: "SUMMARY_TOTALS_MISSING" };
+        return { ok: true, reason: "" };
+    }
+    if (__runtimeCacheFreshBlocked) return { ok: false, reason: __lastRuntimeCacheValidation.reason || "RUNTIME_CACHE_INVALID" };
+    if (!__lastRuntimeCacheValidation.valid) return { ok: false, reason: "CARD_ROWS_NOT_RESTORED" };
+    if (!__summaryTotalsAreFinite(window.__lastCardSummaryForDebug)) return { ok: false, reason: "SUMMARY_TOTALS_MISSING" };
+    return { ok: true, reason: "" };
 }
 
 function __summaryStatusText(status){
-    if (status === "fresh") return "fresh — итог актуален";
-    if (status === "dirty") return "dirty — требуется пересчёт";
-    if (status === "missing") return "missing — итог ещё не создан";
-    if (status === "error") return "error — расчёт невозможен";
+    if (status === "calculating") return "🔵 Выполняется пересчёт";
+    if (status === "fresh") return "🟢 Актуально";
+    if (status === "dirty") return "🟡 Требуется пересчёт";
+    if (status === "missing") return "⚪ Нет расчёта";
+    if (status === "error") return "🔴 Ошибка расчёта";
     return status || "missing";
 }
 
 function __summaryWarningText(status){
-    if (status === "dirty") return "Итог устарел после изменений. Старые totals не показываются как свежие. Нажмите «Пересчитать», чтобы обновить summary.";
+    if (status === "calculating") return "Выполняется пересчёт…";
+    if (status === "dirty") return "Итог устарел — нажмите «Пересчитать». Старые totals не считаются актуальными.";
     if (status === "missing") return "Итог ещё не создан. Старые totals не подставляются. Нажмите «Пересчитать», чтобы создать summary.";
     if (status === "error") return "Расчёт summary невозможен. Проверьте причину ошибки и выполните «Пересчитать» после исправления данных.";
     return "";
 }
 
 function renderAbonentSummaryStatus(status, reason){
-    const normalized = __normalizeSummaryStatus(status);
+    let normalized = __normalizeSummaryStatus(status);
+    let visibleReason = String(reason || "");
+    if (normalized === "fresh") {
+        const guard = __freshSummaryVisibleGuard();
+        if (!guard.ok) {
+            try { console.warn("[summary][fresh-blocked-runtime-cache]", { requestedStatus: "fresh", reason: guard.reason }); } catch(eGuardLog) {}
+            normalized = "dirty";
+            visibleReason = guard.reason === "RUNTIME_CACHE_PERIOD_MISMATCH" ? "Требуется пересчёт таблицы для выбранного периода" : guard.reason;
+        }
+    }
+    __lastRenderedSummaryStatusLocal = normalized;
+    __lastRenderedSummaryReasonLocal = visibleReason;
     const badge = document.getElementById("summaryStatusBadge");
     const reasonEl = document.getElementById("summaryStatusReason");
     const warningEl = document.getElementById("summaryStatusWarning");
@@ -3023,15 +3214,153 @@ function renderAbonentSummaryStatus(status, reason){
         badge.textContent = __summaryStatusText(normalized);
     }
     if (reasonEl) {
-        const r = String(reason || "").trim();
+        const r = String(visibleReason || "").trim();
         reasonEl.textContent = r ? ("Причина: " + r) : "";
     }
     if (warningEl) {
-        const text = __summaryWarningText(normalized);
+        const modeMismatchReason = visibleReason === "CARD_SNAPSHOT_MODE_MISMATCH_FULL_VS_PERIOD" || visibleReason === "CARD_SNAPSHOT_PERIOD_MISMATCH" || visibleReason === "CARD_SNAPSHOT_LEGACY_MODE_AMBIGUOUS";
+        const text = modeMismatchReason ? "Сохранённый snapshot не соответствует текущему режиму расчёта. Нажмите «Пересчитать» для этого режима." : visibleReason === "CARD_ROWS_NOT_RESTORED"
+            ? "Итоги есть, но строки карточки не восстановлены. Нажмите «Пересчитать»."
+            : __summaryWarningText(normalized);
         warningEl.textContent = text;
         warningEl.style.display = text ? "block" : "none";
         warningEl.className = "summary-warning" + (normalized === "error" ? " summary-error" : "");
     }
+    const runBtn = document.getElementById("calcRunBtn");
+    if (runBtn) runBtn.disabled = normalized === "calculating";
+    try {
+        console.log("[summary][visible-status]", { status: normalized, reason: visibleReason });
+        console.log("[summary][status-set]", { status: normalized, reason: visibleReason });
+        if (normalized === "dirty") console.log("[summary][dirty]", { reason: visibleReason });
+        if (normalized === "calculating") console.log("[summary][calculating]", { reason: visibleReason });
+        if (normalized === "fresh") console.log("[summary][fresh]", { reason: visibleReason });
+        if (normalized === "error") console.log("[summary][error]", { reason: visibleReason });
+    } catch(eStatusLog) {}
+}
+
+window.JKHSetSummaryStatus = renderAbonentSummaryStatus;
+
+window.addEventListener("jkh:runtime-cache-invalid", function(event){
+    const detail = event && event.detail ? event.detail : {};
+    const reason = String(detail.reason || "RUNTIME_CACHE_INVALID");
+    __runtimeCacheFreshBlocked = true;
+    __lastRuntimeCacheValidation = { valid: false, reason: reason, detail: detail };
+    try { console.warn("[summary][runtime-cache-downgrade]", detail); } catch(eLog) {}
+    if (__cardSnapshotFreshValidated && __lastCardSnapshotValidation.valid) return;
+    if (__lastRenderedSummaryStatusLocal === "fresh" && __lastCardSnapshotValidation && __lastCardSnapshotValidation.valid === false && __lastCardSnapshotValidation.reason) {
+        renderAbonentSummaryStatus("dirty", __lastCardSnapshotValidation.reason);
+        return;
+    }
+    if (__lastRenderedSummaryStatusLocal === "fresh") {
+        renderAbonentSummaryStatus("dirty", reason === "RUNTIME_CACHE_PERIOD_MISMATCH" ? "Требуется пересчёт таблицы для выбранного периода" : reason);
+    }
+});
+
+window.addEventListener("jkh:runtime-cache-valid", function(event){
+    const detail = event && event.detail ? event.detail : {};
+    __runtimeCacheFreshBlocked = false;
+    __lastRuntimeCacheValidation = { valid: true, reason: "", detail: detail };
+    try { console.log("[summary][runtime-cache-validated]", detail); } catch(eLog) {}
+    const summary = window.__lastCardSummaryForDebug && typeof window.__lastCardSummaryForDebug === "object" ? window.__lastCardSummaryForDebug : null;
+    if (__normalizeSummaryStatus(summary && (summary.summary_status || summary.status)) === "fresh" && __lastRenderedSummaryStatusLocal !== "fresh") {
+        renderAbonentSummaryStatus("fresh", "OK");
+    }
+});
+
+window.addEventListener("jkh:card-snapshot-valid", function(event){
+    const detail = event && event.detail ? event.detail : {};
+    __cardSnapshotFreshValidated = true;
+    __lastCardSnapshotValidation = { valid: true, reason: "", detail: detail };
+    __runtimeCacheFreshBlocked = false;
+    try { console.log("[summary][card-snapshot-validated]", detail); } catch(eLog) {}
+    const summary = window.__lastCardSummaryForDebug && typeof window.__lastCardSummaryForDebug === "object" ? window.__lastCardSummaryForDebug : null;
+    if (__normalizeSummaryStatus(summary && (summary.summary_status || summary.status)) === "fresh") {
+        renderAbonentSummaryStatus("fresh", "OK");
+    }
+});
+
+function __debugCurrentCardSnapshotLifecycle(reason){
+    try {
+        if (!window.Data || typeof Data.debugCardSnapshotLifecycle !== "function") return;
+        const id = getAbonentIdFromURL();
+        const p = Data.debugCardSnapshotLifecycle(id);
+        if (p && typeof p.catch === "function") p.catch(function(e){ try { console.warn("[card-snapshot][debug-lifecycle-failed]", { reason: reason || "", error: String(e && e.message || e) }); } catch (_) {} });
+    } catch(e) {
+        try { console.warn("[card-snapshot][debug-lifecycle-failed]", { reason: reason || "", error: String(e && e.message || e) }); } catch (_) {}
+    }
+}
+
+window.addEventListener("jkh:card-snapshot-invalid", function(event){
+    const detail = event && event.detail ? event.detail : {};
+    const reason = String(detail.reason || "CARD_ROWS_NOT_RESTORED");
+    __cardSnapshotFreshValidated = false;
+    __lastCardSnapshotValidation = { valid: false, reason: reason, detail: detail };
+    try { console.warn("[summary][card-snapshot-invalid]", detail); } catch(eLog) {}
+    __debugCurrentCardSnapshotLifecycle(reason);
+    if (__lastRenderedSummaryStatusLocal === "fresh" || __normalizeSummaryStatus(window.__lastCardSummaryForDebug && window.__lastCardSummaryForDebug.summary_status) === "fresh") {
+        renderAbonentSummaryStatus("dirty", reason);
+    }
+});
+
+function __baseStorageKeyForCurrentOwner(storageKey){
+    const key = String(storageKey || "");
+    if (!key) return "";
+    try {
+        if (window.JKHStore && typeof JKHStore.scopePrefixFor === "function" && typeof JKHStore.getOwnerId === "function") {
+            const pref = String(JKHStore.scopePrefixFor(JKHStore.getOwnerId()) || "");
+            if (pref && key.indexOf(pref) === 0) return key.slice(pref.length);
+        }
+    } catch(e) {}
+    return key;
+}
+
+function __isPossiblyCurrentCardFinancialStorageKey(baseKey){
+    const key = String(baseKey || "");
+    if (!key) return false;
+    const id = String(getAbonentIdFromURL() || "");
+    const uid = String(getAbonentTechnicalIdFromURL() || "");
+    if (key === "abonents_db_v1") return true;
+    if (key === "refinancing_rates_normal_v1" || key === "refinancing_rates_moratorium_v1") return true;
+    try {
+        const ownerId = window.JKHStore && typeof JKHStore.getOwnerId === "function" ? String(JKHStore.getOwnerId() || "") : "";
+        if (ownerId && key === "tariffs_" + ownerId) return true;
+    } catch(e) {}
+    return [id, uid].some(function(x) {
+        return x && (
+            key === "payments_" + x ||
+            key === "exclude_periods_" + x ||
+            key === "moratorium_" + x
+        );
+    });
+}
+
+let __cardSnapshotStorageRecheckTimer = null;
+window.addEventListener("storage", function(event){
+    const baseKey = __baseStorageKeyForCurrentOwner(event && event.key);
+    if (!__isPossiblyCurrentCardFinancialStorageKey(baseKey)) return;
+    if (__cardSnapshotStorageRecheckTimer) clearTimeout(__cardSnapshotStorageRecheckTimer);
+    __cardSnapshotStorageRecheckTimer = setTimeout(function(){
+        try {
+            const uid = getAbonentTechnicalIdFromURL();
+            if (!window.Data || typeof Data.readCardSnapshot !== "function" || !uid) return;
+            const snapshot = Data.readCardSnapshot(uid);
+            if (snapshot && snapshot.dirty === true) {
+                window.dispatchEvent(new CustomEvent("jkh:card-snapshot-invalid", { detail: { reason: snapshot.dirtyReason || "FINANCIAL_INPUT_CHANGED", source: "storage", key: baseKey } }));
+            }
+        } catch(e) {
+            try { console.warn("[card-snapshot][storage-recheck-failed]", e); } catch(_) {}
+        }
+    }, 50);
+});
+
+function __isFreshCardSnapshotUsable(uid, snapshot){
+    if (!snapshot || typeof snapshot !== "object") return false;
+    if (snapshot.dirty === true) return false;
+    if (__normalizeSummaryStatus(snapshot.summary_status) !== "fresh") return false;
+    if (!snapshot.rowsById || typeof snapshot.rowsById !== "object" || Array.isArray(snapshot.rowsById)) return false;
+    if (!Object.keys(snapshot.rowsById).length) return false;
+    const currentLedgerVersion = window.Data && typeof Data.computeLedgerRuntimeVersion === "function" ? String(Data.computeLedgerRuntimeVersion(uid) || "") : "";
+    return !!currentLedgerVersion && String(snapshot.ledgerVersion || "") === currentLedgerVersion;
 }
 
 async function loadAbonentSummaryStatus(){
@@ -3041,23 +3370,47 @@ async function loadAbonentSummaryStatus(){
         renderAbonentSummaryStatus("missing", "UID_REQUIRED");
         return;
     }
-    if (!window.Data || typeof Data.loadAbonentSummaryPage !== "function") {
-        renderAbonentSummaryStatus("missing", "SUMMARY_API_UNAVAILABLE");
+    if (!window.Data || typeof Data.readCardSnapshot !== "function") {
+        renderAbonentSummaryStatus("missing", "CARD_SNAPSHOT_API_UNAVAILABLE");
         return;
     }
 
     try {
-        const payload = await Data.loadAbonentSummaryPage({ page: 1, per_page: 1, account_uid: uid });
-        const item = payload && Array.isArray(payload.items) && payload.items.length ? payload.items[0] : null;
-        const summary = item && item.summary && typeof item.summary === "object" ? item.summary : null;
-        window.__lastCardSummaryForDebug = summary || null;
-        if (!summary) {
-            renderAbonentSummaryStatus("missing", "SUMMARY_NOT_BUILT");
+        const snapshot = Data.readCardSnapshot(uid);
+        if (!snapshot) {
+            __debugCurrentCardSnapshotLifecycle("CARD_SNAPSHOT_MISSING");
+            window.__lastCardSummaryForDebug = null;
+            renderAbonentSummaryStatus("missing", "Требуется пересчёт");
             return;
         }
-        renderAbonentSummaryStatus(summary.summary_status || summary.status || "missing", summary.summary_reason || summary.reason || "");
+        if (snapshot.dirty === true) {
+            __debugCurrentCardSnapshotLifecycle(snapshot.dirtyReason || "CARD_SNAPSHOT_DIRTY");
+            __cardSnapshotFreshValidated = false;
+            __lastCardSnapshotValidation = { valid: false, reason: snapshot.dirtyReason || "CARD_SNAPSHOT_DIRTY" };
+            window.__lastCardSummaryForDebug = null;
+            renderAbonentSummaryStatus("dirty", snapshot.dirtyReason || "Требуется пересчёт");
+            return;
+        }
+        if (!__isFreshCardSnapshotUsable(uid, snapshot)) {
+            __debugCurrentCardSnapshotLifecycle("CARD_ROWS_NOT_RESTORED");
+            window.__lastCardSummaryForDebug = null;
+            __cardSnapshotFreshValidated = false;
+            __lastCardSnapshotValidation = { valid: false, reason: "CARD_ROWS_NOT_RESTORED" };
+            renderAbonentSummaryStatus("dirty", "CARD_ROWS_NOT_RESTORED");
+            return;
+        }
+        const summary = {
+            summary_status: snapshot.summary_status || "fresh",
+            summary_reason: snapshot.summary_reason || "",
+            totals: snapshot.totals || {}
+        };
+        window.__lastCardSummaryForDebug = summary;
+        __cardSnapshotFreshValidated = false;
+        __lastCardSnapshotValidation = { valid: false, reason: "CARD_ROWS_NOT_RESTORED", detail: { uid: uid, ledgerVersion: snapshot.ledgerVersion, rowsByIdCount: Object.keys(snapshot.rowsById).length } };
+        renderAbonentSummaryStatus("dirty", "CARD_ROWS_NOT_RESTORED");
+        __renderAbonentTotalsFromFreshSummary(summary);
     } catch (e) {
-        renderAbonentSummaryStatus("error", String(e && e.message || e || "SUMMARY_API_ERROR"));
+        renderAbonentSummaryStatus("error", String(e && e.message || e || "CARD_SNAPSHOT_READ_ERROR"));
     }
 }
 
@@ -3075,6 +3428,7 @@ function __summaryCalcErrorCode(e){
 function __renderAbonentTotalsFromFreshSummary(summary){
     const status = __normalizeSummaryStatus(summary && (summary.summary_status || summary.status));
     if (status !== "fresh") return;
+    if (!__freshSummaryVisibleGuard().ok) return;
     const totals = summary && summary.totals && typeof summary.totals === "object" ? summary.totals : null;
     if (!totals) return;
 
@@ -3103,6 +3457,7 @@ async function __saveAbonentSummaryAfterUidRecalc(abonentId, from, to){
     }
     const result = await Data.recalculateAbonentCard(abonentId, { period: { from: from, to: to }, saveSummary: false, summaryScope: "period", periodActive: true });
     const summary = result && result.summary && typeof result.summary === "object" ? result.summary : null;
+    window.__lastCardSummaryForDebug = summary || null;
     const status = result && (result.summary_status || result.status) || summary && (summary.summary_status || summary.status) || "error";
     const reason = result && (result.summary_reason || result.reason) || summary && (summary.summary_reason || summary.reason) || "SUMMARY_SAVE_FAILED";
     renderAbonentSummaryStatus(status, reason);
@@ -3175,6 +3530,9 @@ function bindCalcButtons(){
             }
             return msg;
         }
+        if (String(reason || "") === "RECALC_ALREADY_RUNNING" || recalcResult && (recalcResult.status === "already_running" || recalcResult.summary_status === "already_running")) {
+            return "Пересчёт уже выполняется в другой вкладке. Дождитесь завершения и обновите карточку.";
+        }
         return "Пересчёт не выполнен: " + String(reason || "CALC_FAILED");
     }
 
@@ -3182,8 +3540,11 @@ function bindCalcButtons(){
         if (runBtn.disabled) return;
         if (!canWriteOrExplainLocal()) return;
         const currentAbonentId = getAbonentIdFromURL();
-        const from = fromEl.value;
-        const to   = toEl.value;
+        let from = String(fromEl.value || "").trim();
+        let to   = String(toEl.value || "").trim();
+        let hasAnyPeriodInput = !!(from || to);
+        let hasValidPeriodInput = isValidPeriod(from, to);
+        const recalcForReportPeriod = hasAnyPeriodInput;
         const prevText = runBtn.textContent;
         const clickMeta = getCalcPeriodStorageMeta();
         try {
@@ -3195,14 +3556,22 @@ function bindCalcButtons(){
                 periodBefore: __readPeriodKey(clickMeta.storageKey, clickMeta.ownerId),
                 activeBefore: __readActiveKey(clickMeta.activeStorageKey, clickMeta.ownerId)
             });
+            console.log("[recalc][explicit-single]", {
+                abonentId: String(currentAbonentId || ""),
+                uid: clickMeta.resolvedUid,
+                from: from || "",
+                to: to || ""
+            });
+            console.log(hasValidPeriodInput ? "[recalc][explicit-single-period]" : "[recalc][explicit-single-full]", {
+                abonentId: String(currentAbonentId || ""),
+                uid: clickMeta.resolvedUid,
+                from: from || "",
+                to: to || ""
+            });
         } catch (e) {}
 
-        if (!isValidPeriod(from, to)) {
-            if (!from || !to) {
-                alert("Укажите дату начала и дату окончания периода расчёта.");
-            } else {
-                alert("Такой период невозможен: дата начала не может быть позже даты окончания.");
-            }
+        if (hasAnyPeriodInput && !hasValidPeriodInput) {
+            alert("Такой период невозможен: укажите корректные даты начала и окончания.");
             return;
         }
 
@@ -3212,6 +3581,7 @@ function bindCalcButtons(){
         }
 
         runBtn.disabled = true;
+        renderAbonentSummaryStatus((window.JKH_SUMMARY_STATUS && window.JKH_SUMMARY_STATUS.CALCULATING) || "calculating", "EXPLICIT_RECALC");
         runBtn.textContent = "Пересчёт…";
 
         try {
@@ -3223,41 +3593,99 @@ function bindCalcButtons(){
             }
 
             if (!uidResult || uidResult.ok !== true || !uidResult.uid) {
+                renderAbonentSummaryStatus("error", "UID_NOT_SAVED");
                 alert("Период расчёта не сохранён: UID абонента не сохранён.");
                 return;
             }
 
-            if (!saveCalcPeriod(from, to)) {
-                __logCardPeriodSaved(getCalcPeriodStorageMeta(), { ok: false, reason: saveCalcPeriod.lastError || "CALC_PERIOD_SAVE_FAILED", reportReadback: null });
-                if (saveCalcPeriod.lastError !== "PERIOD_REQUIRED") {
-                    alert("Период расчёта не сохранён: не найден canonical UID key.");
+            if (!hasAnyPeriodInput) {
+                const fullPeriod = autofillFullCardPeriodUI("full-summary-recalc-before-run");
+                if (!fullPeriod || fullPeriod.ok !== true) {
+                    renderAbonentSummaryStatus("error", String(fullPeriod && fullPeriod.reason || "FULL_PERIOD_REQUIRED"));
+                    alert("Не удалось определить полный период карточки. Выберите период вручную.");
+                    return;
                 }
-                return;
+                from = fullPeriod.from;
+                to = fullPeriod.to;
+                hasAnyPeriodInput = true;
+                hasValidPeriodInput = isValidPeriod(from, to);
             }
-            const reportPeriodResult = saveReportPeriodForSpravka(from, to, { source: "abonent_card.recalc" });
-            __logCardPeriodSaved(getCalcPeriodStorageMeta(), reportPeriodResult);
-            if (!reportPeriodResult.ok) {
-                alert("РџРµСЂРёРѕРґ РґР»СЏ СЃРїСЂР°РІРєРё РЅРµ СЃРѕС…СЂР°РЅС‘РЅ: " + String(reportPeriodResult.reason || "REPORT_PERIOD_READBACK_FAILED") + " (" + String(reportPeriodResult.reportKey || "report_period_uid_<uid>") + ").");
-                return;
+
+            if (recalcForReportPeriod && hasValidPeriodInput) {
+                window.JKH_CARD_PERIOD_MODE_ACTIVE = true;
+                if (!saveCalcPeriod(from, to)) {
+                    __logCardPeriodSaved(getCalcPeriodStorageMeta(), { ok: false, reason: saveCalcPeriod.lastError || "CALC_PERIOD_SAVE_FAILED", reportReadback: null });
+                    if (saveCalcPeriod.lastError !== "PERIOD_REQUIRED") {
+                        alert("Период расчёта не сохранён: не найден canonical UID key.");
+                    }
+                    return;
+                }
+                const reportPeriodResult = saveReportPeriodForSpravka(from, to, { source: "abonent_card.recalc" });
+                __logCardPeriodSaved(getCalcPeriodStorageMeta(), reportPeriodResult);
+                if (!reportPeriodResult.ok) {
+                    alert("Период для справки не сохранён: " + String(reportPeriodResult.reason || "REPORT_PERIOD_READBACK_FAILED") + " (" + String(reportPeriodResult.reportKey || "report_period_uid_<uid>") + ").");
+                    return;
+                }
+                if (!confirmCalcPeriodSaved()) return;
             }
-            if (!confirmCalcPeriodSaved()) return;
 
             let recalcHandled = false;
             if (typeof window.fullRecalcForCurrentAbonent === "function") {
-                const recalcResult = await window.fullRecalcForCurrentAbonent({ period: { from: from, to: to }, applyAutoAccrual: true });
+                const recalcResult = await window.fullRecalcForCurrentAbonent(recalcForReportPeriod
+                    ? { period: { from: from, to: to }, runtimePeriod: { from: from, to: to }, applyAutoAccrual: true, recalcMode: "REPORT_PERIOD_CALCULATION", summaryScope: "period" }
+                    : { applyAutoAccrual: true, recalcMode: "FULL_SUMMARY_REBUILD", summaryScope: "full" });
                 __logCardRecalcResult(recalcResult, currentAbonentId);
                 if (!recalcResult || recalcResult.ok !== true) {
                     const reason = String(recalcResult && (recalcResult.reason || recalcResult.summary_reason) || "CALC_FAILED");
-                    renderAbonentSummaryStatus("error", reason);
+                    const lockStatus = recalcResult && (recalcResult.status === "already_running" || recalcResult.summary_status === "already_running");
+                    renderAbonentSummaryStatus(lockStatus ? "already_running" : "error", reason);
                     alert(manualRecalcErrorMessage(recalcResult, reason));
                     return;
                 }
                 const summary = recalcResult && recalcResult.summary && typeof recalcResult.summary === "object" ? recalcResult.summary : null;
+                window.__lastCardSummaryForDebug = summary || null;
                 const summaryStatus = recalcResult && (recalcResult.summary_status || recalcResult.status) || summary && (summary.summary_status || summary.status) || "";
                 const summaryReason = recalcResult && (recalcResult.summary_reason || recalcResult.reason) || summary && (summary.summary_reason || summary.reason) || "";
-                if (summaryStatus) renderAbonentSummaryStatus(summaryStatus, summaryReason);
+                if (__normalizeSummaryStatus(summaryStatus) === "fresh") {
+                    if (!window.Data || typeof Data.buildCardSnapshotFromCurrentResult !== "function" || typeof Data.saveCardSnapshotAndWait !== "function") {
+                        renderAbonentSummaryStatus("error", "CARD_SNAPSHOT_API_UNAVAILABLE");
+                        alert("Snapshot карточки не сохранён: API snapshot недоступен.");
+                        return;
+                    }
+                    const snapshot = Data.buildCardSnapshotFromCurrentResult(currentAbonentId, recalcResult);
+                    const snapshotRowsById = snapshot && snapshot.rowsById && typeof snapshot.rowsById === "object" && !Array.isArray(snapshot.rowsById) ? snapshot.rowsById : null;
+                    if (!snapshot || !snapshotRowsById || !Object.keys(snapshotRowsById).length) {
+                        renderAbonentSummaryStatus("error", "EMPTY_ROWS_BY_ID");
+                        alert("Snapshot карточки пуст — пересчёт не дал строк с computed totals");
+                        return;
+                    }
+                    const snapshotSaveResult = await Data.saveCardSnapshotAndWait(currentAbonentId, snapshot);
+                    if (!snapshotSaveResult || snapshotSaveResult.localOk !== true) {
+                        renderAbonentSummaryStatus("error", "CARD_SNAPSHOT_SAVE_FAILED");
+                        alert("Snapshot карточки не сохранён. Итог не будет отмечен fresh.");
+                        return;
+                    }
+                    if (snapshotSaveResult.serverOk !== true) {
+                        renderAbonentSummaryStatus("error", "CARD_SNAPSHOT_SERVER_SAVE_FAILED");
+                        alert("Snapshot карточки не сохранён на сервер. Итог не будет отмечен fresh.");
+                        return;
+                    }
+                    if (snapshotSaveResult.serverReadbackOk !== true) {
+                        renderAbonentSummaryStatus("error", "CARD_SNAPSHOT_SERVER_READBACK_FAILED");
+                        alert("Snapshot карточки не подтверждён сервером. Итог не будет отмечен fresh.");
+                        return;
+                    }
+                    __cardSnapshotFreshValidated = true;
+                    __lastCardSnapshotValidation = { valid: true, reason: "", detail: { key: snapshotSaveResult.key, ownerId: snapshotSaveResult.ownerId, status: snapshotSaveResult.status } };
+                    __runtimeCacheFreshBlocked = false;
+                }
+                if (summaryStatus) renderAbonentSummaryStatus(summaryStatus, __normalizeSummaryStatus(summaryStatus) === "fresh" ? "OK" : summaryReason);
                 if (__normalizeSummaryStatus(summaryStatus) === "fresh" && summary) {
                     __renderAbonentTotalsFromFreshSummary(summary);
+                }
+                if (__normalizeSummaryStatus(summaryStatus) === "fresh") {
+                    const statusBox = document.getElementById("paymentTableStatus") || document.getElementById("paymentStatus") || document.getElementById("paymentsStatus");
+                    if (statusBox) statusBox.textContent = "Итог обновлён.";
                 }
                 recalcHandled = true;
             }
@@ -3278,6 +3706,7 @@ function bindCalcButtons(){
         window.__periodResetInProgress = true;
         fromEl.value = "";
         toEl.value = "";
+        window.JKH_CARD_PERIOD_MODE_ACTIVE = false;
         let urlAfter = urlBefore;
         try {
             const u = new URL(window.location.href);
@@ -3319,28 +3748,25 @@ function bindCalcButtons(){
         if (!from && !to) {
             const defaultPeriod = buildDefaultReportPeriodForCard(id);
             if (!defaultPeriod.ok) {
-                alert("РџРµСЂРёРѕРґ РґР»СЏ СЃРїСЂР°РІРєРё РЅРµ СЃРѕР·РґР°РЅ: " + String(defaultPeriod.reason || "DEFAULT_PERIOD_FROM_MISSING"));
+                alert("Не удалось определить полный период карточки. Выберите период вручную.");
                 return;
             }
             from = defaultPeriod.from;
             to = defaultPeriod.to;
             fromEl.value = from;
             toEl.value = to;
+            const hint = document.getElementById("calcRunHint");
+            if (hint) hint.textContent = "Период заполнен по полной карточке.";
         }
         if (from || to) {
             if (isValidPeriod(from, to)) {
-                const uidResult = await ensureCurrentAbonentUidForCalcPeriod("abonent_card.reports");
-                if (!uidResult || uidResult.ok !== true || !uidResult.uid) {
+                const readonlyMeta = getCalcPeriodStorageMeta();
+                if (!readonlyMeta || !readonlyMeta.resolvedUid) {
                     alert("Период расчёта не сохранён: не найден canonical UID key.");
                     return;
                 }
-                if (!saveCalcPeriod(from, to)) {
-                    __logCardPeriodSaved(getCalcPeriodStorageMeta(), { ok: false, reason: saveCalcPeriod.lastError || "CALC_PERIOD_SAVE_FAILED", reportReadback: null });
-                    alert("Период расчёта не сохранён в canonical UID key. Справка не будет открыта.");
-                    return;
-                }
-                reportPeriodResult = saveReportPeriodForSpravka(from, to, { source: "abonent_card.reports" });
-                __logCardPeriodSaved(getCalcPeriodStorageMeta(), reportPeriodResult);
+                reportPeriodResult = { ok: true, reportKey: getReportPeriodStorageKey(readonlyMeta), reason: "URL_ONLY" };
+                __logCardPeriodSaved(readonlyMeta, reportPeriodResult);
                 if (!reportPeriodResult.ok) {
                     alert("РџРµСЂРёРѕРґ РґР»СЏ СЃРїСЂР°РІРєРё РЅРµ СЃРѕС…СЂР°РЅС‘РЅ: " + String(reportPeriodResult.reason || "REPORT_PERIOD_READBACK_FAILED") + " (" + String(reportPeriodResult.reportKey || "report_period_uid_<uid>") + ").");
                     return;
@@ -3349,7 +3775,6 @@ function bindCalcButtons(){
                 console.warn("[calc-period][save-skipped-invalid-before-reports]", { abonentId: String(id || ""), from: from || "", to: to || "" });
             }
         }
-        if (!confirmCalcPeriodSaved()) return;
         const meta = getCalcPeriodStorageMeta();
         // ✅ FIX: forward active db key (if present) to reports page
         // to keep correct data when multiple bases exist in localStorage.

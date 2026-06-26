@@ -70,6 +70,7 @@
 | server-first        | LOGIC_SPEC | storage.js     | ⚫      |             |
 | owner-scoped данные | LOGIC_SPEC | storage.js     | ⚫      |             |
 | Period keys are view/report state, not financial dirty | LOGIC_SPEC 2.0.1 | abonent_card.html / app.py / data.js / index.html | ✅ OK | Stage 13.5: `CALC_PERIOD_CHANGED` is skipped by backend mark_dirty; full `abonent_summary` rebuild ignores `calc_period` / `report_period` and uses canonical responsibility period only. |
+| Runtime cache is UI acceleration only and must match ledgerVersion/runtimeSignature/selected period/visible financial row coverage | LOGIC_SPEC 2.0.1 | data.js / payment_table.js / abonent_card.html | ✅ OK | Stage 14.7C: invalid cache downgrades UI locally via event, without summary mutation or hidden replay. |
 
 ---
 

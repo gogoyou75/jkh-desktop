@@ -295,6 +295,23 @@ function _isNetworkOrTimeoutError(err) {
     return String(email || "").trim().toLowerCase();
   }
 
+  function normalizeOwnerId(owner) {
+    var value = String(owner || "").trim();
+    var upper = value.toUpperCase();
+    if (upper.indexOf("LAB:") === 0) return value.slice(4).trim();
+    if (upper.indexOf("PROD:") === 0) return value.slice(5).trim();
+    return value;
+  }
+
+  function applyServerEnvType(data) {
+    try {
+      var env = data && (data.env_type || data.env || data.environment);
+      if (env && window.JKHStore && typeof JKHStore.setEnvType === "function") JKHStore.setEnvType(env);
+      else if (env && window.JKHStorage && typeof JKHStorage.setEnvType === "function") JKHStorage.setEnvType(env);
+      else if (env) window.JKH_ENV_TYPE = String(env || "").trim().toUpperCase();
+    } catch (e) {}
+  }
+
   function getCachedSession() {
     return safeJsonParse(localStorage.getItem(K_SESS) || "null", null);
   }
@@ -305,7 +322,7 @@ function _isNetworkOrTimeoutError(err) {
       return;
     }
     localStorage.setItem(K_SESS, safeJsonStringify({
-      userId: user.id,
+      userId: normalizeOwnerId(user.id),
       role: user.role || "user",
       email: user.email || "",
       displayName: user.displayName || "",
@@ -324,7 +341,7 @@ function _isNetworkOrTimeoutError(err) {
     if (!s || !s.userId) return null;
 
     return {
-      id: s.userId,
+      id: normalizeOwnerId(s.userId),
       email: s.email || "",
       role: s.role || "user",
       displayName: s.displayName || "",
@@ -372,6 +389,7 @@ function _isNetworkOrTimeoutError(err) {
 
   async function fetchMe() {
     var data = await api("/api/auth/me", { method: "GET" });
+    applyServerEnvType(data);
     cacheSessionUser(data.user);
     return data.user;
   }
@@ -429,9 +447,9 @@ function _isNetworkOrTimeoutError(err) {
     if (!u || u.role !== "admin") return null;
 
     try {
-      return localStorage.getItem(ADMIN_VIEW_SCOPE_KEY) || u.id;
+      return normalizeOwnerId(localStorage.getItem(ADMIN_VIEW_SCOPE_KEY) || u.id);
     } catch (e) {
-      return u.id;
+      return normalizeOwnerId(u.id);
     }
   }
 
@@ -440,7 +458,8 @@ function _isNetworkOrTimeoutError(err) {
     if (!u || u.role !== "admin") return false;
 
     try {
-      localStorage.setItem(ADMIN_VIEW_SCOPE_KEY, scope || u.id);
+      var value = String(scope || u.id || "");
+      localStorage.setItem(ADMIN_VIEW_SCOPE_KEY, value === "ALL" ? "ALL" : normalizeOwnerId(value));
       return true;
     } catch (e) {
       return false;
@@ -450,8 +469,8 @@ function _isNetworkOrTimeoutError(err) {
   function getActiveDbOwnerId() {
     var u = getCurrentUser();
     if (!u) return "guest";
-    if (u.role === "admin") return getAdminViewScope() || u.id;
-    return u.id;
+    if (u.role === "admin") return getAdminViewScope() || normalizeOwnerId(u.id);
+    return normalizeOwnerId(u.id);
   }
 
   function renderAuthStatus() {
@@ -612,6 +631,7 @@ function _isNetworkOrTimeoutError(err) {
       })
     });
 
+    applyServerEnvType(data);
     cacheSessionUser(data.user);
     _sessionReady = true;
     _setUIState({
@@ -645,6 +665,7 @@ function _isNetworkOrTimeoutError(err) {
       })
     });
 
+    applyServerEnvType(data);
     cacheSessionUser(data.user);
     _sessionReady = true;
     _setUIState({
@@ -960,6 +981,7 @@ function _isNetworkOrTimeoutError(err) {
     getAdminViewScope: getAdminViewScope,
     setAdminViewScope: setAdminViewScope,
     getActiveDbOwnerId: getActiveDbOwnerId,
+    normalizeOwnerId: normalizeOwnerId,
 
     exportProjectStorageSnapshot: exportProjectStorageSnapshot,
     importProjectStorageSnapshot: importProjectStorageSnapshot,

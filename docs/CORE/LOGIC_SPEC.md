@@ -69,6 +69,12 @@ Stage 13.5 canonical full summary modes:
 - `REPORT_PERIOD_CALCULATION` may use the selected report/view period only for temporary court/report rendering and must not overwrite full `abonent_summary` totals.
 - Fatal calculation errors such as `LEDGER_JSON_INVALID`, `RATES_MISSING`, `RATES_JSON_INVALID`, `MISSING_REQUIRED_RATE`, `EXCLUDES_JSON_INVALID`, `EXCLUDES_INVALID`, `START_DATE_MISSING` and `RESPONSIBILITY_DATE_MISSING` are preserved as `summary_status = error` without fake zero totals.
 
+Stage 14.7C runtime cache consistency:
+- `ledger_runtime_cache_<uid>` is a UI acceleration layer only. It is not canonical ledger and must not mutate `payments_<uid>` or `abonent_summary`.
+- Runtime cache freshness requires matching `ledgerVersion`, valid `rowsById`, matching `runtimeSignature`, matching `periodActive`, matching selected period, and coverage for visible financial rows.
+- If summary is `fresh` but runtime cache is missing, stale, period-mismatched, signature-mismatched, or incomplete, UI must locally show “Требуется пересчёт” without saving dirty summary and without automatic replay.
+- Read-only views must not run autoaccrual, hidden flush, or full financial replay to repair runtime cache. Repair is allowed only by explicit user recalculation.
+
 ### 2.1. Источник истины
 - **Backend / серверная БД** — источник истины.
 - **Frontend / localStorage** — рабочий кэш, офлайн-копия и транспортный слой.

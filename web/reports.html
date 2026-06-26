@@ -213,8 +213,9 @@
 </div>
 
 <script>
+window.JKH_REPORT_MODE = "readonly_report";
 function getAbonentIdFromURL() {
-    const params = new URLSearchParams(window.location.search || "");
+const params = new URLSearchParams(window.location.search || "");
     return String(params.get("abonent") || "").trim();
 }
 
@@ -296,8 +297,8 @@ function getReportsUrlParams(){
 }
 
 function extractOwnerFromScopedDbKey(scoped){
-    const m = String(scoped || "").match(/^jkhdb::(.+?)::abonents_db_v1$/);
-    return m ? String(m[1] || "") : "";
+    const m = String(scoped || "").match(/^jkhdb::(?:(LAB|PROD)::)?(.+?)::abonents_db_v1$/);
+    return m ? String(m[2] || "") : "";
 }
 
 function getReportsOwnerId(){
@@ -327,7 +328,8 @@ function storeGetCanonical(key, ownerId){
 }
 
 function storeSetCanonical(key, value, ownerId){
-    try { return (window.JKHStore && JKHStore.setRaw) ? JKHStore.setRaw(key, value, ownerId) : false; } catch(e) { return false; }
+    try { console.warn("[reports][write-blocked-readonly]", { key: String(key || ""), ownerId: String(ownerId || "") }); } catch(eLog) {}
+    return false;
 }
 
 function getCanonicalAbonent(id){
@@ -338,12 +340,6 @@ function getCanonicalAbonent(id){
 
 async function ensureCanonicalAbonent(id){
     let abonent = getCanonicalAbonent(id);
-    if (abonent && !String(abonent.uid || "").trim()) {
-        if (window.Data && typeof Data.ensureAbonentUid === "function") {
-            await Data.ensureAbonentUid(id, { source: "reports" });
-            abonent = getCanonicalAbonent(id);
-        }
-    }
     return abonent;
 }
 
@@ -405,7 +401,7 @@ function fillAbonentCardHeader(id, a) {
 function autoAcceptReportsPeriod(abonent, from, to, source) {
     const fromValue = String(from || "").trim();
     const toValue = String(to || "").trim();
-    const ok = isValidPeriod(fromValue, toValue) && saveCanonicalPeriod(abonent, fromValue, toValue, { silent: true, source: "auto-accept:" + String(source || "unknown") });
+    const ok = isValidPeriod(fromValue, toValue);
     const openBtn = document.getElementById("openReport01");
     const chooseBtn = document.getElementById("repChooseBtn");
     if (openBtn) openBtn.disabled = !ok;
@@ -424,6 +420,16 @@ function autoAcceptReportsPeriod(abonent, from, to, source) {
             from: fromValue,
             to: toValue
         });
+        if (String(source || "") === "url") {
+            console.log("[reports][url-period-accepted]", {
+                ok: !!ok,
+                abonentId: meta.abonentId,
+                uid: meta.uid,
+                from: fromValue,
+                to: toValue
+            });
+        }
+        console.log("[reports][readonly-open]", { source: String(source || "unknown"), from: fromValue, to: toValue, writes: false });
     } catch(eAutoAcceptLog) {}
     return !!ok;
 }
@@ -588,13 +594,9 @@ function saveCanonicalPeriod(abonent, from, to, options){
     } catch(e) {}
 
     const payload = JSON.stringify({ from: fromValue, to: toValue });
-    storeSetCanonical(meta.periodKey, payload, meta.ownerId);
-    storeSetCanonical(meta.activeKey, "1", meta.ownerId);
-    storeSetCanonical(meta.reportKey, payload, meta.ownerId);
-
-    const periodRaw = storeGetCanonical(meta.periodKey, meta.ownerId);
-    const activeRaw = storeGetCanonical(meta.activeKey, meta.ownerId);
-    const reportRaw = storeGetCanonical(meta.reportKey, meta.ownerId);
+    const periodRaw = payload;
+    const activeRaw = "1";
+    const reportRaw = payload;
     let parsedPeriod = null;
     let parsedReportPeriod = null;
     try { parsedPeriod = periodRaw ? JSON.parse(periodRaw) : null; } catch(e) { parsedPeriod = null; }
@@ -613,7 +615,8 @@ function saveCanonicalPeriod(abonent, from, to, options){
             reportRaw: reportRaw,
             parsedPeriod: parsedPeriod,
             parsedReportPeriod: parsedReportPeriod,
-            ok: !!(parsedPeriod && parsedPeriod.from === fromValue && parsedPeriod.to === toValue && parsedReportPeriod && parsedReportPeriod.from === fromValue && parsedReportPeriod.to === toValue && activeRaw === "1")
+            ok: !!(parsedPeriod && parsedPeriod.from === fromValue && parsedPeriod.to === toValue && parsedReportPeriod && parsedReportPeriod.from === fromValue && parsedReportPeriod.to === toValue && activeRaw === "1"),
+            readonly: true
         });
     } catch(e) {}
     try {
@@ -628,7 +631,8 @@ function saveCanonicalPeriod(abonent, from, to, options){
             activeReadback: activeRaw,
             reportReadback: parsedReportPeriod,
             ok: !!(parsedPeriod && parsedPeriod.from === fromValue && parsedPeriod.to === toValue && parsedReportPeriod && parsedReportPeriod.from === fromValue && parsedReportPeriod.to === toValue && activeRaw === "1"),
-            source: String(opts.source || "manual")
+            source: String(opts.source || "manual"),
+            readonly: true
         });
     } catch(eReadbackLog) {}
 
@@ -637,7 +641,17 @@ function saveCanonicalPeriod(abonent, from, to, options){
         return false;
     }
 
+    try { console.log("[reports][readonly-open]", { source: String(opts.source || "manual"), from: fromValue, to: toValue, writes: false }); } catch(eReadonlyLog) {}
     return true;
+}
+
+function requireValidReportPeriod(from, to){
+    const fromValue = String(from || "").trim();
+    const toValue = String(to || "").trim();
+    if (isValidPeriod(fromValue, toValue)) return { ok: true, from: fromValue, to: toValue };
+    try { console.warn("[reports][blocked-empty-period]", { from: fromValue, to: toValue }); } catch(e) {}
+    alert("Сначала выберите корректный период.");
+    return { ok: false, from: fromValue, to: toValue };
 }
 
 async function initReportsPage() {
@@ -654,7 +668,9 @@ async function initReportsPage() {
         const from = document.getElementById("repFrom").value;
         const to   = document.getElementById("repTo").value;
 
-        if (!saveCanonicalPeriod(abonent, from, to)) return;
+        const period = requireValidReportPeriod(from, to);
+        if (!period.ok) return;
+        try { console.log("[reports][readonly-open]", { source: "choose", from: period.from, to: period.to, writes: false }); } catch(eReadonlyLog) {}
         alert("Период для справки выбран: " + from + " — " + to);
     });
 
@@ -665,10 +681,14 @@ async function initReportsPage() {
         const from = document.getElementById("repFrom").value;
         const to   = document.getElementById("repTo").value;
 
-        if (!saveCanonicalPeriod(abonent, from, to)) return;
+        const period = requireValidReportPeriod(from, to);
+        if (!period.ok) return;
 
-        let href = "spravka_sud.html?abonent=" + encodeURIComponent(currentId) + "&from=" + encodeURIComponent(from || "") + "&to=" + encodeURIComponent(to || "");
+        try { console.log("[reports][readonly-open]", { source: "open", from: period.from, to: period.to, writes: false }); } catch(eReadonlyLog) {}
+        try { console.log("[reports][derived-calc-start]", { page: "reports", target: "spravka_sud", abonentId: currentId, from: period.from, to: period.to }); } catch(eStartLog) {}
+        let href = "spravka_sud.html?abonent=" + encodeURIComponent(currentId) + "&from=" + encodeURIComponent(period.from) + "&to=" + encodeURIComponent(period.to);
         href = appendReportsContextToHref(href);
+        try { console.log("[reports][derived-calc-done]", { page: "reports", target: "navigation", href: href }); } catch(eDoneLog) {}
         location.href = href;
     });
 }

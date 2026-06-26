@@ -6,7 +6,7 @@ Doc: docs/LOGIC_SPEC_v1.5.3.md
 Эталон: jkh_site_full_v01.27.3.zip | SHA256: 6b4254a9b3b74327fe2d2c48c34e3e446ba9ae4e3369c6c554a683bde7b6ceec
 
 - ES-modules (type="module") запрещены в v1.5.x (должно работать file://)
-- Порядок подключений CRITICAL: calc_engine.js должен быть ДО payment_table.js / spravka_sud.js
+- Index is a readonly summary consumer; calculation scripts are not loaded here.
 - Карточка абонента = источник истины; справки/отчёты не ломают карточку
 ============================================================ -->
 
@@ -22,8 +22,6 @@ Doc: docs/LOGIC_SPEC_v1.5.3.md
 
     <!-- данные и лэйаут -->
     <script src="data.js"></script>
-    <script src="calc_engine.js"></script>
-<script src="autoaccrual_engine.js"></script>
 <script src="layout.js"></script>
 
     <style>
@@ -68,12 +66,15 @@ Doc: docs/LOGIC_SPEC_v1.5.3.md
         .summary-status-fresh { background:#e7f6e7; color:#116611; }
         .summary-status-dirty { background:#fff3cd; color:#7a5300; }
         .summary-status-missing { background:#f1f1f1; color:#555; }
-        .summary-status-error { background:#fde2e2; color:#9b0015; }
+        .summary-status-error, .summary-status-invalid { background:#fde2e2; color:#9b0015; }
         .summary-reason { display:block; margin-top:3px; font-size:11px; color:#666; }
         .summary-batch-panel { margin:10px 0 12px; padding:10px 12px; border:1px solid #d9e2ef; border-radius:8px; background:#f7fbff; font-size:13px; }
         .summary-batch-panel button { margin-right:8px; }
         .summary-batch-progress { margin-top:7px; color:#345; }
+        .summary-batch-error-detail { margin:6px 0 0; padding:6px; max-height:260px; overflow:auto; background:#fff; border:1px solid #ddd; font-size:11px; white-space:pre-wrap; }
         .summary-row-select { text-align:center; width:34px; }
+        .summary-page-counters { margin:8px 0 10px; font-size:12px; color:#333; }
+        .summary-page-counters span { display:inline-block; margin-right:10px; padding:2px 6px; border:1px solid #ddd; background:#fff; }
 
         /* ===== PAGINATION ===== */
         #paginationInfo {
@@ -235,10 +236,22 @@ Doc: docs/LOGIC_SPEC_v1.5.3.md
 
 <div id="summaryBatchPanel" class="summary-batch-panel" style="display:none;">
     <button id="summaryBatchSelectStaleBtn" type="button">Выбрать устаревшие на странице</button>
-    <button id="summaryBatchRunBtn" type="button" title="Проверяет summary, не пересчитывает карточки">Проверить выбранные summary</button>
+    <button id="summaryBatchRunBtn" type="button" title="Batch-пересчёт выбранных абонентов">Пересчитать выбранных абонентов</button>
+    <button id="summarySnapshotSelectBtn" type="button">Выбрать UID без snapshot</button>
+    <button id="summarySnapshotRunBtn" type="button" title="Пересчитать и сохранить card_snapshot для выбранных UID">Создать snapshot для выбранных</button>
+    <button id="summaryBatchClearBtn" type="button">Снять выбор</button>
+    <button id="summaryBatchStopBtn" type="button" disabled>Остановить</button>
     <span id="summaryBatchCount">Нет выбранных UID</span>
     <div id="summaryBatchProgress" class="summary-batch-progress"></div>
+    <div id="summaryBatchStats" class="summary-batch-stats" style="display:none;"></div>
+    <button id="summaryBatchShowErrorsBtn" type="button" style="display:none;">Показать ошибки</button>
+    <div id="summaryBatchErrors" class="summary-batch-errors" style="display:none;"></div>
+    <div id="summaryBatchLegend" class="summary-batch-legend">
+        fresh — итог актуален; error — расчёт завершился ошибкой; missing — summary отсутствует; invalid — summary повреждён; dirty — требуется пересчёт
+    </div>
 </div>
+
+<div id="summaryPageCounters" class="summary-page-counters" aria-live="polite"></div>
 
 <table id="abonentsTable" class="sticky-header">
     <thead>
@@ -338,7 +351,7 @@ const filters = {};
 
 // CRITICAL: Index page is a read-only summary consumer.
 // Do not:
-// - read all payments_<uid>,
+// - read all canonical ledgers,
 // - trigger recalculation,
 // - auto-build summary,
 // - auto-repair ledger,
@@ -355,7 +368,11 @@ let indexSummaryState = {
 };
 let summaryBatchSelectedUids = {};
 let summaryBatchRunning = false;
-let summaryBatchJobState = { jobId: null, timer: null, retries: 0 };
+let summaryBatchStopRequested = false;
+let summaryBatchJobState = { jobId: null, timer: null, retries: 0, total: 0, mode: "summary" };
+let summaryBatchErrorsVisible = false;
+let summaryBatchProgressState = { jobId: null, total: 0, processed: 0, fresh: 0, error: 0, skipped: 0, errors: [], finished: false, paused: false };
+let summaryBatchPerfStats = [];
 
 function __indexOwnerId(){
     try {
@@ -434,7 +451,7 @@ function escapeHtml(str){
         .replaceAll("'", "&#039;");
 }
 
-// поддержка ISO YYYY-MM-DD и RU DD.MM.YYYY (как в payment_table.js)
+// поддержка ISO YYYY-MM-DD и RU DD.MM.YYYY
 function parseDateAnyToDate(value) {
     if (value === null || value === undefined) return null;
     const s = String(value || "").trim();
@@ -471,7 +488,7 @@ function parseDateForSort(str){
 }
 
 /* ============================================================
-     ✅ ЧТЕНИЕ ИТОГОВ И ДАТ ИЗ payments_<id>
+     Stage 16: legacy ledger-derived totals disabled on index
 ============================================================ */
 function toNum(v){
     const n = parseFloat(String(v ?? "").replace(",", ".").replace(/\s+/g,""));
@@ -496,9 +513,7 @@ function getAbonentNote(id, a){
 }
 
 function getPaymentsForAbonent(id){
-    if (window.Data && typeof window.Data.readPaymentLedger === "function") return window.Data.readPaymentLedger(id);
-    const key = ((typeof window.getPaymentsKeyForAbonent === "function") ? window.getPaymentsKeyForAbonent(id) : "");
-    return key ? getPaymentRowsByStorageKeyCached(key) : [];
+    return [];
 }
 
 function dateToISO(d){
@@ -641,49 +656,18 @@ function calcTotalsFromPayments(id, abonentObj){
     }
 
     // ✅ Итоговые "Всего задолженность" и "ПЕНЯ за период" должны совпадать с логикой карточки.
-    // Важно: в LS строки payments_<id> могут НЕ содержать актуальные total_debt/pay_penalty,
+    // Важно: legacy row totals may be stale and are ignored by summary-only mode,
     // потому что карточка пересчитывает это "на лету".
     // Поэтому:
-    //   1) если доступен calc_engine (JKHCalcEngine) — считаем итог прямо сейчас (это самый надёжный вариант)
+    //   1) прямой расчёт на index отключён; страница читает только abonent_summary
     //   2) иначе — fallback к данным из последней строки последнего месяца.
 
     let totalDebt = 0;
     let penalty = 0;
 
-    // (1) основной путь — через calc_engine
+    // (1) legacy direct calculation path is blocked on index
     try {
-        if (window.JKHCalcEngine) {
-            // ✅ ЕДИНЫЙ ДВИЖОК: для сводной главной используем тот же метод,
-            // что и карточка/справка: calcTotalsAsOfAdjusted() на дату окончания расчёта.
-            //
-            // ВАЖНО:
-            // - calcTotalsAsOfCore() отдаёт "начисленную пеню" (penaltyAccruedTotal) — это ДРУГОЕ.
-            // - нам нужна "пеня к взысканию / задолженность по пени" (penaltyDebt),
-            //   которая согласована с карточкой и справкой.
-            if (typeof window.JKHCalcEngine.calcTotalsAsOfAdjusted === 'function') {
-                const adj = window.JKHCalcEngine.calcTotalsAsOfAdjusted(
-                    viewRows,
-                    asOf,
-                    { abonentId: id, applyAdvanceOffset: true, allowNegativePrincipal: true }
-                );
-
-                const principal = Number(adj?.principal) || 0;       // может быть отрицательный (аванс)
-                const penDebt   = Number(adj?.penaltyDebt) || 0;
-                const total     = Number(adj?.total) || (principal + penDebt);
-
-                totalDebt = total;
-                // CRITICAL: пеня берётся напрямую из calc_engine (penaltyDebt).
-                // Запрещено обнулять её в index.html — это нарушает единый расчёт.
-                penalty = penDebt;
-
-                CRITICAL_ASSERT(Number.isFinite(totalDebt), "Index: totalDebt is not finite", { id, totalDebt, adj });
-                CRITICAL_ASSERT(Number.isFinite(penalty),   "Index: penalty is not finite",   { id, penalty, adj });
-            } else {
-                throw new Error('JKHCalcEngine.calcTotalsAsOfAdjusted is missing');
-            }
-        } else {
-            throw new Error('no JKHCalcEngine');
-        }
+        throw new Error('INDEX_DIRECT_CALC_DISABLED');
     } catch (e) {
         // (2) fallback — последняя строка последнего месяца (как раньше)
         let endRow = null;
@@ -812,7 +796,8 @@ function shouldUsePassiveSummaryMode(){
 
 function normalizeSummaryStatus(value){
     const s = String(value || "missing").trim().toLowerCase();
-    return (s === "fresh" || s === "dirty" || s === "missing" || s === "error") ? s : "error";
+    if (s === "stale") return "dirty";
+    return (s === "fresh" || s === "dirty" || s === "missing" || s === "error" || s === "invalid") ? s : "error";
 }
 
 function summaryNumberToDisplay(value){
@@ -857,6 +842,70 @@ const INDEX_SUMMARY_TOTAL_KEYS = {
     accrued: ["totals.accrued", "totals.total_accrued", "total_accrued", "nachisleno", "accrued", "accrued_total", "accruedTotal"],
     paid: ["totals.paid", "totals.total_paid", "total_paid", "oplacheno", "paid", "paid_total", "paidTotal"]
 };
+
+function firstPresentValue(){
+    for (let i = 0; i < arguments.length; i++) {
+        const v = arguments[i];
+        if (v !== null && v !== undefined && v !== "") return v;
+    }
+    return "";
+}
+
+function isBackendAbonentsRow(item){
+    return !!(item && typeof item === "object" && !item.summary && (
+        item.uid !== undefined ||
+        item.total_debt !== undefined ||
+        item.total_accrued !== undefined ||
+        item.total_paid !== undefined ||
+        item.penalty_debt !== undefined ||
+        item.total_penalty !== undefined
+    ));
+}
+
+function buildSummaryFromBackendAbonentsRow(item){
+    const penalty = firstPresentValue(item && item.penalty_debt, item && item.total_penalty);
+    const summary = {
+        summary_status: item && item.summary_status,
+        status: item && item.summary_status,
+        summary_reason: item && item.summary_reason,
+        reason: item && item.summary_reason,
+        abonent_id: item && item.abonent_id,
+        account_uid: firstPresentValue(item && item.uid, item && item.account_uid),
+        account_number: item && item.account_number,
+        fio: item && item.fio,
+        address: item && item.address,
+        regnum: firstPresentValue(item && item.regnum, item && item.premise),
+        premise_regnum: firstPresentValue(item && item.regnum, item && item.premise),
+        total_debt: item && item.total_debt,
+        total_accrued: item && item.total_accrued,
+        total_paid: item && item.total_paid,
+        penalty_debt: penalty,
+        total_penalty: penalty,
+        updated_at: item && item.updated_at,
+        abonent: {
+            abonent_id: item && item.abonent_id,
+            account_uid: firstPresentValue(item && item.uid, item && item.account_uid),
+            account_number: item && item.account_number,
+            fio: item && item.fio,
+            address: item && item.address,
+            regnum: firstPresentValue(item && item.regnum, item && item.premise)
+        }
+    };
+    if (summary.summary_status === "fresh" || summary.total_debt !== "" || summary.total_accrued !== "" || summary.total_paid !== "" || penalty !== "") {
+        summary.totals = {
+            debt: summary.total_debt,
+            total_debt: summary.total_debt,
+            total: summary.total_debt,
+            accrued: summary.total_accrued,
+            total_accrued: summary.total_accrued,
+            paid: summary.total_paid,
+            total_paid: summary.total_paid,
+            penalty: penalty,
+            total_penalty: penalty
+        };
+    }
+    return summary;
+}
 
 function validateIndexSummaryTotals(summary, status){
     const totalsObj = summary && summary.totals && typeof summary.totals === "object" && !Array.isArray(summary.totals) ? summary.totals : null;
@@ -908,6 +957,9 @@ function validateIndexSummaryTotals(summary, status){
     } else if (status === "error") {
         whyEmptyTotals = "summary error";
         exactGuard = "summary_status error";
+    } else if (status === "invalid") {
+        whyEmptyTotals = "summary invalid";
+        exactGuard = "summary_status invalid";
     }
 
     return {
@@ -946,7 +998,9 @@ function summaryStatusHtml(row){
 }
 
 function buildIndexRowFromSummaryItem(item){
-    const summary = (item && item.summary && typeof item.summary === "object") ? item.summary : {};
+    const summary = (item && item.summary && typeof item.summary === "object")
+        ? item.summary
+        : (isBackendAbonentsRow(item) ? buildSummaryFromBackendAbonentsRow(item) : {});
     const abonent = (summary.abonent && typeof summary.abonent === "object") ? summary.abonent : {};
     const status = normalizeSummaryStatus(summary.summary_status || summary.status || item && item.summary_status);
     const rawReason = String(summary.summary_reason || summary.reason || "").trim();
@@ -976,8 +1030,8 @@ function buildIndexRowFromSummaryItem(item){
     };
 
     return {
-        id: String(item && (item.abonent_id || item.account_number || item.account_uid || item.id) || abonent.id || abonent.abonent_id || abonent.account_number || abonent.account_uid || ""),
-        accountUid: String(item && item.account_uid || summary.account_uid || summary.accountUid || abonent.account_uid || abonent.accountUid || ""),
+        id: String(item && (item.abonent_id || item.account_number || item.uid || item.account_uid || item.id) || abonent.id || abonent.abonent_id || abonent.account_number || abonent.account_uid || ""),
+        accountUid: String(item && (item.uid || item.account_uid) || summary.account_uid || summary.accountUid || abonent.account_uid || abonent.accountUid || ""),
         fam: String(fam || ""),
         name: String(name || ""),
         otch: String(otch || ""),
@@ -988,14 +1042,20 @@ function buildIndexRowFromSummaryItem(item){
         startDate: isFresh ? formatSummaryDate(pickSummaryValue(summary, ["start_date", "startDate", "period_start", "date_from", "period_from", "period.from"]) || period.from || period.period_from || period.date_from || period.start_date) : "",
         endDate: isFresh ? formatSummaryDate(pickSummaryValue(summary, ["end_date", "endDate", "period_end", "date_to", "period_to", "as_of", "period.to"]) || period.to || period.period_to || period.date_to || period.end_date || period.as_of) : "",
         note: String(summary.note || summary.defaultNote || ""),
-        flatReg: String(summary.flat_reg || summary.regnum || summary.premise_regnum || summary.premiseRegnum || abonent.flat_reg || abonent.regnum || abonent.premise_regnum || abonent.premiseRegnum || ""),
+        flatReg: String(summary.flat_reg || summary.regnum || summary.premise_regnum || summary.premiseRegnum || item && (item.regnum || item.premise) || abonent.flat_reg || abonent.regnum || abonent.premise_regnum || abonent.premiseRegnum || ""),
         rowStatusMark: "",
         summaryStatus: displayStatus,
         summaryReason: reason,
         rawSummaryStatus: status,
         rawSummaryReason: rawReason,
+        snapshotStatus: String(item && item.snapshot_status || "missing").toLowerCase(),
+        snapshotReason: String(item && item.snapshot_reason || ""),
+        inputHashSummary: String(item && item.input_hash_summary || ""),
+        inputHashSnapshot: String(item && item.input_hash_snapshot || ""),
+        hashMismatch: !!(item && item.hash_mismatch),
+        warnings: Array.isArray(item && item.warnings) ? item.warnings : [],
         __totalsRenderDebug: {
-            uid: String(item && item.account_uid || summary.account_uid || summary.accountUid || abonent.account_uid || abonent.accountUid || ""),
+            uid: String(item && (item.uid || item.account_uid) || summary.account_uid || summary.accountUid || abonent.account_uid || abonent.accountUid || ""),
             summaryStatus: displayStatus,
             rawSummaryStatus: status,
             summaryReason: reason,
@@ -1053,10 +1113,59 @@ function renderIndexSummaryError(message){
     if (controls) controls.innerHTML = "";
 }
 
+function normalizeIndexApiPagination(payload){
+    const p = payload && payload.pagination && typeof payload.pagination === "object" ? payload.pagination : {};
+    const page = Number(p.page || payload && payload.page || currentPage) || 1;
+    const perPage = Number(p.per_page || p.limit || payload && payload.limit || pageSize) || pageSize;
+    const total = Number(p.total || payload && payload.total || (payload && Array.isArray(payload.items) ? payload.items.length : 0)) || 0;
+    const pages = Number(p.pages || (perPage ? Math.ceil(total / perPage) : 0)) || 0;
+    return {
+        page: page,
+        per_page: perPage,
+        total: total,
+        pages: pages,
+        has_next: p.has_next !== undefined ? !!p.has_next : page < pages,
+        has_prev: p.has_prev !== undefined ? !!p.has_prev : page > 1
+    };
+}
+
+async function renderIndexRowsLegacyFallback(reason){
+    indexPassiveSummaryMode = false;
+    indexSummaryState = Object.assign({}, indexSummaryState, {
+        mode: "legacy",
+        loading: false,
+        error: String(reason || "")
+    });
+    if (!isExplicitLocalOrOfflineModeForIndex()) {
+        try { console.warn("[index][abonents-api-fallback-blocked]", { reason: String(reason || "api_unavailable") }); } catch(eBlockedLog) {}
+        return false;
+    }
+    if (window.AbonentsDB && window.AbonentsDB.abonents) {
+        try { console.warn("[index][abonents-api-fallback]", { reason: String(reason || "api_unavailable") }); } catch(eLog) {}
+        rebuildIndexRows();
+        render();
+        return true;
+    }
+    return false;
+}
+
+function isExplicitLocalOrOfflineModeForIndex(){
+    try {
+        var p = String(window.location && window.location.protocol || "");
+        if (p === "file:") return true;
+        if (window.JKHStore && typeof JKHStore.allowLocalCacheReadBeforeServer === "function") {
+            return !!JKHStore.allowLocalCacheReadBeforeServer();
+        }
+        return localStorage.getItem("jkh_sync_mode_v1") === "offline";
+    } catch(e) {
+        return false;
+    }
+}
+
 function getIndexServerSummaryStatusFilter(){
     const raw = String(filters.summaryStatus || "").trim().toLowerCase();
     if (!raw) return "";
-    if (raw === "stale" || raw === "устаревшие" || raw === "устаревший") return "dirty,missing,error";
+    if (raw === "stale" || raw === "устаревшие" || raw === "устаревший") return "dirty,missing,error,invalid";
     return raw;
 }
 
@@ -1092,14 +1201,15 @@ async function loadPassiveSummaryPage(page){
         pruneSummaryBatchSelection();
         indexSummaryState.loading = false;
         indexSummaryState.error = "";
-        indexSummaryState.pagination = Object.assign({ page: currentPage, per_page: pageSize, total: allRows.length, pages: 0, has_next: false, has_prev: false }, payload.pagination || {});
+        indexSummaryState.pagination = normalizeIndexApiPagination(payload);
         currentPage = Number(indexSummaryState.pagination.page) || currentPage;
         render();
     } catch(e) {
         allRows = [];
         indexSummaryState.loading = false;
         indexSummaryState.error = String(e && e.message || e || "summary_api_error");
-        renderIndexSummaryError(indexSummaryState.error);
+        const fallbackOk = await renderIndexRowsLegacyFallback(indexSummaryState.error);
+        if (!fallbackOk) renderIndexSummaryError(indexSummaryState.error);
     }
 }
 
@@ -1144,18 +1254,6 @@ function rebuildIndexRows(){
 }
 
 function hasUsablePaymentLedger(abonentId){
-    try {
-        const arr = (window.Data && typeof window.Data.readPaymentLedger === "function")
-            ? window.Data.readPaymentLedger(abonentId)
-            : (function(){
-                const key = ((typeof window.getPaymentsKeyForAbonent === "function") ? window.getPaymentsKeyForAbonent(abonentId) : "");
-                return key ? getPaymentRowsByStorageKeyCached(key) : [];
-            })();
-        if (!Array.isArray(arr)) return false;
-        for (const row of arr){
-            if (toNum(row && row.accrued) > 0 || toNum(row && row.paid) > 0) return true;
-        }
-    } catch (e) {}
     return false;
 }
 
@@ -1175,6 +1273,10 @@ async function renderIndexRowsReadonly(){
 let __indexExcludeRepairOwnerKey = "";
 
 function isIndexDataReadyForCalc(){
+    if (!isExplicitLocalOrOfflineModeForIndex()) {
+        var stHosted = window.JKH_UI_STATE && window.JKH_UI_STATE.data;
+        return !!(stHosted && (stHosted.status === "ready" || stHosted.status === "empty") && stHosted.source === "server");
+    }
     var st = window.JKH_UI_STATE && window.JKH_UI_STATE.data;
     if (st && (st.status === "ready" || st.status === "empty")) return true;
 
@@ -1363,7 +1465,7 @@ function initSorting() {
 function isSummaryBatchStatus(status){
     if (String(status || "").trim().toLowerCase() === "legacy") return false;
     const s = normalizeSummaryStatus(status);
-    return s === "dirty" || s === "missing" || s === "error";
+    return s === "dirty" || s === "missing" || s === "error" || s === "invalid";
 }
 
 function getSummaryBatchUid(row){
@@ -1374,6 +1476,27 @@ function getCurrentSummaryBatchRows(){
     return (filteredRows || []).filter(function(r){
         const uid = getSummaryBatchUid(r);
         return uid && isSummaryBatchStatus(r && r.summaryStatus);
+    });
+}
+
+function isSnapshotBackfillCandidate(row){
+    if (!row || normalizeSummaryStatus(row.rawSummaryStatus || row.summaryStatus) !== "fresh") return false;
+    const snapshotStatus = String(row.snapshotStatus || "missing").toLowerCase();
+    const warnings = Array.isArray(row.warnings) ? row.warnings : [];
+    return snapshotStatus === "missing"
+        || snapshotStatus === "invalid"
+        || snapshotStatus === "dirty"
+        || snapshotStatus === "error"
+        || row.hashMismatch === true
+        || warnings.indexOf("SUMMARY_FRESH_CARD_SNAPSHOT_MISSING") >= 0
+        || warnings.indexOf("INPUT_HASH_CHANGED") >= 0
+        || warnings.indexOf("SUMMARY_FRESH_SNAPSHOT_NOT_FRESH") >= 0;
+}
+
+function getCurrentSnapshotBackfillRows(){
+    return (filteredRows || []).filter(function(r){
+        const uid = getSummaryBatchUid(r);
+        return uid && isSnapshotBackfillCandidate(r);
     });
 }
 
@@ -1388,20 +1511,123 @@ function pruneSummaryBatchSelection(){
     });
 }
 
+function summaryBatchAccountLabel(uid){
+    uid = String(uid || "").trim();
+    const row = (allRows || []).find(function(r){ return getSummaryBatchUid(r) === uid; });
+    return String(row && row.id || uid || "");
+}
+
+function resetSummaryBatchProgress(){
+    summaryBatchErrorsVisible = false;
+    summaryBatchProgressState = { jobId: null, total: 0, processed: 0, fresh: 0, error: 0, skipped: 0, errors: [], finished: false, paused: false };
+    renderSummaryBatchProgress();
+}
+
+function addSummaryBatchError(uid, reason, detail){
+    uid = String(uid || "").trim();
+    reason = String(reason || "CLIENT_RECALC_FAILED").trim();
+    if (!uid && !reason) return;
+    const detailText = detail ? JSON.stringify(detail) : "";
+    const key = uid + "\n" + reason + "\n" + detailText;
+    const exists = (summaryBatchProgressState.errors || []).some(function(item){
+        return item && item.key === key;
+    });
+    if (!exists) {
+        summaryBatchProgressState.errors.push({
+            key: key,
+            uid: uid,
+            account: summaryBatchAccountLabel(uid),
+            reason: reason,
+            detail: detail || null
+        });
+    }
+}
+
+function mergeSummaryBatchPayloadErrors(payload){
+    if (!payload || typeof payload !== "object") return;
+    const items = Array.isArray(payload.items) ? payload.items : [];
+    items.forEach(function(item){
+        const status = String(item && (item.summary_status || item.status) || "").toLowerCase();
+        const reason = String(item && (item.summary_reason || item.error_message) || "").trim();
+        if (status === "error" || reason) addSummaryBatchError(item && item.account_uid, reason || "UID_PROCESSING_FAILED");
+    });
+    const sample = Array.isArray(payload.sample_errors) ? payload.sample_errors : [];
+    sample.forEach(function(item){
+        addSummaryBatchError(item && item.account_uid, item && item.error);
+    });
+}
+
+function updateSummaryBatchProgressState(patch){
+    patch = patch || {};
+    Object.keys(patch).forEach(function(key){
+        if (key !== "errors") summaryBatchProgressState[key] = patch[key];
+    });
+    renderSummaryBatchProgress();
+}
+
+function renderSummaryBatchProgress(){
+    const stats = document.getElementById("summaryBatchStats");
+    const showBtn = document.getElementById("summaryBatchShowErrorsBtn");
+    const errorsBox = document.getElementById("summaryBatchErrors");
+    const state = summaryBatchProgressState || {};
+    const hasJob = !!state.jobId || !!state.total || !!state.processed || !!state.finished || !!state.paused;
+    if (stats) {
+        if (!hasJob) {
+            stats.style.display = "none";
+            stats.innerHTML = "";
+        } else {
+            const total = Number(state.total || 0);
+            const processed = Number(state.processed || 0);
+            const left = Math.max(0, total - processed);
+            stats.style.display = "block";
+            stats.innerHTML = [
+                "Job #" + escapeHtml(state.jobId || ""),
+                "Обработано: " + processed + "/" + total,
+                "Fresh: " + Number(state.fresh || 0),
+                "Error: " + Number(state.error || 0),
+                "Skipped: " + Number(state.skipped || 0),
+                "Осталось: " + left
+            ].map(function(line){ return "<div>" + line + "</div>"; }).join("");
+        }
+    }
+    const errors = Array.isArray(state.errors) ? state.errors : [];
+    if (showBtn) {
+        showBtn.style.display = errors.length ? "inline-block" : "none";
+        showBtn.textContent = summaryBatchErrorsVisible ? "Скрыть ошибки" : "Показать ошибки";
+    }
+    if (errorsBox) {
+        errorsBox.style.display = errors.length && summaryBatchErrorsVisible ? "block" : "none";
+        errorsBox.innerHTML = errors.map(function(item){
+            const detail = item.detail ? '<pre class="summary-batch-error-detail">' + escapeHtml(JSON.stringify(item.detail, null, 2)) + '</pre>' : '';
+            return '<div class="summary-batch-error-item"><div>ЛС ' + escapeHtml(item.account || item.uid || "") + '</div><div>' + escapeHtml(item.reason || "") + '</div>' + detail + '</div>';
+        }).join("");
+    }
+}
+
 function updateSummaryBatchPanel(){
     const panel = document.getElementById("summaryBatchPanel");
     const countEl = document.getElementById("summaryBatchCount");
     const runBtn = document.getElementById("summaryBatchRunBtn");
     const selectBtn = document.getElementById("summaryBatchSelectStaleBtn");
+    const snapshotSelectBtn = document.getElementById("summarySnapshotSelectBtn");
+    const snapshotRunBtn = document.getElementById("summarySnapshotRunBtn");
+    const clearBtn = document.getElementById("summaryBatchClearBtn");
+    const stopBtn = document.getElementById("summaryBatchStopBtn");
     if (!panel) return;
     const summaryMode = indexPassiveSummaryMode && indexSummaryState.mode === "summary";
     panel.style.display = summaryMode ? "block" : "none";
     if (!summaryMode) return;
     const selected = Object.keys(summaryBatchSelectedUids).filter(function(uid){ return summaryBatchSelectedUids[uid]; });
     const staleOnPage = getCurrentSummaryBatchRows().length;
-    if (countEl) countEl.textContent = selected.length ? ("Выбрано UID: " + selected.length) : ("Устаревших на странице: " + staleOnPage);
-    if (runBtn) runBtn.disabled = summaryBatchRunning || (!selected.length && !staleOnPage);
+    const snapshotOnPage = getCurrentSnapshotBackfillRows().length;
+    if (countEl) countEl.textContent = selected.length ? ("Выбрано UID: " + selected.length) : ("Устаревших: " + staleOnPage + "; snapshot: " + snapshotOnPage);
+    if (runBtn) runBtn.disabled = summaryBatchRunning || !selected.length;
     if (selectBtn) selectBtn.disabled = summaryBatchRunning || !staleOnPage;
+    if (snapshotSelectBtn) snapshotSelectBtn.disabled = summaryBatchRunning || !snapshotOnPage;
+    if (snapshotRunBtn) snapshotRunBtn.disabled = summaryBatchRunning || !selected.length;
+    if (clearBtn) clearBtn.disabled = summaryBatchRunning || !selected.length;
+    if (stopBtn) stopBtn.disabled = !summaryBatchRunning || summaryBatchStopRequested;
+    renderSummaryBatchProgress();
 }
 
 function bindSummaryBatchPanelOnce(){
@@ -1410,6 +1636,11 @@ function bindSummaryBatchPanelOnce(){
     panel.dataset.bound = "1";
     const selectBtn = document.getElementById("summaryBatchSelectStaleBtn");
     const runBtn = document.getElementById("summaryBatchRunBtn");
+    const snapshotSelectBtn = document.getElementById("summarySnapshotSelectBtn");
+    const snapshotRunBtn = document.getElementById("summarySnapshotRunBtn");
+    const clearBtn = document.getElementById("summaryBatchClearBtn");
+    const stopBtn = document.getElementById("summaryBatchStopBtn");
+    const showErrorsBtn = document.getElementById("summaryBatchShowErrorsBtn");
     if (selectBtn) {
         selectBtn.onclick = function(){
             getCurrentSummaryBatchRows().forEach(function(r){
@@ -1419,7 +1650,38 @@ function bindSummaryBatchPanelOnce(){
             render();
         };
     }
-    if (runBtn) runBtn.onclick = runSelectedSummaryBatch;
+    if (snapshotSelectBtn) {
+        snapshotSelectBtn.onclick = function(){
+            getCurrentSnapshotBackfillRows().forEach(function(r){
+                const uid = getSummaryBatchUid(r);
+                if (uid) summaryBatchSelectedUids[uid] = true;
+            });
+            render();
+        };
+    }
+    if (runBtn) runBtn.onclick = function(){ runSelectedSummaryBatch({ mode: "summary" }); };
+    if (snapshotRunBtn) snapshotRunBtn.onclick = function(){ runSelectedSummaryBatch({ mode: "snapshot" }); };
+    if (clearBtn) {
+        clearBtn.onclick = function(){
+            selectedUidsClear();
+            render();
+        };
+    }
+    if (showErrorsBtn) {
+        showErrorsBtn.onclick = function(){
+            summaryBatchErrorsVisible = !summaryBatchErrorsVisible;
+            renderSummaryBatchProgress();
+        };
+    }
+    if (stopBtn) {
+        stopBtn.onclick = function(){
+            if (!summaryBatchRunning) return;
+            summaryBatchStopRequested = true;
+            const progress = document.getElementById("summaryBatchProgress");
+            if (progress) progress.textContent = "Stop requested. Current UID will finish, then worker will pause.";
+            updateSummaryBatchPanel();
+        };
+    }
 }
 
 
@@ -1441,44 +1703,476 @@ async function loadLatestSummaryBatchStatus(){
     } catch(e) {}
 }
 
-async function runSelectedSummaryBatch(){
+async function runSelectedSummaryBatch(options){
+    const runOptions = options || {};
+    const batchMode = String(runOptions.mode || "summary").toLowerCase() === "snapshot" ? "snapshot" : "summary";
+    const progress = document.getElementById("summaryBatchProgress");
     if (summaryBatchRunning) return;
-    if (!window.Data || typeof Data.createAbonentSummaryRecalcBatchJob !== "function" || typeof Data.runAbonentSummaryRecalcBatchJob !== "function" || typeof Data.getAbonentSummaryRecalcBatchJob !== "function") {
+    if (progress) progress.textContent = batchMode === "snapshot" ? "Запуск создания snapshot для выбранных UID..." : "Запуск пересчёта выбранных UID...";
+    if (!window.Data || typeof Data.createAbonentSummaryRecalcBatchJob !== "function" || typeof Data.getNextRecalcUid !== "function" || typeof Data.completeRecalcUid !== "function" || typeof Data.recalculateAbonentCard !== "function") {
+        if (progress) progress.textContent = "Batch job API unavailable: Data API is not loaded.";
         alert("Batch job API недоступен: Data API не загружен.");
         return;
     }
-    let selected = Object.keys(summaryBatchSelectedUids).filter(function(uid){ return summaryBatchSelectedUids[uid]; });
-    if (!selected.length) {
-        selected = getCurrentSummaryBatchRows().map(getSummaryBatchUid).filter(Boolean);
+    if (batchMode === "snapshot" && (typeof Data.recalculateAbonentCardWithRows !== "function" || typeof Data.buildCardSnapshotFromCurrentResult !== "function" || typeof Data.saveCardSnapshotAndWait !== "function")) {
+        if (progress) progress.textContent = "Snapshot API unavailable: Data snapshot API is not loaded.";
+        alert("Snapshot API недоступен: Data snapshot API не загружен.");
+        return;
     }
+    let selected = Object.keys(summaryBatchSelectedUids).filter(function(uid){ return summaryBatchSelectedUids[uid]; });
     selected = Array.from(new Set(selected));
-    if (!selected.length) return;
+    if (!selected.length) {
+        const message = "No selected UID.";
+        if (progress) progress.textContent = message;
+        updateSummaryBatchPanel();
+        return;
+    }
+    const resumeJobId = summaryBatchJobState.jobId;
+    if (!resumeJobId && selected.length > 10 && !confirm("Выбрано " + selected.length + " абонентов.\nЗапустить пересчёт?")) {
+        if (progress) progress.textContent = "Пересчёт отменён оператором.";
+        updateSummaryBatchPanel();
+        return;
+    }
+    try { console.log("[recalc][explicit-batch]", { uidCount: selected.length, uids: selected }); } catch(eBatchLog) {}
 
-    const progress = document.getElementById("summaryBatchProgress");
+    try {
+        if (progress) progress.textContent = "Loading calculation module...";
+        await ensureCalcEngineForManualBatch();
+    } catch (engineError) {
+        const message = "Расчётный модуль не загружен. Пересчёт не запущен.";
+        if (progress) progress.textContent = message;
+        updateSummaryBatchPanel();
+        return;
+    }
+
     if (summaryBatchJobState.timer) {
         clearTimeout(summaryBatchJobState.timer);
         summaryBatchJobState.timer = null;
     }
     summaryBatchJobState.retries = 0;
+    summaryBatchJobState.mode = batchMode;
+    summaryBatchPerfStats = [];
     summaryBatchRunning = true;
+    summaryBatchStopRequested = false;
     updateSummaryBatchPanel();
-    if (progress) progress.textContent = "Проверка UID на сервере…";
+    if (progress) progress.textContent = "Проверка выбранных UID на сервере: " + selected.length + "...";
 
     try {
-        const created = await Data.createAbonentSummaryRecalcBatchJob(selected, "MANUAL_RECALC");
+        if (resumeJobId) {
+            updateSummaryBatchProgressState({ jobId: resumeJobId, total: summaryBatchJobState.total || selected.length, paused: false, finished: false });
+            if (progress) progress.textContent = "Job #" + resumeJobId + " resumed. Continuing queued UID...";
+            await processClientSummaryBatchJob(resumeJobId, Number(summaryBatchJobState.total || selected.length || 0), batchMode);
+            return;
+        }
+        resetSummaryBatchProgress();
+        const created = await Data.createAbonentSummaryRecalcBatchJob(selected, batchMode === "snapshot" ? "SNAPSHOT_BACKFILL" : "CLIENT_RECALC");
         if (!created || !created.job_id) throw new Error("job_create_failed");
-        if (progress) progress.textContent = "Создано задание #" + created.job_id + ". Принято: " + created.accepted + ", пропущено: " + created.skipped + ".";
         summaryBatchJobState.jobId = created.job_id;
-        await Data.runAbonentSummaryRecalcBatchJob(created.job_id);
-        await pollSummaryBatchJobStatus();
+        summaryBatchJobState.total = Number(created.accepted || selected.length || 0);
+        updateSummaryBatchProgressState({ jobId: created.job_id, total: summaryBatchJobState.total, processed: 0, fresh: 0, error: 0, skipped: 0, finished: false, paused: false });
+        if (progress) progress.textContent = "Job #" + created.job_id + " created. accepted=" + created.accepted + ", skipped=" + created.skipped + ". Client worker started...";
+        await processClientSummaryBatchJob(created.job_id, Number(created.accepted || selected.length || 0), batchMode);
     } catch (e) {
         const msg = String(e && e.message || e);
+        const detail = e && e.payload ? " payload=" + JSON.stringify(e.payload) : "";
         if (msg === "TOO_MANY_UIDS") {
             if (progress) progress.textContent = "Слишком много UID в одном запуске (максимум 100).";
         } else {
             if (progress) progress.textContent = "Ошибка batch-проверки: " + msg;
         }
+        if (progress && detail) progress.textContent = String(progress.textContent || "") + detail;
         summaryBatchRunning = false;
+        summaryBatchStopRequested = false;
+        summaryBatchJobState.jobId = null;
+        summaryBatchJobState.total = 0;
+        summaryBatchJobState.mode = "summary";
+        updateSummaryBatchPanel();
+    }
+}
+
+async function ensureCalcEngineForManualBatch(){
+    if (window.JKHCalcEngine) return true;
+    if (window.__indexCalcEngineLoadPromise) return window.__indexCalcEngineLoadPromise;
+
+    window.__indexCalcEngineLoadPromise = new Promise(function(resolve, reject){
+        const existing = document.querySelector('script[data-index-lazy-calc-engine="1"]');
+        if (existing) {
+            existing.addEventListener("load", function(){
+                if (window.JKHCalcEngine) resolve(true);
+                else reject(new Error("CALC_ENGINE_UNAVAILABLE_AFTER_LOAD"));
+            }, { once: true });
+            existing.addEventListener("error", function(){
+                reject(new Error("CALC_ENGINE_LOAD_FAILED"));
+            }, { once: true });
+            return;
+        }
+
+        const script = document.createElement("script");
+        script.src = "calc_engine.js";
+        script.async = false;
+        script.dataset.indexLazyCalcEngine = "1";
+        script.onload = function(){
+            if (window.JKHCalcEngine) resolve(true);
+            else reject(new Error("CALC_ENGINE_UNAVAILABLE_AFTER_LOAD"));
+        };
+        script.onerror = function(){
+            reject(new Error("CALC_ENGINE_LOAD_FAILED"));
+        };
+        document.head.appendChild(script);
+    });
+    return window.__indexCalcEngineLoadPromise;
+}
+
+function summaryBatchYield(delayMs){
+    return new Promise(function(resolve){
+        const delay = Number(delayMs || 0);
+        if (delay > 0) {
+            setTimeout(resolve, delay);
+            return;
+        }
+        if (typeof requestAnimationFrame === "function") {
+            requestAnimationFrame(function(){ setTimeout(resolve, 0); });
+        } else {
+            setTimeout(resolve, 0);
+        }
+    });
+}
+
+function summaryBatchResultStatus(result){
+    const status = String(result && (result.summary_status || result.status) || "").toLowerCase();
+    if (result && result.ok === true && status === "fresh") return "fresh";
+    return "error";
+}
+
+function summaryBatchResultReason(result, fallback){
+    return String(result && (result.summary_reason || result.reason) || fallback || "CLIENT_RECALC_FAILED");
+}
+
+async function fetchBackendCardSnapshotDiagnostic(uid){
+    uid = String(uid || "").trim();
+    if (!uid) return { ok: false, error: "UID_REQUIRED" };
+    try {
+        const res = await fetch("/api/card_snapshot/" + encodeURIComponent(uid), { credentials: "include" });
+        const text = await res.text();
+        let data = null;
+        try { data = text ? JSON.parse(text) : null; } catch(eParse) { data = null; }
+        return {
+            httpStatus: res.status,
+            ok: !!(res.ok && data && data.ok !== false),
+            has_card_snapshot: !!(data && data.snapshot),
+            snapshot_status: String(data && data.snapshot_status || ""),
+            snapshot_reason: String(data && data.snapshot_reason || ""),
+            input_hash: String(data && data.input_hash || ""),
+            error: data && data.error || (!res.ok ? ("HTTP_" + res.status) : "")
+        };
+    } catch (e) {
+        return { ok: false, error: String(e && e.message || e || "SNAPSHOT_STATUS_FETCH_FAILED") };
+    }
+}
+
+async function collectSnapshotBackfillDiagnostic(uid, result, stage, extra){
+    const row = (allRows || []).find(function(r){ return getSummaryBatchUid(r) === String(uid || "").trim(); }) || null;
+    let buildDiagnostic = null;
+    try {
+        buildDiagnostic = window.Data && typeof Data.diagnoseCardSnapshotBuildFromCurrentResult === "function"
+            ? Data.diagnoseCardSnapshotBuildFromCurrentResult(uid, result)
+            : { ok: false, reason: "DIAGNOSTIC_API_UNAVAILABLE" };
+    } catch (eDiag) {
+        buildDiagnostic = { ok: false, reason: "DIAGNOSTIC_FAILED", error: String(eDiag && eDiag.message || eDiag) };
+    }
+    const backendSnapshot = await fetchBackendCardSnapshotDiagnostic(uid);
+    return {
+        stage: String(stage || ""),
+        uid: String(uid || ""),
+        indexRow: row ? {
+            account: String(row.id || ""),
+            summaryStatus: String(row.rawSummaryStatus || row.summaryStatus || ""),
+            summaryReason: String(row.rawSummaryReason || row.summaryReason || ""),
+            snapshotStatus: String(row.snapshotStatus || ""),
+            snapshotReason: String(row.snapshotReason || ""),
+            hashMismatch: row.hashMismatch === true,
+            warnings: Array.isArray(row.warnings) ? row.warnings : []
+        } : null,
+        backendSnapshot: backendSnapshot,
+        buildCardSnapshotFromCurrentResult: buildDiagnostic,
+        extra: extra || null
+    };
+}
+
+function summaryBatchSlowestProfileStep(steps){
+    if (!Array.isArray(steps) || !steps.length) return null;
+    return steps.slice().sort(function(a, b){
+        return Number(b && b.ms || 0) - Number(a && a.ms || 0);
+    })[0] || null;
+}
+
+function summaryBatchSlowestProfileText(steps){
+    var slowest = summaryBatchSlowestProfileStep(steps || []);
+    if (!slowest || !slowest.name) return "";
+    return "\n  slowest: " + slowest.name + " " + Number(slowest.ms || 0) + "ms";
+}
+
+function summaryBatchRowsBuildSlowestProfileText(steps){
+    var slowest = summaryBatchSlowestProfileStep(steps || []);
+    if (!slowest || !slowest.name) return "";
+    return "\n  rows-build slowest: " + slowest.name + " " + Number(slowest.ms || 0) + "ms";
+}
+
+function summaryBatchCalcTotalsStats(s){
+    var steps = Array.isArray(s && s.rowsBuildProfileSteps) ? s.rowsBuildProfileSteps : [];
+    var calcStep = null;
+    for (var i = 0; i < steps.length; i++) {
+        if (steps[i] && steps[i].name === "JKHCalcEngine.calcTotalsAsOfAdjusted") {
+            calcStep = steps[i];
+            break;
+        }
+    }
+    return {
+        calls: Number(s && s.calcTotalsAsOfAdjustedCallCount || calcStep && calcStep.calls || 0),
+        avgMs: Number(s && s.calcTotalsAsOfAdjustedAvgMs || calcStep && calcStep.avgMs || 0),
+        maxMs: Number(s && s.calcTotalsAsOfAdjustedMaxMs || calcStep && calcStep.maxMs || 0),
+        cacheHits: Number(s && s.calcTotalsAsOfAdjustedCacheHits || calcStep && calcStep.cacheHits || 0),
+        uniqueAsOfKeys: Number(s && s.uniqueAsOfKeys || calcStep && calcStep.uniqueAsOfKeys || 0)
+    };
+}
+
+function summaryBatchCalcTotalsStatsText(s){
+    var stats = summaryBatchCalcTotalsStats(s || {});
+    if (!stats.calls && !stats.cacheHits) return "";
+    return "\n  calls: " + stats.calls +
+        ", cache hits: " + stats.cacheHits +
+        ", unique asOf: " + stats.uniqueAsOfKeys +
+        ", avg: " + stats.avgMs + "ms" +
+        ", max: " + stats.maxMs + "ms";
+}
+
+function renderSummaryBatchPerfTop10(){
+    if (!Array.isArray(summaryBatchPerfStats) || !summaryBatchPerfStats.length) return "";
+    var top10 = summaryBatchPerfStats
+        .slice()
+        .sort(function(a, b){ return Number(b.profileTotalMs || b.durationMs || 0) - Number(a.profileTotalMs || a.durationMs || 0); })
+        .slice(0, 10);
+    try { console.table(top10); } catch(e) {}
+    try {
+        top10.slice(0, 3).forEach(function(s){
+            console.log("[snapshot][profile][top-slow]", {
+                uid: s.uid,
+                account: s.account,
+                durationMs: Number(s.durationMs || 0),
+                profileTotalMs: Number(s.profileTotalMs || 0),
+                rowsByIdSource: String(s.rowsByIdSource || ""),
+                runtimeCacheHit: s.runtimeCacheHit === true,
+                runtimeCacheReason: String(s.runtimeCacheReason || ""),
+                slowest: summaryBatchSlowestProfileStep(s.profileSteps || []),
+                rowsBuildSlowest: summaryBatchSlowestProfileStep(s.rowsBuildProfileSteps || []),
+                calcTotalsAsOfAdjusted: summaryBatchCalcTotalsStats(s)
+            });
+            if (Array.isArray(s.profileSteps) && s.profileSteps.length) console.table(s.profileSteps);
+            if (Array.isArray(s.rowsBuildProfileSteps) && s.rowsBuildProfileSteps.length) console.table(s.rowsBuildProfileSteps);
+        });
+    } catch(e) {}
+    return "\n\nТоп-10 медленных UID:\n" + top10.map(function(s){
+        return "ЛС " + (s.account || "") +
+            " / " + s.uid +
+            ": " + Number(s.profileTotalMs || s.durationMs || 0) + "ms" +
+            "\n  source: " + (s.rowsByIdSource || "") +
+            ", cacheHit: " + (s.runtimeCacheHit === true ? "true" : "false") +
+            (s.runtimeCacheReason ? ", cache reason: " + s.runtimeCacheReason : "") +
+            summaryBatchSlowestProfileText(s.profileSteps || []) +
+            summaryBatchRowsBuildSlowestProfileText(s.rowsBuildProfileSteps || []) +
+            summaryBatchCalcTotalsStatsText(s) +
+            " (" + Number(s.ledgerRowsCount || 0) + " ledger rows" +
+            ", " + Number(s.rowsByIdCount || 0) + " rowsById)";
+    }).join("\n");
+}
+
+async function finishClientSummaryBatchJob(jobId, total, processedLocal, freshLocal, errorLocal, skippedLocal){
+    const progress = document.getElementById("summaryBatchProgress");
+    const doneText = (summaryBatchJobState.mode === "snapshot" ? "Snapshot backfill завершён" : "Пересчёт завершён") + ". Fresh: " + freshLocal + ". Error: " + errorLocal + ". Skipped: " + skippedLocal + ".";
+    const perfText = renderSummaryBatchPerfTop10();
+    selectedUidsClear();
+    updateSummaryBatchProgressState({
+        jobId: jobId,
+        total: total,
+        processed: processedLocal,
+        fresh: freshLocal,
+        error: errorLocal,
+        skipped: skippedLocal,
+        finished: true,
+        paused: false
+    });
+    if (progress) progress.textContent = doneText + " Refreshing summary..." + perfText;
+    await loadPassiveSummaryPage(currentPage);
+    if (progress) progress.textContent = doneText + perfText;
+    summaryBatchRunning = false;
+    summaryBatchStopRequested = false;
+    summaryBatchJobState.jobId = null;
+    summaryBatchJobState.total = 0;
+    summaryBatchJobState.mode = "summary";
+    updateSummaryBatchPanel();
+}
+
+async function processClientSummaryBatchJob(jobId, totalAccepted, mode){
+    const progress = document.getElementById("summaryBatchProgress");
+    const batchMode = String(mode || summaryBatchJobState.mode || "summary").toLowerCase() === "snapshot" ? "snapshot" : "summary";
+    const prior = summaryBatchProgressState && summaryBatchProgressState.jobId === jobId ? summaryBatchProgressState : {};
+    let processedLocal = Number(prior.processed || 0);
+    let freshLocal = Number(prior.fresh || 0);
+    let errorLocal = Number(prior.error || 0);
+    let skippedLocal = Number(prior.skipped || 0);
+    let total = Number(totalAccepted || prior.total || 0);
+    let pausedByOperator = false;
+    updateSummaryBatchProgressState({ jobId: jobId, total: total, processed: processedLocal, fresh: freshLocal, error: errorLocal, skipped: skippedLocal, paused: false, finished: false });
+    try {
+        while (!summaryBatchStopRequested) {
+            let next = null;
+            try {
+                next = await Data.getNextRecalcUid(jobId);
+            } catch (nextError) {
+                const payload = nextError && nextError.payload;
+                if (payload && payload.error === "job_not_active" && String(payload.status || "") === "done") {
+                    await finishClientSummaryBatchJob(jobId, total, processedLocal, freshLocal, errorLocal, skippedLocal);
+                    return;
+                }
+                throw nextError;
+            }
+            if (next && (next.all_done || String(next.status || "") === "done")) {
+                await finishClientSummaryBatchJob(jobId, total, processedLocal, freshLocal, errorLocal, skippedLocal);
+                return;
+            }
+            if (next && String(next.status || "") === "retry") {
+                if (progress) progress.textContent = "Job #" + jobId + ": no available UID yet, retrying...";
+                await summaryBatchYield(1000);
+                continue;
+            }
+
+            const itemId = next && next.item_id;
+            const uid = String(next && next.account_uid || "").trim();
+            if (!itemId || !uid) throw new Error("invalid_next_uid_response");
+
+            const accountLabel = summaryBatchAccountLabel(uid);
+            if (progress) progress.textContent = "Job #" + jobId + ": " + (batchMode === "snapshot" ? "создание snapshot для ЛС " : "пересчёт ЛС ") + accountLabel + " / UID " + uid + " (" + (processedLocal + 1) + "/" + total + ")...";
+            await summaryBatchYield(0);
+
+            let completePayload = null;
+            let result = null;
+            let status = "error";
+            let reason = "CLIENT_RECALC_FAILED";
+            let summary = {};
+            try {
+                if (batchMode === "snapshot") {
+                    result = await Data.recalculateAbonentCardWithRows(uid, {
+                        saveSummary: false,
+                        summaryScope: "full",
+                        recalcMode: "FULL_SUMMARY_REBUILD",
+                        mode: "FULL_SUMMARY_REBUILD",
+                        timeoutMs: 15000
+                    });
+                    summaryBatchPerfStats.push({
+                        uid: uid,
+                        account: summaryBatchAccountLabel(uid),
+                        durationMs: Number(result && result.rowsBuildDurationMs || 0),
+                        profileTotalMs: Number(result && result.profileTotalMs || 0),
+                        profileSteps: Array.isArray(result && result.profileSteps) ? result.profileSteps : [],
+                        rowsBuildProfileTotalMs: Number(result && result.rowsBuildProfileTotalMs || 0),
+                        rowsBuildProfileSteps: Array.isArray(result && result.rowsBuildProfileSteps) ? result.rowsBuildProfileSteps : [],
+                        rowsByIdSource: String(result && result.rowsByIdSource || ""),
+                        runtimeCacheHit: result && result.runtimeCacheHit === true,
+                        runtimeCacheReason: String(result && result.runtimeCacheReason || ""),
+                        calcTotalsAsOfAdjustedCallCount: Number(result && result.calcTotalsAsOfAdjustedCallCount || 0),
+                        calcTotalsAsOfAdjustedCacheHits: Number(result && result.calcTotalsAsOfAdjustedCacheHits || 0),
+                        calcTotalsAsOfAdjustedAvgMs: Number(result && result.calcTotalsAsOfAdjustedAvgMs || 0),
+                        calcTotalsAsOfAdjustedMaxMs: Number(result && result.calcTotalsAsOfAdjustedMaxMs || 0),
+                        uniqueAsOfKeys: Number(result && result.uniqueAsOfKeys || 0),
+                        ledgerRowsCount: Number(result && result.ledgerRowsCount || 0),
+                        filteredRowsCount: Number(result && result.filteredRowsCount || 0),
+                        rowsByIdCount: Number(result && result.rowsByIdCount || 0),
+                        reason: String(result && (result.summary_reason || result.reason) || "")
+                    });
+                } else {
+                    result = await Data.recalculateAbonentCard(uid, {
+                        saveSummary: false,
+                        summaryScope: "full",
+                        recalcMode: "FULL_SUMMARY_REBUILD",
+                        mode: "FULL_SUMMARY_REBUILD",
+                        timeoutMs: 15000
+                    });
+                }
+            } catch (itemError) {
+                reason = String(itemError && itemError.message || itemError || "CLIENT_RECALC_FAILED");
+                result = null;
+            }
+            if (result) {
+                status = summaryBatchResultStatus(result);
+                reason = summaryBatchResultReason(result, status === "fresh" ? "RECALC_OK" : "CLIENT_RECALC_FAILED");
+                summary = result && result.summary || {};
+                if (batchMode === "snapshot" && status !== "fresh" && String(result.summary_status || result.status || "").toLowerCase() === "fresh") {
+                    status = "skipped";
+                    reason = String(result.reason || result.summary_reason || "ROWS_BY_ID_BUILD_FAILED");
+                    const diagnostic = await collectSnapshotBackfillDiagnostic(uid, result, "recalculateAbonentCardWithRows", { snapshotReturned: false });
+                    addSummaryBatchError(uid, reason, diagnostic);
+                }
+            } else {
+                summary = { account_uid: uid, summary_status: "error", summary_reason: reason };
+            }
+            if (batchMode === "snapshot" && status === "fresh") {
+                const snapshot = Data.buildCardSnapshotFromCurrentResult(uid, result, {
+                    rowsById: result && result.rowsById
+                });
+                if (!snapshot) {
+                    status = "skipped";
+                    reason = result && result.rowsByIdSource === "datajs_batch_rows_builder" ? "ROWS_BY_ID_EMPTY_AFTER_WITH_ROWS_RECALC" : "SNAPSHOT_BUILD_FAILED_AFTER_ROWS";
+                    const diagnostic = await collectSnapshotBackfillDiagnostic(uid, result, "buildCardSnapshotFromCurrentResult", { snapshotReturned: false });
+                    addSummaryBatchError(uid, reason, diagnostic);
+                } else {
+                    const snapshotSave = await Data.saveCardSnapshotAndWait(uid, snapshot);
+                    if (!snapshotSave || snapshotSave.ok !== true || snapshotSave.serverOk !== true || snapshotSave.serverReadbackOk !== true) {
+                        status = "skipped";
+                        reason = snapshotSave && snapshotSave.serverReadbackOk === false ? "CARD_SNAPSHOT_READBACK_FAILED" : String(snapshotSave && snapshotSave.reason || "CARD_SNAPSHOT_SAVE_FAILED");
+                        const diagnostic = await collectSnapshotBackfillDiagnostic(uid, result, "saveCardSnapshotAndWait", { snapshotReturned: true, snapshotSave: snapshotSave || null });
+                        addSummaryBatchError(uid, reason, diagnostic);
+                    }
+                }
+            }
+            completePayload = await Data.completeRecalcUid(jobId, itemId, status, summary, reason);
+            if (status === "fresh") freshLocal += 1;
+            else if (status === "skipped") {
+                skippedLocal += 1;
+            } else {
+                errorLocal += 1;
+                addSummaryBatchError(uid, reason);
+            }
+            processedLocal += 1;
+            if (completePayload && completePayload.job) {
+                total = Number(completePayload.job.total_count || completePayload.job.total || total || 0);
+                freshLocal = Number(completePayload.job.fresh_count || freshLocal || 0);
+                errorLocal = Number(completePayload.job.error_count || errorLocal || 0);
+                skippedLocal = Number(completePayload.job.skipped_count || skippedLocal || 0);
+            }
+            mergeSummaryBatchPayloadErrors(completePayload);
+            updateSummaryBatchProgressState({ jobId: jobId, total: total, processed: processedLocal, fresh: freshLocal, error: errorLocal, skipped: skippedLocal, paused: false, finished: false });
+            const completeStatus = String(completePayload && (completePayload.status || completePayload.job && completePayload.job.status) || "").toLowerCase();
+            if (completeStatus === "done" || completeStatus === "completed") {
+                await finishClientSummaryBatchJob(jobId, total, processedLocal, freshLocal, errorLocal, skippedLocal);
+                return;
+            }
+            if (progress) progress.textContent = "Job #" + jobId + ": processed=" + processedLocal + "/" + total + ", fresh=" + freshLocal + ", error=" + errorLocal + ", skipped=" + skippedLocal + ".";
+            await summaryBatchYield(0);
+        }
+        pausedByOperator = true;
+        summaryBatchJobState.jobId = jobId;
+        summaryBatchJobState.total = total;
+        updateSummaryBatchProgressState({ jobId: jobId, total: total, processed: processedLocal, fresh: freshLocal, error: errorLocal, skipped: skippedLocal, paused: true, finished: false });
+        if (progress) progress.textContent = "Job #" + jobId + " paused by operator. No new UID will be requested.";
+    } catch (e) {
+        if (progress) progress.textContent = "Client batch worker error: " + String(e && e.message || e) + (e && e.payload ? " payload=" + JSON.stringify(e.payload) : "");
+    } finally {
+        summaryBatchRunning = false;
+        summaryBatchStopRequested = false;
+        if (!pausedByOperator) {
+            summaryBatchJobState.jobId = null;
+            summaryBatchJobState.total = 0;
+        }
         updateSummaryBatchPanel();
     }
 }
@@ -1503,14 +2197,20 @@ async function pollSummaryBatchJobStatus(){
         const message = String((statusPayload && statusPayload.message) || job.message || "");
         if (progress) progress.textContent = "Статус: " + status + ". " + processed + "/" + total + " (" + pct + "%), fresh: " + fresh + ", error: " + errorCount + ", skipped: " + skipped + (message ? ". " + message : "");
         if (status === "completed") {
+            const completedText = "Задание завершено. Итог: total=" + total + ", processed=" + processed + ", fresh=" + fresh + ", error=" + errorCount + ", skipped=" + skipped + ".";
+            const completedWithoutResult = total > 0 && fresh === 0 && errorCount === 0;
             selectedUidsClear();
+            if (progress) progress.textContent = completedText + " Обновление passive summary page...";
             await loadPassiveSummaryPage(currentPage);
+            if (progress) progress.textContent = completedWithoutResult ? (completedText + " WARNING: job completed without recalculation result.") : completedText;
+            if (completedWithoutResult) alert("job completed without recalculation result");
             summaryBatchRunning = false;
             summaryBatchJobState.jobId = null;
             updateSummaryBatchPanel();
             return;
         }
         if (status === "failed" || status === "cancelled" || status === "stale") {
+            if (progress) progress.textContent = "Задание завершилось со статусом " + status + (message ? ". " + message : "");
             summaryBatchRunning = false;
             summaryBatchJobState.jobId = null;
             updateSummaryBatchPanel();
@@ -1520,7 +2220,7 @@ async function pollSummaryBatchJobStatus(){
     } catch (e) {
         summaryBatchJobState.retries += 1;
         if (summaryBatchJobState.retries > maxRetries) {
-            if (progress) progress.textContent = "Не удалось получить статус job";
+            if (progress) progress.textContent = "Не удалось получить статус job: " + String(e && e.message || e) + (e && e.payload ? " payload=" + JSON.stringify(e.payload) : "");
             summaryBatchRunning = false;
             summaryBatchJobState.jobId = null;
             updateSummaryBatchPanel();
@@ -1532,6 +2232,23 @@ async function pollSummaryBatchJobStatus(){
 
 function selectedUidsClear(){
     Object.keys(summaryBatchSelectedUids).forEach(function(uid){ delete summaryBatchSelectedUids[uid]; });
+}
+
+function renderSummaryPageCounters(pageRows){
+    const el = document.getElementById("summaryPageCounters");
+    if (!el) return;
+    const counts = { fresh: 0, error: 0, missing: 0, dirty: 0 };
+    (Array.isArray(pageRows) ? pageRows : []).forEach(function(row){
+        const status = normalizeSummaryStatus(row && (row.summaryStatus || row.rawSummaryStatus));
+        if (Object.prototype.hasOwnProperty.call(counts, status)) counts[status] += 1;
+        else counts.error += 1;
+    });
+    el.innerHTML = [
+        "fresh: " + counts.fresh,
+        "error: " + counts.error,
+        "missing: " + counts.missing,
+        "dirty: " + counts.dirty
+    ].map(function(text){ return "<span>" + escapeHtml(text) + "</span>"; }).join("");
 }
 
 /* ============================================================
@@ -1577,6 +2294,7 @@ function render() {
     const pageRows = summaryMode ? filteredRows : filteredRows.slice(startIndex, startIndex + pageSize);
     bindSummaryBatchPanelOnce();
     updateSummaryBatchPanel();
+    renderSummaryPageCounters(pageRows);
 
     /* --- вывод строк --- */
     const tbody = document.querySelector("#abonentsTable tbody");
@@ -1605,7 +2323,7 @@ function render() {
         else if (r.rowStatusMark === "расчёт остановлен") tr.classList.add("row-stopped");
 
         const batchUid = getSummaryBatchUid(r);
-        const canBatchSelect = summaryMode && batchUid && isSummaryBatchStatus(r.summaryStatus);
+        const canBatchSelect = summaryMode && batchUid && (isSummaryBatchStatus(r.summaryStatus) || isSnapshotBackfillCandidate(r));
         const batchChecked = canBatchSelect && !!summaryBatchSelectedUids[batchUid];
 
         tr.innerHTML = `

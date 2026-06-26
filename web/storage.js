@@ -42,6 +42,68 @@
   // ============================================================
   // 🔑 Scoped localStorage keys (per-user базы)
   // ============================================================
+  var ENV_UNBOUND = "UNBOUND";
+
+  function _normalizeEnvType(value) {
+    var env = String(value || "").trim().toUpperCase();
+    return (env === "LAB" || env === "PROD") ? env : "";
+  }
+
+  function setEnvType(value) {
+    var env = _normalizeEnvType(value);
+    if (!env) return false;
+    window.JKH_ENV_TYPE = env;
+    try { window.JKHBoot?.markReady?.("env"); } catch (e) {}
+    return true;
+  }
+
+  function getEnvType() {
+    return _normalizeEnvType(window.JKH_ENV_TYPE || "");
+  }
+
+  function normalizeOwnerId(owner) {
+    var value = String(owner || "").trim();
+    var upper = value.toUpperCase();
+    if (upper.indexOf("LAB:") === 0) return value.slice(4).trim();
+    if (upper.indexOf("PROD:") === 0) return value.slice(5).trim();
+    return value;
+  }
+
+  function hasServerEnvType() {
+    return !!getEnvType();
+  }
+
+  async function fetchEnvType() {
+    if (hasServerEnvType()) return getEnvType();
+    try {
+      var r = await fetch("/api/env", { method: "GET", credentials: "include" });
+      var data = await r.json();
+      if (data && setEnvType(data.env_type || data.env || data.environment)) return getEnvType();
+    } catch (e) {}
+    return "";
+  }
+
+  function isHostedMode() {
+    try {
+      var p = String(window.location && window.location.protocol || "");
+      return p === "http:" || p === "https:";
+    } catch (e) {
+      return true;
+    }
+  }
+
+  function isExplicitOfflineMode() {
+    try {
+      return Storage.prototype.getItem.call(localStorage, "jkh_sync_mode_v1") === "offline";
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function allowLocalCacheReadBeforeServer() {
+    return !isHostedMode() || isExplicitOfflineMode();
+  }
+
   function _getSessionUser() {
     try {
       return (window.Auth && typeof Auth.getCurrentUser === "function") ? Auth.getCurrentUser() : null;
@@ -60,15 +122,15 @@
       var u = _getSessionUser();
       if (!u || u.role !== "admin") return null;
       var v = localStorage.getItem(k);
-      return v || u.id;
+      return normalizeOwnerId(v || u.id);
     } catch (e) { return null; }
   }
 
   function getActiveOwnerId() {
     var u = _getSessionUser();
     if (!u) return "guest";
-    if (u.role === "admin") return _getAdminViewScope() || u.id;
-    return u.id;
+    if (u.role === "admin") return _getAdminViewScope() || normalizeOwnerId(u.id);
+    return normalizeOwnerId(u.id);
   }
 
   function isAllMode() {
@@ -80,7 +142,8 @@
   }
 
   function scopePrefixFor(ownerId) {
-    return "jkhdb::" + String(ownerId || "guest") + "::";
+    var env = getEnvType() || ENV_UNBOUND;
+    return "jkhdb::" + env + "::" + normalizeOwnerId(ownerId || "guest") + "::";
   }
 
   var GLOBAL_PROJECT_EXACT = [
@@ -144,6 +207,12 @@
   // global helper (used by data.js / pages)
   window.JKHStorage = {
     getActiveOwnerId: getActiveOwnerId,
+    getEnvType: getEnvType,
+    normalizeOwnerId: normalizeOwnerId,
+    hasServerEnvType: hasServerEnvType,
+    setEnvType: setEnvType,
+    fetchEnvType: fetchEnvType,
+    allowLocalCacheReadBeforeServer: allowLocalCacheReadBeforeServer,
     isAllMode: isAllMode,
     isGuestMode: isGuestMode,
     k: k,
@@ -184,6 +253,7 @@
     "calc_period_",
     "calc_period_active_",
     "report_period_",
+    "card_snapshot_",
     "payments_ui_collapsed_",
     "jkh_transfer_to_v1:",
     "jkh_transfer_balance_v1:",
@@ -468,6 +538,13 @@
     return out;
   }
 
+  function _baseKeyFromScopedForOwner(scopedKey, ownerId) {
+    var full = String(scopedKey || "");
+    var pref = scopePrefixFor(ownerId || getActiveOwnerId());
+    if (pref && full.indexOf(pref) === 0) return full.slice(pref.length);
+    return "";
+  }
+
   function _adminGetItemForOwner(ownerId, baseKey) {
     var u = _getSessionUser();
     if (!u || u.role !== "admin") throw new Error("ADMIN_ONLY");
@@ -488,6 +565,13 @@
   window.JKHStore = {
     // identity/scope
     getOwnerId: function () { return getActiveOwnerId(); },
+    getEnvType: getEnvType,
+    normalizeOwnerId: normalizeOwnerId,
+    hasServerEnvType: hasServerEnvType,
+    setEnvType: setEnvType,
+    fetchEnvType: fetchEnvType,
+    allowLocalCacheReadBeforeServer: allowLocalCacheReadBeforeServer,
+    key: k,
     isGuestMode: isGuestMode,
     isAllMode: isAllMode,
     scopePrefixFor: scopePrefixFor,
@@ -650,7 +734,7 @@
 
   function _ownerId() {
     if (!window.JKHStore) return "guest";
-    return window.JKHStore.getOwnerId();
+    return normalizeOwnerId(window.JKHStore.getOwnerId());
   }
 
   function _isGuestOrAll() {
@@ -857,6 +941,7 @@
       "calc_period_",
       "calc_period_active_",
       "report_period_",
+      "card_snapshot_",
       "payments_ui_collapsed_",
       "jkh_transfer_to_v1:",
       "jkh_transfer_balance_v1:",
@@ -977,10 +1062,11 @@
 
   function _clearAllProjectScopes() {
     var removed = 0;
+    var envPrefix = "jkhdb::" + (getEnvType() || ENV_UNBOUND) + "::";
     for (var i = localStorage.length - 1; i >= 0; i--) {
       var full = String(localStorage.key(i) || "");
-      if (full.indexOf("jkhdb::") !== 0) continue;
-      var p = full.indexOf("::", 7);
+      if (full.indexOf(envPrefix) !== 0) continue;
+      var p = full.indexOf("::", envPrefix.length);
       if (p < 0) continue;
       var baseKey = full.slice(p + 2);
       if (!_isProjectDataKeyLocal(baseKey)) continue;
@@ -1077,15 +1163,41 @@
 
 
   function _replaceOwnerProjectScopeFromDump(ownerId, dumpObj) {
-    if (!window.JKHStore) return { removed: 0, written: 0, invalidAbonentsDb: false };
+    if (!window.JKHStore) return { removed: 0, written: 0, invalidAbonentsDb: false, serverDbEmpty: true };
     dumpObj = _normalizeCalcPeriodKeysInDump(dumpObj, ownerId);
     var dumpKeys = _projectKeysFromDump(dumpObj);
+    var hasServerDbKey = Object.prototype.hasOwnProperty.call(dumpObj || {}, KEY_DB);
+    var serverRawDb = hasServerDbKey ? ((dumpObj[KEY_DB] === null || dumpObj[KEY_DB] === undefined) ? "" : String(dumpObj[KEY_DB])) : "";
+    var serverDbValid = hasServerDbKey && _validateAbonentsDbRaw(serverRawDb);
+    var serverDbEmpty = !serverDbValid || _isDbEffectivelyEmpty(serverRawDb);
     var keep = {};
     var i;
     for (i = 0; i < dumpKeys.length; i++) keep[dumpKeys[i]] = true;
 
     var pref = window.JKHStore.scopePrefixFor(ownerId) || "";
     var scoped = window.JKHStore.keysForOwner(ownerId) || [];
+    function _cardSnapshotBaseKeysFromScoped(keys) {
+      var out = [];
+      for (var ci = 0; ci < (keys || []).length; ci++) {
+        var csk = String(keys[ci] || "");
+        if (!csk) continue;
+        var cbase = csk.indexOf(pref) === 0 ? csk.slice(pref.length) : csk;
+        if (cbase.indexOf("card_snapshot_") === 0) out.push(cbase);
+      }
+      return out;
+    }
+    var dumpCardSnapshotKeys = [];
+    for (i = 0; i < dumpKeys.length; i++) {
+      if (String(dumpKeys[i] || "").indexOf("card_snapshot_") === 0) dumpCardSnapshotKeys.push(dumpKeys[i]);
+    }
+    try {
+      console.log("[store-dump][card-snapshot-dump-check]", {
+        ownerId: ownerId,
+        dumpHasCardSnapshots: dumpCardSnapshotKeys.length > 0,
+        dumpCardSnapshotKeys: dumpCardSnapshotKeys,
+        localCardSnapshotKeysBefore: _cardSnapshotBaseKeysFromScoped(scoped)
+      });
+    } catch (eDumpCheck) {}
     var removed = 0;
     for (i = 0; i < scoped.length; i++) {
       var sk = String(scoped[i] || "");
@@ -1093,11 +1205,26 @@
       var baseKey = sk.indexOf(pref) === 0 ? sk.slice(pref.length) : sk;
       if (!_isProjectDataKeyLocal(baseKey)) continue;
       if (keep[baseKey]) continue;
+      if (!serverDbEmpty && baseKey.indexOf("card_snapshot_") === 0) {
+        try {
+          console.log("[store-dump][preserve-local-card-snapshot]", {
+            ownerId: ownerId,
+            key: baseKey
+          });
+        } catch (ePreserve) {}
+        continue;
+      }
       try {
         window.JKHStore.removeRaw(baseKey, ownerId);
         removed++;
       } catch (eRem) {}
     }
+    try {
+      console.log("[store-dump][card-snapshot-local-after]", {
+        ownerId: ownerId,
+        localCardSnapshotKeysAfter: _cardSnapshotBaseKeysFromScoped(window.JKHStore.keysForOwner(ownerId) || [])
+      });
+    } catch (eAfter) {}
 
     var written = 0;
     var invalidAbonentsDb = false;
@@ -1108,6 +1235,7 @@
         var rawDb = (val === null || val === undefined) ? "" : String(val);
         if (!_validateAbonentsDbRaw(rawDb)) {
           invalidAbonentsDb = true;
+          try { window.JKHStore.removeRaw(KEY_DB, ownerId); } catch (eDbRemove) {}
           console.error("[JKH sync][load] owner=%s key=%s status=invalid_schema_from_server raw_preview=%s", ownerId, kx, _rawPreview(rawDb, 500));
           continue;
         }
@@ -1119,7 +1247,7 @@
         throw eWrite;
       }
     }
-    return { removed: removed, written: written, invalidAbonentsDb: invalidAbonentsDb };
+    return { removed: removed, written: written, invalidAbonentsDb: invalidAbonentsDb, serverDbEmpty: serverDbEmpty };
   }
 
   function _isDbEffectivelyEmpty(rawDb) {
@@ -1199,7 +1327,7 @@
   try {
     // ✅ ПИНГ через store_dump (единый канон)
     var pingOwner = _ownerId();
-    var res = await _apiGet("/api/store_dump?owner=" + encodeURIComponent(pingOwner));
+    var res = await _apiGet("/api/store_dump?client_owner_hint=" + encodeURIComponent(pingOwner));
 
     if (res.okHttp && res.data && res.data.ok === true) {
       _setStatus({ server: "🟢 подключён", lastError: null });
@@ -1281,7 +1409,7 @@
 
         // safeguard: не перезаписываем непустую базу на сервере пустой локальной базой
         if (baseKey === KEY_DB && _isDbEffectivelyEmpty(raw)) {
-          var resCur = await _apiGet("/api/store?owner=" + encodeURIComponent(ownerId) + "&key=" + encodeURIComponent(KEY_DB));
+          var resCur = await _apiGet("/api/store?key=" + encodeURIComponent(KEY_DB) + "&client_owner_hint=" + encodeURIComponent(ownerId));
           var srv = (resCur.okHttp && resCur.data && resCur.data.ok) ? (resCur.data.value || "") : "";
           if (_isDbEffectivelyEmpty(raw) && !_isDbEffectivelyEmpty(srv)) {
             _setStatus({ lastAction: "Сохранение остановлено", lastError: "EMPTY_DB_OVERWRITE_BLOCKED" });
@@ -1295,7 +1423,7 @@
           return false;
         }
 
-        var resSet = await _apiPost("/api/store", { owner: ownerId, key: baseKey, value: raw });
+        var resSet = await _apiPost("/api/store", { client_owner_hint: ownerId, key: baseKey, value: raw });
         if (!(resSet.okHttp && resSet.data && resSet.data.ok === true)) {
           _setStatus({ lastAction: "Ошибка сохранения ключа " + baseKey, lastError: (resSet.data && resSet.data.error) ? resSet.data.error : ("HTTP " + resSet.status) });
           console.warn("[JKH sync][save] owner=%s key=%s size=%s status=error", ownerId, baseKey, String(raw || "").length);
@@ -1446,8 +1574,7 @@
       });
 
       try {
-        var ownerParam = encodeURIComponent(ownerId);
-        var resDump = await _apiGet("/api/store_dump?owner=" + ownerParam);
+        var resDump = await _apiGet("/api/store_dump?client_owner_hint=" + encodeURIComponent(ownerId));
         if (!(resDump.okHttp && resDump.data && resDump.data.ok === true)) {
           var httpErr = (resDump.data && resDump.data.error) ? resDump.data.error : ("HTTP " + resDump.status);
           var serverStatus = (resDump.status === 401) ? "unauthorized" : ((resDump.status === 403) ? "forbidden" : "offline");
@@ -1460,14 +1587,21 @@
         }
 
         var responseOwner = String((resDump.data && resDump.data.owner) || "");
+        var responseEnv = String((resDump.data && (resDump.data.env_type || resDump.data.env || resDump.data.environment)) || "");
+        if (!setEnvType(responseEnv) && isHostedMode()) {
+          _setUIState({
+            server: { status: "online", checkedAt: _nowISO(), message: "" },
+            data: { status: "invalid", source: "server", message: "ENV_TYPE missing from /api/store_dump" }
+          });
+          _setStatus({ lastAction: "Ошибка загрузки", lastError: "ENV_TYPE_MISSING_STORE_DUMP" });
+          return { ok: false, status: "invalid", serverStatus: "online", message: "ENV_TYPE_MISSING_STORE_DUMP" };
+        }
         console.info("[JKH sync][load] requested_owner=%s response_owner=%s", ownerId, responseOwner);
         if (responseOwner !== String(ownerId)) {
-          _setUIState({
-            server: { status: "forbidden", checkedAt: _nowISO(), message: "OWNER_MISMATCH" },
-            data: { status: "invalid", source: "server", message: "Ответ сервера не соответствует выбранной базе" }
+          console.warn("[JKH sync][load] server_owner differs from client_owner_hint", {
+            server_owner: responseOwner,
+            client_owner_hint: String(ownerId)
           });
-          _setStatus({ lastAction: "Ошибка загрузки", lastError: "OWNER_MISMATCH" });
-          return { ok: false, status: "invalid", serverStatus: "forbidden", message: "OWNER_MISMATCH" };
         }
 
         var data = (resDump.data && Object.prototype.hasOwnProperty.call(resDump.data, "data")) ? resDump.data.data : null;
@@ -1491,8 +1625,13 @@
         }
 
         var applied = replaced.written;
-        var status = applied > 0 ? "ready" : "empty";
+        var status = replaced.serverDbEmpty ? "empty" : "ready";
         var loadedAt = _nowISO();
+        if (status === "empty") {
+          try {
+            window.AbonentsDB = { orgName: "", orgInn: "", chairman: "", premises: {}, links: [], premiseEvents: [], abonents: {} };
+          } catch (eRuntimeEmpty) {}
+        }
         _setUIState({
           server: { status: "online", checkedAt: _nowISO(), message: "" },
           data: { status: status, loadedAt: loadedAt, source: "server", message: (status === "empty" ? "Серверный dump пуст" : "") }

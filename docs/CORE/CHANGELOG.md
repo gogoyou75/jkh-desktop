@@ -1,3 +1,10 @@
+## 2026-05-26 — Stage 14.7C runtime cache consistency
+
+- Усилена readonly runtime-cache validation: ledgerVersion, rowsById, runtimeSignature, periodActive/period and visible financial row coverage.
+- `readonly_no_recalc` больше не показывает fresh UI при missing/stale/period-mismatch/incomplete runtime cache; карточка downgrades только локально через event-driven UI event без записи summary.
+- Runtime cache остаётся UI acceleration layer; financial replay запускается только explicit кнопкой `Пересчитать`.
+- `web/calc_engine.js` не изменялся.
+
 ## 2026-05-18 — Abonent summary: frontend dirty tracking
 
 - Добавлен frontend-сервис `Data.markAbonentSummaryDirty(abonentOrId, reason)` для безопасного вызова `POST /api/abonent_summary/mark_dirty` с `credentials: "include"`.

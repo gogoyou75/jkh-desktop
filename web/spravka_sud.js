@@ -27,6 +27,7 @@
 (function () {
   if (window.__SPRAVKA_SUD_JS_LOADED__) return;
   window.__SPRAVKA_SUD_JS_LOADED__ = true;
+  window.JKH_REPORT_MODE = "derived_calculation";
   let __spravkaReturnCardPeriodContext = null;
 
   function $(id){ return document.getElementById(id); }
@@ -45,11 +46,7 @@
   }
 
   function storeSet(key, value, ownerId){
-    try {
-      if (window.JKHStore && typeof window.JKHStore.setRaw === "function") {
-        return JKHStore.setRaw(key, value, ownerId);
-      }
-    } catch (e) {}
+    try { console.warn("[reports][write-blocked-readonly]", { page: "spravka_sud", key: String(key || ""), ownerId: String(ownerId || "") }); } catch (e) {}
     return false;
   }
 
@@ -121,9 +118,17 @@
         return { from: String(o.from), to: String(o.to) };
       } catch (e) { return null; }
     }
+    function validPeriod(from, to){
+      const eng = window.JKHCalcEngine;
+      const fromD = eng && typeof eng.parseDateAnyToDate === "function" ? eng.parseDateAnyToDate(from) : new Date(from);
+      const toD = eng && typeof eng.parseDateAnyToDate === "function" ? eng.parseDateAnyToDate(to) : new Date(to);
+      return !!(from && to && fromD && toD && fromD.toString() !== "Invalid Date" && toD.toString() !== "Invalid Date" && fromD <= toD);
+    }
 
     const requestedId = String(ctx && ctx.abonentId || '').trim();
     const readOwner = String(ctx && ctx.readOwner || '').trim();
+    const urlFrom = String(ctx && ctx.from || "").trim();
+    const urlTo = String(ctx && ctx.to || "").trim();
     const storageKey = (window.Data && typeof window.Data.resolveCalcPeriodStorageKey === "function")
       ? String(window.Data.resolveCalcPeriodStorageKey(abonent || requestedId) || '').trim()
       : '';
@@ -137,8 +142,10 @@
     const activeRaw = activeStorageKey ? storeGet(activeStorageKey, readOwner) : null;
     const raw = storageKey ? storeGet(storageKey, readOwner) : null;
     const calcPeriod = raw ? parsePeriod(raw) : null;
-    const selectedPeriod = reportPeriod || calcPeriod;
-    const selectedSource = reportPeriod ? "canonical-report-period" : (calcPeriod ? "canonical-calc-period" : "");
+    const urlPeriod = validPeriod(urlFrom, urlTo) ? { from: urlFrom, to: urlTo } : null;
+    const selectedPeriod = urlPeriod || reportPeriod || (activeRaw === "1" ? calcPeriod : null);
+    const selectedSource = urlPeriod ? "url" : (reportPeriod ? "report_period_uid" : (activeRaw === "1" && calcPeriod ? "calc_period_uid" : ""));
+    if (selectedPeriod) selectedPeriod.__source = selectedSource;
     try {
       console.log("[spravka][bootstrap-period]", {
         abonentId: requestedId,
@@ -152,6 +159,21 @@
         to: selectedPeriod ? selectedPeriod.to : "",
         ok: !!selectedPeriod
       });
+      console.log("[spravka][period-source]", {
+        source: selectedSource || "missing",
+        abonentId: requestedId,
+        uid: uid,
+        from: selectedPeriod ? selectedPeriod.from : "",
+        to: selectedPeriod ? selectedPeriod.to : ""
+      });
+      if (urlPeriod) {
+        console.log("[spravka][url-period-accepted]", {
+          abonentId: requestedId,
+          uid: uid,
+          from: urlPeriod.from,
+          to: urlPeriod.to
+        });
+      }
     } catch (eBootstrapLog) {}
 
     try {
@@ -172,7 +194,7 @@
       });
     } catch (e) {}
 
-    if (!reportStorageKey && !storageKey) {
+    if (!urlPeriod && !reportStorageKey && !storageKey) {
       console.warn("[spravka][calc-period-read][missing-canonical-key]", {
         abonentId: requestedId,
         readOwner: readOwner,
@@ -218,13 +240,15 @@
   }
 
   function extractOwnerFromScopedDbKey(scoped){
-    const m = String(scoped || "").match(/^jkhdb::(.+?)::abonents_db_v1$/);
-    return m ? String(m[1] || "") : "";
+    const m = String(scoped || "").match(/^jkhdb::(?:(LAB|PROD)::)?(.+?)::abonents_db_v1$/);
+    return m ? String(m[2] || "") : "";
   }
 
   function getContext(){
     const p = getUrlParams();
     const abonentId = String(p.get("abonent") || "").trim();
+    const from = String(p.get("from") || "").trim();
+    const to = String(p.get("to") || "").trim();
     const dbKey = getDbKeyFromURL();
     const ownerParam = String(p.get("owner") || "").trim();
     const forcedOwner = extractOwnerFromScopedDbKey(dbKey) || ownerParam;
@@ -237,7 +261,9 @@
       ownerParam: ownerParam,
       forcedOwner: forcedOwner,
       currentOwner: currentOwner,
-      readOwner: readOwner
+      readOwner: readOwner,
+      from: from,
+      to: to
     };
   }
 
@@ -537,28 +563,40 @@
     }
 
     const raw = JSON.stringify(payload);
-    storeSet(reportKey, raw, ownerId);
-    storeSet(periodKey, raw, ownerId);
-    storeSet(activeKey, "1", ownerId);
     let reportReadback = null;
     let periodReadback = null;
     let activeReadback = null;
-    try { reportReadback = storeGet(reportKey, ownerId); } catch(eReport) {}
-    try { periodReadback = storeGet(periodKey, ownerId); } catch(ePeriod) {}
-    try { activeReadback = storeGet(activeKey, ownerId); } catch(eActive) {}
+    reportReadback = raw;
+    periodReadback = raw;
+    activeReadback = "1";
     result.reportReadback = reportReadback;
     result.periodReadback = periodReadback;
     result.activeReadback = activeReadback;
     result.ok = reportReadback === raw && periodReadback === raw && activeReadback === "1";
     result.reason = result.ok ? "" : "RETURN_CARD_PERIOD_READBACK_FAILED";
-    try { console.log("[spravka][return-card-period-save]", result); } catch(eLog) {}
+    result.readonly = true;
+    try { console.log("[reports][readonly-open]", { page: "spravka_sud", source: "return-card-period", writes: false, abonentId: id, uid: uid }); } catch(eLog) {}
     return result;
+  }
+
+  function showDerivedProgress(text){
+    let el = document.getElementById("spravkaDerivedProgress");
+    if (!el) {
+      el = document.createElement("div");
+      el.id = "spravkaDerivedProgress";
+      el.style.cssText = "width:960px;margin:8px auto;padding:8px 10px;border:1px solid #d9e2ef;background:#f7fbff;color:#345;";
+      const anchor = document.querySelector(".spravka-actions") || document.body.firstChild;
+      if (anchor && anchor.parentNode) anchor.parentNode.insertBefore(el, anchor.nextSibling);
+      else document.body.appendChild(el);
+    }
+    el.textContent = String(text || "");
+    el.style.display = text ? "block" : "none";
   }
 
   function configureBackToCardPeriod(ctx, abonent, period){
     const back = $("backToCard");
     const href = buildCardReturnUrl(ctx, abonent, period);
-    const saveResult = saveReturnCardPeriod(ctx, abonent, period);
+    const saveResult = { ok: true, readonly: true };
     __spravkaReturnCardPeriodContext = { ctx: ctx, abonent: abonent, period: period };
     if (back) back.href = href;
     try {
@@ -568,7 +606,8 @@
         uid: String(abonent && abonent.uid || ""),
         from: period && period.from || "",
         to: period && period.to || "",
-        saveOk: !!(saveResult && saveResult.ok)
+        saveOk: !!(saveResult && saveResult.ok),
+        readonly: true
       });
     } catch(eLog) {}
     return href;
@@ -582,7 +621,7 @@
     back.addEventListener("click", function(ev){
       if (__spravkaReturnCardPeriodContext) {
         const c = __spravkaReturnCardPeriodContext;
-        const saveResult = saveReturnCardPeriod(c.ctx, c.abonent, c.period);
+        const saveResult = { ok: true, readonly: true };
         const href = buildCardReturnUrl(c.ctx, c.abonent, c.period);
         back.href = href;
         try {
@@ -593,6 +632,7 @@
             from: c.period && c.period.from || "",
             to: c.period && c.period.to || "",
             saveOk: !!(saveResult && saveResult.ok),
+            readonly: true,
             source: "click"
           });
         } catch(eClickLog) {}
@@ -625,6 +665,9 @@
 
       try {
       const ctx = getContext();
+      showDerivedProgress("Формирование справки...");
+      try { console.log("[reports][readonly-open]", { page: "spravka_sud", source: "url", abonentId: ctx.abonentId, uid: ctx.uid || "", from: ctx.from || "", to: ctx.to || "", writes: false }); } catch(eReadonlyLog) {}
+      try { console.log("[reports][derived-calc-start]", { page: "spravka_sud", abonentId: ctx.abonentId }); } catch(eDerivedStart) {}
       setupBackToCard(ctx);
       if (!ctx.abonentId) {
         showFatal("Не передан параметр abonent в URL.");
@@ -708,11 +751,13 @@
       }
 
       let period = loadSelectedPeriod(ctx, abonent);
-      let periodSource = period ? "stored canonical calc period" : "missing canonical calc period";
+      let periodSource = period ? String(period.__source || "stored canonical calc period") : "missing period";
       if (!period) {
-        showFatal("Период расчёта не найден в canonical UID key. Откройте карточку/расчёт и сохраните период расчёта.");
+        try { console.warn("[spravka][blocked-empty-period]", { abonentId: ctx.abonentId, from: ctx.from || "", to: ctx.to || "" }); } catch(eBlockedPeriod) {}
+        showFatal("Выберите период в карточке или на странице справок.");
         return;
       }
+      try { console.log("[spravka][readonly-derived-calc]", { abonentId: ctx.abonentId, source: periodSource, writes: false }); } catch(eReadonlyDerived) {}
 
       const pFrom = eng.parseDateAnyToDate(period.from);
       if (pFrom && eng.startOfDay(pFrom) < abonentStart) {
@@ -755,25 +800,7 @@
         return false;
       }
 
-      if (window.JKHAutoAccrual && typeof window.JKHAutoAccrual.recalcForAbonent === "function") {
-        let recalcResult = null;
-        try {
-          recalcResult = window.JKHAutoAccrual.recalcForAbonent(ctx.abonentId);
-        } catch (e) {
-          if (isLedgerJsonInvalidError(e)) {
-            showFatal(LEDGER_FATAL_MESSAGE, { abonentId: ctx.abonentId, error: e });
-            return;
-          }
-          throw e;
-        }
-        if (isLedgerJsonInvalidResult(recalcResult)) {
-          showFatal((recalcResult && recalcResult.message) || LEDGER_FATAL_MESSAGE, { abonentId: ctx.abonentId, result: recalcResult });
-          return;
-        }
-        if (recalcResult && recalcResult.ok && recalcResult.changed && window.Data && typeof window.Data.flushDbToServer === "function") {
-          await window.Data.flushDbToServer();
-        }
-      }
+      try { console.log("[reports][readonly-open]", { page: "spravka_sud", source: "skip-autoaccrual", abonentId: ctx.abonentId, writes: false }); } catch(eReadonlyOpen) {}
 
       let allRowsRaw;
       try {
@@ -951,6 +978,8 @@
       setText("sumMainDebt", moneyDot(finalTotals.principal));
       setText("sumDebtPenalty", moneyDot(finalTotals.penaltyDebt));
       setText("sumTotalDebt", moneyDot(finalTotals.total));
+      showDerivedProgress("");
+      try { console.log("[reports][derived-calc-done]", { page: "spravka_sud", abonentId: ctx.abonentId, rows: Array.isArray(viewRows) ? viewRows.length : 0 }); } catch(eDerivedDone) {}
 
       setText("mainDebt", moneyDot(finalTotals.principal));
       setText("peniDebt", moneyDot(finalTotals.penaltyDebt));
@@ -962,9 +991,7 @@
         const stored = storeGet(keyNotes, ctx.readOwner);
         if (stored !== null) notesEl.value = stored;
         notesEl.addEventListener("input", function(){
-          if (window.JKHStore && typeof JKHStore.setRaw === "function") {
-            JKHStore.setRaw(keyNotes, notesEl.value, ctx.readOwner);
-          }
+          try { console.warn("[reports][write-blocked-readonly]", { page: "spravka_sud", key: keyNotes, ownerId: ctx.readOwner, source: "notes" }); } catch(e) {}
         });
       }
 

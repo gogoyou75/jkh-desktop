@@ -4,9 +4,21 @@
   'use strict';
 
   function ensureOwner(ownerId) {
-    var owner = String(ownerId || '').trim();
+    var owner = normalizeOwnerId(ownerId);
     if (!owner) throw new Error('ownerId is required');
     return owner;
+  }
+
+  function normalizeOwnerId(ownerId) {
+    try {
+      if (window.JKHStore && typeof JKHStore.normalizeOwnerId === 'function') return JKHStore.normalizeOwnerId(ownerId);
+      if (window.Auth && typeof Auth.normalizeOwnerId === 'function') return Auth.normalizeOwnerId(ownerId);
+    } catch (e) {}
+    var value = String(ownerId || '').trim();
+    var upper = value.toUpperCase();
+    if (upper.indexOf('LAB:') === 0) return value.slice(4).trim();
+    if (upper.indexOf('PROD:') === 0) return value.slice(5).trim();
+    return value;
   }
 
   function ensureStore() {
@@ -21,7 +33,7 @@
     var res = await fetch('/api/store', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ owner: ownerId, key: key, value: value })
+      body: JSON.stringify({ client_owner_hint: ownerId, key: key, value: value })
     });
 
     var data = null;

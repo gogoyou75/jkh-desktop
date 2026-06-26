@@ -26,6 +26,9 @@ class RecalcBatchJobsTest(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
+        with app_module.app.app_context():
+            app_module.db.session.remove()
+            app_module.db.engine.dispose()
         os.unlink(cls._db_file.name)
 
     def setUp(self):

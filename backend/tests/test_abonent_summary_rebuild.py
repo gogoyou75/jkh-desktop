@@ -53,6 +53,18 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
                     abonent_id VARCHAR(128) NOT NULL DEFAULT '',
                     account_uid VARCHAR(128) NOT NULL DEFAULT '',
                     account_number VARCHAR(128) NOT NULL DEFAULT '',
+                    fio VARCHAR(255) NOT NULL DEFAULT '',
+                    address VARCHAR(1024) NOT NULL DEFAULT '',
+                    total_accrued NUMERIC(14, 2) NULL,
+                    total_paid NUMERIC(14, 2) NULL,
+                    main_debt NUMERIC(14, 2) NULL,
+                    penalty_debt NUMERIC(14, 2) NULL,
+                    total_debt NUMERIC(14, 2) NULL,
+                    summary_status VARCHAR(32) NOT NULL DEFAULT 'missing',
+                    summary_reason VARCHAR(128) NOT NULL DEFAULT '',
+                    input_hash VARCHAR(64) NOT NULL DEFAULT '',
+                    dirty_since DATETIME NULL,
+                    last_error_code VARCHAR(64) NOT NULL DEFAULT '',
                     summary_json TEXT NOT NULL,
                     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -752,6 +764,52 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         self.assertEqual(payload["items"][0]["summary_status"], "error")
         self.assertEqual(payload["items"][0]["summary_reason"], "FRESH_TOTALS_MISSING")
 
+    def test_dirty_summary_batch_job_persists_error_result(self):
+        with app_module.app.app_context():
+            self._add_user("owner-dirty-batch-error")
+            self._put_abonents("owner-dirty-batch-error", {
+                "1001": {"uid": "uid_dirty_batch_error_1001", "id": "1001"},
+            })
+            app_module.db.session.add(app_module.AbonentSummary(
+                owner_id="owner-dirty-batch-error",
+                abonent_id="1001",
+                account_uid="uid_dirty_batch_error_1001",
+                account_number="1001",
+                summary_json=json.dumps({
+                    "summary_status": "dirty",
+                    "summary_reason": "TARIFFS_CHANGED",
+                    "status": "dirty",
+                    "reason": "TARIFFS_CHANGED",
+                    "totals": {"total": 999},
+                }, sort_keys=True),
+            ))
+            app_module.db.session.commit()
+        self._login("owner-dirty-batch-error")
+
+        create_response = self.client.post("/api/abonent_summary/recalc_batch_job", json={
+            "uids": ["uid_dirty_batch_error_1001"],
+            "reason": "MANUAL_RECALC",
+        })
+        self.assertEqual(create_response.status_code, 200)
+        job_id = create_response.get_json()["job_id"]
+
+        run_response = self.client.post(f"/api/abonent_summary/recalc_batch_job/{job_id}/run")
+
+        self.assertEqual(run_response.status_code, 200)
+        payload = run_response.get_json()
+        self.assertEqual(payload["status"], "completed")
+        self.assertEqual(payload["processed"], 1)
+        self.assertEqual(payload["fresh"], 0)
+        self.assertEqual(payload["error"], 1)
+        self.assertEqual(payload["items"][0]["summary_status"], "error")
+        self.assertEqual(payload["items"][0]["summary_reason"], "BATCH_RECALC_NOT_AVAILABLE:TARIFFS_CHANGED")
+        self.assertIn("uid_dirty_batch_error_1001", payload["errors_by_uid"])
+        with app_module.app.app_context():
+            stored = json.loads(app_module.AbonentSummary.query.one().summary_json)
+            self.assertEqual(stored["summary_status"], "error")
+            self.assertEqual(stored["summary_reason"], "BATCH_RECALC_NOT_AVAILABLE:TARIFFS_CHANGED")
+            self.assertNotIn("totals", stored)
+
     def test_rebuild_rejects_period_summary_payload(self):
         with app_module.app.app_context():
             self._add_user("owner-period-summary-reject")
@@ -927,8 +985,8 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         self.assertEqual(payload["processed"], 1)
         self.assertEqual(payload["fresh"], 0)
         self.assertEqual(payload["error"], 1)
-        self.assertEqual(payload["items"][0]["summary_status"], "missing")
-        self.assertEqual(payload["items"][0]["summary_reason"], "PERIOD_SUMMARY_LEGACY")
+        self.assertEqual(payload["items"][0]["summary_status"], "error")
+        self.assertEqual(payload["items"][0]["summary_reason"], "BATCH_RECALC_NOT_AVAILABLE:PERIOD_SUMMARY_LEGACY")
 
     def test_legacy_summary_with_canonical_full_period_stays_fresh(self):
         with app_module.app.app_context():
@@ -1174,8 +1232,9 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         self.assertIn('__paymentTableMode = "readonly_no_recalc"', body)
         self.assertIn('await loadPaymentTable("full_recalc_completed")', body)
         self.assertIn("Data.recalculateAbonentCard(id, {", body)
-        self.assertIn("saveSummary: !(periodActive && selectedPeriod)", body)
-        self.assertIn('summaryScope: (periodActive && selectedPeriod) ? "period" : "full"', body)
+        self.assertIn("saveSummary: !explicitReportPeriod", body)
+        self.assertIn('summaryScope: explicitReportPeriod ? "period" : "full"', body)
+        self.assertIn("periodActive: !!explicitReportPeriod", body)
         self.assertIn("autoaccrual_changed", body)
         self.assertIn("summary_status", body)
         self.assertIn("summary_save", body)
@@ -1207,7 +1266,7 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         self.assertIn("recalcResult.summary", body)
         self.assertIn("manualRecalcErrorMessage", source)
         self.assertIn("Не задан период ответственности/дата начала расчёта", source)
-        self.assertIn("renderAbonentSummaryStatus(summaryStatus, summaryReason)", body)
+        self.assertIn('renderAbonentSummaryStatus(summaryStatus, __normalizeSummaryStatus(summaryStatus) === "fresh" ? "OK" : summaryReason)', body)
         self.assertIn("__renderAbonentTotalsFromFreshSummary(summary)", body)
         self.assertNotIn("CALC_PERIOD_CHANGED", body)
         self.assertNotIn("recalc_batch", body)
@@ -1532,8 +1591,8 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         self.assertIn('summaryScope === "period" || summaryScope === "report"', save_body)
         self.assertIn("totalsKeys", save_body)
         self.assertIn("Расчёт выполнен, но итоговый summary для главной страницы не сохранён", card_recalc_body)
-        self.assertIn("Проверить выбранные summary", index_source)
-        self.assertIn("Проверяет summary, не пересчитывает карточки", index_source)
+        self.assertIn("summaryBatchRunBtn", index_source)
+        self.assertIn("Data.createAbonentSummaryRecalcBatchJob", index_source)
 
         calc_after = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
         self.assertEqual(calc_before, calc_after)
@@ -1565,9 +1624,9 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         self.assertIn('summary.summary_scope = "period"', recalc_body)
         self.assertIn('summary.summary_scope = "full"', recalc_body)
         self.assertIn('mode === SUMMARY_RECALC_MODE_REPORT', recalc_body)
-        self.assertIn("saveSummary: !(periodActive && selectedPeriod)", full_recalc_body)
-        self.assertIn('summaryScope: (periodActive && selectedPeriod) ? "period" : "full"', full_recalc_body)
-        self.assertIn("periodActive: !!(periodActive && selectedPeriod)", full_recalc_body)
+        self.assertIn("saveSummary: !explicitReportPeriod", full_recalc_body)
+        self.assertIn('summaryScope: explicitReportPeriod ? "period" : "full"', full_recalc_body)
+        self.assertIn("periodActive: !!explicitReportPeriod", full_recalc_body)
         self.assertIn("FRESH_TOTALS_MISSING", index_source)
 
         calc_after = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
@@ -1637,11 +1696,14 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
 
         reports_body = card_source.split('repBtn.addEventListener("click"', 1)[1].split("});\n}", 1)[0]
         self.assertIn("[reports][open-with-period]", reports_body)
-        self.assertIn("ensureCurrentAbonentUidForCalcPeriod", reports_body)
-        self.assertIn("saveCalcPeriod(from, to)", reports_body)
-        self.assertIn("saveReportPeriodForSpravka", reports_body)
+        self.assertIn("getCalcPeriodStorageMeta()", reports_body)
+        self.assertIn("getReportPeriodStorageKey(readonlyMeta)", reports_body)
+        self.assertIn('reason: "URL_ONLY"', reports_body)
         self.assertIn("location.href = href", reports_body)
         self.assertIn("[reports][blocked-card-recalc]", card_source)
+        self.assertNotIn("ensureCurrentAbonentUidForCalcPeriod", reports_body)
+        self.assertNotIn("saveCalcPeriod(from, to)", reports_body)
+        self.assertNotIn("saveReportPeriodForSpravka", reports_body)
         self.assertNotIn("fullRecalcForCurrentAbonent", reports_body)
         self.assertNotIn("Data.recalculateAbonentCard", reports_body)
         self.assertNotIn("saveAbonentSummaryAfterRecalc", reports_body)
@@ -1893,10 +1955,11 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         self.assertIn("[reports][bootstrap-period]", reports_source)
         self.assertIn("[reports][period-auto-accepted]", reports_source)
         self.assertIn("function autoAcceptReportsPeriod", reports_source)
-        self.assertIn("auto-accept:", reports_source)
+        self.assertIn("[reports][readonly-open]", reports_source)
         self.assertIn("openBtn.disabled = !ok", reports_source)
         self.assertIn("uidFromUrl", reports_source)
-        self.assertIn("storeSetCanonical(meta.reportKey", reports_source)
+        self.assertIn("function storeSetCanonical", reports_source)
+        self.assertIn("[reports][write-blocked-readonly]", reports_source)
         self.assertIn("/^report_period_uid_/.test(meta.reportKey)", reports_source)
         self.assertIn("[report-period][readback]", reports_source)
 
@@ -1926,8 +1989,8 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         self.assertIn("::period:", payment_source)
 
         self.assertIn("reportStorageKey", spravka_source)
-        self.assertIn("canonical-report-period", spravka_source)
-        self.assertIn("const selectedPeriod = reportPeriod || calcPeriod", spravka_source)
+        self.assertIn("report_period_uid", spravka_source)
+        self.assertIn("const selectedPeriod = urlPeriod || reportPeriod || (activeRaw === \"1\" ? calcPeriod : null)", spravka_source)
         self.assertIn("[spravka][bootstrap-period]", spravka_source)
         self.assertIn("[spravka][return-card-period-save]", spravka_source)
         self.assertIn("[spravka][return-card-url]", spravka_source)
