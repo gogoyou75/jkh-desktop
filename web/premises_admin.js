@@ -4,6 +4,8 @@
 */
 
 const PREMISES_ADMIN_VERSION = '20260626-runtime-db';
+window.PREMISES_FILE_VERSION = '20260626-A';
+console.log('PREMISES FILE EXECUTED');
 console.log('[premises][script-loaded]', {
     file: 'premises_admin.js',
     version: PREMISES_ADMIN_VERSION,
@@ -1768,5 +1770,7 @@ function onSave() {
         }
     }
 
-    return { init };
+    const api = { init };
+    api.__version = PREMISES_ADMIN_VERSION;
+    return api;
 })();

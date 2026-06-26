@@ -170,6 +170,23 @@
     }
 
     console.log('[premises][document-scripts]', Array.from(document.scripts).map((s) => s.src || '(inline)'));
+    console.log('[premises][file-version]', {
+      version: window.PREMISES_FILE_VERSION || null,
+      premVersion: window.PremisesAdmin && window.PremisesAdmin.__version ? window.PremisesAdmin.__version : null,
+      descriptor: Object.getOwnPropertyDescriptor(window, 'PremisesAdmin')
+    });
+
+    if (window.PREMISES_FILE_VERSION !== '20260626-A') {
+      if (warnEl) {
+        warnEl.style.display = 'block';
+        warnEl.textContent = 'Не загружен свежий premises_admin.js (file version mismatch).';
+      }
+      console.warn('[premises][file-version-mismatch]', {
+        expected: '20260626-A',
+        actual: window.PREMISES_FILE_VERSION || null
+      });
+      return;
+    }
 
     if (window.PremisesAdmin && typeof PremisesAdmin.init === 'function') {
       await PremisesAdmin.init();
