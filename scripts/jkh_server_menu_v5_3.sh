@@ -14,6 +14,7 @@ API_CHECK=""
 ENV_FILE=""
 MYSQL_CONTAINER=""
 BACKUP_DIR="/root/jkh_backups"
+MANUAL_BACKUP_DIR="/root/backups"
 LOCK_FILE="/tmp/jkh_server_menu_v5_3.lock"
 SELECTED_BRANCH=""
 SELECTED_COMMIT=""
@@ -363,6 +364,58 @@ create_mysql_backup() {
   run mkdir -p "$BACKUP_DIR" || return 1
   echo "Создаётся backup MySQL: $backup_file"
   run mysql_root_dump "$backup_file" || return 1
+
+  if [ ! -s "$backup_file" ]; then
+    echo "ОШИБКА: backup не создан или пустой: $backup_file"
+    LAST_ERROR=1
+    return 1
+  fi
+
+  run ls -lh "$backup_file" || return 1
+}
+
+backup_current_environment() {
+  local backup_file backup_db
+
+  require_prod_confirmation "Backup текущей PROD среды" || return 1
+  environment_guard || return 1
+  load_env || return 1
+
+  case "$ENVIRONMENT" in
+    LAB) backup_db="jkh_lab" ;;
+    PROD) backup_db="jkh" ;;
+    *)
+      echo "ОШИБКА: неизвестная среда для backup: $ENVIRONMENT"
+      LAST_ERROR=1
+      return 1
+      ;;
+  esac
+
+  backup_file="$MANUAL_BACKUP_DIR/${ENVIRONMENT,,}_backup_$(date +%F_%H-%M-%S).sql"
+
+  echo
+  print_line
+  echo "BACKUP ТЕКУЩЕЙ СРЕДЫ | $ENVIRONMENT"
+  print_line
+  echo "Container: $MYSQL_CONTAINER"
+  echo "DB_NAME:   $backup_db"
+  echo "File:      $backup_file"
+  echo "Restore НЕ выполняется."
+  echo "Docker down НЕ выполняется."
+  echo "Git НЕ меняется."
+  print_line
+
+  run mkdir -p "$MANUAL_BACKUP_DIR" || return 1
+  echo "Создаётся backup MySQL: $backup_file"
+  docker exec -e MYSQL_PWD="$MYSQL_ROOT_PASSWORD" "$MYSQL_CONTAINER" \
+    mysqldump -u root --single-transaction --routines --triggers \
+    "$backup_db" > "$backup_file"
+  local dump_code=$?
+  if [ "$dump_code" -ne 0 ]; then
+    echo "ОШИБКА: mysqldump завершился с кодом $dump_code"
+    LAST_ERROR=$dump_code
+    return "$dump_code"
+  fi
 
   if [ ! -s "$backup_file" ]; then
     echo "ОШИБКА: backup не создан или пустой: $backup_file"
@@ -896,7 +949,7 @@ explain() {
     11)
       scenario_header 11 "Cherry-pick одного коммита"
       scenario_block \
-        "Забирает данные с GitHub, показывает выбранный коммит, применяет его в текущую ветку и запускает build." \
+        "Забирает данные с GitHub, показывает выбранный коммит, применяет его в текущую ветку и отдельно спрашивает, запускать ли build." \
         "Когда нужен ровно один конкретный коммит без полного переключения ветки." \
         "Текущую Git-ветку выбранной среды, Docker-образы и контейнеры." \
         "Другие коммиты, GitHub-ветки, untracked-файлы. В PROD docker compose down не выполняется." \
@@ -940,13 +993,24 @@ explain() {
     15)
       scenario_header 15 "Проверка готовности LAB -> PROD"
       scenario_block \
-        "Заглушка будущей проверки готовности переноса LAB в PROD. Сейчас ничего не сравнивает и не переносит." \
-        "Когда позже потребуется отдельный безопасный preflight перед переносом из LAB в PROD." \
-        "Ничего. Пункт пока только показывает описание будущей проверки." \
+        "Read-only preflight: проверяет Git, health, docker compose ps и sha256sum calc_engine в LAB и PROD без переноса." \
+        "Когда нужно понять, можно ли готовить merge LAB-ветки в main перед PROD deploy." \
+        "Ничего. Пункт только читает состояние LAB и PROD." \
         "LAB, PROD, Git, Docker, базу данных, файлы и контейнеры." \
         "Безопасный." \
-        "Позже здесь будет отчёт по различиям LAB/PROD: файлы, миграции, hash calc_engine и риски переноса." \
-        "[LAB]\n|\nv\n[Будущая проверка]\n|\nv\n[PROD]\n\nПеренос сейчас НЕ реализован."
+        "Если всё хорошо, покажет READY. Если нет, покажет BLOCKED со списком причин." \
+        "[LAB]\n|\nv\n[Read-only preflight]\n|\nv\n[PROD]\n\nПеренос НЕ выполняется."
+      ;;
+    16)
+      scenario_header 16 "Backup текущей среды"
+      scenario_block \
+        "Создаёт MySQL dump текущей выбранной среды в /root/backups и показывает размер файла." \
+        "Перед рискованными действиями или как ручная точка сохранения LAB/PROD." \
+        "Только новый .sql файл backup. В PROD требует YES_PROD." \
+        "Git, docker-compose.yml, Docker volumes, restore, docker down, ветки и код." \
+        "Средний для LAB, опасный для PROD." \
+        "Это только backup текущей базы выбранной среды. Восстановление здесь не реализовано." \
+        "[$ENVIRONMENT MySQL]\n|\nv\n[/root/backups/${ENVIRONMENT,,}_backup_YYYY-MM-DD_HH-MM-SS.sql]"
       ;;
     *)
       echo "Нет такого пункта."
@@ -1327,21 +1391,157 @@ full_stage_verification() {
   check_api || return 1
 }
 
-lab_prod_readiness_stub() {
+PREFLIGHT_REASONS=()
+
+preflight_add_reason() {
+  PREFLIGHT_REASONS+=("$1")
+}
+
+preflight_http_check() {
+  local label="$1"
+  local url="$2"
+  shift 2
+  local status curl_code expected
+
+  status="$(curl -sS -o /dev/null -w "%{http_code}" "$url")"
+  curl_code=$?
+  echo "$label: $url -> HTTP $status"
+  if [ "$curl_code" -ne 0 ]; then
+    preflight_add_reason "$label не прошёл: $url -> HTTP $status"
+    return 0
+  fi
+
+  for expected in "$@"; do
+    if [ "$status" = "$expected" ]; then
+      return 0
+    fi
+  done
+
+  preflight_add_reason "$label не прошёл: $url -> HTTP $status"
+}
+
+preflight_git_report() {
+  local label="$1"
+  local dir="$2"
+  local branch status commit calc_hash
+
+  echo
+  print_line
+  echo "$label | Git"
+  print_line
+
+  if [ ! -d "$dir/.git" ]; then
+    echo "BLOCK: $dir не является git-репозиторием."
+    preflight_add_reason "$label git repo не найден: $dir"
+    return 0
+  fi
+
+  branch="$(git -C "$dir" branch --show-current 2>/dev/null || true)"
+  commit="$(git -C "$dir" rev-parse --short=12 HEAD 2>/dev/null || true)"
+  status="$(git -C "$dir" status --short 2>/dev/null || true)"
+
+  echo "Папка: $dir"
+  echo "Текущая ветка: ${branch:-unknown}"
+  echo "Последний commit: ${commit:-unknown}"
+  echo "git status:"
+  if [ -n "$status" ]; then
+    echo "$status"
+    preflight_add_reason "$label git status не чистый"
+  else
+    echo "OK: clean"
+  fi
+
+  if [ ! -f "$dir/scripts/jkh_server_menu_v5_3.sh" ]; then
+    echo "BLOCK: scripts/jkh_server_menu_v5_3.sh не найден."
+    preflight_add_reason "$label scripts/jkh_server_menu_v5_3.sh не найден"
+  else
+    echo "OK: scripts/jkh_server_menu_v5_3.sh найден."
+  fi
+
+  if [ ! -f "$dir/web/calc_engine.js" ]; then
+    echo "BLOCK: web/calc_engine.js не найден."
+    preflight_add_reason "$label web/calc_engine.js не найден"
+  elif command -v sha256sum >/dev/null 2>&1; then
+    calc_hash="$(sha256sum "$dir/web/calc_engine.js" | awk '{print $1}')"
+    echo "sha256sum web/calc_engine.js: $calc_hash"
+  elif command -v shasum >/dev/null 2>&1; then
+    calc_hash="$(shasum -a 256 "$dir/web/calc_engine.js" | awk '{print $1}')"
+    echo "sha256sum web/calc_engine.js: $calc_hash"
+  else
+    echo "BLOCK: sha256sum/shasum не найден."
+    preflight_add_reason "$label sha256sum недоступен"
+  fi
+}
+
+preflight_docker_ps() {
+  local label="$1"
+  local dir="$2"
+
+  echo
+  print_line
+  echo "$label | docker compose ps"
+  print_line
+
+  if [ ! -f "$dir/docker-compose.yml" ]; then
+    echo "BLOCK: docker-compose.yml не найден в $dir"
+    preflight_add_reason "$label docker-compose.yml не найден"
+    return 0
+  fi
+
+  if ! (cd "$dir" && docker compose ps); then
+    preflight_add_reason "$label docker compose ps не прошёл"
+  fi
+}
+
+lab_prod_readiness_preflight() {
+  local lab_dir="/root/jkh-lab"
+  local prod_dir="/root/jkh"
+
+  PREFLIGHT_REASONS=()
+
   echo
   print_line
   echo "Проверка готовности LAB -> PROD"
   print_line
-  echo "Заглушка будущего пункта. Перенос LAB -> PROD сейчас не реализован."
+  echo "Read-only preflight. Перенос, merge, deploy, backup, reset и запись файлов НЕ выполняются."
+  print_line
+
+  preflight_git_report "LAB" "$lab_dir"
+  preflight_git_report "PROD" "$prod_dir"
+
   echo
-  echo "Позже здесь нужно проверить:"
-  echo "- текущие ветки и commits LAB/PROD;"
-  echo "- список файлов, которые отличаются;"
-  echo "- миграции и совместимость схемы БД;"
-  echo "- sha256sum web/calc_engine.js в LAB и PROD;"
-  echo "- docker-compose различия и риски переноса."
+  print_line
+  echo "Health LAB"
+  print_line
+  preflight_http_check "LAB site" "http://127.0.0.1:8080" "200" "302"
+  preflight_http_check "LAB API auth" "http://127.0.0.1:8080/api/auth/me" "401"
+
   echo
-  echo "Текущий запуск ничего не меняет."
+  print_line
+  echo "Health PROD"
+  print_line
+  preflight_http_check "PROD site" "http://127.0.0.1/" "200" "302"
+  preflight_http_check "PROD API auth" "http://127.0.0.1/api/auth/me" "401"
+
+  preflight_docker_ps "LAB" "$lab_dir"
+  preflight_docker_ps "PROD" "$prod_dir"
+
+  echo
+  print_line
+  echo "ИТОГ LAB -> PROD PREFLIGHT"
+  print_line
+  if [ "${#PREFLIGHT_REASONS[@]}" -eq 0 ]; then
+    echo "READY: можно готовить merge в main"
+    return 0
+  fi
+
+  echo "BLOCKED: список причин"
+  local reason
+  for reason in "${PREFLIGHT_REASONS[@]}"; do
+    echo "- $reason"
+  done
+  block_operation "BLOCKED: список причин"
+  return 1
 }
 
 run_basic_checks() {
@@ -1631,7 +1831,8 @@ run_case() {
     11) cherry_pick_commit || true ;;
     13) dashboard ;;
     14) safe_rollback || true ;;
-    15) lab_prod_readiness_stub ;;
+    15) lab_prod_readiness_preflight || true ;;
+    16) backup_current_environment || true ;;
     *)
       echo "Нет такого пункта."
       LAST_ERROR=1
@@ -1663,7 +1864,8 @@ menu() {
   echo "12) Сменить LAB/PROD"
   echo "13) Dashboard среды"
   echo "14) Rollback"
-  echo "15) Проверка готовности LAB -> PROD (заглушка)"
+  echo "15) Проверка готовности LAB -> PROD"
+  echo "16) Backup текущей среды"
   echo "0) Выход"
   echo
 }

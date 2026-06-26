@@ -20,6 +20,8 @@ CRITICAL-риски: не найдено.
 - Main-сценарии в LAB запрещены до любых Git/Docker/self-heal действий. Для LAB нужно использовать пункты 4/5 с тестовой веткой.
 - PROD main-сценарии требуют `YES_PROD`, backup MySQL, environment guard и branch guard `main == origin/main`.
 - Cherry-pick теперь выбирает source branch из `origin/*`, показывает последние 20 коммитов, выбирает commit номером, валидирует ручной hash и запускает build только после второго подтверждения.
+- Добавлен пункт 16 `Backup текущей среды`: dump MySQL выбранной среды в `/root/backups`, без restore, docker down, Git-изменений и правки compose.
+- Пункт 15 заменён на read-only LAB -> PROD preflight без merge/deploy/backup/reset/изменения веток.
 - LAB блокирует PROD `container_name`.
 - LAB блокирует запрещённые volume-имена `jkh_lab_mysql_data` и `jkh_mysql_data`.
 - LAB требует существующее compose-volume имя `mysql_data`.
@@ -29,29 +31,40 @@ CRITICAL-риски: не найдено.
 ## Проверенные маркеры
 
 Найдено:
-- LAB path: `scripts/jkh_server_menu_v5_3.sh:114` -> `/root/jkh-lab`
-- PROD path: `scripts/jkh_server_menu_v5_3.sh:120` -> `/root/jkh`
-- LAB MySQL container: `scripts/jkh_server_menu_v5_3.sh:116` -> `jkh_lab_mysql`
-- PROD MySQL container: `scripts/jkh_server_menu_v5_3.sh:122` -> `jkh_mysql`
-- `.env` path строится от выбранной среды: `scripts/jkh_server_menu_v5_3.sh:131`
-- LAB compose self-heal: `scripts/jkh_server_menu_v5_3.sh:430`
-- LAB compose file replacement: `scripts/jkh_server_menu_v5_3.sh:516`
-- LAB guard: `scripts/jkh_server_menu_v5_3.sh:526`
-- PROD guard: `scripts/jkh_server_menu_v5_3.sh:594`
-- environment guard: `scripts/jkh_server_menu_v5_3.sh:645`
-- общий compose guard: `scripts/jkh_server_menu_v5_3.sh:671`
-- Docker restart wrapper: `scripts/jkh_server_menu_v5_3.sh:682`
-- Docker build wrapper: `scripts/jkh_server_menu_v5_3.sh:687`
-- LAB запрет main-сценариев: `scripts/jkh_server_menu_v5_3.sh:376`
-- PROD branch guard для main-сценариев: `scripts/jkh_server_menu_v5_3.sh:386`
-- Cherry-pick source branch выбор: `scripts/jkh_server_menu_v5_3.sh:1081`
-- Cherry-pick hash validation: `scripts/jkh_server_menu_v5_3.sh:1156`
-- Cherry-pick commit выбор: `scripts/jkh_server_menu_v5_3.sh:1170`
-- пункт 3 `Main с build`: `scripts/jkh_server_menu_v5_3.sh:1422`
-- пункт 11 `Cherry-pick одного коммита`: `scripts/jkh_server_menu_v5_3.sh:1471`
-- `git checkout`: `scripts/jkh_server_menu_v5_3.sh:1386`, `1414`, `1424`, `1438`, `1461`
-- `git pull`: `scripts/jkh_server_menu_v5_3.sh:1387`, `1425`, `1462`
-- `git reset --hard`: `scripts/jkh_server_menu_v5_3.sh:1415`, `1570`
+- LAB path: `scripts/jkh_server_menu_v5_3.sh:115` -> `/root/jkh-lab`
+- PROD path: `scripts/jkh_server_menu_v5_3.sh:121` -> `/root/jkh`
+- LAB MySQL container: `scripts/jkh_server_menu_v5_3.sh:117` -> `jkh_lab_mysql`
+- PROD MySQL container: `scripts/jkh_server_menu_v5_3.sh:123` -> `jkh_mysql`
+- `.env` path строится от выбранной среды: `scripts/jkh_server_menu_v5_3.sh:132`
+- Backup текущей среды: `scripts/jkh_server_menu_v5_3.sh:377`
+- LAB compose self-heal: `scripts/jkh_server_menu_v5_3.sh:483`
+- LAB compose file replacement: `scripts/jkh_server_menu_v5_3.sh:569`
+- LAB guard: `scripts/jkh_server_menu_v5_3.sh:579`
+- PROD guard: `scripts/jkh_server_menu_v5_3.sh:647`
+- environment guard: `scripts/jkh_server_menu_v5_3.sh:698`
+- общий compose guard: `scripts/jkh_server_menu_v5_3.sh:724`
+- Docker restart wrapper: `scripts/jkh_server_menu_v5_3.sh:735`
+- Docker build wrapper: `scripts/jkh_server_menu_v5_3.sh:740`
+- LAB запрет main-сценариев: `scripts/jkh_server_menu_v5_3.sh:429`
+- PROD branch guard для main-сценариев: `scripts/jkh_server_menu_v5_3.sh:439`
+- Cherry-pick source branch выбор: `scripts/jkh_server_menu_v5_3.sh:1145`
+- Cherry-pick hash validation: `scripts/jkh_server_menu_v5_3.sh:1220`
+- Cherry-pick commit выбор: `scripts/jkh_server_menu_v5_3.sh:1248`
+- LAB -> PROD preflight: `scripts/jkh_server_menu_v5_3.sh:1487`
+- пункт 3 `Main с build`: `scripts/jkh_server_menu_v5_3.sh:1629`
+- пункт 11 `Cherry-pick одного коммита`: `scripts/jkh_server_menu_v5_3.sh:1679`
+- `git checkout`: `scripts/jkh_server_menu_v5_3.sh:1594`, `1622`, `1632`, `1646`, `1669`
+- `git pull`: `scripts/jkh_server_menu_v5_3.sh:1595`, `1633`, `1670`
+- `git reset --hard`: `scripts/jkh_server_menu_v5_3.sh:1623`, `1783`
+
+## Правильный поток LAB -> PROD
+
+Правило:
+- PROD deploy разрешён только из `main`.
+- LAB-ветка не выкатывается напрямую в PROD.
+- Правильный поток: LAB branch -> проверки -> merge в `main` -> PROD backup -> deploy `main` -> health-check.
+
+Пункт 15 только проверяет готовность и не переносит код. Пункт 16 делает только backup текущей среды и не выполняет restore.
 
 Не найдено как исполняемая команда:
 - `git clean`
@@ -65,7 +78,7 @@ CRITICAL-риски: не найдено.
 ### 0. LAB пункт 3 `Main с build` оставляет LAB на main и dirty compose
 
 Статус: найдено практической проверкой и заблокировано.
-Файл и строки: `scripts/jkh_server_menu_v5_3.sh:376`, `1422`.
+Файл и строки: `scripts/jkh_server_menu_v5_3.sh:429`, `1629`.
 Риск до guard: HIGH.
 Риск после guard: LOW.
 
@@ -84,7 +97,7 @@ CRITICAL-риски: не найдено.
 ### 1. Разделение LAB/PROD путей и контейнеров
 
 Статус: найдено, контролируется.
-Файл и строки: `scripts/jkh_server_menu_v5_3.sh:114`, `116`, `120`, `122`, `131`.
+Файл и строки: `scripts/jkh_server_menu_v5_3.sh:115`, `117`, `121`, `123`, `132`.
 Риск: LOW.
 
 Объяснение:
@@ -99,7 +112,7 @@ CRITICAL-риски: не найдено.
 ### 2. LAB self-heal перезаписывает docker-compose.yml
 
 Статус: найдено.
-Файл и строки: `scripts/jkh_server_menu_v5_3.sh:430`, `510`, `516`.
+Файл и строки: `scripts/jkh_server_menu_v5_3.sh:483`, `563`, `569`.
 Риск: MEDIUM.
 
 Объяснение:
@@ -114,7 +127,7 @@ CRITICAL-риски: не найдено.
 ### 3. LAB может увидеть PROD compose
 
 Статус: найдено и заблокировано.
-Файл и строки: `scripts/jkh_server_menu_v5_3.sh:537`, `549`, `570`.
+Файл и строки: `scripts/jkh_server_menu_v5_3.sh:590`, `602`, `623`.
 Риск до guard: HIGH.
 Риск после guard: LOW.
 
@@ -130,7 +143,7 @@ CRITICAL-риски: не найдено.
 ### 4. LAB volume должен быть mysql_data
 
 Статус: найдено и заблокировано.
-Файл и строки: `scripts/jkh_server_menu_v5_3.sh:472`, `501`, `543`, `562`, `580`.
+Файл и строки: `scripts/jkh_server_menu_v5_3.sh:525`, `554`, `596`, `615`, `633`.
 Риск до guard: HIGH.
 Риск после guard: LOW.
 
@@ -146,7 +159,7 @@ Volume `jkh_lab_mysql_data` создаёт новый пустой Docker volume
 ### 5. PROD может увидеть LAB compose
 
 Статус: найдено и заблокировано.
-Файл и строки: `scripts/jkh_server_menu_v5_3.sh:594`, `605`, `617`, `624`.
+Файл и строки: `scripts/jkh_server_menu_v5_3.sh:647`, `658`, `670`, `677`.
 Риск до guard: HIGH.
 Риск после guard: LOW.
 
@@ -162,7 +175,7 @@ Volume `jkh_lab_mysql_data` создаёт новый пустой Docker volume
 ### 6. docker compose restart/up/build
 
 Статус: найдено, теперь обёрнуто guard.
-Файл и строки: `scripts/jkh_server_menu_v5_3.sh:682`, `683`, `687`, `688`.
+Файл и строки: `scripts/jkh_server_menu_v5_3.sh:735`, `736`, `740`, `741`.
 Риск: LOW.
 
 Объяснение:
@@ -177,7 +190,7 @@ Volume `jkh_lab_mysql_data` создаёт новый пустой Docker volume
 ### 7. .env
 
 Статус: найдено, только чтение.
-Файл и строки: `scripts/jkh_server_menu_v5_3.sh:131`, `220`, `230`, `231`, `232`, `233`, `240`.
+Файл и строки: `scripts/jkh_server_menu_v5_3.sh:132`, `221`, `231`, `232`, `233`, `234`, `241`.
 Риск: LOW.
 
 Объяснение:
@@ -192,7 +205,7 @@ Volume `jkh_lab_mysql_data` создаёт новый пустой Docker volume
 ### 8. git reset --hard
 
 Статус: найдено.
-Файл и строки: `scripts/jkh_server_menu_v5_3.sh:1415`, `1570`.
+Файл и строки: `scripts/jkh_server_menu_v5_3.sh:1623`, `1783`.
 Риск: MEDIUM.
 
 Объяснение:
@@ -207,7 +220,7 @@ Volume `jkh_lab_mysql_data` создаёт новый пустой Docker volume
 ### 9. git clean / docker down / docker volume rm
 
 Статус: не найдено как исполняемая команда.
-Файл и строки: упоминания только в описаниях `scripts/jkh_server_menu_v5_3.sh:341`, `792`, `814`, `1534`, `1547`, `1548`.
+Файл и строки: упоминания только в описаниях `scripts/jkh_server_menu_v5_3.sh:342`, `845`, `867`, `1747`, `1760`, `1761`.
 Риск: LOW.
 
 Объяснение:
@@ -222,7 +235,7 @@ Volume `jkh_lab_mysql_data` создаёт новый пустой Docker volume
 ### 10. Локальные незакоммиченные изменения
 
 Статус: найдено, частично контролируется.
-Файл и строки: `scripts/jkh_server_menu_v5_3.sh:326`, `341`, `1415`, `1570`.
+Файл и строки: `scripts/jkh_server_menu_v5_3.sh:327`, `342`, `1623`, `1783`.
 Риск: MEDIUM.
 
 Объяснение:
@@ -237,7 +250,7 @@ Volume `jkh_lab_mysql_data` создаёт новый пустой Docker volume
 ### 11. Cherry-pick принимал произвольный commit hash
 
 Статус: найдено практической проверкой и заблокировано.
-Файл и строки: `scripts/jkh_server_menu_v5_3.sh:1081`, `1156`, `1170`, `1471`.
+Файл и строки: `scripts/jkh_server_menu_v5_3.sh:1145`, `1220`, `1248`, `1679`.
 Риск до guard: MEDIUM/HIGH.
 Риск после guard: LOW.
 
@@ -260,6 +273,40 @@ Build после успешного cherry-pick больше не запуска
 
 Нужно ли чинить сейчас:
 Уже исправлено.
+
+### 12. Backup текущей среды
+
+Статус: добавлено.
+Риск: MEDIUM для LAB, HIGH для PROD без подтверждения; после guard риск LOW/MEDIUM.
+
+Объяснение:
+Пункт 16 создаёт только MySQL dump текущей выбранной среды в `/root/backups`. Для LAB используется container `jkh_lab_mysql`, база `jkh_lab`, файл `lab_backup_YYYY-MM-DD_HH-MM-SS.sql`. Для PROD используется container `jkh_mysql`, база `jkh`, файл `prod_backup_YYYY-MM-DD_HH-MM-SS.sql`, перед выполнением требуется `YES_PROD`.
+
+Guard:
+Backup выполняет `mkdir -p /root/backups`, `mysqldump` внутри нужного контейнера и `ls -lh` созданного файла. Если файл пустой, сценарий завершается ERROR. Restore, `docker compose down`, Git-операции, изменение `docker-compose.yml`, БД-миграции и Docker volumes не выполняются.
+
+Рекомендация:
+Использовать пункт 16 перед PROD deploy и перед рискованными ручными действиями. Restore должен оставаться отдельной процедурой вне этого меню.
+
+Нужно ли чинить сейчас:
+Уже добавлено.
+
+### 13. LAB -> PROD preflight
+
+Статус: заглушка заменена на read-only preflight.
+Риск: LOW.
+
+Объяснение:
+Пункт 15 читает состояние LAB и PROD: текущую ветку, `git status`, последний commit, health сайта/API, sha256sum `web/calc_engine.js`, наличие `scripts/jkh_server_menu_v5_3.sh`, `docker compose ps`. Он не делает merge, deploy, backup, reset, checkout, запись файлов или изменение БД.
+
+Итог:
+Если проверка не нашла причин блокировки, выводится `READY: можно готовить merge в main`. Если есть проблемы, выводится `BLOCKED: список причин`.
+
+Правило переноса:
+LAB-ветка не выкатывается напрямую в PROD. Сначала проверка LAB branch, затем merge в `main`, затем PROD backup, deploy `main`, health-check.
+
+Нужно ли чинить сейчас:
+Уже добавлено.
 
 ## CRITICAL-план
 
