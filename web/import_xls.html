@@ -3467,7 +3467,9 @@ $('previewBody').addEventListener('click', function(ev){
       setImportStatus('Не удалось сохранить draft для создания абонента.', 'err');
       return;
     }
-    const readBackDraft = loadDraftNewAbonent();
+    const readBackDraft = (window.JKHStore && typeof JKHStore.getJSON === 'function')
+      ? JKHStore.getJSON('draft_new_abonent_v1', null, null)
+      : null;
     console.log('[import_xls][new-abonent-draft-readback]', {
       excelRow: excelRow,
       ok: !!(readBackDraft && normStr(readBackDraft.ls || readBackDraft.fam || readBackDraft.name || readBackDraft.otch)),
