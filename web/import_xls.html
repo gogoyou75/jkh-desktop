@@ -1089,12 +1089,27 @@ function saveImportResumeState(payload){
     next.fileYearValidation = fileYearValidation || null;
     next.fileYearBlockReason = fileYearBlockReason || '';
     next.fileName = normStr(currentFileName);
+    next.returnFrom = normStr(next.returnFrom || '');
     JKHStore.setJSON('import_xls_resume_v1', next, null);
+    console.log('[import_xls][draft-save]', {
+      kind: 'resume',
+      ownerId: getCurrentOwnerId(),
+      targetExcelRow: Number(next.targetExcelRow) || 0,
+      returnFrom: normStr(next.returnFrom || '')
+    });
   }catch(e){}
 }
 function loadImportResumeState(){
   if (!window.JKHStore || !JKHStore.getJSON) return null;
-  try{ return JKHStore.getJSON('import_xls_resume_v1', null, null); }catch(e){ return null; }
+  try{
+    const resume = JKHStore.getJSON('import_xls_resume_v1', null, null);
+    console.log('[import_xls][draft-load]', {
+      kind: 'resume',
+      ownerId: getCurrentOwnerId(),
+      hasData: !!resume
+    });
+    return resume;
+  }catch(e){ return null; }
 }
 function clearImportResumeState(){
   if (!window.JKHStore || !JKHStore.setJSON) return;
@@ -1103,7 +1118,7 @@ function clearImportResumeState(){
 function saveImportDraftState(){
   if (!window.JKHStore || !JKHStore.setJSON) return;
   try{
-    JKHStore.setJSON('import_xls_draft_v1', {
+    const payload = {
       dataRows: Array.isArray(dataRows) ? dataRows : [],
       mode: mode === 'payments' ? 'payments' : 'primary',
       primaryApplied: !!primaryApplied,
@@ -1119,12 +1134,29 @@ function saveImportDraftState(){
       ownerId: getCurrentOwnerId(),
       fileName: normStr(currentFileName),
       savedAt: new Date().toISOString()
-    }, null);
+    };
+    JKHStore.setJSON('import_xls_draft_v1', payload, null);
+    console.log('[import_xls][draft-save]', {
+      kind: 'preview',
+      ownerId: getCurrentOwnerId(),
+      rows: Array.isArray(payload.dataRows) ? payload.dataRows.length : 0,
+      mode: payload.mode,
+      fileName: payload.fileName
+    });
   }catch(e){}
 }
 function loadImportDraftState(){
   if (!window.JKHStore || !JKHStore.getJSON) return null;
-  try{ return JKHStore.getJSON('import_xls_draft_v1', null, null); }catch(e){ return null; }
+  try{
+    const draft = JKHStore.getJSON('import_xls_draft_v1', null, null);
+    console.log('[import_xls][draft-load]', {
+      kind: 'preview',
+      ownerId: getCurrentOwnerId(),
+      hasData: !!draft,
+      draftOwner: normStr(draft && draft.ownerId)
+    });
+    return draft;
+  }catch(e){ return null; }
 }
 function clearImportDraftState(){
   if (!window.JKHStore || !JKHStore.setJSON) return;
@@ -1142,10 +1174,21 @@ function saveDraftNewAbonent(row){
     otch: normStr(row && row.otch),
     ls: normStr(row && row.ls),
     square: Number.isFinite(row && row.square) ? row.square : '',
-    regnum: '',
-    excelRow: Number(row && row.excelRow) || 0
+    regnum: normStr(row && (row.regnum || row.premiseRegnum || '')),
+    excelRow: Number(row && row.excelRow) || 0,
+    uid_import: normStr(row && (row.uid || row.excelUid || row.createdUid || row.resolvedUid))
   };
-  try{ JKHStore.setJSON('draft_new_abonent_v1', draft, null); return true; }catch(e){ return false; }
+  try{
+    JKHStore.setJSON('draft_new_abonent_v1', draft, null);
+    console.log('[import_xls][draft-save]', {
+      kind: 'new_abonent',
+      excelRow: draft.excelRow,
+      ls: draft.ls,
+      hasFio: !!(draft.fam || draft.name || draft.otch),
+      hasSquare: !!draft.square
+    });
+    return true;
+  }catch(e){ return false; }
 }
 function tryResumeFromHash(){
   if (location.hash !== '#resume=1') return false;
@@ -1193,12 +1236,17 @@ function tryResumeFromHash(){
 
   if (Array.isArray(dataRows) && dataRows.length){
     buildPreview();
-    saveImportDraftState();
   }
   if (target){
     const row = dataRows.find(function(x){ return Number(x.excelRow)===target; });
     const uid = normStr((row && getResolvedUid(row)) || resumedUid);
     const excelUid = row ? getExcelUid(row) : "";
+    console.log('[import_xls][resume-restored]', {
+      targetExcelRow: target,
+      uid: uid,
+      excelUid: excelUid,
+      hasRow: !!row
+    });
     if (uid){
       if (excelUid){
         setImportStatus('Абонент создан. Строка Excel: ' + target + '. UID: ' + uid + '.', 'ok');
@@ -2818,6 +2866,7 @@ function buildPreview(){
       (createdUidCount ? ' Создано программой: <b>' + createdUidCount + '</b>.' : (foundNeedsUidCount ? ' Скопируйте UID в Excel для найденных абонентов.' : ' Нажмите "Создать абонента" в нужной строке.'))
     : 'Строк без UID в Excel не найдено.';
   renderPreview();
+  saveImportDraftState();
 }
 
 function statusRU(s){ return ({OK:'ОК', ERROR:'ОШИБКА', NOT_FOUND:'НЕ НАЙДЕН', FOUND_NEEDS_EXCEL_UID:'НАЙДЕН / НУЖЕН UID В EXCEL', UPDATED:'ПРЕДУПРЕЖДЕНИЕ', STOPPED:'УЧТЁН / РАСЧЁТ ОСТАНОВЛЕН', WARNING_CREATED:'СОЗДАН', SKIP_DUPLICATE:'ДУБЛИКАТ', CONFLICT:'КОНФЛИКТ', APPLIED:'ПРИМЕНЕНО'})[s] || s; }
@@ -3400,7 +3449,10 @@ $('previewBody').addEventListener('click', function(ev){
       primaryBlocked: primaryBlocked,
       mode: mode,
       conflictDecision: conflictDecision,
-      targetExcelRow: excelRow
+      targetExcelRow: excelRow,
+      returnFrom: 'new_abonent',
+      createdUid: normStr(getCreatedUid(row)),
+      resolvedUid: normStr(getResolvedUid(row))
     });
     saveImportDraftState();
 
@@ -3542,7 +3594,18 @@ $('previewBody').addEventListener('click', function(ev){
           return;
         }
         buildPreview();
+        console.log('[import_xls][draft-restored]', {
+          ownerId: currentOwner,
+          rows: Array.isArray(dataRows) ? dataRows.length : 0,
+          mode: mode,
+          fileName: normStr(currentFileName)
+        });
         setImportStatus(fileYearBlockReason || 'Предпросмотр восстановлен. Исходный файл не выбран, но можно продолжать работу.', fileYearBlockReason ? 'err' : 'info');
+      });
+    } else {
+      console.warn('[import_xls][draft-owner-mismatch]', {
+        draftOwner: draftOwner,
+        currentOwner: currentOwner
       });
     }
   }
