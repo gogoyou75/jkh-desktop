@@ -69,6 +69,19 @@
     return value;
   }
 
+  window.unwrapRuntimeDb = window.unwrapRuntimeDb || function unwrapRuntimeDb(raw) {
+    if (!raw) return null;
+    try {
+      var parsed = (typeof raw === "string") ? JSON.parse(raw) : raw;
+      if (parsed && typeof parsed === "object" && Object.prototype.hasOwnProperty.call(parsed, "value") && parsed.value) {
+        return (typeof parsed.value === "string") ? JSON.parse(parsed.value) : parsed.value;
+      }
+      return parsed;
+    } catch (e) {
+      return null;
+    }
+  };
+
   function hasServerEnvType() {
     return !!getEnvType();
   }
@@ -1635,7 +1648,7 @@
         var applied = replaced.written;
         var runtimeBefore = window.AbonentsDB || null;
         var rawRuntimeDb = _readLocalCompat(KEY_DB, ownerId);
-        var parsedRuntimeDb = safeJsonParse(rawRuntimeDb, null);
+        var parsedRuntimeDb = window.unwrapRuntimeDb ? window.unwrapRuntimeDb(rawRuntimeDb) : safeJsonParse(rawRuntimeDb, null);
         var runtimeCounts = {
           abonents: runtimeBefore && runtimeBefore.abonents && typeof runtimeBefore.abonents === "object" ? Object.keys(runtimeBefore.abonents).length : 0,
           premises: runtimeBefore && runtimeBefore.premises && typeof runtimeBefore.premises === "object" ? Object.keys(runtimeBefore.premises).length : 0,

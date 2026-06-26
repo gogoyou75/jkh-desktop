@@ -146,7 +146,7 @@ window.PremisesAdmin = (function () {
         const raw = (window.JKHStore && typeof JKHStore.getRaw === "function")
             ? JKHStore.getRaw(KEY_DB, ownerId)
             : null;
-        const parsed = safeParse(raw, null);
+        const parsed = window.unwrapRuntimeDb ? window.unwrapRuntimeDb(raw) : safeParse(raw, null);
         if (parsed && typeof parsed === "object") return parsed;
         return { premises: {}, links: [], abonents: {} };
     }
@@ -173,7 +173,7 @@ window.PremisesAdmin = (function () {
         const raw = (window.JKHStore && typeof JKHStore.getRaw === "function")
             ? JKHStore.getRaw(KEY_DB, getActiveOwnerId())
             : null;
-        const parsed = safeParse(raw, null);
+        const parsed = window.unwrapRuntimeDb ? window.unwrapRuntimeDb(raw) : safeParse(raw, null);
         if (parsed && typeof parsed === 'object' && !Array.isArray(parsed) && hasDbContent(parsed)) {
             window.AbonentsDB = parsed;
         } else if (!hasDbContent(current)) {

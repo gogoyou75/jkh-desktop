@@ -780,11 +780,11 @@ function __installAbonentCardRuntimeDbGuard(rawHasContent) {
 function hydrateRuntimeDbFromStore() {
     try {
         console.log("[abonent_card][hydrate-start]");
-        const raw = (window.JKHStore && typeof window.JKHStore.getRaw === "function")
+        const rawBlob = (window.JKHStore && typeof window.JKHStore.getRaw === "function")
             ? window.JKHStore.getRaw("abonents_db_v1")
             : null;
-        const rawType = raw === null ? "null" : Array.isArray(raw) ? "array" : typeof raw;
-        const rawStr = String(raw || "");
+        const rawType = rawBlob === null ? "null" : Array.isArray(rawBlob) ? "array" : typeof rawBlob;
+        const rawStr = typeof rawBlob === "string" ? rawBlob : JSON.stringify(rawBlob || null);
         console.log("[abonent_card][raw-check]", {
             rawType,
             rawLen: rawStr.length,
@@ -799,7 +799,7 @@ function hydrateRuntimeDbFromStore() {
             has1001: !!(parsed && parsed.abonents && parsed.abonents["1001"])
         });
 
-        let db = parsed && Object.prototype.hasOwnProperty.call(parsed, "value") ? parsed.value : parsed;
+        let db = window.unwrapRuntimeDb ? window.unwrapRuntimeDb(rawBlob) : (parsed && Object.prototype.hasOwnProperty.call(parsed, "value") ? parsed.value : parsed);
         if (typeof db === "string" && db.trim()) {
             try { db = JSON.parse(db); } catch (innerParseErr) { console.warn("[abonent_card][hydrate-inner-parse-error]", innerParseErr); }
         }

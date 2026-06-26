@@ -2424,6 +2424,22 @@
     return out;
   }
 
+  function unwrapRuntimeDb(raw) {
+    if (window.unwrapRuntimeDb && window.unwrapRuntimeDb !== unwrapRuntimeDb) {
+      return window.unwrapRuntimeDb(raw);
+    }
+    if (!raw) return null;
+    try {
+      const parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
+      if (parsed && typeof parsed === "object" && Object.prototype.hasOwnProperty.call(parsed, "value") && parsed.value) {
+        return typeof parsed.value === "string" ? JSON.parse(parsed.value) : parsed.value;
+      }
+      return parsed;
+    } catch (e) {
+      return null;
+    }
+  }
+
   function logRuntimeDbShape(reason) {
     try {
       console.log("[runtime-db-keys]", Object.keys(window.AbonentsDB || {}));
@@ -2448,7 +2464,7 @@
     if (!_canReadLocalCacheAsSource()) {
       try {
         var blockedRaw = _getRawScoped(KEY_DB, _ownerId());
-        var blockedParsed = safeJsonParse(blockedRaw, null);
+        var blockedParsed = unwrapRuntimeDb(blockedRaw);
         if (blockedParsed && typeof blockedParsed === "object" && !Array.isArray(blockedParsed) && !_isDbEffectivelyEmpty(blockedParsed)) {
           try {
             console.info("[data][runtime-hydrate-ok]", {
@@ -2526,7 +2542,7 @@
 
     window.JKH_DB_READONLY = false;
     const raw = _getRawScoped(KEY_DB);
-    const parsed = safeJsonParse(raw, null);
+    const parsed = unwrapRuntimeDb(raw);
     if (parsed && typeof parsed === "object" && !Array.isArray(parsed) && !_isDbEffectivelyEmpty(parsed)) {
       try {
         console.info("[data][runtime-hydrate-ok]", {
