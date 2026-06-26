@@ -736,6 +736,47 @@ function __countRuntimeDb(db) {
     };
 }
 
+function __installAbonentCardRuntimeDbGuard(rawHasContent) {
+    try {
+        if (window.__ABONENTS_DB_GUARD_INSTALLED) return true;
+        const desc = Object.getOwnPropertyDescriptor(window, "AbonentsDB");
+        if (desc && desc.configurable === false) return false;
+
+        let currentDb = window.AbonentsDB && typeof window.AbonentsDB === "object"
+            ? window.AbonentsDB
+            : { abonents: {}, premises: {}, links: [] };
+
+        Object.defineProperty(window, "AbonentsDB", {
+            configurable: true,
+            enumerable: true,
+            get() {
+                return currentDb;
+            },
+            set(next) {
+                const nextDb = next && typeof next === "object" ? next : null;
+                const currentCounts = __countRuntimeDb(currentDb || {});
+                const nextCounts = __countRuntimeDb(nextDb || {});
+                const currentHasContent = !!(currentCounts.abonentsCount || currentCounts.premisesCount || currentCounts.linksCount);
+                const nextHasContent = !!(nextCounts.abonentsCount || nextCounts.premisesCount || nextCounts.linksCount);
+                if (rawHasContent && currentHasContent && !nextHasContent) {
+                    console.warn("[abonent_card][runtime-overwrite-blocked]", {
+                        reason: "empty_overwrite_blocked",
+                        currentCounts,
+                        nextCounts
+                    });
+                    return;
+                }
+                currentDb = nextDb || { abonents: {}, premises: {}, links: [] };
+            }
+        });
+        window.__ABONENTS_DB_GUARD_INSTALLED = true;
+        return true;
+    } catch (e) {
+        console.warn("[abonent_card][runtime-guard-error]", e);
+        return false;
+    }
+}
+
 function hydrateRuntimeDbFromStore() {
     try {
         console.log("[abonent_card][hydrate-start]");
@@ -743,17 +784,35 @@ function hydrateRuntimeDbFromStore() {
             ? window.JKHStore.getRaw("abonents_db_v1")
             : null;
         const parsed = raw ? JSON.parse(String(raw)) : null;
-        if (parsed && typeof parsed === "object" && !Array.isArray(parsed) && parsed.abonents && typeof parsed.abonents === "object" && Object.keys(parsed.abonents).length) {
+        const rawHasContent = !!(parsed && typeof parsed === "object" && !Array.isArray(parsed) && parsed.abonents && typeof parsed.abonents === "object" && Object.keys(parsed.abonents).length);
+        if (rawHasContent) {
             window.AbonentsDB = parsed;
+            window.AbonentsDB.abonents = parsed.abonents || {};
+            window.AbonentsDB.premises = parsed.premises || {};
+            window.AbonentsDB.links = parsed.links || [];
+            __installAbonentCardRuntimeDbGuard(true);
         } else if (!window.AbonentsDB || typeof window.AbonentsDB !== "object") {
             window.AbonentsDB = { abonents: {}, premises: {}, links: [] };
+            __installAbonentCardRuntimeDbGuard(false);
         } else {
             window.AbonentsDB.abonents = window.AbonentsDB.abonents || {};
             window.AbonentsDB.premises = window.AbonentsDB.premises || {};
             window.AbonentsDB.links = window.AbonentsDB.links || [];
+            __installAbonentCardRuntimeDbGuard(false);
         }
         const counts = __countRuntimeDb(window.AbonentsDB);
         console.log("[abonent_card][hydrate-done]", counts);
+        console.log("[abonent_card][hydrate-after-assign]", {
+            abonentsCount: counts.abonentsCount,
+            has1001: !!(window.AbonentsDB && window.AbonentsDB.abonents && window.AbonentsDB.abonents["1001"])
+        });
+        setTimeout(() => {
+            const tickCounts = __countRuntimeDb(window.AbonentsDB);
+            console.log("[abonent_card][hydrate-after-tick]", {
+                abonentsCount: tickCounts.abonentsCount,
+                has1001: !!(window.AbonentsDB && window.AbonentsDB.abonents && window.AbonentsDB.abonents["1001"])
+            });
+        }, 0);
         return {
             rawLen: String(raw || "").length,
             counts: counts,
@@ -768,6 +827,8 @@ function hydrateRuntimeDbFromStore() {
         };
     }
 }
+
+hydrateRuntimeDbFromStore();
 
 function showAbonentCardContextError(reason) {
     const msg = reason === "not_found"
@@ -788,26 +849,14 @@ function showAbonentCardContextError(reason) {
 }
 
 function getDb() {
-    if (window.Data && typeof window.Data.getDb === "function") {
-        const db = window.Data.getDb();
-        return db?.abonents || {};
-    }
     return window.AbonentsDB?.abonents || {};
 }
 
 function getPremisesDb(){
-    if (window.Data && typeof window.Data.getDb === "function") {
-        const db = window.Data.getDb();
-        return db?.premises || {};
-    }
     return window.AbonentsDB?.premises || {};
 }
 
 function getLinks(){
-    if (window.Data && typeof window.Data.getDb === "function") {
-        const db = window.Data.getDb();
-        return Array.isArray(db?.links) ? db.links : [];
-    }
     return Array.isArray(window.AbonentsDB?.links) ? window.AbonentsDB.links : [];
 }
 
@@ -850,8 +899,9 @@ function getActiveLinkForPremise(regnum){
 
 function getCurrentAbonent() {
     const id = String(getAbonentIdFromURL() || "").trim();
-    const db = getDb();
-    return { id, a: id ? (db[id] || null) : null };
+    const db = window.AbonentsDB && typeof window.AbonentsDB === "object" ? window.AbonentsDB : { abonents: {}, premises: {}, links: [] };
+    const abonent = db.abonents && typeof db.abonents === "object" ? db.abonents[id] || null : null;
+    return { id, a: abonent };
 }
 
 function splitFio(fio) {
@@ -950,7 +1000,7 @@ function fillAbonentCard() {
 
     const activePremiseLink = regnum ? getActiveLinkForPremise(regnum) : null;
     const activeAbId = String(activePremiseLink?.abonentId || '').trim();
-    const activeAb = activeAbId ? (getDb()[activeAbId] || null) : null;
+    const activeAb = activeAbId && window.AbonentsDB && window.AbonentsDB.abonents ? (window.AbonentsDB.abonents[activeAbId] || null) : null;
     const activeName = String(activeAb?.fio || '').trim();
 
     // кто ответственный по квартире
@@ -1377,7 +1427,7 @@ function __isAbonentCardDataReady() {
     try {
         if (!hasExplicitAbonentCardContext()) return true;
         const id = String(getAbonentIdFromURL() || "").trim();
-        const db = (window.Data && typeof Data.getDb === "function") ? Data.getDb() : null;
+        const db = window.AbonentsDB && typeof window.AbonentsDB === "object" ? window.AbonentsDB : null;
         const abonents = db && db.abonents ? db.abonents : null;
         if (!id || !abonents) return false;
         const a = abonents[id];
@@ -2180,7 +2230,7 @@ async function saveAbonentEdit() {
         if (window.Data && typeof window.Data.ensurePremise === 'function') {
             window.Data.ensurePremise(syncedPremise);
         } else {
-            if (!window.AbonentsDB) window.AbonentsDB = {};
+            if (!window.AbonentsDB || typeof window.AbonentsDB !== 'object') window.AbonentsDB = { abonents: {}, premises: {}, links: [] };
             if (!window.AbonentsDB.premises || typeof window.AbonentsDB.premises !== 'object') window.AbonentsDB.premises = {};
             window.AbonentsDB.premises[activeRegnum] = syncedPremise;
             if (typeof window.saveAbonentsDB === 'function') window.saveAbonentsDB();
