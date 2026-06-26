@@ -6,7 +6,10 @@
 
 ## Итог
 
-CRITICAL-риски: не найдено.
+CRITICAL-риски: найдены практической проверкой и исправлены.
+
+Найден CRITICAL-риск практической проверкой и исправлен:
+- `main` содержал LAB `docker-compose.yml`: `jkh_lab_nginx`, `jkh_lab_mysql`, `jkh_lab_api`, порты `8080/5001/3307` и LAB-переменные. PROD deploy был корректно остановлен guard-ом `PROD compose содержит LAB container_name. Deploy запрещён.`
 
 Найден HIGH-риск практической проверкой и исправлен:
 - LAB пункт 3 `Main с build` мог переключить рабочую копию на `main`, выполнить `git pull origin main`, восстановить LAB `docker-compose.yml`, выполнить `docker compose up -d --build`, завершиться SUCCESS и оставить LAB на ветке `main` с `M docker-compose.yml`.
@@ -17,6 +20,7 @@ CRITICAL-риски: не найдено.
 - `git reset --hard` может удалить tracked-изменения после явного подтверждения.
 
 Добавлены безопасные guard-исправления:
+- Основной `docker-compose.yml` в `main` теперь является PROD-safe default: `jkh_nginx`, `jkh_mysql`, `jkh_api`, порты `80/3306/5000`, без `jkh_lab_*`, `8080/5001/3307` и `jkh_lab_mysql_data`.
 - Main-сценарии в LAB запрещены до любых Git/Docker/self-heal действий. Для LAB нужно использовать пункты 4/5 с тестовой веткой.
 - PROD main-сценарии требуют `YES_PROD`, backup MySQL, environment guard и branch guard `main == origin/main`.
 - Cherry-pick теперь выбирает source branch из `origin/*`, показывает последние 20 коммитов, выбирает commit номером, валидирует ручной hash и запускает build только после второго подтверждения.
@@ -57,6 +61,8 @@ CRITICAL-риски: не найдено.
 - `git checkout`: `scripts/jkh_server_menu_v5_3.sh:1594`, `1622`, `1632`, `1646`, `1669`
 - `git pull`: `scripts/jkh_server_menu_v5_3.sh:1595`, `1633`, `1670`
 - `git reset --hard`: `scripts/jkh_server_menu_v5_3.sh:1623`, `1783`
+- main compose PROD container names: `docker-compose.yml`
+- LAB differences: только через `lab_compose_self_heal` / override, не через основной `main` compose.
 
 ## Правильный поток LAB -> PROD
 
@@ -75,6 +81,25 @@ CRITICAL-риски: не найдено.
 - `docker volume rm`
 
 ## Находки
+
+### -1. main содержал LAB docker-compose.yml
+
+Статус: найдено практической проверкой и исправлено.
+Файл: `docker-compose.yml`.
+Риск до исправления: CRITICAL.
+Риск после исправления: LOW при сохранении guard-ов.
+
+Объяснение:
+После merge `main` содержал LAB compose: `jkh_lab_nginx`, `jkh_lab_mysql`, `jkh_lab_api`, порты `8080:80`, `3307:3306`, `5001:5000`, а также LAB-специфичные переменные. На PROD это было остановлено guard-ом `PROD compose содержит LAB container_name. Deploy запрещён.`
+
+Исправление:
+Основной `docker-compose.yml` переведён в PROD-safe default: `jkh_nginx`, `jkh_mysql`, `jkh_api`, порты `80:80`, `3306:3306`, `5000:5000`, без `jkh_lab_*`, без `8080/5001/3307`, без `jkh_lab_mysql_data` и без LAB-принуждения `DB_NAME=jkh_lab` / `ENV_TYPE=LAB`.
+
+Правило:
+`main` всегда должен хранить PROD-safe compose. LAB differences допускаются только через LAB self-heal в меню или отдельный override, но не как основной compose в `main`.
+
+Нужно ли чинить сейчас:
+Уже исправлено.
 
 ### 0. LAB пункт 3 `Main с build` оставляет LAB на main и dirty compose
 
