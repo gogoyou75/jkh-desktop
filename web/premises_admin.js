@@ -3,6 +3,13 @@
    Не ломает существующий проект: работает поверх window.AbonentsDB
 */
 
+const PREMISES_ADMIN_VERSION = '20260626-runtime-db';
+console.log('[premises][script-loaded]', {
+    file: 'premises_admin.js',
+    version: PREMISES_ADMIN_VERSION,
+    src: document.currentScript && document.currentScript.src ? document.currentScript.src : null
+});
+
 window.PremisesAdmin = (function () {
     function q(id) { return document.getElementById(id); }
 
