@@ -375,7 +375,7 @@ create_mysql_backup() {
 }
 
 backup_current_environment() {
-  local backup_file backup_db
+  local backup_file backup_db git_status answer
 
   require_prod_confirmation "Backup текущей PROD среды" || return 1
   environment_guard || return 1
@@ -392,18 +392,47 @@ backup_current_environment() {
   esac
 
   backup_file="$MANUAL_BACKUP_DIR/${ENVIRONMENT,,}_backup_$(date +%F_%H-%M-%S).sql"
+  git_status="$(git status --porcelain)"
 
   echo
   print_line
   echo "BACKUP ТЕКУЩЕЙ СРЕДЫ | $ENVIRONMENT"
   print_line
-  echo "Container: $MYSQL_CONTAINER"
-  echo "DB_NAME:   $backup_db"
-  echo "File:      $backup_file"
+  echo "Среда:           $ENVIRONMENT"
+  echo "Папка:           $PROJECT_DIR"
+  echo "Текущая ветка:   $(git branch --show-current 2>/dev/null || echo unknown)"
+  echo "HEAD commit:     $(git log --oneline -1 2>/dev/null || echo unknown)"
+  echo "Git status:"
+  git status -sb || true
+  echo "MySQL container: $MYSQL_CONTAINER"
+  echo "DB_NAME:         $backup_db"
+  echo "Backup file:     $backup_file"
+  echo
+  echo "Backup сохраняет только MySQL-базу текущей среды. Ветка показана только для понимания, какой код сейчас рядом с этой базой. Ветку для backup выбирать не нужно."
+  echo
   echo "Restore НЕ выполняется."
   echo "Docker down НЕ выполняется."
   echo "Git НЕ меняется."
   print_line
+
+  if [ -n "$git_status" ]; then
+    if [ "$ENVIRONMENT" = "PROD" ]; then
+      echo "ВНИМАНИЕ: PROD git status не чистый."
+      read -rp "Для backup PROD при dirty git status введи YES_PROD_DIRTY_BACKUP: " answer
+      if [ "$answer" != "YES_PROD_DIRTY_BACKUP" ]; then
+        block_operation "BLOCKED: PROD backup при dirty git status требует YES_PROD_DIRTY_BACKUP"
+        return 1
+      fi
+    else
+      echo "WARNING: LAB git status не чистый. Backup базы можно продолжить, Git не меняется."
+      read -rp "Продолжить LAB backup при dirty git status? Напиши y: " answer
+      if [ "$answer" != "y" ]; then
+        echo "Backup отменён до mysqldump."
+        LAST_ERROR=1
+        return 1
+      fi
+    fi
+  fi
 
   run mkdir -p "$MANUAL_BACKUP_DIR" || return 1
   echo "Создаётся backup MySQL: $backup_file"
