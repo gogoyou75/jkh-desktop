@@ -170,7 +170,7 @@
     }
 
     if (window.PremisesAdmin && typeof PremisesAdmin.init === 'function') {
-      PremisesAdmin.init();
+      await PremisesAdmin.init();
     } else {
       if (warnEl) {
         warnEl.style.display = 'block';

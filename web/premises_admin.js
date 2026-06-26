@@ -142,6 +142,47 @@ window.PremisesAdmin = (function () {
         return { premises: {}, links: [], abonents: {} };
     }
 
+    function countDb(db) {
+        return {
+            abonentsCount: db && db.abonents && typeof db.abonents === 'object' ? Object.keys(db.abonents).length : 0,
+            premisesCount: db && db.premises && typeof db.premises === 'object' ? Object.keys(db.premises).length : 0,
+            linksCount: db && Array.isArray(db.links) ? db.links.length : 0
+        };
+    }
+
+    function hasDbContent(db) {
+        const c = countDb(db);
+        return !!(c.abonentsCount || c.premisesCount || c.linksCount);
+    }
+
+    async function ensureRuntimeHydration(reason) {
+        if (hasDbContent(window.AbonentsDB)) {
+            const readyNow = countDb(window.AbonentsDB);
+            console.log('[premises][db-ready]', readyNow);
+            return readyNow;
+        }
+
+        try {
+            if (window.Data && typeof Data.waitForServerFirstDataReady === 'function') {
+                await Data.waitForServerFirstDataReady({ timeoutMs: 8000 });
+            } else if (window.JKHDataLoader && typeof window.JKHDataLoader.loadFromServer === 'function') {
+                await window.JKHDataLoader.loadFromServer({ force: false, reason: reason || 'premises_init' });
+            }
+        } catch (e) {}
+
+        const raw = (window.JKHStore && typeof JKHStore.getRaw === "function")
+            ? JKHStore.getRaw(KEY_DB, getActiveOwnerId())
+            : null;
+        const parsed = safeParse(raw, null);
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed) && hasDbContent(parsed)) {
+            window.AbonentsDB = parsed;
+        }
+
+        const ready = countDb(window.AbonentsDB);
+        console.log('[premises][db-ready]', ready);
+        return ready;
+    }
+
     const GROUP_COLORS = [
         "#EAF3FF", // light blue
         "#EAFBEA", // light green
@@ -1236,7 +1277,8 @@ window.PremisesAdmin = (function () {
         return premiseSortWeight(p) > 0;
     }
 
-    function renderTable() {
+    async function renderTable() {
+        await ensureRuntimeHydration('render');
         const tbody = q('premisesTable')?.querySelector('tbody');
         if (!tbody) return;
 
@@ -1316,6 +1358,7 @@ window.PremisesAdmin = (function () {
             });
 
             q('premCount').textContent = `Показано: ${totalShown} / ${totalAll} (все базы)`;
+            console.log('[premises][render]', { premisesCount: totalAll, visibleCount: totalShown });
             return;
         }
 
@@ -1369,6 +1412,7 @@ window.PremisesAdmin = (function () {
         });
 
         q('premCount').textContent = `Показано: ${shown} / ${Object.keys(premises).length}`;
+        console.log('[premises][render]', { premisesCount: Object.keys(premises).length, visibleCount: shown });
 
         tbody.querySelectorAll('button[data-act]')?.forEach(btn => {
             btn.addEventListener('click', () => {
@@ -1656,7 +1700,8 @@ function onSave() {
         });
     }
 
-    function init() {
+    async function init() {
+        await ensureRuntimeHydration('init');
         window.AbonentsDB = window.AbonentsDB || { abonents: {}, premises: {}, links: [] };
         window.AbonentsDB.premises = window.AbonentsDB.premises || {};
         window.AbonentsDB.links = window.AbonentsDB.links || [];
@@ -1683,7 +1728,7 @@ function onSave() {
         bind();
         importOpenContext = readImportOpenContext();
         setFormModeAdd();
-        renderTable();
+        await renderTable();
         if (importOpenContext && importOpenContext.regnum) {
             const ctxCheck = checkImportOpenContext(importOpenContext);
             logPremisesImportContextCheck(importOpenContext, ctxCheck.ok ? (ctxCheck.result || 'ok') : 'blocked', ctxCheck.reason);
