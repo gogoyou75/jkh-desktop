@@ -728,6 +728,47 @@ function hasExplicitAbonentCardContext() {
     return !!String(params.get("abonent") || params.get("uid") || "").trim();
 }
 
+function __countRuntimeDb(db) {
+    return {
+        abonentsCount: db && db.abonents && typeof db.abonents === "object" ? Object.keys(db.abonents).length : 0,
+        premisesCount: db && db.premises && typeof db.premises === "object" ? Object.keys(db.premises).length : 0,
+        linksCount: db && Array.isArray(db.links) ? db.links.length : 0
+    };
+}
+
+function hydrateRuntimeDbFromStore() {
+    try {
+        console.log("[abonent_card][hydrate-start]");
+        const raw = (window.JKHStore && typeof window.JKHStore.getRaw === "function")
+            ? window.JKHStore.getRaw("abonents_db_v1")
+            : null;
+        const parsed = raw ? JSON.parse(String(raw)) : null;
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed) && parsed.abonents && typeof parsed.abonents === "object" && Object.keys(parsed.abonents).length) {
+            window.AbonentsDB = parsed;
+        } else if (!window.AbonentsDB || typeof window.AbonentsDB !== "object") {
+            window.AbonentsDB = { abonents: {}, premises: {}, links: [] };
+        } else {
+            window.AbonentsDB.abonents = window.AbonentsDB.abonents || {};
+            window.AbonentsDB.premises = window.AbonentsDB.premises || {};
+            window.AbonentsDB.links = window.AbonentsDB.links || [];
+        }
+        const counts = __countRuntimeDb(window.AbonentsDB);
+        console.log("[abonent_card][hydrate-done]", counts);
+        return {
+            rawLen: String(raw || "").length,
+            counts: counts,
+            foundTarget: !!(String(getAbonentIdFromURL() || "").trim() && window.AbonentsDB && window.AbonentsDB.abonents && window.AbonentsDB.abonents[String(getAbonentIdFromURL() || "").trim()])
+        };
+    } catch (e) {
+        console.warn("[abonent_card][hydrate-error]", e);
+        return {
+            rawLen: 0,
+            counts: __countRuntimeDb(window.AbonentsDB || {}),
+            foundTarget: !!(String(getAbonentIdFromURL() || "").trim() && window.AbonentsDB && window.AbonentsDB.abonents && window.AbonentsDB.abonents[String(getAbonentIdFromURL() || "").trim()])
+        };
+    }
+}
+
 function showAbonentCardContextError(reason) {
     const msg = reason === "not_found"
         ? "Абонент не найден в текущей базе. Откройте карточку из списка абонентов."
@@ -1300,30 +1341,36 @@ async function __repairEmptyExcludePeriodsKeysAfterServerLoad(){
 }
 
 async function __initAbonentCardSafe(){
+    console.log("[abonent_card][init-enter]");
     if (__abonentCardInitStarted) return;
     __logCardReturnFromSpravkaContext("init");
-    if (!hasExplicitAbonentCardContext()) {
-        __abonentCardInitStarted = true;
-        showAbonentCardContextError("missing_abonent");
-        return;
-    }
-    __abonentCardInitStarted = true;
-
-    await __repairEmptyExcludePeriodsKeysAfterServerLoad();
-
-    try { loadCalcPeriodUI(); } catch(e) { try { console.warn('[card-period][load-after-ready-failed]', e); } catch(_){} }
-    try { fillAbonentCard(); } catch(e) { try { console.error('[abonent_card] fill failed', e); } catch(_){} }
-    try { loadAbonentSummaryStatus(); } catch(e) { try { console.warn('[summary][status-load-failed]', e); } catch(_){} }
-
-    setTimeout(() => {
-        // Opening the card is read-only for summary/accrual state: no auto-recalc here.
-        const fromSpravka = __isCardReturnFromSpravkaUrl();
-        if (fromSpravka) {
-            try { console.log("[card-init][ready-after-return]", { reason: "server-first-ready", force: true }); } catch(eReturnReady) {}
+    try {
+        if (!hasExplicitAbonentCardContext()) {
+            __abonentCardInitStarted = true;
+            showAbonentCardContextError("missing_abonent");
+            return;
         }
-        try { console.log("[card-init][force-payment-table-load]", { reason: fromSpravka ? "return-from-spravka" : "DOMContentLoaded", force: !!fromSpravka }); } catch(eForceLog) {}
-        __safeLoadPaymentTableOnce(fromSpravka ? 'return-from-spravka' : 'DOMContentLoaded', { force: fromSpravka });
-    }, 0);
+        __abonentCardInitStarted = true;
+
+        await __repairEmptyExcludePeriodsKeysAfterServerLoad();
+
+        try { loadCalcPeriodUI(); } catch(e) { try { console.warn('[card-period][load-after-ready-failed]', e); } catch(_){} }
+        try { fillAbonentCard(); } catch(e) { try { console.error('[abonent_card] fill failed', e); } catch(_){} }
+        try { loadAbonentSummaryStatus(); } catch(e) { try { console.warn('[summary][status-load-failed]', e); } catch(_){} }
+
+        setTimeout(() => {
+            // Opening the card is read-only for summary/accrual state: no auto-recalc here.
+            const fromSpravka = __isCardReturnFromSpravkaUrl();
+            if (fromSpravka) {
+                try { console.log("[card-init][ready-after-return]", { reason: "server-first-ready", force: true }); } catch(eReturnReady) {}
+            }
+            try { console.log("[card-init][force-payment-table-load]", { reason: fromSpravka ? "return-from-spravka" : "DOMContentLoaded", force: !!fromSpravka }); } catch(eForceLog) {}
+            __safeLoadPaymentTableOnce(fromSpravka ? 'return-from-spravka' : 'DOMContentLoaded', { force: fromSpravka });
+        }, 0);
+    } catch (e) {
+        try { console.error("[abonent_card][init-error]", e); } catch (_) {}
+        throw e;
+    }
 }
 
 function __isAbonentCardDataReady() {
@@ -1358,6 +1405,7 @@ function __waitForAbonentCardDataReady(cb) {
     let done = false;
     let tries = 0;
     let lastStateKey = "";
+    let runtimeHydration = hydrateRuntimeDbFromStore();
 
     function finish(reason) {
         if (done) return;
@@ -1386,6 +1434,14 @@ function __waitForAbonentCardDataReady(cb) {
         const serverReady = __isAbonentCardServerFirstReady();
         const abonentReady = __isAbonentCardDataReady();
         const returnFromSpravka = __isCardReturnFromSpravkaUrl();
+        const runtimeTargetReady = !!(runtimeHydration && runtimeHydration.foundTarget);
+
+        try { console.log("[abonent_card][target]", { requestedAbonentId: String(getAbonentIdFromURL() || "").trim(), found: runtimeTargetReady || abonentReady }); } catch(eTargetLog) {}
+
+        if ((runtimeTargetReady || abonentReady) && hasExplicitAbonentCardContext()) {
+            finish("runtime-hydrated");
+            return;
+        }
 
         if (returnFromSpravka && abonentReady) {
             try { console.log("[card-init][data-already-ready]", { reason: reason, status: status }); } catch(eReadyLog) {}
