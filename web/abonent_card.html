@@ -783,13 +783,43 @@ function hydrateRuntimeDbFromStore() {
         const raw = (window.JKHStore && typeof window.JKHStore.getRaw === "function")
             ? window.JKHStore.getRaw("abonents_db_v1")
             : null;
-        const parsed = raw ? JSON.parse(String(raw)) : null;
-        const rawHasContent = !!(parsed && typeof parsed === "object" && !Array.isArray(parsed) && parsed.abonents && typeof parsed.abonents === "object" && Object.keys(parsed.abonents).length);
-        if (rawHasContent) {
-            window.AbonentsDB = parsed;
-            window.AbonentsDB.abonents = parsed.abonents || {};
-            window.AbonentsDB.premises = parsed.premises || {};
-            window.AbonentsDB.links = parsed.links || [];
+        const rawType = raw === null ? "null" : Array.isArray(raw) ? "array" : typeof raw;
+        const rawStr = String(raw || "");
+        console.log("[abonent_card][raw-check]", {
+            rawType,
+            rawLen: rawStr.length,
+            rawStart: rawStr.slice(0, 120)
+        });
+
+        const parsed = rawStr ? JSON.parse(rawStr) : null;
+        console.log("[abonent_card][parsed-keys]", {
+            keys: Object.keys(parsed || {}),
+            abonentsType: typeof (parsed && parsed.abonents),
+            abonentsKeysCount: parsed && parsed.abonents ? Object.keys(parsed.abonents).length : 0,
+            has1001: !!(parsed && parsed.abonents && parsed.abonents["1001"])
+        });
+
+        let db = parsed && Object.prototype.hasOwnProperty.call(parsed, "value") ? parsed.value : parsed;
+        if (typeof db === "string" && db.trim()) {
+            try { db = JSON.parse(db); } catch (innerParseErr) { console.warn("[abonent_card][hydrate-inner-parse-error]", innerParseErr); }
+        }
+        if (!db || typeof db !== "object" || Array.isArray(db)) {
+            db = null;
+        }
+
+        const dbHasContent = !!(db && db.abonents && typeof db.abonents === "object" && Object.keys(db.abonents).length);
+        const rawLen = rawStr.length;
+        if (dbHasContent) {
+            window.AbonentsDB = db;
+            window.AbonentsDB.abonents = db.abonents || {};
+            window.AbonentsDB.premises = db.premises || {};
+            window.AbonentsDB.links = db.links || [];
+            __installAbonentCardRuntimeDbGuard(true);
+        } else if (rawLen > 1000) {
+            console.warn("[abonent_card][hydrate-large-raw-no-db]", {
+                rawLen,
+                currentKeys: Object.keys(window.AbonentsDB || {})
+            });
             __installAbonentCardRuntimeDbGuard(true);
         } else if (!window.AbonentsDB || typeof window.AbonentsDB !== "object") {
             window.AbonentsDB = { abonents: {}, premises: {}, links: [] };
@@ -803,7 +833,9 @@ function hydrateRuntimeDbFromStore() {
         const counts = __countRuntimeDb(window.AbonentsDB);
         console.log("[abonent_card][hydrate-done]", counts);
         console.log("[abonent_card][hydrate-after-assign]", {
-            abonentsCount: counts.abonentsCount,
+            abonentsCount: Object.keys(window.AbonentsDB.abonents || {}).length,
+            premisesCount: Object.keys(window.AbonentsDB.premises || {}).length,
+            linksCount: (window.AbonentsDB.links || []).length,
             has1001: !!(window.AbonentsDB && window.AbonentsDB.abonents && window.AbonentsDB.abonents["1001"])
         });
         setTimeout(() => {
