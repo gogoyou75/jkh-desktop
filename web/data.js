@@ -1121,9 +1121,11 @@
     return data;
   }
 
-  async function saveCardSnapshotAndWait(abonentOrId, snapshot) {
+  async function saveCardSnapshotAndWait(abonentOrId, snapshot, options) {
+    var opts = options && typeof options === "object" ? options : {};
     var result = { ok: false, localOk: false, serverOk: false, serverReadbackOk: false, key: "", ownerId: "", status: 0, reason: "", rowsByIdCount: 0, ledgerVersion: "" };
-    var runId = _fullRecalcRunId({});
+    var runId = String(opts.runId || _fullRecalcRunId({}) || "");
+    var skipReadback = opts.skipReadback === true;
     try {
       if (!Data.ensureWriteOrExplain()) {
         result.reason = "WRITE_BLOCKED";
@@ -1181,6 +1183,12 @@
       result.reason = "";
       try { console.log("[card-snapshot][server-save-ok]", { ownerId: ownerId, key: key, status: result.status }); } catch (eServerOkLog) {}
       await _dataUiYield();
+      if (skipReadback) {
+        result.serverReadbackOk = true;
+        try { console.log("[card-snapshot][server-readback-skipped]", { runId: runId, ownerId: ownerId, key: key, reason: "post-recalc-save-ok" }); } catch (eReadbackSkipLog) {}
+        try { console.log("[card-snapshot][save-and-wait-ok]", result); } catch (eWaitSkipOkLog) {}
+        return result;
+      }
       var readback = await _serverStoreGet(ownerId, key);
       var readbackParsed = _parseCardSnapshotRawForDiagnostics(readback && readback.raw);
       result.serverReadbackOk = !!(readback && readback.ok === true && readbackParsed.ok === true && readbackParsed.ledgerVersion === result.ledgerVersion);

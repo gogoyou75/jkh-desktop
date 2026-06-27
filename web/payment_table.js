@@ -72,9 +72,102 @@
 
   let __paymentTableMode = "default";
   let __runtimeCacheState = { valid: false, reason: "", dataById: {} };
+  let __postRecalcRenderCount = 0;
+  let __postRecalcSnapshotValidationCount = 0;
+  let __postRecalcRestoreRowsCount = 0;
 
   function isReadonlyNoRecalcMode(){ return __paymentTableMode === "readonly_no_recalc"; }
   function isTemporaryCourtPeriodMode(){ return __paymentTableMode === "temporary_court_period"; }
+
+  function postRecalcState(){
+    const state = window.__JKH_POST_RECALC_SNAPSHOT;
+    return state && typeof state === "object" ? state : null;
+  }
+
+  function postRecalcRunId(){
+    const state = postRecalcState();
+    return String(state && state.runId || currentFullRecalcRunState() && currentFullRecalcRunState().runId || "");
+  }
+
+  function postRecalcElapsedMs(){
+    const state = postRecalcState();
+    const running = currentFullRecalcRunState();
+    const startedAt = Number(state && state.startedAt || running && running.startedAt || state && state.createdAt || 0);
+    return startedAt ? Math.max(0, Date.now() - startedAt) : 0;
+  }
+
+  function logPostRecalcRender(source){
+    const runId = postRecalcRunId();
+    if (!runId) return;
+    __postRecalcRenderCount += 1;
+    try {
+      console.log("[post-recalc][render]", {
+        runId: runId,
+        renderCount: __postRecalcRenderCount,
+        source: String(source || "")
+      });
+    } catch(ePostRenderLog) {}
+  }
+
+  function logPostRecalcSnapshotCycle(detail){
+    const runId = postRecalcRunId();
+    if (!runId) return;
+    const d = detail && typeof detail === "object" ? detail : {};
+    try {
+      console.log("[post-recalc][snapshot-cycle]", {
+        runId: runId,
+        saveOk: d.saveOk === true,
+        validationOk: d.validationOk === true,
+        readbackNeeded: d.readbackNeeded === true,
+        fallbackTriggered: d.fallbackTriggered === true
+      });
+    } catch(ePostSnapshotLog) {}
+  }
+
+  window.__markPostRecalcSnapshotFresh = function(runId, snapshot){
+    const s = snapshot && typeof snapshot === "object" ? snapshot : {};
+    const map = s.rowsById && typeof s.rowsById === "object" && !Array.isArray(s.rowsById) ? s.rowsById : {};
+    window.__JKH_POST_RECALC_SNAPSHOT = {
+      runId: String(runId || ""),
+      uid: String(s.uid || getAbonentId() || ""),
+      ledgerVersion: String(s.ledgerVersion || ""),
+      runtimeSignature: String(s.runtimeSignature || ""),
+      summaryStatus: String(s.summary_status || s.status || ""),
+      snapshotMode: String(s.snapshotMode || ""),
+      periodActive: s.periodActive === true,
+      period: s.period && typeof s.period === "object" ? { from: String(s.period.from || ""), to: String(s.period.to || "") } : null,
+      rowsById: map,
+      createdAt: Date.now(),
+      startedAt: currentFullRecalcRunState() && currentFullRecalcRunState().startedAt || Date.now(),
+      saveOk: false
+    };
+    __postRecalcRenderCount = 0;
+    __postRecalcSnapshotValidationCount = 0;
+    __postRecalcRestoreRowsCount = 0;
+  };
+
+  window.__setPostRecalcSnapshotSaveResult = function(runId, saveOk){
+    const state = postRecalcState();
+    if (!state || String(state.runId || "") !== String(runId || "")) return;
+    state.saveOk = saveOk === true;
+  };
+
+  function getFreshPostRecalcSnapshotRows(expectedLedgerVersion, periodActive, selectedPeriod, expectedSignature){
+    const state = postRecalcState();
+    if (!state) return null;
+    if (Date.now() - Number(state.createdAt || 0) > 120000) return null;
+    if (String(state.summaryStatus || "").toLowerCase() !== "fresh") return null;
+    if (String(state.uid || "") !== String(getAbonentId() || "")) return null;
+    if (String(state.ledgerVersion || "") !== String(expectedLedgerVersion || "")) return null;
+    if (expectedSignature && state.runtimeSignature && String(state.runtimeSignature) !== String(expectedSignature)) return null;
+    if ((state.periodActive === true) !== !!periodActive) return null;
+    if (periodActive) {
+      const p = state.period || {};
+      if (String(p.from || "") !== String(selectedPeriod && selectedPeriod.from || "") || String(p.to || "") !== String(selectedPeriod && selectedPeriod.to || "")) return null;
+    }
+    const map = state.rowsById && typeof state.rowsById === "object" && !Array.isArray(state.rowsById) ? state.rowsById : null;
+    return map && Object.keys(map).length ? map : null;
+  }
 
   function runtimePeriodDescriptor(periodActive, selectedPeriod){
     const active = !!periodActive;
@@ -165,6 +258,17 @@
 
   function applyRuntimeRowsById(rows, rowsById){
     const map = rowsById && typeof rowsById === "object" ? rowsById : {};
+    const runId = postRecalcRunId();
+    if (runId) {
+      __postRecalcRestoreRowsCount += 1;
+      try {
+        console.log("[post-recalc][stage]", {
+          runId: runId,
+          stage: "restore-rows-" + __postRecalcRestoreRowsCount,
+          elapsedMs: postRecalcElapsedMs()
+        });
+      } catch(ePostRestoreLog) {}
+    }
     (Array.isArray(rows) ? rows : []).forEach(function(r){
       const item = map[String(r.id)] || null;
       if (!item) return;
@@ -286,6 +390,17 @@
   function tryApplyCardSnapshotToRows(rows, expectedLedgerVersion, periodActive, selectedPeriod, expectedSignature){
     const out = { valid: false, reason: "CARD_SNAPSHOT_MISSING", dataById: {}, periodMatches: false, missingRows: [] };
     let snapshotForDiagnostics = null;
+    const postRunId = postRecalcRunId();
+    if (postRunId) {
+      __postRecalcSnapshotValidationCount += 1;
+      try {
+        console.log("[post-recalc][stage]", {
+          runId: postRunId,
+          stage: "snapshot-validation-" + __postRecalcSnapshotValidationCount,
+          elapsedMs: postRecalcElapsedMs()
+        });
+      } catch(ePostValidationStageLog) {}
+    }
     function dispatchInvalid(reason, extra){
       out.valid = false;
       out.reason = reason || "CARD_SNAPSHOT_ROWS_NOT_APPLIED";
@@ -327,6 +442,32 @@
     }
     if (!window.Data || typeof Data.readCardSnapshot !== "function") return dispatchInvalid("CARD_SNAPSHOT_MISSING");
     const id = String(getAbonentId() || "");
+    const freshPostRecalcRowsById = getFreshPostRecalcSnapshotRows(expectedLedgerVersion, periodActive, selectedPeriod, expectedSignature);
+    if (freshPostRecalcRowsById) {
+      applyRuntimeRowsById(rows, freshPostRecalcRowsById);
+      out.valid = true;
+      out.reason = "";
+      out.dataById = freshPostRecalcRowsById;
+      out.periodMatches = true;
+      try {
+        console.log("[card-snapshot][validation-ok]", { snapshotMode: periodActive ? "period" : "full", rowsByIdCount: Object.keys(freshPostRecalcRowsById).length, source: "post-recalc-memory" });
+      } catch(eMemoryValidationOkLog) {}
+      logPostRecalcSnapshotCycle({ saveOk: postRecalcState() && postRecalcState().saveOk === true, validationOk: true, readbackNeeded: false, fallbackTriggered: false });
+      try {
+        window.dispatchEvent(new CustomEvent("jkh:card-snapshot-valid", {
+          detail: {
+            uid: id,
+            ledgerVersion: expectedLedgerVersion,
+            runtimeSignature: expectedSignature,
+            periodActive: !!periodActive,
+            selectedPeriod: selectedPeriod || null,
+            rowsByIdCount: Object.keys(freshPostRecalcRowsById).length,
+            source: "post-recalc-memory"
+          }
+        }));
+      } catch(eMemoryEvent) {}
+      return out;
+    }
     const snapshot = Data.readCardSnapshot(id);
     snapshotForDiagnostics = snapshot;
     if (!snapshot) return dispatchInvalid("CARD_SNAPSHOT_MISSING");
@@ -474,6 +615,7 @@
         rowsCount: stats.rowsCount,
         reason: out.reason
       });
+      logPostRecalcSnapshotCycle({ saveOk: postRecalcState() && postRecalcState().saveOk === true, validationOk: false, readbackNeeded: false, fallbackTriggered: true });
       console.warn("[card-reload][prevent-zero-overwrite]", {
         uid: id,
         oldRowsWithTotals: stats.rowsWithTotals,
@@ -509,6 +651,7 @@
     if (snapshotFirstState.valid) return snapshotFirstState;
     const displayOnlyFirstSnapshot = tryApplyDisplayOnlyCardSnapshotRows(rows, snapshotFirstState.reason || "CARD_SNAPSHOT_DISPLAY_ONLY", periodActive, selectedPeriod, version, expectedSignature);
     if (displayOnlyFirstSnapshot.dataById && Object.keys(displayOnlyFirstSnapshot.dataById).length) return displayOnlyFirstSnapshot;
+    logPostRecalcSnapshotCycle({ saveOk: postRecalcState() && postRecalcState().saveOk === true, validationOk: false, readbackNeeded: false, fallbackTriggered: false });
     if (validity && validity.valid !== true) {
       const rawReason = String(validity.reason || "");
       out.reason = rawReason || "RUNTIME_CACHE_STALE";
@@ -525,10 +668,6 @@
           missingRows: out.missingRows.slice(0, 20)
         });
       } catch(eInvalidLog) {}
-      const snapshotState = tryApplyCardSnapshotToRows(rows, version, periodActive, selectedPeriod, expectedSignature);
-      if (snapshotState.valid) return snapshotState;
-      const displayOnlySnapshot = tryApplyDisplayOnlyCardSnapshotRows(rows, snapshotState.reason || out.reason, periodActive, selectedPeriod, version, expectedSignature);
-      if (displayOnlySnapshot.dataById && Object.keys(displayOnlySnapshot.dataById).length) return displayOnlySnapshot;
       return out;
     }
     if (!version || !cache || !map || !cacheVersion || cacheVersion !== version) {
@@ -544,10 +683,6 @@
           missingRowsCount: 0
         });
       } catch(eFallbackInvalidLog) {}
-      const snapshotState = tryApplyCardSnapshotToRows(rows, version, periodActive, selectedPeriod, expectedSignature);
-      if (snapshotState.valid) return snapshotState;
-      const displayOnlySnapshot = tryApplyDisplayOnlyCardSnapshotRows(rows, snapshotState.reason || out.reason, periodActive, selectedPeriod, version, expectedSignature);
-      if (displayOnlySnapshot.dataById && Object.keys(displayOnlySnapshot.dataById).length) return displayOnlySnapshot;
       return out;
     }
     out.periodMatches = runtimeCachePeriodMatches(cache, version, periodActive, selectedPeriod);
@@ -564,10 +699,6 @@
           missingRowsCount: 0
         });
       } catch(ePeriodInvalidLog) {}
-      const snapshotState = tryApplyCardSnapshotToRows(rows, version, periodActive, selectedPeriod, expectedSignature);
-      if (snapshotState.valid) return snapshotState;
-      const displayOnlySnapshot = tryApplyDisplayOnlyCardSnapshotRows(rows, snapshotState.reason || out.reason, periodActive, selectedPeriod, version, expectedSignature);
-      if (displayOnlySnapshot.dataById && Object.keys(displayOnlySnapshot.dataById).length) return displayOnlySnapshot;
       return out;
     }
     out.valid = true;
@@ -3508,6 +3639,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
     }
     __paymentTableLoadRunning = true;
     try {
+      logPostRecalcRender(reason || "loadPaymentTable");
       console.log("[payment-table][init-start]", { reason: String(reason || "") });
       await loadPaymentTableImpl();
       console.log("[payment-table][init-done]", { reason: String(reason || "") });
