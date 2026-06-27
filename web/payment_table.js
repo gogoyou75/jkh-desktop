@@ -2510,6 +2510,35 @@ function calcPenaltyForObligation(ob, asOf, excludes, rates){
 
   const hardLimit = addDays(ob.dueDate, 3650);
   const end = (asOfDay < hardLimit) ? asOfDay : hardLimit;
+  const startDate = day;
+  const totalDays = Math.max(0, Math.floor((startOfDay(end).getTime() - startOfDay(startDate).getTime()) / 86400000) + 1);
+  try {
+    console.log("[penalty-row-dates]", {
+      rowId: rowId,
+      periodKey: String(ob && ob.key || ""),
+      dueDate: toISODateString(ob.dueDate),
+      debtDate: toISODateString(ob.dueDate),
+      asOfDate: toISODateString(asOfDay),
+      excludedPeriods: Array.isArray(excludes) ? excludes.length : (excludes && typeof excludes === "object" ? Object.keys(excludes).length : 0)
+    });
+    console.log("[penalty-days-range]", {
+      rowId: rowId,
+      obligationKey: String(ob && ob.key || ""),
+      debtDate: toISODateString(ob.dueDate),
+      startDate: toISODateString(startDate),
+      endDate: toISODateString(end),
+      totalDays: totalDays
+    });
+    if (totalDays > 5000) {
+      console.warn("[penalty-abnormal-range]", {
+        rowId: rowId,
+        debtDate: toISODateString(ob.dueDate),
+        startDate: toISODateString(startDate),
+        endDate: toISODateString(end),
+        totalDays: totalDays
+      });
+    }
+  } catch(ePenaltyRangeLog) {}
 
   logPenaltyProfile("daily-loop", { from: toISODateString(day), to: toISODateString(end) });
   let i = 0;
@@ -4703,6 +4732,54 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
           return 0;
         }
       }
+      function realPenaltyDebtDateForRow(row){
+        try {
+          const y = parseInt(row && row.year, 10);
+          const m = parseInt(row && row.month, 10);
+          if (Number.isFinite(y) && Number.isFinite(m) && y > 0 && m >= 1 && m <= 12) {
+            const nm = nextMonthYear(y, m);
+            return startOfDay(new Date(nm.y, nm.m - 1, 10));
+          }
+          const d = parseDateAnyToDate(row && row.paid_date);
+          return d ? startOfDay(d) : null;
+        } catch(eDebtDate) {
+          return null;
+        }
+      }
+      function logRealPenaltyDateRange(row, rowId, runtimeIdx, asOfDate, daysCount){
+        try {
+          const debtDate = realPenaltyDebtDateForRow(row);
+          const startDate = debtDate ? addDays(debtDate, 1) : null;
+          const endDate = asOfDate && asOfDate.getTime ? startOfDay(asOfDate) : null;
+          const periodKey = String(row && row.year || "") + "-" + String(row && row.month || "");
+          console.log("[penalty-row-dates]", {
+            rowId: rowId,
+            periodKey: periodKey,
+            dueDate: debtDate ? toISODateString(debtDate) : "",
+            debtDate: debtDate ? toISODateString(debtDate) : "",
+            asOfDate: endDate ? toISODateString(endDate) : "",
+            excludedPeriods: "active-engine-path"
+          });
+          console.log("[penalty-days-range]", {
+            rowId: rowId,
+            obligationKey: periodKey,
+            debtDate: debtDate ? toISODateString(debtDate) : "",
+            startDate: startDate ? toISODateString(startDate) : "",
+            endDate: endDate ? toISODateString(endDate) : "",
+            totalDays: daysCount,
+            index: runtimeIdx
+          });
+          if (daysCount > 5000) {
+            console.warn("[penalty-abnormal-range]", {
+              rowId: rowId,
+              debtDate: debtDate ? toISODateString(debtDate) : "",
+              startDate: startDate ? toISODateString(startDate) : "",
+              endDate: endDate ? toISODateString(endDate) : "",
+              totalDays: daysCount
+            });
+          }
+        } catch(eRealPenaltyDateRangeLog) {}
+      }
       logRealPenaltyProfile("start", {
         rows: Array.isArray(runtimeRows) ? runtimeRows.length : 0,
         obligations: runtimeProfileObligationCount(baseRows)
@@ -4717,6 +4794,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
         const asOfStartedAt = perfNow();
         const asOf = asOfForRow(r);
         const daysCount = realPenaltyDaysCount(asOf);
+        logRealPenaltyDateRange(r, rowId, runtimeIdx, asOf, daysCount);
         logRealPenaltyProfile("row-start", {
           rowId: rowId,
           index: runtimeIdx,
