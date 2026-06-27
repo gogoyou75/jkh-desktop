@@ -1123,6 +1123,7 @@
 
   async function saveCardSnapshotAndWait(abonentOrId, snapshot) {
     var result = { ok: false, localOk: false, serverOk: false, serverReadbackOk: false, key: "", ownerId: "", status: 0, reason: "", rowsByIdCount: 0, ledgerVersion: "" };
+    var runId = _fullRecalcRunId({});
     try {
       if (!Data.ensureWriteOrExplain()) {
         result.reason = "WRITE_BLOCKED";
@@ -1145,7 +1146,8 @@
       result.ledgerVersion = String(normalized.ledgerVersion || "");
       var localOk = _setProjectRaw(key, serialized);
       result.localOk = localOk !== false;
-      try { console.log("[card-snapshot][save]", { key: key, ok: result.localOk, rows: normalized.rows.length, ledgerVersion: normalized.ledgerVersion }); } catch (eSaveLog) {}
+      try { console.log("[card-snapshot][save]", { runId: runId, key: key, ok: result.localOk, rows: normalized.rows.length, ledgerVersion: normalized.ledgerVersion }); } catch (eSaveLog) {}
+      await _dataUiYield();
       if (!result.localOk) {
         result.reason = "LOCAL_SAVE_FAILED";
         try { console.warn("[card-snapshot][save-and-wait-failed]", result); } catch (eLocalLog) {}
@@ -1160,6 +1162,7 @@
       var serverResult = await _serverStoreSet(ownerId, key, serialized);
       result.status = Number(serverResult && serverResult.status || 0);
       result.serverOk = !!(serverResult && serverResult.ok === true);
+      await _dataUiYield();
       if (!result.serverOk) {
         result.reason = serverResult && (serverResult.text || serverResult.data && serverResult.data.error) || "SERVER_STORE_FAILED";
         try { console.warn("[card-snapshot][server-save-failed]", { ownerId: ownerId, key: key, status: result.status, reason: result.reason }); } catch (eServerFailLog) {}
@@ -1177,6 +1180,7 @@
       result.ok = true;
       result.reason = "";
       try { console.log("[card-snapshot][server-save-ok]", { ownerId: ownerId, key: key, status: result.status }); } catch (eServerOkLog) {}
+      await _dataUiYield();
       var readback = await _serverStoreGet(ownerId, key);
       var readbackParsed = _parseCardSnapshotRawForDiagnostics(readback && readback.raw);
       result.serverReadbackOk = !!(readback && readback.ok === true && readbackParsed.ok === true && readbackParsed.ledgerVersion === result.ledgerVersion);
@@ -3615,6 +3619,38 @@
   var SUMMARY_RECALC_MODE_FULL = "FULL_SUMMARY_REBUILD";
   var SUMMARY_RECALC_MODE_REPORT = "REPORT_PERIOD_CALCULATION";
 
+  function _fullRecalcRunId(options) {
+    var opts = options || {};
+    try {
+      var state = window.__JKH_FULL_RECALC_STATE;
+      return String(opts.recalcRunId || opts.runId || state && state.runId || "");
+    } catch (e) {
+      return String(opts.recalcRunId || opts.runId || "");
+    }
+  }
+
+  function _dataUiYield() {
+    return new Promise(function(resolve) { setTimeout(resolve, 0); });
+  }
+
+  function _logFullRecalcStep(runId, step, extra) {
+    try {
+      console.log("[full-recalc][step]", Object.assign({
+        runId: String(runId || ""),
+        step: String(step || "")
+      }, extra || {}));
+    } catch (eLog) {}
+  }
+
+  function _logFullRecalcStepDone(runId, step, extra) {
+    try {
+      console.log("[full-recalc][step-done]", Object.assign({
+        runId: String(runId || ""),
+        step: String(step || "")
+      }, extra || {}));
+    } catch (eLog) {}
+  }
+
   function _normalizeSummaryRecalcMode(options) {
     var opts = options || {};
     var raw = String(opts.mode || opts.recalcMode || opts.summaryMode || "").trim().toUpperCase();
@@ -4959,6 +4995,7 @@
 
   async function recalcAbonentSummaryExplicit(abonentOrId, options) {
     var opts = options || {};
+    var runId = _fullRecalcRunId(opts);
     var hydrated = await waitForHydratedDatabase({ timeoutMs: opts.timeoutMs || opts.timeout || 10000, reason: opts.recalcMode || "recalcAbonentSummaryExplicit" });
     if (!hydrated || hydrated.ok !== true) {
       _logBlockedBeforeHydrateData(abonentOrId, opts.recalcMode || "FULL_SUMMARY_REBUILD");
@@ -4971,7 +5008,11 @@
 
     try {
       if (!period.ok) throw new Error(period.error || "PERIOD_INVALID");
+      _logFullRecalcStep(runId, "calc-totals", { mode: mode, periodFrom: String(period.from || ""), periodTo: String(period.to || "") });
+      await _dataUiYield();
       summary = buildAbonentSummaryAfterExplicitRecalc(abonentOrId, period.from, period.to);
+      _logFullRecalcStepDone(runId, "calc-totals", { status: summary && (summary.summary_status || summary.status) || "" });
+      await _dataUiYield();
       if (periodActive) {
         summary.summary_scope = "period";
         summary.report_scope = "period";
@@ -4982,6 +5023,7 @@
       }
     } catch (e) {
       var reason = _summaryCalcErrorCode(e);
+      _logFullRecalcStepDone(runId, "calc-totals", { status: "error", reason: reason });
       summary = buildAbonentSummaryErrorAfterExplicitRecalc(abonentOrId, period, reason);
       if (periodActive) {
         summary.summary_scope = "period";
@@ -5014,6 +5056,7 @@
     } else {
       try {
         console.log("[summary][save-full-summary]", {
+          runId: runId,
           uid: String(summary.account_uid || summary.uid || ""),
           periodActive: false,
           periodFrom: String(period && period.from || ""),
@@ -5022,7 +5065,10 @@
       } catch (eFullLog) {}
       console.time("[card-recalc] save summary");
       try {
+        _logFullRecalcStep(runId, "summary-save", { uid: String(summary.account_uid || summary.uid || "") });
         saveResult = await saveAbonentSummaryAfterRecalc(abonentOrId, summary);
+        _logFullRecalcStepDone(runId, "summary-save", { ok: !!(saveResult && saveResult.ok === true), status: saveResult && (saveResult.summary_status || saveResult.status) || "", reason: saveResult && (saveResult.summary_reason || saveResult.reason) || "" });
+        await _dataUiYield();
       } finally {
         console.timeEnd("[card-recalc] save summary");
       }

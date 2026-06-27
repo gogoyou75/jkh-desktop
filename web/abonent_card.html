@@ -3553,6 +3553,40 @@ let __runtimeCacheFreshBlocked = false;
 let __lastRuntimeCacheValidation = { valid: false, reason: "RUNTIME_CACHE_NOT_VALIDATED" };
 let __cardSnapshotFreshValidated = false;
 let __lastCardSnapshotValidation = { valid: false, reason: "CARD_SNAPSHOT_NOT_VALIDATED" };
+let __fullRecalcRunSeq = 0;
+
+function __nextFullRecalcRunId(){
+    __fullRecalcRunSeq += 1;
+    return "full-" + Date.now() + "-" + __fullRecalcRunSeq;
+}
+
+function __fullRecalcUiYield(){
+    return new Promise(function(resolve){ setTimeout(resolve, 0); });
+}
+
+function __currentFullRecalcRun(){
+    const state = window.__JKH_FULL_RECALC_STATE;
+    return state && state.running === true ? state : null;
+}
+
+function __logFullRecalcEventIgnored(eventName, detail){
+    const run = __currentFullRecalcRun();
+    try {
+        console.log("[full-recalc][event-ignored-during-run]", {
+            runId: run && run.runId || "",
+            event: String(eventName || ""),
+            detail: detail || null
+        });
+    } catch(eLog) {}
+    return !!run;
+}
+
+function __setCalcButtonsDisabled(disabled){
+    ["calcRunBtn", "calcReportsBtn", "calcResetBtn"].forEach(function(id){
+        const btn = document.getElementById(id);
+        if (btn) btn.disabled = !!disabled;
+    });
+}
 
 function __summaryTotalsAreFinite(summary){
     const s = summary && typeof summary === "object" ? summary : null;
@@ -3701,6 +3735,7 @@ function restoreFullSummaryStatusUi(snapshot){
 window.addEventListener("jkh:runtime-cache-invalid", function(event){
     const detail = event && event.detail ? event.detail : {};
     if (detail && detail.temporary === true) return;
+    if (__logFullRecalcEventIgnored("jkh:runtime-cache-invalid", detail)) return;
     const reason = String(detail.reason || "RUNTIME_CACHE_INVALID");
     __runtimeCacheFreshBlocked = true;
     __lastRuntimeCacheValidation = { valid: false, reason: reason, detail: detail };
@@ -3718,6 +3753,7 @@ window.addEventListener("jkh:runtime-cache-invalid", function(event){
 window.addEventListener("jkh:runtime-cache-valid", function(event){
     const detail = event && event.detail ? event.detail : {};
     if (detail && detail.temporary === true) return;
+    if (__logFullRecalcEventIgnored("jkh:runtime-cache-valid", detail)) return;
     __runtimeCacheFreshBlocked = false;
     __lastRuntimeCacheValidation = { valid: true, reason: "", detail: detail };
     try { console.log("[summary][runtime-cache-validated]", detail); } catch(eLog) {}
@@ -3729,6 +3765,7 @@ window.addEventListener("jkh:runtime-cache-valid", function(event){
 
 window.addEventListener("jkh:card-snapshot-valid", function(event){
     const detail = event && event.detail ? event.detail : {};
+    if (__logFullRecalcEventIgnored("jkh:card-snapshot-valid", detail)) return;
     __cardSnapshotFreshValidated = true;
     __lastCardSnapshotValidation = { valid: true, reason: "", detail: detail };
     __runtimeCacheFreshBlocked = false;
@@ -3752,6 +3789,7 @@ function __debugCurrentCardSnapshotLifecycle(reason){
 
 window.addEventListener("jkh:card-snapshot-invalid", function(event){
     const detail = event && event.detail ? event.detail : {};
+    if (__logFullRecalcEventIgnored("jkh:card-snapshot-invalid", detail)) return;
     const reason = String(detail.reason || "CARD_ROWS_NOT_RESTORED");
     __cardSnapshotFreshValidated = false;
     __lastCardSnapshotValidation = { valid: false, reason: reason, detail: detail };
@@ -4027,9 +4065,21 @@ function bindCalcButtons(){
     }
 
     runBtn.addEventListener("click", async () => {
+        const existingRun = __currentFullRecalcRun();
+        if (existingRun) {
+            try {
+                console.log("[full-recalc][duplicate-call-ignored]", {
+                    runId: existingRun.runId || "",
+                    abonentId: String(existingRun.abonentId || getAbonentIdFromURL() || ""),
+                    source: "abonent_card.click"
+                });
+            } catch(eDupLog) {}
+            return;
+        }
         if (runBtn.disabled) return;
         if (!canWriteOrExplainLocal()) return;
         const currentAbonentId = getAbonentIdFromURL();
+        const recalcRunId = __nextFullRecalcRunId();
         let from = String(fromEl.value || "").trim();
         let to   = String(toEl.value || "").trim();
         let hasAnyPeriodInput = !!(from || to);
@@ -4039,7 +4089,17 @@ function bindCalcButtons(){
         const fullSummaryUiBeforeRecalc = captureFullSummaryStatusUi();
         const clickMeta = getCalcPeriodStorageMeta();
         try {
+            console.log("[full-recalc][click]", {
+                runId: recalcRunId,
+                abonentId: String(currentAbonentId || ""),
+                uid: clickMeta.resolvedUid,
+                fromInput: from || "",
+                toInput: to || "",
+                periodBefore: __readPeriodKey(clickMeta.storageKey, clickMeta.ownerId),
+                activeBefore: __readActiveKey(clickMeta.activeStorageKey, clickMeta.ownerId)
+            });
             console.log("[card-recalc][click]", {
+                runId: recalcRunId,
                 abonentId: String(currentAbonentId || ""),
                 uid: clickMeta.resolvedUid,
                 fromInput: from || "",
@@ -4071,10 +4131,64 @@ function bindCalcButtons(){
             return;
         }
 
-        runBtn.disabled = true;
+        const fullRecalcState = {
+            running: true,
+            runId: recalcRunId,
+            abonentId: String(currentAbonentId || ""),
+            uid: String(clickMeta.resolvedUid || ""),
+            startedAt: Date.now(),
+            timedOut: false,
+            source: "abonent_card.click"
+        };
+        window.__JKH_FULL_RECALC_STATE = fullRecalcState;
+        __setCalcButtonsDisabled(true);
         renderAbonentSummaryStatus((window.JKH_SUMMARY_STATUS && window.JKH_SUMMARY_STATUS.CALCULATING) || "calculating", "EXPLICIT_RECALC");
-        try { console.log("[summary-ui][explicit-recalc-set]", { abonentId: String(currentAbonentId || ""), reason: "EXPLICIT_RECALC" }); } catch(eSummaryUiSetLog) {}
+        try {
+            console.log("[full-recalc][run-start]", { runId: recalcRunId, abonentId: String(currentAbonentId || ""), uid: String(clickMeta.resolvedUid || "") });
+            console.log("[summary-ui][explicit-recalc-set]", { runId: recalcRunId, abonentId: String(currentAbonentId || ""), reason: "EXPLICIT_RECALC" });
+        } catch(eSummaryUiSetLog) {}
         runBtn.textContent = "Пересчёт…";
+        let watchdogTimer = null;
+        let watchdogFired = false;
+        function unlockFullRecalcUi(source){
+            if (watchdogTimer) {
+                clearTimeout(watchdogTimer);
+                watchdogTimer = null;
+            }
+            __setCalcButtonsDisabled(false);
+            runBtn.textContent = prevText || "Пересчитать";
+            if (window.__JKH_FULL_RECALC_STATE && window.__JKH_FULL_RECALC_STATE.runId === recalcRunId) {
+                window.__JKH_FULL_RECALC_STATE.running = false;
+                window.__JKH_FULL_RECALC_STATE.finishedAt = Date.now();
+                window.__JKH_FULL_RECALC_STATE.finishSource = String(source || "");
+                window.__JKH_FULL_RECALC_STATE = null;
+            }
+            try { console.log("[full-recalc][ui-unlocked]", { runId: recalcRunId, abonentId: String(currentAbonentId || ""), source: String(source || "") }); } catch(eUnlockLog) {}
+        }
+        watchdogTimer = setTimeout(async function(){
+            watchdogFired = true;
+            fullRecalcState.timedOut = true;
+            rememberExplicitFullRecalcFinal("error", "RECALC_TIMEOUT_UI", null);
+            explicitFullRecalcStarted = true;
+            renderExplicitFullRecalcFinal("watchdog-timeout");
+            try {
+                console.warn("[full-recalc][watchdog-timeout]", {
+                    runId: recalcRunId,
+                    abonentId: String(currentAbonentId || ""),
+                    uid: String(fullRecalcState.uid || clickMeta.resolvedUid || ""),
+                    elapsedMs: Date.now() - fullRecalcState.startedAt
+                });
+            } catch(eWatchdogLog) {}
+            try {
+                const watchdogUid = String(fullRecalcState.uid || clickMeta.resolvedUid || "");
+                if (window.Data && typeof Data.finishRecalcUidLock === "function" && watchdogUid) {
+                    await Data.finishRecalcUidLock(watchdogUid, "");
+                }
+            } catch(eWatchdogUnlock) {
+                try { console.warn("[full-recalc][watchdog-timeout]", { runId: recalcRunId, lockReleaseFailed: String(eWatchdogUnlock && eWatchdogUnlock.message || eWatchdogUnlock) }); } catch(eLockLog) {}
+            }
+            unlockFullRecalcUi("watchdog-timeout");
+        }, 20000);
         let explicitFullRecalcStarted = false;
         let explicitFullRecalcFinal = null;
         function rememberExplicitFullRecalcFinal(status, reason, result){
@@ -4093,6 +4207,7 @@ function bindCalcButtons(){
             renderAbonentSummaryStatus(status, reason);
             try {
                 console.log("[summary-ui][final-render]", {
+                    runId: recalcRunId,
                     abonentId: String(currentAbonentId || ""),
                     status: status,
                     reason: reason,
@@ -4100,6 +4215,7 @@ function bindCalcButtons(){
                 });
                 if (wasRunning && __lastRenderedSummaryStatusLocal !== "calculating") {
                     console.log("[summary-ui][running-cleared]", {
+                        runId: recalcRunId,
                         abonentId: String(currentAbonentId || ""),
                         status: __lastRenderedSummaryStatusLocal,
                         reason: __lastRenderedSummaryReasonLocal
@@ -4110,17 +4226,21 @@ function bindCalcButtons(){
 
         try {
             let uidResult = null;
+            try { console.log("[full-recalc][step]", { runId: recalcRunId, step: "ensure-uid" }); } catch(eStepLog) {}
             try {
                 uidResult = await Data.ensureAbonentUid(currentAbonentId, { source: "abonent_card.calc" });
             } catch (e) {
                 uidResult = { ok: false, reason: String(e && e.message || e) };
             }
+            try { console.log("[full-recalc][step-done]", { runId: recalcRunId, step: "ensure-uid", ok: !!(uidResult && uidResult.ok === true) }); } catch(eStepDoneLog) {}
+            await __fullRecalcUiYield();
 
             if (!uidResult || uidResult.ok !== true || !uidResult.uid) {
                 renderAbonentSummaryStatus("error", "UID_NOT_SAVED");
                 alert("Период расчёта не сохранён: UID абонента не сохранён.");
                 return;
             }
+            fullRecalcState.uid = String(uidResult.uid || fullRecalcState.uid || "");
 
             if (!hasAnyPeriodInput) {
                 const fullPeriod = autofillFullCardPeriodUI("full-summary-recalc-before-run");
@@ -4190,9 +4310,14 @@ function bindCalcButtons(){
             let recalcHandled = false;
             if (typeof window.fullRecalcForCurrentAbonent === "function") {
                 explicitFullRecalcStarted = true;
-                const recalcResult = await window.fullRecalcForCurrentAbonent({ applyAutoAccrual: true, recalcMode: "FULL_SUMMARY_REBUILD", summaryScope: "full" });
+                try { console.log("[full-recalc][step]", { runId: recalcRunId, step: "fullRecalcForCurrentAbonent" }); } catch(eStepLog) {}
+                const recalcResult = await window.fullRecalcForCurrentAbonent({ applyAutoAccrual: true, recalcMode: "FULL_SUMMARY_REBUILD", summaryScope: "full", recalcRunId: recalcRunId });
+                if (watchdogFired || fullRecalcState.timedOut) return;
+                try { console.log("[full-recalc][step-done]", { runId: recalcRunId, step: "fullRecalcForCurrentAbonent", ok: !!(recalcResult && recalcResult.ok === true) }); } catch(eStepDoneLog) {}
+                await __fullRecalcUiYield();
                 try {
                     console.log("[summary-ui][final-result-received]", {
+                        runId: recalcRunId,
                         abonentId: String(currentAbonentId || ""),
                         ok: !!(recalcResult && recalcResult.ok === true),
                         status: String(recalcResult && (recalcResult.summary_status || recalcResult.status) || ""),
@@ -4220,7 +4345,10 @@ function bindCalcButtons(){
                         alert("Snapshot карточки не сохранён: API snapshot недоступен.");
                         return;
                     }
+                    try { console.log("[full-recalc][step]", { runId: recalcRunId, step: "build-card-snapshot" }); } catch(eStepLog) {}
                     const snapshot = Data.buildCardSnapshotFromCurrentResult(currentAbonentId, recalcResult);
+                    try { console.log("[full-recalc][step-done]", { runId: recalcRunId, step: "build-card-snapshot" }); } catch(eStepDoneLog) {}
+                    await __fullRecalcUiYield();
                     const snapshotRowsById = snapshot && snapshot.rowsById && typeof snapshot.rowsById === "object" && !Array.isArray(snapshot.rowsById) ? snapshot.rowsById : null;
                     if (!snapshot || !snapshotRowsById || !Object.keys(snapshotRowsById).length) {
                         rememberExplicitFullRecalcFinal("error", "EMPTY_ROWS_BY_ID", recalcResult);
@@ -4229,9 +4357,14 @@ function bindCalcButtons(){
                         alert("Snapshot карточки пуст — пересчёт не дал строк с computed totals");
                         return;
                     }
+                    try { console.log("[full-recalc][step]", { runId: recalcRunId, step: "save-card-snapshot" }); } catch(eStepLog) {}
                     const snapshotSaveResult = await Data.saveCardSnapshotAndWait(currentAbonentId, snapshot);
+                    if (watchdogFired || fullRecalcState.timedOut) return;
+                    try { console.log("[full-recalc][step-done]", { runId: recalcRunId, step: "save-card-snapshot", ok: !!(snapshotSaveResult && snapshotSaveResult.ok === true) }); } catch(eStepDoneLog) {}
+                    await __fullRecalcUiYield();
                     try {
                         console.log("[full-recalc][save-snapshot]", {
+                            runId: recalcRunId,
                             abonentId: String(currentAbonentId || ""),
                             uid: String(snapshot && snapshot.uid || ""),
                             key: String(snapshotSaveResult && snapshotSaveResult.key || ""),
@@ -4303,17 +4436,20 @@ function bindCalcButtons(){
             }
         } catch (eRecalcHandler) {
             const reason = String(eRecalcHandler && (eRecalcHandler.message || eRecalcHandler.reason) || eRecalcHandler || "RECALC_EXCEPTION");
+            if (watchdogFired || fullRecalcState.timedOut) return;
             rememberExplicitFullRecalcFinal("error", reason, null);
             if (explicitFullRecalcStarted) renderExplicitFullRecalcFinal("exception");
             else renderAbonentSummaryStatus("error", reason);
             try {
                 console.error("[full-recalc][result]", {
+                    runId: recalcRunId,
                     abonentId: String(currentAbonentId || ""),
                     ok: false,
                     reason: reason,
                     exception: true
                 });
                 console.log("[full-recalc][ui-status-final]", {
+                    runId: recalcRunId,
                     abonentId: String(currentAbonentId || ""),
                     status: "error",
                     reason: reason
@@ -4321,11 +4457,11 @@ function bindCalcButtons(){
             } catch(eRecalcCatchLog) {}
             alert("Пересчёт не завершён: " + reason);
         } finally {
-            if (explicitFullRecalcStarted && __lastRenderedSummaryStatusLocal === "calculating") {
+            try { console.log("[full-recalc][finally]", { runId: recalcRunId, abonentId: String(currentAbonentId || ""), timedOut: !!(watchdogFired || fullRecalcState.timedOut) }); } catch(eFinallyLog) {}
+            if (!watchdogFired && explicitFullRecalcStarted && __lastRenderedSummaryStatusLocal === "calculating") {
                 renderExplicitFullRecalcFinal("finally-running-safety");
             }
-            runBtn.disabled = false;
-            runBtn.textContent = prevText || "Пересчитать";
+            if (!watchdogFired) unlockFullRecalcUi("finally");
         }
     });
 
