@@ -4073,7 +4073,40 @@ function bindCalcButtons(){
 
         runBtn.disabled = true;
         renderAbonentSummaryStatus((window.JKH_SUMMARY_STATUS && window.JKH_SUMMARY_STATUS.CALCULATING) || "calculating", "EXPLICIT_RECALC");
+        try { console.log("[summary-ui][explicit-recalc-set]", { abonentId: String(currentAbonentId || ""), reason: "EXPLICIT_RECALC" }); } catch(eSummaryUiSetLog) {}
         runBtn.textContent = "Пересчёт…";
+        let explicitFullRecalcStarted = false;
+        let explicitFullRecalcFinal = null;
+        function rememberExplicitFullRecalcFinal(status, reason, result){
+            explicitFullRecalcFinal = {
+                status: __normalizeSummaryStatus(status || "error"),
+                reason: String(reason || ""),
+                result: result || null
+            };
+        }
+        function renderExplicitFullRecalcFinal(source){
+            if (!explicitFullRecalcStarted) return;
+            const finalState = explicitFullRecalcFinal || { status: "error", reason: "FINAL_RECALC_STATUS_MISSING", result: null };
+            const status = __normalizeSummaryStatus(finalState.status || "error");
+            const reason = status === "fresh" ? "OK" : String(finalState.reason || "CALC_FAILED");
+            const wasRunning = __lastRenderedSummaryStatusLocal === "calculating";
+            renderAbonentSummaryStatus(status, reason);
+            try {
+                console.log("[summary-ui][final-render]", {
+                    abonentId: String(currentAbonentId || ""),
+                    status: status,
+                    reason: reason,
+                    source: String(source || "")
+                });
+                if (wasRunning && __lastRenderedSummaryStatusLocal !== "calculating") {
+                    console.log("[summary-ui][running-cleared]", {
+                        abonentId: String(currentAbonentId || ""),
+                        status: __lastRenderedSummaryStatusLocal,
+                        reason: __lastRenderedSummaryReasonLocal
+                    });
+                }
+            } catch(eSummaryUiFinalLog) {}
+        }
 
         try {
             let uidResult = null;
@@ -4156,13 +4189,22 @@ function bindCalcButtons(){
 
             let recalcHandled = false;
             if (typeof window.fullRecalcForCurrentAbonent === "function") {
+                explicitFullRecalcStarted = true;
                 const recalcResult = await window.fullRecalcForCurrentAbonent({ applyAutoAccrual: true, recalcMode: "FULL_SUMMARY_REBUILD", summaryScope: "full" });
+                try {
+                    console.log("[summary-ui][final-result-received]", {
+                        abonentId: String(currentAbonentId || ""),
+                        ok: !!(recalcResult && recalcResult.ok === true),
+                        status: String(recalcResult && (recalcResult.summary_status || recalcResult.status) || ""),
+                        reason: String(recalcResult && (recalcResult.summary_reason || recalcResult.reason) || "")
+                    });
+                } catch(eSummaryUiResultLog) {}
                 __logCardRecalcResult(recalcResult, currentAbonentId);
                 if (!recalcResult || recalcResult.ok !== true) {
                     const reason = String(recalcResult && (recalcResult.reason || recalcResult.summary_reason) || "CALC_FAILED");
-                    const lockStatus = recalcResult && (recalcResult.status === "already_running" || recalcResult.summary_status === "already_running");
-                    renderAbonentSummaryStatus(lockStatus ? "already_running" : "error", reason);
-                    try { console.log("[full-recalc][ui-status-final]", { abonentId: String(currentAbonentId || ""), status: lockStatus ? "already_running" : "error", reason: reason }); } catch(eUiFinalFailLog) {}
+                    rememberExplicitFullRecalcFinal("error", reason, recalcResult);
+                    renderExplicitFullRecalcFinal("recalc-result-error");
+                    try { console.log("[full-recalc][ui-status-final]", { abonentId: String(currentAbonentId || ""), status: "error", reason: reason }); } catch(eUiFinalFailLog) {}
                     alert(manualRecalcErrorMessage(recalcResult, reason));
                     return;
                 }
@@ -4172,7 +4214,8 @@ function bindCalcButtons(){
                 const summaryReason = recalcResult && (recalcResult.summary_reason || recalcResult.reason) || summary && (summary.summary_reason || summary.reason) || "";
                 if (__normalizeSummaryStatus(summaryStatus) === "fresh") {
                     if (!window.Data || typeof Data.buildCardSnapshotFromCurrentResult !== "function" || typeof Data.saveCardSnapshotAndWait !== "function") {
-                        renderAbonentSummaryStatus("error", "CARD_SNAPSHOT_API_UNAVAILABLE");
+                        rememberExplicitFullRecalcFinal("error", "CARD_SNAPSHOT_API_UNAVAILABLE", recalcResult);
+                        renderExplicitFullRecalcFinal("snapshot-api-unavailable");
                         try { console.log("[full-recalc][ui-status-final]", { abonentId: String(currentAbonentId || ""), status: "error", reason: "CARD_SNAPSHOT_API_UNAVAILABLE" }); } catch(eUiFinalApiLog) {}
                         alert("Snapshot карточки не сохранён: API snapshot недоступен.");
                         return;
@@ -4180,7 +4223,8 @@ function bindCalcButtons(){
                     const snapshot = Data.buildCardSnapshotFromCurrentResult(currentAbonentId, recalcResult);
                     const snapshotRowsById = snapshot && snapshot.rowsById && typeof snapshot.rowsById === "object" && !Array.isArray(snapshot.rowsById) ? snapshot.rowsById : null;
                     if (!snapshot || !snapshotRowsById || !Object.keys(snapshotRowsById).length) {
-                        renderAbonentSummaryStatus("error", "EMPTY_ROWS_BY_ID");
+                        rememberExplicitFullRecalcFinal("error", "EMPTY_ROWS_BY_ID", recalcResult);
+                        renderExplicitFullRecalcFinal("snapshot-empty-rows");
                         try { console.log("[full-recalc][ui-status-final]", { abonentId: String(currentAbonentId || ""), status: "error", reason: "EMPTY_ROWS_BY_ID" }); } catch(eUiFinalEmptyRowsLog) {}
                         alert("Snapshot карточки пуст — пересчёт не дал строк с computed totals");
                         return;
@@ -4199,19 +4243,22 @@ function bindCalcButtons(){
                         });
                     } catch(eSnapshotSaveLog) {}
                     if (!snapshotSaveResult || snapshotSaveResult.localOk !== true) {
-                        renderAbonentSummaryStatus("error", "CARD_SNAPSHOT_SAVE_FAILED");
+                        rememberExplicitFullRecalcFinal("error", "CARD_SNAPSHOT_SAVE_FAILED", recalcResult);
+                        renderExplicitFullRecalcFinal("snapshot-local-save-failed");
                         try { console.log("[full-recalc][ui-status-final]", { abonentId: String(currentAbonentId || ""), status: "error", reason: "CARD_SNAPSHOT_SAVE_FAILED" }); } catch(eUiFinalLocalLog) {}
                         alert("Snapshot карточки не сохранён. Итог не будет отмечен fresh.");
                         return;
                     }
                     if (snapshotSaveResult.serverOk !== true) {
-                        renderAbonentSummaryStatus("error", "CARD_SNAPSHOT_SERVER_SAVE_FAILED");
+                        rememberExplicitFullRecalcFinal("error", "CARD_SNAPSHOT_SERVER_SAVE_FAILED", recalcResult);
+                        renderExplicitFullRecalcFinal("snapshot-server-save-failed");
                         try { console.log("[full-recalc][ui-status-final]", { abonentId: String(currentAbonentId || ""), status: "error", reason: "CARD_SNAPSHOT_SERVER_SAVE_FAILED" }); } catch(eUiFinalServerLog) {}
                         alert("Snapshot карточки не сохранён на сервер. Итог не будет отмечен fresh.");
                         return;
                     }
                     if (snapshotSaveResult.serverReadbackOk !== true) {
-                        renderAbonentSummaryStatus("error", "CARD_SNAPSHOT_SERVER_READBACK_FAILED");
+                        rememberExplicitFullRecalcFinal("error", "CARD_SNAPSHOT_SERVER_READBACK_FAILED", recalcResult);
+                        renderExplicitFullRecalcFinal("snapshot-server-readback-failed");
                         try { console.log("[full-recalc][ui-status-final]", { abonentId: String(currentAbonentId || ""), status: "error", reason: "CARD_SNAPSHOT_SERVER_READBACK_FAILED" }); } catch(eUiFinalReadbackLog) {}
                         alert("Snapshot карточки не подтверждён сервером. Итог не будет отмечен fresh.");
                         return;
@@ -4233,12 +4280,13 @@ function bindCalcButtons(){
                         });
                     } catch(eFreshAfterRecalcLog) {}
                 }
-                if (summaryStatus) renderAbonentSummaryStatus(summaryStatus, __normalizeSummaryStatus(summaryStatus) === "fresh" ? "OK" : summaryReason);
+                rememberExplicitFullRecalcFinal("fresh", "OK", recalcResult);
+                renderExplicitFullRecalcFinal("recalc-success");
                 try {
                     console.log("[full-recalc][ui-status-final]", {
                         abonentId: String(currentAbonentId || ""),
-                        status: summaryStatus || "",
-                        reason: __normalizeSummaryStatus(summaryStatus) === "fresh" ? "OK" : summaryReason
+                        status: "fresh",
+                        reason: "OK"
                     });
                 } catch(eUiStatusFinalLog) {}
                 if (__normalizeSummaryStatus(summaryStatus) === "fresh" && summary) {
@@ -4255,7 +4303,9 @@ function bindCalcButtons(){
             }
         } catch (eRecalcHandler) {
             const reason = String(eRecalcHandler && (eRecalcHandler.message || eRecalcHandler.reason) || eRecalcHandler || "RECALC_EXCEPTION");
-            renderAbonentSummaryStatus("error", reason);
+            rememberExplicitFullRecalcFinal("error", reason, null);
+            if (explicitFullRecalcStarted) renderExplicitFullRecalcFinal("exception");
+            else renderAbonentSummaryStatus("error", reason);
             try {
                 console.error("[full-recalc][result]", {
                     abonentId: String(currentAbonentId || ""),
@@ -4271,6 +4321,9 @@ function bindCalcButtons(){
             } catch(eRecalcCatchLog) {}
             alert("Пересчёт не завершён: " + reason);
         } finally {
+            if (explicitFullRecalcStarted && __lastRenderedSummaryStatusLocal === "calculating") {
+                renderExplicitFullRecalcFinal("finally-running-safety");
+            }
             runBtn.disabled = false;
             runBtn.textContent = prevText || "Пересчитать";
         }
