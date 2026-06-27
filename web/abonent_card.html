@@ -4164,6 +4164,17 @@ function bindCalcButtons(){
         } catch(eSummaryUiSetLog) {}
         runBtn.textContent = "Пересчёт…";
         let watchdogFired = false;
+        function logFullRecalcStage(stage){
+            try {
+                console.log("[full-recalc-stage]", {
+                    stage: String(stage || ""),
+                    abonentId: String(currentAbonentId || ""),
+                    uid: String(fullRecalcState.uid || ""),
+                    elapsedMs: Date.now() - fullRecalcState.startedAt
+                });
+            } catch(eStageLog) {}
+        }
+        logFullRecalcStage("start");
         function fullRecalcStageText(stage){
             const s = String(stage || "").trim();
             const map = {
@@ -4207,6 +4218,17 @@ function bindCalcButtons(){
             const d = detail && typeof detail === "object" ? detail : {};
             heartbeatFullRecalc(d.stage || "progress");
         };
+        function releaseFullRecalcLockOnUnload(){
+            try {
+                const state = window.__JKH_FULL_RECALC_STATE;
+                if (!state || state.runId !== recalcRunId) return;
+                if (state.completed || state.finalRendered || state.cancelled) return;
+                if (window.Data && typeof Data.releaseRecalcUidLockOnUnload === "function") {
+                    Data.releaseRecalcUidLockOnUnload(state.uid || currentAbonentId, state.recalcLockToken || "", { runId: recalcRunId, reason: "beforeunload" });
+                }
+            } catch(eUnloadRelease) {}
+        }
+        window.addEventListener("beforeunload", releaseFullRecalcLockOnUnload);
         heartbeatFullRecalc("start");
         function hasCalculatedRowsForFullRecalc(){
             try {
@@ -4268,7 +4290,9 @@ function bindCalcButtons(){
         }
         function unlockFullRecalcUi(source){
             heartbeatFullRecalc("unlock");
+            logFullRecalcStage("unlock");
             clearFullRecalcWatchdog(source || "unlock");
+            try { window.removeEventListener("beforeunload", releaseFullRecalcLockOnUnload); } catch(eRemoveUnload) {}
             __setCalcButtonsDisabled(false);
             runBtn.textContent = prevText || "Пересчитать";
             if (window.__JKH_FULL_RECALC_STATE && window.__JKH_FULL_RECALC_STATE.runId === recalcRunId) {
@@ -4338,7 +4362,8 @@ function bindCalcButtons(){
                 try {
                     const watchdogUid = String(fullRecalcState.uid || clickMeta.resolvedUid || "");
                     if (window.Data && typeof Data.finishRecalcUidLock === "function" && watchdogUid) {
-                        await Data.finishRecalcUidLock(watchdogUid, "");
+                        logFullRecalcStage("release-lock");
+                        await Data.finishRecalcUidLock(watchdogUid, "", { runId: recalcRunId, abonentId: currentAbonentId, reason: "watchdog-timeout" });
                     }
                 } catch(eWatchdogUnlock) {
                     try { console.warn("[full-recalc][watchdog-timeout]", { runId: recalcRunId, lockReleaseFailed: String(eWatchdogUnlock && eWatchdogUnlock.message || eWatchdogUnlock) }); } catch(eLockLog) {}
@@ -4442,6 +4467,7 @@ function bindCalcButtons(){
                 try {
                     heartbeatFullRecalc("save-card-snapshot-async");
                     logPostRecalcStage("snapshot-save-start");
+                    logFullRecalcStage("snapshot-save-start");
                     try { console.log("[full-recalc][step]", { runId: recalcRunId, step: "save-card-snapshot-async" }); } catch(eStepLog) {}
                     snapshotSaveResult = await Data.saveCardSnapshotAndWait(currentAbonentId, snapshot, { runId: recalcRunId, skipReadback: true });
                     const saveOk = !!(snapshotSaveResult && snapshotSaveResult.localOk === true && snapshotSaveResult.serverOk === true);
@@ -4468,11 +4494,13 @@ function bindCalcButtons(){
                         });
                     }
                     logPostRecalcStage("snapshot-save-done");
+                    logFullRecalcStage("snapshot-save-done");
                 } catch(eSnapshotAsync) {
                     if (typeof window.__setPostRecalcSnapshotSaveResult === "function") window.__setPostRecalcSnapshotSaveResult(recalcRunId, false);
                     logPostRecalcSnapshotCycle({ saveOk: false, validationOk: false, readbackNeeded: false, fallbackTriggered: false });
                     try { console.warn("[card-snapshot][post-recalc-save-failed]", { runId: recalcRunId, reason: String(eSnapshotAsync && eSnapshotAsync.message || eSnapshotAsync) }); } catch(eAsyncWarn) {}
                     logPostRecalcStage("snapshot-save-failed");
+                    logFullRecalcStage("snapshot-save-done");
                 }
             }, 0);
         }
@@ -4480,6 +4508,7 @@ function bindCalcButtons(){
         try {
             let uidResult = null;
             heartbeatFullRecalc("ensure-uid");
+            logFullRecalcStage("ensure-uid");
             try { console.log("[full-recalc][step]", { runId: recalcRunId, step: "ensure-uid" }); } catch(eStepLog) {}
             try {
                 uidResult = await Data.ensureAbonentUid(currentAbonentId, { source: "abonent_card.calc" });
@@ -4666,6 +4695,7 @@ function bindCalcButtons(){
                 rememberExplicitFullRecalcFinal("fresh", "OK", recalcResult);
                 heartbeatFullRecalc("final-render");
                 logPostRecalcStage("final-render-start");
+                logFullRecalcStage("final-ui-render");
                 renderExplicitFullRecalcFinal("recalc-success");
                 logPostRecalcStage("final-render-done");
                 if (!watchdogFired) unlockFullRecalcUi("recalc-success");

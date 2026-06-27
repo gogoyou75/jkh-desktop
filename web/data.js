@@ -5128,7 +5128,59 @@
     };
   }
 
-  async function beginRecalcUidLock(uid) {
+  function _recalcLockDebug(action, detail) {
+    var d = detail && typeof detail === "object" ? detail : {};
+    try {
+      console.log("[recalc-lock-debug]", {
+        action: String(action || ""),
+        abonentId: String(d.abonentId || ""),
+        uid: String(d.uid || ""),
+        lockKey: String(d.lockKey || ""),
+        lockAgeMs: Number(d.lockAgeMs || 0),
+        runId: String(d.runId || ""),
+        ownerId: String(d.ownerId || (typeof _ownerId === "function" ? _ownerId() : "") || ""),
+        reason: String(d.reason || "")
+      });
+    } catch (eLockDebug) {}
+  }
+
+  function _recalcLockAgeFromServer(data) {
+    var d = data && typeof data === "object" ? data : {};
+    var direct = Number(d.lockAgeMs || d.lock_age_ms || d.ageMs || d.age_ms || 0);
+    if (Number.isFinite(direct) && direct > 0) return direct;
+    var startedRaw = d.startedAt || d.started_at || d.lockStartedAt || d.lock_started_at || "";
+    var startedMs = 0;
+    if (typeof startedRaw === "number") startedMs = startedRaw;
+    else if (startedRaw) startedMs = Date.parse(String(startedRaw));
+    return startedMs && Number.isFinite(startedMs) ? Math.max(0, Date.now() - startedMs) : 0;
+  }
+
+  function releaseRecalcUidLockOnUnload(uid, token, options) {
+    var opts = options || {};
+    var found = _findAbonentByIdOrUid(uid);
+    var abonent = found && found.abonent ? found.abonent : (uid && typeof uid === "object" ? uid : null);
+    uid = String(abonent && (abonent.uid || abonent.account_uid || abonent.accountUid) || uid || "").trim();
+    if (!isValidUid(uid)) return false;
+    var lockKey = "stage16_recalc_lock_" + uid;
+    try { sessionStorage.removeItem(lockKey); } catch (eLocal) {}
+    _recalcLockDebug("release-unload", { abonentId: found && found.id || "", uid: uid, lockKey: lockKey, runId: opts.runId || "", reason: opts.reason || "unload" });
+    try {
+      var body = JSON.stringify({ lock_token: token || "" });
+      var url = "/api/recalc_lock/" + encodeURIComponent(uid) + "/finish";
+      if (navigator && typeof navigator.sendBeacon === "function") {
+        var blob = new Blob([body], { type: "application/json" });
+        return navigator.sendBeacon(url, blob);
+      }
+      if (typeof fetch === "function") {
+        fetch(url, { method: "POST", credentials: "include", headers: { "Content-Type": "application/json" }, body: body, keepalive: true }).catch(function(){});
+        return true;
+      }
+    } catch (eBeacon) {}
+    return false;
+  }
+
+  async function beginRecalcUidLock(uid, options) {
+    var opts = options || {};
     var found = _findAbonentByIdOrUid(uid);
     var abonent = found && found.abonent ? found.abonent : (uid && typeof uid === "object" ? uid : null);
     var resolvedUid = String(abonent && (abonent.uid || abonent.account_uid || abonent.accountUid) || uid || "").trim();
@@ -5137,19 +5189,23 @@
     var localKey = "stage16_recalc_lock_" + uid;
     var now = Date.now();
     var lockTtlMs = 60 * 1000;
+    _recalcLockDebug("check", { abonentId: found && found.id || "", uid: uid, lockKey: localKey, runId: opts.runId || "", reason: "begin" });
     try {
       var raw = sessionStorage.getItem(localKey);
       var local = raw ? JSON.parse(raw) : null;
       var localAgeMs = local && local.running ? now - Number(local.startedAt || 0) : 0;
       if (local && local.running && localAgeMs < lockTtlMs) {
+        _recalcLockDebug("already-running", { abonentId: found && found.id || "", uid: uid, lockKey: localKey, lockAgeMs: localAgeMs, runId: opts.runId || "", reason: "local-active" });
         try { console.log("[recalc-lock][begin]", { uid: uid, status: "already_running", local: true, ageMs: localAgeMs, ttlMs: lockTtlMs }); } catch (eBeginAlreadyLog) {}
         return { ok: true, status: "already_running", account_uid: uid, local: true };
       }
       if (local && local.running) {
         try { sessionStorage.removeItem(localKey); } catch (eExpiredRemove) {}
+        _recalcLockDebug("expired-cleared", { abonentId: found && found.id || "", uid: uid, lockKey: localKey, lockAgeMs: localAgeMs, runId: opts.runId || "", reason: "local-ttl" });
         try { console.warn("[recalc-lock][expired-cleared]", { uid: uid, ageMs: localAgeMs, ttlMs: lockTtlMs }); } catch (eExpiredLog) {}
       }
-      sessionStorage.setItem(localKey, JSON.stringify({ running: true, startedAt: now }));
+      sessionStorage.setItem(localKey, JSON.stringify({ running: true, startedAt: now, runId: String(opts.runId || "") }));
+      _recalcLockDebug("set-local", { abonentId: found && found.id || "", uid: uid, lockKey: localKey, lockAgeMs: 0, runId: opts.runId || "", reason: "started" });
       try { console.log("[recalc-lock][begin]", { uid: uid, status: "started", local: true, startedAt: now, ttlMs: lockTtlMs }); } catch (eBeginLog) {}
     } catch (eLocal) {}
     try {
@@ -5158,19 +5214,38 @@
       var data = null;
       try { data = text ? JSON.parse(text) : null; } catch (eParse) { data = null; }
       if (res.ok && data && data.ok !== false) {
+        var serverAgeMs = _recalcLockAgeFromServer(data);
         if (String(data.status || "") === "already_running") {
+          _recalcLockDebug("already-running", { abonentId: found && found.id || "", uid: uid, lockKey: localKey, lockAgeMs: serverAgeMs, runId: opts.runId || "", reason: "server-active" });
+          if (serverAgeMs > lockTtlMs) {
+            _recalcLockDebug("expired-cleared", { abonentId: found && found.id || "", uid: uid, lockKey: localKey, lockAgeMs: serverAgeMs, runId: opts.runId || "", reason: "server-ttl" });
+            try { await finishRecalcUidLock(uid, data.lock_token || "", { runId: opts.runId || "", reason: "server-expired-cleared" }); } catch (eFinishExpired) {}
+            try {
+              var retryRes = await fetch("/api/recalc_lock/" + encodeURIComponent(uid) + "/begin", { method: "POST", credentials: "include" });
+              var retryText = await retryRes.text();
+              var retryData = null;
+              try { retryData = retryText ? JSON.parse(retryText) : null; } catch (eRetryParse) { retryData = null; }
+              if (retryRes.ok && retryData && retryData.ok !== false) {
+                _recalcLockDebug("set-server", { abonentId: found && found.id || "", uid: uid, lockKey: localKey, lockAgeMs: 0, runId: opts.runId || "", reason: String(retryData.status || "") });
+                return retryData;
+              }
+            } catch (eRetry) {}
+          }
           try { sessionStorage.removeItem(localKey); } catch (eServerAlreadyLocalRemove) {}
         }
+        _recalcLockDebug(String(data.status || "") === "started" ? "set-server" : "check-server", { abonentId: found && found.id || "", uid: uid, lockKey: localKey, lockAgeMs: serverAgeMs, runId: opts.runId || "", reason: String(data.status || "") });
         try { console.log("[recalc-lock][begin]", { uid: uid, status: data.status || "", server: true, local: false }); } catch (eBeginServerLog) {}
         return data;
       }
     } catch (e) {
+      _recalcLockDebug("begin-failed", { abonentId: found && found.id || "", uid: uid, lockKey: localKey, runId: opts.runId || "", reason: String(e && e.message || e) });
       try { console.warn("[recalc-lock][begin-failed-local-only]", { uid: uid, reason: String(e && e.message || e) }); } catch (eLog) {}
     }
     return { ok: true, status: "started", account_uid: uid, local: true };
   }
 
-  async function finishRecalcUidLock(uid, token) {
+  async function finishRecalcUidLock(uid, token, options) {
+    var opts = options || {};
     var found = _findAbonentByIdOrUid(uid);
     var abonent = found && found.abonent ? found.abonent : (uid && typeof uid === "object" ? uid : null);
     uid = String(abonent && (abonent.uid || abonent.account_uid || abonent.accountUid) || uid || "").trim();
@@ -5178,7 +5253,9 @@
     var releasedLocal = false;
     var serverOk = false;
     var serverStatus = "";
-    try { sessionStorage.removeItem("stage16_recalc_lock_" + uid); releasedLocal = true; } catch (eLocal) {}
+    var lockKey = "stage16_recalc_lock_" + uid;
+    _recalcLockDebug("release-start", { abonentId: found && found.id || "", uid: uid, lockKey: lockKey, runId: opts.runId || "", reason: opts.reason || "" });
+    try { sessionStorage.removeItem(lockKey); releasedLocal = true; } catch (eLocal) {}
     try {
       var res = await fetch("/api/recalc_lock/" + encodeURIComponent(uid) + "/finish", {
         method: "POST",
@@ -5191,6 +5268,7 @@
     } catch (e) {
       serverStatus = String(e && e.message || e || "FETCH_FAILED");
     } finally {
+      _recalcLockDebug("release-finish", { abonentId: found && found.id || "", uid: uid, lockKey: lockKey, runId: opts.runId || "", reason: "serverStatus=" + serverStatus });
       try { console.log("[recalc-lock][release]", { uid: uid, releasedLocal: releasedLocal, serverOk: serverOk, serverStatus: serverStatus }); } catch (eReleaseLog) {}
     }
   }
@@ -5238,7 +5316,7 @@
 
     var lock = opts.recalcLockHeld === true
       ? { ok: true, status: "started", account_uid: uid, lock_token: opts.recalcLockToken || "", external: true }
-      : await beginRecalcUidLock(uid);
+      : await beginRecalcUidLock(uid, { runId: opts.recalcRunId || opts.runId || "", abonentId: abonentId, reason: "recalculateAbonentCard" });
     if (lock && lock.status === "already_running") {
       endCardRecalcFullTimer();
       return {
@@ -5339,7 +5417,7 @@
       };
     } finally {
       if (!(lock && lock.external === true)) {
-        await finishRecalcUidLock(uid, lock && lock.lock_token);
+        await finishRecalcUidLock(uid, lock && lock.lock_token, { runId: opts.recalcRunId || opts.runId || "", abonentId: abonentId, reason: "recalculateAbonentCard-finally" });
       }
       endCardRecalcFullTimer();
     }
@@ -5761,6 +5839,7 @@
     recalculateAbonentCardWithRows: recalculateAbonentCardWithRows,
     beginRecalcUidLock: beginRecalcUidLock,
     finishRecalcUidLock: finishRecalcUidLock,
+    releaseRecalcUidLockOnUnload: releaseRecalcUidLockOnUnload,
     waitForServerFirstDataReady: waitForServerFirstDataReady,
     waitForHydratedDatabase: waitForHydratedDatabase,
     saveAbonentSummaryAfterRecalc: saveAbonentSummaryAfterRecalc,
