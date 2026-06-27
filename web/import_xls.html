@@ -1123,6 +1123,26 @@ function clearImportResumeState(){
   if (!window.JKHStore || !JKHStore.setJSON) return;
   try{ JKHStore.setJSON('import_xls_resume_v1', null, null); }catch(e){}
 }
+function getImportDraftRowsCount(draft){
+  if (!draft || typeof draft !== 'object') return 0;
+  if (Array.isArray(draft.dataRows)) return draft.dataRows.length;
+  if (Array.isArray(draft.rows)) return draft.rows.length;
+  if (Array.isArray(draft.previewRows)) return draft.previewRows.length;
+  return 0;
+}
+function getImportDraftFileName(draft){
+  return normStr(draft && (draft.currentFileName || draft.fileName || draft.name));
+}
+function isImportDraftNonEmpty(draft){
+  return getImportDraftRowsCount(draft) > 0 && !!getImportDraftFileName(draft);
+}
+function loadLastNonEmptyImportDraftState(){
+  if (!window.JKHStore || !JKHStore.getJSON) return null;
+  try{
+    const draft = JKHStore.getJSON('import_xls_draft_last_nonempty_v1', null, null);
+    return isImportDraftNonEmpty(draft) ? draft : null;
+  }catch(e){ return null; }
+}
 function saveImportDraftState(){
   if (!window.JKHStore || !JKHStore.setJSON) return;
   try{
@@ -1144,7 +1164,23 @@ function saveImportDraftState(){
       currentFileName: normStr(currentFileName),
       savedAt: new Date().toISOString()
     };
+    const attemptedRows = getImportDraftRowsCount(payload);
+    const attemptedFileName = getImportDraftFileName(payload);
+    if (!attemptedRows || !attemptedFileName){
+      let existing = null;
+      try{ existing = JKHStore.getJSON ? JKHStore.getJSON('import_xls_draft_v1', null, null) : null; }catch(e){}
+      if (!isImportDraftNonEmpty(existing)){
+        existing = loadLastNonEmptyImportDraftState();
+      }
+      console.warn('[import_xls][draft-save-skipped-empty]', {
+        existingRows: getImportDraftRowsCount(existing),
+        attemptedRows: attemptedRows,
+        reason: !attemptedRows ? 'empty_dataRows' : 'empty_fileName'
+      });
+      return;
+    }
     JKHStore.setJSON('import_xls_draft_v1', payload, null);
+    JKHStore.setJSON('import_xls_draft_last_nonempty_v1', payload, null);
     console.log('[import_xls][draft-save]', {
       kind: 'preview',
       ownerId: getCurrentOwnerId(),
@@ -1157,20 +1193,37 @@ function saveImportDraftState(){
 function loadImportDraftState(){
   if (!window.JKHStore || !JKHStore.getJSON) return null;
   try{
-    const draft = JKHStore.getJSON('import_xls_draft_v1', null, null);
+    let draft = JKHStore.getJSON('import_xls_draft_v1', null, null);
+    let usedFallback = false;
+    if (!isImportDraftNonEmpty(draft)){
+      const fallback = loadLastNonEmptyImportDraftState();
+      if (fallback){
+        console.warn('[import_xls][draft-restore-blocked]', {
+          kind: 'preview',
+          ownerId: getCurrentOwnerId(),
+          currentRows: getImportDraftRowsCount(draft),
+          fallbackRows: getImportDraftRowsCount(fallback),
+          cause: 'empty_current_using_last_nonempty'
+        });
+        draft = fallback;
+        usedFallback = true;
+      }
+    }
     const hasData = Array.isArray(draft && draft.dataRows) && draft.dataRows.length > 0;
     console.log('[import_xls][draft-load-shape]', {
       kind: 'preview',
       ownerId: getCurrentOwnerId(),
       hasData: hasData,
       dataRows: hasData ? draft.dataRows.length : 0,
-      draftOwner: normStr(draft && draft.ownerId)
+      draftOwner: normStr(draft && draft.ownerId),
+      usedFallback: usedFallback
     });
     console.log('[import_xls][draft-load]', {
       kind: 'preview',
       ownerId: getCurrentOwnerId(),
       hasData: hasData,
-      draftOwner: normStr(draft && draft.ownerId)
+      draftOwner: normStr(draft && draft.ownerId),
+      usedFallback: usedFallback
     });
     return draft;
   }catch(e){ return null; }
@@ -1184,6 +1237,7 @@ function clearImportDraftState(){
       reason: 'resetPreview'
     });
     JKHStore.setJSON('import_xls_draft_v1', null, null);
+    JKHStore.setJSON('import_xls_draft_last_nonempty_v1', null, null);
   }catch(e){}
 }
 function getCurrentOwnerId(){
@@ -1311,9 +1365,22 @@ function restoreImportDraftOrResume(reason){
       });
       return false;
     }
-    const source = useResume ? loadImportResumeState() : loadImportDraftState();
+    let source = useResume ? loadImportResumeState() : loadImportDraftState();
     const sourceHasData = Array.isArray(source && source.dataRows) && source.dataRows.length > 0;
-    if (!source || !sourceHasData){
+    if (useResume && (!source || !sourceHasData)){
+      const draftFallback = loadImportDraftState();
+      if (draftFallback && Array.isArray(draftFallback.dataRows) && draftFallback.dataRows.length > 0){
+        console.warn('[import_xls][draft-restore-blocked]', {
+          reason: normStr(reason || ''),
+          source: 'resume',
+          cause: source ? 'empty_resume_using_preview_draft' : 'missing_resume_using_preview_draft',
+          fallbackRows: draftFallback.dataRows.length
+        });
+        source = draftFallback;
+      }
+    }
+    const restoredSourceHasData = Array.isArray(source && source.dataRows) && source.dataRows.length > 0;
+    if (!source || !restoredSourceHasData){
       console.warn('[import_xls][draft-restore-blocked]', {
         reason: normStr(reason || ''),
         source: useResume ? 'resume' : 'draft',
