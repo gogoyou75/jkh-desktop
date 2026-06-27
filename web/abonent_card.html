@@ -3604,8 +3604,23 @@ function renderAbonentSummaryStatus(status, reason){
 
 window.JKHSetSummaryStatus = renderAbonentSummaryStatus;
 
+function renderPeriodCalculationStatus(message, options){
+    const opts = options || {};
+    const hint = document.getElementById("calcRunHint");
+    const text = String(message || "");
+    if (hint && text) hint.textContent = text;
+    try {
+        console.log("[period-recalc][status-isolated]", {
+            fullStatusBefore: String(opts.fullStatusBefore || __lastRenderedSummaryStatusLocal || ""),
+            fullStatusAfter: String(__lastRenderedSummaryStatusLocal || ""),
+            periodStatus: text
+        });
+    } catch(ePeriodStatusLog) {}
+}
+
 window.addEventListener("jkh:runtime-cache-invalid", function(event){
     const detail = event && event.detail ? event.detail : {};
+    if (detail && detail.temporary === true) return;
     const reason = String(detail.reason || "RUNTIME_CACHE_INVALID");
     __runtimeCacheFreshBlocked = true;
     __lastRuntimeCacheValidation = { valid: false, reason: reason, detail: detail };
@@ -3622,6 +3637,7 @@ window.addEventListener("jkh:runtime-cache-invalid", function(event){
 
 window.addEventListener("jkh:runtime-cache-valid", function(event){
     const detail = event && event.detail ? event.detail : {};
+    if (detail && detail.temporary === true) return;
     __runtimeCacheFreshBlocked = false;
     __lastRuntimeCacheValidation = { valid: true, reason: "", detail: detail };
     try { console.log("[summary][runtime-cache-validated]", detail); } catch(eLog) {}
@@ -4013,6 +4029,7 @@ function bindCalcButtons(){
                     alert("Временный расчёт периода недоступен.");
                     return;
                 }
+                const fullStatusBeforePeriod = String(__lastRenderedSummaryStatusLocal || "");
                 const periodResult = await window.runTemporaryPeriodCalculation({
                     abonentId: currentAbonentId,
                     period: { from: from, to: to },
@@ -4024,7 +4041,14 @@ function bindCalcButtons(){
                     alert("Расчёт периода не выполнен: " + reason);
                     return;
                 }
-                renderAbonentSummaryStatus("dirty", "TEMPORARY_PERIOD_NOT_SAVED");
+                const fullStatusAfterPeriod = String(__lastRenderedSummaryStatusLocal || "");
+                const periodStatusMessage = __normalizeSummaryStatus(fullStatusBeforePeriod) === "fresh"
+                    ? "Период рассчитан временно. Основной итог карточки не изменялся."
+                    : "Основной итог карточки требует пересчёта. Период рассчитан отдельно.";
+                renderPeriodCalculationStatus(periodStatusMessage, {
+                    fullStatusBefore: fullStatusBeforePeriod,
+                    fullStatusAfter: fullStatusAfterPeriod
+                });
                 return;
             }
 

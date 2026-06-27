@@ -498,7 +498,8 @@
       selectedPeriod: selectedPeriod || null,
       missingRows: Array.isArray(s.missingRows) ? s.missingRows : [],
       missingRowsCount: Array.isArray(s.missingRows) ? s.missingRows.length : 0,
-      rowsByIdCount: s.dataById && typeof s.dataById === "object" ? Object.keys(s.dataById).length : 0
+      rowsByIdCount: s.dataById && typeof s.dataById === "object" ? Object.keys(s.dataById).length : 0,
+      temporary: s.temporary === true || isTemporaryCourtPeriodMode()
     };
     try {
       if (window.Data && typeof Data.computeLedgerRuntimeVersion === "function") {
