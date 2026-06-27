@@ -1472,7 +1472,7 @@ function __safeLoadPaymentTableOnce(reason, options){
         __paymentTableLoadScheduled = false;
         __paymentTableLoading = true;
         try {
-            window.__loadPaymentTable({ mode: 'readonly_no_recalc', reason: reason || 'abonent-card', force: !!opts.force });
+            window.__loadPaymentTable({ mode: opts.mode || 'readonly_no_recalc', reason: reason || 'abonent-card', force: !!opts.force });
             __hideExcludesFatalBox();
         } catch(e) {
             if (__isExcludesFatalError(e)) __showExcludesFatalBox(e);
@@ -1481,6 +1481,37 @@ function __safeLoadPaymentTableOnce(reason, options){
             setTimeout(() => { __paymentTableLoading = false; }, 300);
         }
     }, 0);
+}
+
+function __periodSessionKey(abonentId){
+    return "jkh_period_recalc_state_v1:" + String(abonentId || getAbonentIdFromURL() || "");
+}
+
+function __saveTemporaryPeriodState(period, extra){
+    try {
+        const p = period && typeof period === "object" ? period : {};
+        const payload = Object.assign({
+            mode: "temporary_court_period",
+            period_from: String(p.from || ""),
+            period_to: String(p.to || ""),
+            savedAt: (new Date()).toISOString()
+        }, extra || {});
+        if (!payload.period_from || !payload.period_to) return;
+        sessionStorage.setItem(__periodSessionKey(payload.abonentId), JSON.stringify(payload));
+    } catch(e) {}
+}
+
+function __readTemporaryPeriodState(abonentId){
+    try {
+        const raw = sessionStorage.getItem(__periodSessionKey(abonentId));
+        if (!raw) return null;
+        const parsed = JSON.parse(raw);
+        if (!parsed || parsed.mode !== "temporary_court_period") return null;
+        if (!isValidPeriod(parsed.period_from, parsed.period_to)) return null;
+        return parsed;
+    } catch(e) {
+        return null;
+    }
 }
 
 function __isCardReturnFromSpravkaUrl(){
@@ -1647,7 +1678,10 @@ async function __initAbonentCardSafe(){
                 try { console.log("[card-init][ready-after-return]", { reason: "server-first-ready", force: true }); } catch(eReturnReady) {}
             }
             try { console.log("[card-init][force-payment-table-load]", { reason: fromSpravka ? "return-from-spravka" : "DOMContentLoaded", force: !!fromSpravka }); } catch(eForceLog) {}
-            __safeLoadPaymentTableOnce(fromSpravka ? 'return-from-spravka' : 'DOMContentLoaded', { force: fromSpravka });
+            __safeLoadPaymentTableOnce(fromSpravka ? 'return-from-spravka' : 'DOMContentLoaded', {
+                force: fromSpravka,
+                mode: (fromSpravka && window.JKH_CARD_PERIOD_MODE_ACTIVE === true) ? "temporary_court_period" : "readonly_no_recalc"
+            });
         }, 0);
     } catch (e) {
         try { console.error("[abonent_card][init-error]", e); } catch (_) {}
@@ -3200,9 +3234,11 @@ function loadCalcPeriodUI(){
                 fromEl.value = urlFrom;
                 toEl.value = urlTo;
                 window.JKH_CARD_PERIOD_MODE_ACTIVE = true;
+                __saveTemporaryPeriodState({ from: urlFrom, to: urlTo }, { abonentId: meta.requestedId, source: "url" });
                 try { console.log("[card-return][from-spravka]", { from: urlFrom, to: urlTo, requestedId: meta.requestedId, uid: meta.resolvedUid, ownerId: meta.ownerId, writes: false }); } catch(eReturnLog) {}
                 try { console.log("[period][restore-source]", { source: "url", key: "location.search", raw: window.location.search || "", from: urlFrom, to: urlTo, requestedId: meta.requestedId, uid: meta.resolvedUid, ownerId: meta.ownerId }); } catch (eRestoreUrlLog) {}
-                __safeLoadPaymentTableOnce("calc-period-bootstrap-url", { force: true });
+                try { console.log("[period-recalc][return-state-restored]", { source: "url", periodFrom: urlFrom, periodTo: urlTo, mode: "temporary_court_period" }); } catch(eReturnStateUrl) {}
+                __safeLoadPaymentTableOnce("calc-period-bootstrap-url", { force: true, mode: "temporary_court_period" });
                 try {
                     console.log("[card-period][bootstrap-inputs-from-url]", {
                         requestedId: meta.requestedId,
@@ -3229,6 +3265,15 @@ function loadCalcPeriodUI(){
         }
 
         if (!hasUrlPeriod) {
+            const sessionPeriod = __readTemporaryPeriodState(meta.requestedId);
+            if (sessionPeriod) {
+                fromEl.value = sessionPeriod.period_from || "";
+                toEl.value = sessionPeriod.period_to || "";
+                window.JKH_CARD_PERIOD_MODE_ACTIVE = true;
+                try { console.log("[period-recalc][return-state-restored]", { source: "session", periodFrom: fromEl.value || "", periodTo: toEl.value || "", mode: "temporary_court_period" }); } catch(eSessionRestoreLog) {}
+                __safeLoadPaymentTableOnce("calc-period-bootstrap-session", { force: true, mode: "temporary_court_period" });
+                return;
+            }
             fromEl.value = "";
             toEl.value = "";
             window.JKH_CARD_PERIOD_MODE_ACTIVE = false;
@@ -3618,6 +3663,41 @@ function renderPeriodCalculationStatus(message, options){
     } catch(ePeriodStatusLog) {}
 }
 
+function captureFullSummaryStatusUi(){
+    const badge = document.getElementById("summaryStatusBadge");
+    const reasonEl = document.getElementById("summaryStatusReason");
+    const warningEl = document.getElementById("summaryStatusWarning");
+    return {
+        status: String(__lastRenderedSummaryStatusLocal || ""),
+        reason: String(__lastRenderedSummaryReasonLocal || ""),
+        badgeClass: badge ? badge.className : "",
+        badgeText: badge ? badge.textContent : "",
+        reasonText: reasonEl ? reasonEl.textContent : "",
+        warningText: warningEl ? warningEl.textContent : "",
+        warningDisplay: warningEl ? warningEl.style.display : "",
+        warningClass: warningEl ? warningEl.className : ""
+    };
+}
+
+function restoreFullSummaryStatusUi(snapshot){
+    const s = snapshot || {};
+    __lastRenderedSummaryStatusLocal = String(s.status || __lastRenderedSummaryStatusLocal || "");
+    __lastRenderedSummaryReasonLocal = String(s.reason || __lastRenderedSummaryReasonLocal || "");
+    const badge = document.getElementById("summaryStatusBadge");
+    const reasonEl = document.getElementById("summaryStatusReason");
+    const warningEl = document.getElementById("summaryStatusWarning");
+    if (badge) {
+        badge.className = String(s.badgeClass || badge.className || "");
+        badge.textContent = String(s.badgeText || badge.textContent || "");
+    }
+    if (reasonEl) reasonEl.textContent = String(s.reasonText || "");
+    if (warningEl) {
+        warningEl.textContent = String(s.warningText || "");
+        warningEl.style.display = String(s.warningDisplay || "");
+        warningEl.className = String(s.warningClass || warningEl.className || "summary-warning");
+    }
+}
+
 window.addEventListener("jkh:runtime-cache-invalid", function(event){
     const detail = event && event.detail ? event.detail : {};
     if (detail && detail.temporary === true) return;
@@ -3939,6 +4019,7 @@ function bindCalcButtons(){
         let hasValidPeriodInput = isValidPeriod(from, to);
         const recalcForReportPeriod = hasAnyPeriodInput;
         const prevText = runBtn.textContent;
+        const fullSummaryUiBeforeRecalc = captureFullSummaryStatusUi();
         const clickMeta = getCalcPeriodStorageMeta();
         try {
             console.log("[card-recalc][click]", {
@@ -4029,7 +4110,8 @@ function bindCalcButtons(){
                     alert("Временный расчёт периода недоступен.");
                     return;
                 }
-                const fullStatusBeforePeriod = String(__lastRenderedSummaryStatusLocal || "");
+                const fullStatusBeforePeriod = String(fullSummaryUiBeforeRecalc.status || __lastRenderedSummaryStatusLocal || "");
+                __saveTemporaryPeriodState({ from: from, to: to }, { abonentId: currentAbonentId, source: "temporary-recalc" });
                 const periodResult = await window.runTemporaryPeriodCalculation({
                     abonentId: currentAbonentId,
                     period: { from: from, to: to },
@@ -4041,6 +4123,8 @@ function bindCalcButtons(){
                     alert("Расчёт периода не выполнен: " + reason);
                     return;
                 }
+                __saveTemporaryPeriodState({ from: from, to: to }, { abonentId: currentAbonentId, source: "temporary-recalc-done", renderedPeriodRows: periodResult.renderedPeriodRows || 0 });
+                restoreFullSummaryStatusUi(fullSummaryUiBeforeRecalc);
                 const fullStatusAfterPeriod = String(__lastRenderedSummaryStatusLocal || "");
                 const periodStatusMessage = __normalizeSummaryStatus(fullStatusBeforePeriod) === "fresh"
                     ? "Период рассчитан временно. Основной итог карточки не изменялся."
@@ -4049,6 +4133,7 @@ function bindCalcButtons(){
                     fullStatusBefore: fullStatusBeforePeriod,
                     fullStatusAfter: fullStatusAfterPeriod
                 });
+                try { console.log("[period-recalc][loading-cleared]", { fullStatusBefore: fullStatusBeforePeriod, fullStatusAfter: fullStatusAfterPeriod, periodStatus: periodStatusMessage }); } catch(eLoadingCleared) {}
                 return;
             }
 
@@ -4128,6 +4213,7 @@ function bindCalcButtons(){
         fromEl.value = "";
         toEl.value = "";
         window.JKH_CARD_PERIOD_MODE_ACTIVE = false;
+        try { sessionStorage.removeItem(__periodSessionKey(id)); } catch(eSessionClear) {}
         let urlAfter = urlBefore;
         try {
             const u = new URL(window.location.href);
@@ -4181,6 +4267,7 @@ function bindCalcButtons(){
         }
         if (from || to) {
             if (isValidPeriod(from, to)) {
+                __saveTemporaryPeriodState({ from: from, to: to }, { abonentId: id, source: "open-reports" });
                 const readonlyMeta = getCalcPeriodStorageMeta();
                 if (!readonlyMeta || !readonlyMeta.resolvedUid) {
                     alert("Период расчёта не сохранён: не найден canonical UID key.");

@@ -146,9 +146,17 @@
     applyRuntimeRowsById(visibleRows, rowsById);
     const totals = summarizeRowsById(visibleRows, rowsById);
     try {
+      const months = (Array.isArray(visibleRows) ? visibleRows : []).map(function(r){ return ymKeyOfRow(r); }).filter(Boolean).sort();
       console.log("[period-recalc][rows-built]", {
         rowsCount: Array.isArray(visibleRows) ? visibleRows.length : 0,
         accruedCount: (Array.isArray(visibleRows) ? visibleRows : []).filter(function(r){ return Math.abs(toNum(r && r.accrued || 0)) > 0.0000001; }).length
+      });
+      console.log("[period-recalc][range-rendered]", {
+        periodFrom: String(selectedPeriod && selectedPeriod.from || ""),
+        periodTo: String(selectedPeriod && selectedPeriod.to || ""),
+        rowsCount: Array.isArray(visibleRows) ? visibleRows.length : 0,
+        firstRowMonth: months.length ? months[0] : "",
+        lastRowMonth: months.length ? months[months.length - 1] : ""
       });
       console.log("[period-recalc][totals-built]", totals);
     } catch(ePeriodRowsLog) {}
@@ -3367,11 +3375,15 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
     __paymentTableRenderedSignature = "";
     await loadPaymentTable("temporary_court_period");
 
+    let renderedRowsCount = 0;
+    let renderedTotals = { debt: 0, penalty: 0, total: 0 };
     try {
       const snapshot = typeof window.__getPaymentTableComputedRowsSnapshot === "function" ? window.__getPaymentTableComputedRowsSnapshot() : null;
       const rows = snapshot && Array.isArray(snapshot.rows) ? snapshot.rows : [];
       const rowsById = snapshot && snapshot.rowsById && typeof snapshot.rowsById === "object" ? snapshot.rowsById : {};
       const totals = summarizeRowsById(rows, rowsById);
+      renderedRowsCount = rows.length;
+      renderedTotals = totals;
       console.log("[period-recalc][done]", {
         abonentId: id,
         from: selectedPeriod.from,
@@ -3381,7 +3393,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
       console.log("[period-recalc][no-write-confirmed]", {
         abonentId: id,
         mode: "temporary_court_period",
-        rowsCount: rows.length,
+        rowsCount: renderedRowsCount,
         debt: totals.debt,
         penalty: totals.penalty,
         total: totals.total
@@ -3393,6 +3405,8 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
       reason:"OK",
       mode:"temporary_court_period",
       period:selectedPeriod,
+      renderedPeriodRows: renderedRowsCount,
+      totals: renderedTotals,
       autoaccrual_changed:false,
       summary_status:"skipped",
       summary_reason:"TEMPORARY_PERIOD_NOT_SAVED"
