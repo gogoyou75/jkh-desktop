@@ -427,9 +427,16 @@
   async function waitForOwnerTariffs(ownerId){
     const owner = String(ownerId || '').trim();
     const key = owner ? ('tariffs_' + owner) : '';
+    let lastRaw = '';
+    let attempts = 0;
     for (let attempt = 1; attempt <= 30; attempt++){
+      attempts = attempt;
       let list = null;
       try{
+        if (key && window.JKHStore && typeof JKHStore.getRaw === 'function'){
+          const raw = JKHStore.getRaw(key);
+          lastRaw = raw === null || raw === undefined ? '' : String(raw);
+        }
         if (key && window.JKHStore && typeof JKHStore.getJSON === 'function'){
           list = await JKHStore.getJSON(key);
         }
@@ -438,15 +445,30 @@
       try {
         console.log('[autoaccrual][wait-owner-tariffs]', {
           ownerId: owner,
-          attempt,
           found,
-          length: Array.isArray(list) ? list.length : 0
+          attempts,
+          rawLength: lastRaw ? lastRaw.length : 0
         });
       } catch(eLog) {}
-      if (found) return list;
+      if (found) {
+        try {
+          console.log('[autoaccrual][tariffs-ready]', {
+            ownerId: owner,
+            attempts,
+            rawLength: lastRaw ? lastRaw.length : 0,
+            length: Array.isArray(list) ? list.length : 0
+          });
+        } catch(eReadyLog) {}
+        return {
+          found,
+          list,
+          attempts,
+          rawLength: lastRaw ? lastRaw.length : 0
+        };
+      }
       if (attempt < 30) await delay(100);
     }
-    return null;
+    return { found:false, list:null, attempts, rawLength: lastRaw ? lastRaw.length : 0 };
   }
 
   function normalizeOwnerTariffs(list){
@@ -731,7 +753,7 @@
     return arr.length ? Math.max(...arr.map(x => Number(x.id) || 0)) + 1 : 1;
   }
 
-  function ensureAutoAccrualsForAbonent(ls, arr){
+  async function ensureAutoAccrualsForAbonent(ls, arr){
     const range = getActiveRangeISOForAbonent(ls);
     if (range && range.__fatal) return { changed:false, reason:range.code, code:range.code, message:range.message, fatal:true, details:range.details };
     if (!range) return { changed:false, reason:'NO_RANGE' };
@@ -741,6 +763,27 @@
 
     const sq = getSquareForAbonent(ls);
     const regnum = getPremiseRegnumForAbonent(ls);
+    const ownerId = getOwnerId();
+    const tariffsWait = await waitForOwnerTariffs(ownerId);
+    if (!tariffsWait || tariffsWait.found !== true){
+      return {
+        ok:false,
+        changed:false,
+        reason:'TARIFFS_NOT_FOUND_AFTER_WAIT',
+        fatal:true,
+        ownerId: ownerId,
+        attempts: tariffsWait && tariffsWait.attempts || 30,
+        details:{
+          abonentId: String(ls || ''),
+          ownerId: ownerId,
+          attempts: tariffsWait && tariffsWait.attempts || 30,
+          rawLength: tariffsWait && tariffsWait.rawLength || 0,
+          tariffsKey: ownerTariffsKey(),
+          regnum: regnum,
+          square: sq
+        }
+      };
+    }
     const tariffs = loadNormalizedOwnerTariffs();
     const hasPerM2Tariffs = tariffs.some(t => t.type === 'per_m2');
     if (!tariffs.length){
@@ -893,7 +936,6 @@
       ? String(window.JKHStore.getOwnerId() || '').trim()
       : '';
     if (!ownerId) return { ok:false, reason:'EMPTY_OWNER', ls:id };
-    await waitForOwnerTariffs(ownerId);
 
     let arr;
     try {
@@ -905,7 +947,7 @@
       throw e;
     }
     const beforeRows = dryRun ? JSON.parse(JSON.stringify(arr || [])) : null;
-    const res = ensureAutoAccrualsForAbonent(id, arr);
+    const res = await ensureAutoAccrualsForAbonent(id, arr);
     const rows = arr;
 
     if (res && res.fatal){
