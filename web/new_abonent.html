@@ -391,6 +391,7 @@
 </div>
 
 <script>
+window.new_abonent = window.new_abonent || {};
 /* =========================
    УТИЛИТЫ
    ========================= */
@@ -914,34 +915,55 @@ async function prefillFromQueryParams() {
   let src = "";
   let ret = "";
   let importDraftMissing = false;
+  let queryFio = "";
+  let queryExcelRow = 0;
 
   try {
     const params = new URLSearchParams(window.location.search || "");
     regnum = (params.get("regnum") || "").trim();
-    last = (params.get("last") || "").trim();
+    last = (params.get("fam") || params.get("last") || "").trim();
     first = (params.get("first") || "").trim();
     mid = (params.get("mid") || "").trim();
     ls = (params.get("ls") || "").trim();
     square = (params.get("square") || "").trim();
-    uid = (params.get("uid") || "").trim();
+    uid = (params.get("excelUid") || params.get("uid") || "").trim();
     src = (params.get("src") || "").trim();
     ret = (params.get("return") || "").trim();
+    queryFio = (params.get("fio") || "").trim();
+    queryExcelRow = Number(params.get("excelRow") || 0) || 0;
   } catch {}
+
+  if ((!last || !first) && queryFio) {
+    const queryFioParts = queryFio.split(/\s+/).filter(Boolean);
+    if (!last) last = String(queryFioParts[0] || "").trim();
+    if (!first) first = String(queryFioParts[1] || "").trim();
+    if (!mid) mid = String(queryFioParts.slice(2).join(" ") || "").trim();
+  }
 
   if (String(new URLSearchParams(window.location.search || '').get('from') || '').trim() === 'import') {
     src = 'import_xls';
   }
 
   const isFromImport = String(new URLSearchParams(window.location.search || '').get('from') || '').trim() === 'import';
+  if (isFromImport) {
+    console.log('[new_abonent][from-import-detected]', {
+      href: String(window.location.href || ''),
+      excelRow: queryExcelRow,
+      ls: String(ls || ''),
+      hasQueryFio: !!queryFio,
+      hasQueryUid: !!uid
+    });
+  }
   const draft = isFromImport ? await waitDraftNewAbonent() : loadDraftNewAbonent();
   if (hasDraftNewAbonentData(draft)) {
     const draftFioParts = String(draft.fio || '').trim().split(/\s+/).filter(Boolean);
-    console.log('[new_abonent][prefill-from-import]', {
+    console.log('[new_abonent][fill-from-import]', {
       hasDraft: true,
       ls: String(draft.ls || ''),
       regnum: String(draft.regnum || ''),
       square: String(draft.square || ''),
-      excelRow: Number(draft.excelRow) || 0
+      excelRow: Number(draft.excelRow) || 0,
+      source: String(draft.source || '')
     });
     last = String(draft.fam || draftFioParts[0] || last || '').trim();
     first = String(draft.name || draftFioParts[1] || first || '').trim();
@@ -953,11 +975,23 @@ async function prefillFromQueryParams() {
     src = 'import_xls';
   } else if (isFromImport) {
     importDraftMissing = true;
-    console.log('[new_abonent][prefill-missing-draft]', {
+    console.log('[new_abonent][draft-not-found]', {
       reason: 'draft_empty_or_not_found',
-      href: String(window.location.href || '')
+      href: String(window.location.href || ''),
+      excelRow: queryExcelRow,
+      ls: String(ls || '')
     });
     if (typeof setCreateStatus === 'function') setCreateStatus('draft_new_abonent_v1 пустой или не найден');
+    if (last || first || mid || ls || square || uid) {
+      console.log('[new_abonent][fill-from-import]', {
+        hasDraft: false,
+        source: 'query',
+        excelRow: queryExcelRow,
+        ls: String(ls || ''),
+        square: String(square || ''),
+        hasUid: !!uid
+      });
+    }
   }
 
   document.getElementById("na_src").value = src;

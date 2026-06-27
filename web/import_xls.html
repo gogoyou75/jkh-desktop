@@ -1278,6 +1278,28 @@ function saveDraftNewAbonent(row){
     return true;
   }catch(e){ return false; }
 }
+function buildNewAbonentImportUrl(row, draft){
+  const params = new URLSearchParams();
+  const source = draft || row || {};
+  const fam = normStr(source.fam || (row && row.fam));
+  const name = normStr(source.name || (row && row.name));
+  const otch = normStr(source.otch || (row && row.otch));
+  const fio = normStr(source.fio || [fam, name, otch].filter(Boolean).join(' ') || (row && row.fio));
+  const excelUid = normStr(source.excelUid || source.uid || getExcelUid(row));
+  params.set('from', 'import');
+  params.set('excelRow', String(Number(source.excelRow || (row && row.excelRow)) || 0));
+  params.set('ls', normStr(source.ls || (row && row.ls)));
+  if (fam) params.set('fam', fam);
+  if (fio) params.set('fio', fio);
+  if (name) params.set('first', name);
+  if (otch) params.set('mid', otch);
+  params.set('square', normStr(source.square || (row && row.square)));
+  if (excelUid){
+    params.set('uid', excelUid);
+    params.set('excelUid', excelUid);
+  }
+  return 'new_abonent.html?' + params.toString();
+}
 function restoreImportDraftOrResume(reason){
   const useResume = location.hash === '#resume=1';
   return __waitForImportDbReady('draft-restore').then(function(ok){
@@ -3598,7 +3620,17 @@ $('previewBody').addEventListener('click', function(ev){
     });
     saveImportDraftState();
 
-    location.href = 'new_abonent.html?from=import';
+    const newAbonentUrl = buildNewAbonentImportUrl(row, readBackDraft);
+    console.log('[import_xls][open-new-abonent-from-import]', {
+      url: newAbonentUrl,
+      excelRow: excelRow,
+      ls: normStr(readBackDraft && readBackDraft.ls),
+      fam: normStr(readBackDraft && readBackDraft.fam),
+      fio: normStr(readBackDraft && readBackDraft.fio),
+      square: normStr(readBackDraft && readBackDraft.square),
+      excelUid: normStr(readBackDraft && readBackDraft.excelUid)
+    });
+    location.href = newAbonentUrl;
     return;
   }
 
