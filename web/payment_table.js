@@ -2933,6 +2933,13 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
     const totalStartedAt = perfNow();
     try { console.time('[payment-table] init-total'); } catch(e) {}
     try {
+      if (!await waitPaymentTableHydratedDatabase("PAYMENT_TABLE_LOAD")) {
+        const tbodyBlocked = qs("#paymentTableBody");
+        if (tbodyBlocked) tbodyBlocked.innerHTML = '<tr><td colspan="20" style="color:#7a5300;font-weight:700;">База данных ещё загружается. Повторите через несколько секунд.</td></tr>';
+        const statusBlocked = qs("#paymentTableStatus") || qs("#paymentStatus") || qs("#paymentsStatus");
+        if (statusBlocked) statusBlocked.textContent = "База данных ещё загружается. Повторите через несколько секунд.";
+        return;
+      }
       if (!isDataReady()) {
         try { console.warn('[payment-table] load skipped: DATA_NOT_READY'); } catch(e) {}
         return;
@@ -3800,9 +3807,55 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
     return !!(fromD && toD && startOfDay(fromD) <= startOfDay(toD));
   }
 
+  function getHydratedDbCountsForPaymentTable(){
+    const db = window.AbonentsDB && typeof window.AbonentsDB === "object" ? window.AbonentsDB : {};
+    return {
+      abonentsCount: db && db.abonents && typeof db.abonents === "object" ? Object.keys(db.abonents).length : 0,
+      premisesCount: db && db.premises && typeof db.premises === "object" ? Object.keys(db.premises).length : 0,
+      linksCount: db && Array.isArray(db.links) ? db.links.length : 0
+    };
+  }
+
+  function logPaymentTableBlockedBeforeHydrate(reason){
+    const counts = getHydratedDbCountsForPaymentTable();
+    const ownerId = (window.JKHStore && typeof JKHStore.getOwnerId === "function") ? String(JKHStore.getOwnerId() || "") : "";
+    const payload = {
+      abonentId: String(getAbonentId() || ""),
+      abonentsCount: counts.abonentsCount,
+      linksCount: counts.linksCount,
+      premisesCount: counts.premisesCount,
+      ownerId: ownerId,
+      reason: String(reason || "DB_NOT_HYDRATED")
+    };
+    try { console.warn("[card][blocked-before-hydrate]", payload); } catch(e) {}
+    return payload;
+  }
+
+  async function waitPaymentTableHydratedDatabase(reason){
+    if (window.waitForHydratedDatabase && typeof window.waitForHydratedDatabase === "function") {
+      const ready = await window.waitForHydratedDatabase({ timeoutMs: 10000, reason: reason || "payment_table" });
+      if (ready && ready.ok === true) return true;
+      logPaymentTableBlockedBeforeHydrate(reason || "WAIT_TIMEOUT");
+      return false;
+    }
+    if (window.Data && typeof Data.waitForHydratedDatabase === "function") {
+      const ready = await Data.waitForHydratedDatabase({ timeoutMs: 10000, reason: reason || "payment_table" });
+      if (ready && ready.ok === true) return true;
+      logPaymentTableBlockedBeforeHydrate(reason || "DATA_WAIT_TIMEOUT");
+      return false;
+    }
+    const counts = getHydratedDbCountsForPaymentTable();
+    if (counts.abonentsCount > 0) return true;
+    logPaymentTableBlockedBeforeHydrate(reason || "NO_GLOBAL_WAIT");
+    return false;
+  }
+
   async function applyControlledAutoAccrualForManualRecalc(abonentId, options){
     const opts = options || {};
     if (opts.applyAutoAccrual !== true) return { ok:true, changed:false, reason:"SKIPPED" };
+    if (!await waitPaymentTableHydratedDatabase("AUTOACCRUAL_WRITE")) {
+      return { ok:false, changed:false, reason:"DB_NOT_HYDRATED" };
+    }
     if (!window.JKHAutoAccrual || typeof window.JKHAutoAccrual.dryRunForAbonent !== "function") {
       return { ok:false, changed:false, reason:"AUTOACCRUAL_UNAVAILABLE" };
     }
@@ -3872,6 +3925,10 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
     if (!id) {
       endRecalcTotalTimer();
       return { ok:false, reason:"ABONENT_REQUIRED" };
+    }
+    if (!await waitPaymentTableHydratedDatabase("FULL_SUMMARY_REBUILD")) {
+      endRecalcTotalTimer();
+      return { ok:false, reason:"DB_NOT_HYDRATED", summary_status:"error", summary_reason:"DB_NOT_HYDRATED" };
     }
     const mode = String(opts.recalcMode || opts.mode || "").trim().toUpperCase();
     const explicitReportPeriod = (mode === "REPORT_PERIOD_CALCULATION" || mode === "REPORT" || mode === "PERIOD" || String(opts.summaryScope || opts.summary_scope || "").toLowerCase() === "period")

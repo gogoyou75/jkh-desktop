@@ -1819,6 +1819,10 @@
   function writePaymentLedger(abonentOrId, rows, options) {
     if (!Data.ensureWriteOrExplain()) return false;
     var opts = options || {};
+    if (!_isHydratedDatabaseReady() && String(opts.eventType || "").trim() === "AUTOACCRUAL_WRITE") {
+      _logBlockedBeforeHydrateData(abonentOrId, "AUTOACCRUAL_WRITE");
+      return false;
+    }
     var found = _findAbonentByIdOrUid(abonentOrId);
     var id = String(found && found.id || (typeof abonentOrId === "object" ? abonentOrId && abonentOrId.id : abonentOrId) || "").trim();
     var abonent = found && found.abonent ? found.abonent : null;
@@ -3075,6 +3079,55 @@
     } catch (e) {
       return false;
     }
+  }
+
+  function _hydratedDbCounts() {
+    var db = window.AbonentsDB && typeof window.AbonentsDB === "object" ? window.AbonentsDB : {};
+    return {
+      abonentsCount: db && db.abonents && typeof db.abonents === "object" ? Object.keys(db.abonents).length : 0,
+      premisesCount: db && db.premises && typeof db.premises === "object" ? Object.keys(db.premises).length : 0,
+      linksCount: db && Array.isArray(db.links) ? db.links.length : 0
+    };
+  }
+
+  function _isHydratedDatabaseReady() {
+    return _hydratedDbCounts().abonentsCount > 0;
+  }
+
+  function _logBlockedBeforeHydrateData(abonentOrId, reason) {
+    var counts = _hydratedDbCounts();
+    var ownerId = "";
+    try { ownerId = (window.JKHStore && typeof JKHStore.getOwnerId === "function") ? String(JKHStore.getOwnerId() || "") : ""; } catch (eOwner) {}
+    var payload = {
+      abonentId: String(abonentOrId && typeof abonentOrId === "object" ? (abonentOrId.id || abonentOrId.uid || "") : (abonentOrId || "")),
+      abonentsCount: counts.abonentsCount,
+      linksCount: counts.linksCount,
+      premisesCount: counts.premisesCount,
+      ownerId: ownerId,
+      reason: String(reason || "DB_NOT_HYDRATED")
+    };
+    try { console.warn("[card][blocked-before-hydrate]", payload); } catch (eLog) {}
+    return payload;
+  }
+
+  async function waitForHydratedDatabase(options) {
+    var opts = options || {};
+    var timeoutMs = Number(opts.timeoutMs || opts.timeout || 10000);
+    if (!Number.isFinite(timeoutMs) || timeoutMs < 0) timeoutMs = 10000;
+    var startedAt = Date.now();
+    while ((Date.now() - startedAt) <= timeoutMs) {
+      if (_isHydratedDatabaseReady()) return { ok: true, counts: _hydratedDbCounts() };
+      if (window.waitForHydratedDatabase && window.waitForHydratedDatabase !== waitForHydratedDatabase && typeof window.waitForHydratedDatabase === "function") {
+        try {
+          var external = await window.waitForHydratedDatabase({ timeoutMs: Math.min(1000, timeoutMs), reason: opts.reason || "data" });
+          if (external && external.ok === true && _isHydratedDatabaseReady()) return { ok: true, counts: _hydratedDbCounts() };
+        } catch (eExternal) {}
+      }
+      var ready = await waitForServerFirstDataReady({ timeoutMs: 1000 });
+      if (ready && ready.ok === true && _isHydratedDatabaseReady()) return { ok: true, counts: _hydratedDbCounts() };
+      await new Promise(function(resolve) { setTimeout(resolve, 150); });
+    }
+    return { ok: false, reason: "DB_NOT_HYDRATED", counts: _hydratedDbCounts() };
   }
 
   async function waitForServerFirstDataReady(options) {
@@ -4897,6 +4950,11 @@
 
   async function recalcAbonentSummaryExplicit(abonentOrId, options) {
     var opts = options || {};
+    var hydrated = await waitForHydratedDatabase({ timeoutMs: opts.timeoutMs || opts.timeout || 10000, reason: opts.recalcMode || "recalcAbonentSummaryExplicit" });
+    if (!hydrated || hydrated.ok !== true) {
+      _logBlockedBeforeHydrateData(abonentOrId, opts.recalcMode || "FULL_SUMMARY_REBUILD");
+      return { ok: false, summary_status: "error", summary_reason: "DB_NOT_HYDRATED", reason: "DB_NOT_HYDRATED", summary: null };
+    }
     var summary = null;
     var mode = _normalizeSummaryRecalcMode(opts);
     var period = await _resolveAbonentSummaryRecalcPeriod(abonentOrId, opts.period, { mode: mode, summaryScope: opts.summaryScope || opts.summary_scope, saveSummary: opts.saveSummary });
@@ -5031,6 +5089,12 @@
     if (!ready || ready.ok !== true) {
       endCardRecalcFullTimer();
       return { ok: false, uid: "", summary_status: "error", summary_reason: "SERVER_FIRST_DATA_NOT_READY", summary: null };
+    }
+    var hydrated = await waitForHydratedDatabase({ timeoutMs: opts.timeoutMs || opts.timeout || 10000, reason: opts.recalcMode || "recalculateAbonentCard" });
+    if (!hydrated || hydrated.ok !== true) {
+      _logBlockedBeforeHydrateData(abonentOrId, opts.recalcMode || "FULL_SUMMARY_REBUILD");
+      endCardRecalcFullTimer();
+      return { ok: false, uid: "", summary_status: "error", summary_reason: "DB_NOT_HYDRATED", reason: "DB_NOT_HYDRATED", summary: null };
     }
 
     var found = _findAbonentByIdOrUid(abonentOrId);
@@ -5579,6 +5643,7 @@
     beginRecalcUidLock: beginRecalcUidLock,
     finishRecalcUidLock: finishRecalcUidLock,
     waitForServerFirstDataReady: waitForServerFirstDataReady,
+    waitForHydratedDatabase: waitForHydratedDatabase,
     saveAbonentSummaryAfterRecalc: saveAbonentSummaryAfterRecalc,
     markAbonentSummaryDirty: markAbonentSummaryDirty,
     writePaymentLedger: writePaymentLedger,

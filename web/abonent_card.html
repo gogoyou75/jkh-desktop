@@ -846,7 +846,7 @@ function hydrateRuntimeDbFromStore() {
             });
         }, 0);
         return {
-            rawLen: String(raw || "").length,
+            rawLen: String(rawBlob || "").length,
             counts: counts,
             foundTarget: !!(String(getAbonentIdFromURL() || "").trim() && window.AbonentsDB && window.AbonentsDB.abonents && window.AbonentsDB.abonents[String(getAbonentIdFromURL() || "").trim()])
         };
@@ -859,6 +859,89 @@ function hydrateRuntimeDbFromStore() {
         };
     }
 }
+
+function __hydratedDbCounts(){
+    const db = window.AbonentsDB && typeof window.AbonentsDB === "object" ? window.AbonentsDB : {};
+    return {
+        abonentsCount: db && db.abonents && typeof db.abonents === "object" ? Object.keys(db.abonents).length : 0,
+        premisesCount: db && db.premises && typeof db.premises === "object" ? Object.keys(db.premises).length : 0,
+        linksCount: db && Array.isArray(db.links) ? db.links.length : 0
+    };
+}
+
+function __cardHydrateOwnerId(){
+    try { return (window.JKHStore && typeof JKHStore.getOwnerId === "function") ? String(JKHStore.getOwnerId() || "").trim() : ""; }
+    catch(e){ return ""; }
+}
+
+function __logBlockedBeforeHydrate(reason){
+    const counts = __hydratedDbCounts();
+    const payload = {
+        abonentId: String(getAbonentIdFromURL() || ""),
+        abonentsCount: counts.abonentsCount,
+        linksCount: counts.linksCount,
+        premisesCount: counts.premisesCount,
+        ownerId: __cardHydrateOwnerId(),
+        reason: String(reason || "DB_NOT_HYDRATED")
+    };
+    try { console.warn("[card][blocked-before-hydrate]", payload); } catch(e) {}
+    return payload;
+}
+
+function __showDbStillLoadingMessage(){
+    let box = document.getElementById("cardDbHydrateBlockedBox");
+    if (!box) {
+        box = document.createElement("div");
+        box.id = "cardDbHydrateBlockedBox";
+        box.style.cssText = "margin:10px 0;padding:10px 12px;border:1px solid #f0c36d;background:#fff8e1;color:#7a5300;font-size:13px;";
+        const anchor = document.getElementById("abonentSummaryStatusCard") || document.body.firstChild;
+        if (anchor && anchor.parentNode) anchor.parentNode.insertBefore(box, anchor);
+        else document.body.appendChild(box);
+    }
+    box.textContent = "База данных ещё загружается. Повторите через несколько секунд.";
+}
+
+function __hideDbStillLoadingMessage(){
+    const box = document.getElementById("cardDbHydrateBlockedBox");
+    if (box) box.remove();
+}
+
+function __isHydratedDatabaseReady(){
+    const counts = __hydratedDbCounts();
+    return counts.abonentsCount > 0;
+}
+
+async function waitForHydratedDatabase(options){
+    const opts = options || {};
+    const timeoutMs = Number(opts.timeoutMs || opts.timeout || 10000);
+    const startedAt = Date.now();
+    while ((Date.now() - startedAt) <= timeoutMs) {
+        const hydration = hydrateRuntimeDbFromStore();
+        if (__isHydratedDatabaseReady()) {
+            window.__ABONENT_CARD_DB_HYDRATED = true;
+            __hideDbStillLoadingMessage();
+            return { ok:true, counts: __hydratedDbCounts(), hydration: hydration || null };
+        }
+        try {
+            if (window.Data && typeof Data.waitForServerFirstDataReady === "function") {
+                await Data.waitForServerFirstDataReady({ timeoutMs: 1000 });
+            } else if (window.JKHDataLoader && typeof window.JKHDataLoader.loadFromServer === "function") {
+                await window.JKHDataLoader.loadFromServer({ force:false, reason:"waitForHydratedDatabase" });
+            }
+        } catch(e) {}
+        if (__isHydratedDatabaseReady()) {
+            window.__ABONENT_CARD_DB_HYDRATED = true;
+            __hideDbStillLoadingMessage();
+            return { ok:true, counts: __hydratedDbCounts(), hydration: hydration || null };
+        }
+        await new Promise(resolve => setTimeout(resolve, 150));
+    }
+    window.__ABONENT_CARD_DB_HYDRATED = false;
+    const blocked = __logBlockedBeforeHydrate("TIMEOUT");
+    __showDbStillLoadingMessage();
+    return { ok:false, reason:"DB_NOT_HYDRATED", counts: __hydratedDbCounts(), blocked: blocked };
+}
+window.waitForHydratedDatabase = waitForHydratedDatabase;
 
 hydrateRuntimeDbFromStore();
 
@@ -1366,6 +1449,11 @@ function __clearBrokenExcludesAndReload(){
 
 function __safeLoadPaymentTableOnce(reason, options){
     const opts = options || {};
+    if (!__isHydratedDatabaseReady()) {
+        __logBlockedBeforeHydrate("PAYMENT_TABLE_LOAD:" + String(reason || ""));
+        __showDbStillLoadingMessage();
+        return;
+    }
     if (!__abonentCardServerRepairDone) {
         try { console.warn('[abonent_card] payment table load skipped before server repair:', reason); } catch(e){}
         return;
@@ -1455,6 +1543,10 @@ function __showCardInitTimeoutAfterReturn(){
 
 function __runAutoAccrualRepairOnce(){
     try {
+        if (!__isHydratedDatabaseReady()) {
+            __logBlockedBeforeHydrate("AUTOACCRUAL_REPAIR_ONCE");
+            return;
+        }
         if (!__abonentCardServerRepairDone) {
             try { console.warn('[abonent_card] skip autoaccrual before server repair'); } catch(e){}
             return;
@@ -1535,6 +1627,11 @@ async function __initAbonentCardSafe(){
             showAbonentCardContextError("missing_abonent");
             return;
         }
+        const hydrated = await waitForHydratedDatabase({ timeoutMs: 10000 });
+        if (!hydrated || hydrated.ok !== true) {
+            __logBlockedBeforeHydrate("INIT");
+            return;
+        }
         __abonentCardInitStarted = true;
 
         await __repairEmptyExcludePeriodsKeysAfterServerLoad();
@@ -1564,6 +1661,7 @@ function __isAbonentCardDataReady() {
         const id = String(getAbonentIdFromURL() || "").trim();
         const db = window.AbonentsDB && typeof window.AbonentsDB === "object" ? window.AbonentsDB : null;
         const abonents = db && db.abonents ? db.abonents : null;
+        if (!abonents || !Object.keys(abonents).length) return false;
         if (!id || !abonents) return false;
         const a = abonents[id];
         if (!a) return false;
@@ -1634,13 +1732,15 @@ function __waitForAbonentCardDataReady(cb) {
             return;
         }
 
-        if (serverReady && (status === "empty" || abonentReady)) {
+        if (serverReady && abonentReady) {
             finish(reason);
             return;
         }
 
         tries++;
         if (tries > 80) {
+            __logBlockedBeforeHydrate("INIT_WAIT_TIMEOUT");
+            __showDbStillLoadingMessage();
             console.warn("[abonent_card] server data not ready after wait, init blocked");
             if (__isCardReturnFromSpravkaUrl()) {
                 try { console.warn("[card-init][timeout-after-return]", { tries: tries, timeoutMs: 8000 }); } catch(eTimeoutLog) {}
@@ -3796,6 +3896,9 @@ function bindCalcButtons(){
         }
         if (String(reason || "") === "RECALC_ALREADY_RUNNING" || recalcResult && (recalcResult.status === "already_running" || recalcResult.summary_status === "already_running")) {
             return "Пересчёт уже выполняется в другой вкладке. Дождитесь завершения и обновите карточку.";
+        }
+        if (String(reason || "") === "DB_NOT_HYDRATED") {
+            return "База данных ещё загружается. Повторите через несколько секунд.";
         }
         if (String(reason || "") === "ZERO_ACCRUAL_OVERWRITE_BLOCKED" ||
             (String(reason || "") === "PAYMENT_LEDGER_WRITE_BLOCKED" && window.__JKH_LAST_AUTOACCRUAL_BLOCK && window.__JKH_LAST_AUTOACCRUAL_BLOCK.reason === "ZERO_ACCRUAL_OVERWRITE_BLOCKED")) {
