@@ -206,6 +206,58 @@
     return out;
   }
 
+  function computedRowsStats(rows, rowsById){
+    const map = rowsById && typeof rowsById === "object" && !Array.isArray(rowsById) ? rowsById : null;
+    let rowsCount = 0;
+    let debtTotalsCount = 0;
+    let penaltyTotalsCount = 0;
+    let totalTotalsCount = 0;
+    let rowsWithAnyTotals = 0;
+    let rowsWithZeroTotals = 0;
+    (Array.isArray(rows) ? rows : []).forEach(function(row){
+      const item = map ? (map[String(row && row.id || "")] || {}) : (row || {});
+      rowsCount += 1;
+      const pm = Number(item.pay_main);
+      const pp = Number(item.pay_penalty);
+      const totalRaw = Object.prototype.hasOwnProperty.call(item, "total") ? item.total : (pm + pp);
+      const total = Number(totalRaw);
+      const hasDebt = Number.isFinite(pm) && Math.abs(pm) > 0.0000001;
+      const hasPenalty = Number.isFinite(pp) && Math.abs(pp) > 0.0000001;
+      const hasTotal = Number.isFinite(total) && Math.abs(total) > 0.0000001;
+      if (hasDebt) debtTotalsCount += 1;
+      if (hasPenalty) penaltyTotalsCount += 1;
+      if (hasTotal) totalTotalsCount += 1;
+      if (hasDebt || hasPenalty || hasTotal) rowsWithAnyTotals += 1;
+      if (Number.isFinite(pm) && Number.isFinite(pp) && Number.isFinite(total) && Math.abs(pm) <= 0.0000001 && Math.abs(pp) <= 0.0000001 && Math.abs(total) <= 0.0000001) rowsWithZeroTotals += 1;
+    });
+    return {
+      rowsCount: rowsCount,
+      hasDebtTotals: debtTotalsCount > 0,
+      hasPenaltyTotals: penaltyTotalsCount > 0,
+      hasTotalTotals: totalTotalsCount > 0,
+      rowsWithTotals: rowsWithAnyTotals,
+      rowsWithZeroTotals: rowsWithZeroTotals
+    };
+  }
+
+  function logCardReloadRestoreRowsSource(source, rows, rowsById, extra){
+    const stats = computedRowsStats(rows, rowsById);
+    try {
+      console.log("[card-reload][restore-rows-source]", Object.assign({
+        source: String(source || ""),
+        rowsCount: stats.rowsCount,
+        hasDebtTotals: stats.hasDebtTotals,
+        hasPenaltyTotals: stats.hasPenaltyTotals,
+        hasTotalTotals: stats.hasTotalTotals,
+        rowsWithTotals: stats.rowsWithTotals,
+        rowsWithZeroTotals: stats.rowsWithZeroTotals,
+        snapshotStatus: "",
+        snapshotReason: ""
+      }, extra || {}));
+    } catch(eRestoreSourceLog) {}
+    return stats;
+  }
+
   function capturePaymentTableComputedRowsSnapshot(rows, rowsById, periodActive, selectedPeriod, runtimeSignatureValue, ledgerVersionValue){
     const normalizedRowsById = normalizeComputedRowsByIdForSnapshot(rows, rowsById);
     __paymentTableComputedRowsSnapshot = {
@@ -364,10 +416,11 @@
         selectedPeriod: selectedPeriod || null,
         rowsByIdCount: Object.keys(map).length
       });
-      console.log("[card-reload][restore-rows-source]", {
+      logCardReloadRestoreRowsSource("card_snapshot", rows, map, {
         uid: id,
-        source: "card_snapshot",
         reason: "valid",
+        snapshotStatus: "fresh",
+        snapshotReason: "",
         ledgerVersion: expectedLedgerVersion,
         snapshotLedgerVersion: String(snapshot.ledgerVersion || ""),
         runtimeSignature: expectedSignature,
@@ -399,20 +452,32 @@
     const snapshot = Data.readCardSnapshot(id);
     const map = snapshot && snapshot.rowsById && typeof snapshot.rowsById === "object" && !Array.isArray(snapshot.rowsById) ? snapshot.rowsById : null;
     if (!map || !Object.keys(map).length) return out;
+    const rawStatsBeforeApply = computedRowsStats(rows, null);
     applyRuntimeRowsById(rows, map);
     out.dataById = map;
     out.reason = String(snapshot.dirtyReason || snapshot.summary_reason || reason || "CARD_SNAPSHOT_DISPLAY_ONLY");
     try {
-      console.log("[card-reload][restore-rows-source]", {
+      const stats = logCardReloadRestoreRowsSource(snapshot.dirty === true ? "dirty_card_snapshot" : "card_snapshot_display_only", rows, map, {
         uid: id,
-        source: snapshot.dirty === true ? "dirty_card_snapshot" : "card_snapshot_display_only",
         reason: out.reason,
+        snapshotStatus: snapshot.dirty === true ? "dirty" : "display_only",
+        snapshotReason: out.reason,
         ledgerVersion: String(expectedLedgerVersion || ""),
         snapshotLedgerVersion: String(snapshot.ledgerVersion || ""),
         runtimeSignature: String(expectedSignature || ""),
         periodActive: !!periodActive,
         selectedPeriod: selectedPeriod || null,
         rowsByIdCount: Object.keys(map).length
+      });
+      console.warn("[card-reload][dirty-snapshot-display-fallback]", {
+        uid: id,
+        rowsCount: stats.rowsCount,
+        reason: out.reason
+      });
+      console.warn("[card-reload][prevent-zero-overwrite]", {
+        uid: id,
+        oldRowsWithTotals: stats.rowsWithTotals,
+        newRowsWithZeroTotals: rawStatsBeforeApply.rowsWithZeroTotals
       });
     } catch(eRestoreRowsLog) {}
     return out;
@@ -440,6 +505,10 @@
     const cacheVersion = cache && typeof cache === "object" ? String(cache.ledgerVersion || "") : "";
     const map = cache && cache.rowsById && typeof cache.rowsById === "object" ? cache.rowsById : null;
     const validity = (typeof Data.isLedgerRuntimeCacheValid === "function") ? Data.isLedgerRuntimeCacheValid(id, cache, validationOptions) : null;
+    const snapshotFirstState = tryApplyCardSnapshotToRows(rows, version, periodActive, selectedPeriod, expectedSignature);
+    if (snapshotFirstState.valid) return snapshotFirstState;
+    const displayOnlyFirstSnapshot = tryApplyDisplayOnlyCardSnapshotRows(rows, snapshotFirstState.reason || "CARD_SNAPSHOT_DISPLAY_ONLY", periodActive, selectedPeriod, version, expectedSignature);
+    if (displayOnlyFirstSnapshot.dataById && Object.keys(displayOnlyFirstSnapshot.dataById).length) return displayOnlyFirstSnapshot;
     if (validity && validity.valid !== true) {
       const rawReason = String(validity.reason || "");
       out.reason = rawReason || "RUNTIME_CACHE_STALE";
@@ -522,10 +591,11 @@
         selectedPeriod: selectedPeriod || null,
         rowsByIdCount: Object.keys(map).length
       });
-      console.log("[card-reload][restore-rows-source]", {
+      logCardReloadRestoreRowsSource("runtime_cache", rows, map, {
         uid: id,
-        source: "runtime_cache",
         reason: "valid",
+        snapshotStatus: "runtime_cache",
+        snapshotReason: "",
         ledgerVersion: version,
         runtimeSignature: expectedSignature,
         periodActive: periodActive,
@@ -3224,6 +3294,17 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
               selectedPeriod: selectedPeriod || null
             });
           } catch(eSnapshotRestoredLog) {}
+        } else {
+          const displayOnlySnapshotState = tryApplyDisplayOnlyCardSnapshotRows(view, normalSnapshotState && normalSnapshotState.reason || "CARD_SNAPSHOT_DISPLAY_ONLY", periodActive, selectedPeriod, runtimeLedgerVersion, runtimeCacheSignature(runtimeLedgerVersion, periodActive, selectedPeriod));
+          if (displayOnlySnapshotState && displayOnlySnapshotState.dataById && Object.keys(displayOnlySnapshotState.dataById).length) {
+            __runtimeCacheState = displayOnlySnapshotState;
+            runtimeCacheUsed = false;
+            runtimeCachePeriodMatches = false;
+            baseRowsSource = "dirty_card_snapshot_display_only";
+            restoredFromCardSnapshot = true;
+            skipRunningTotalsUpdate = true;
+            notifyRuntimeCacheSummaryState(__runtimeCacheState, periodActive, selectedPeriod);
+          }
         }
       }
       if (!restoredFromCardSnapshot && periodActive && selectedPeriod && !isReadonlyNoRecalcMode()) {
@@ -3248,6 +3329,19 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
         );
       }
       if (!restoredFromCardSnapshot) notifyRuntimeCacheSummaryState(__runtimeCacheState, periodActive, selectedPeriod);
+      const viewTotalsStats = computedRowsStats(view, null);
+      if (Array.isArray(view) && view.length && viewTotalsStats.rowsWithTotals <= 0) {
+        try {
+          console.warn("[card-reload][raw-ledger-no-totals]", {
+            uid: String(getAbonentId() || ""),
+            source: "raw_payments_ledger",
+            rowsCount: view.length,
+            periodActive: !!periodActive,
+            selectedPeriod: selectedPeriod || null,
+            runtimeCacheReason: String(__runtimeCacheState && __runtimeCacheState.reason || "")
+          });
+        } catch(eRawLedgerNoTotalsLog) {}
+      }
       try {
         if (isReadonlyNoRecalcMode()) {
           console.log("[payment-table][readonly-no-recalc]", {
