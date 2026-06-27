@@ -4162,6 +4162,7 @@ function bindCalcButtons(){
                     const reason = String(recalcResult && (recalcResult.reason || recalcResult.summary_reason) || "CALC_FAILED");
                     const lockStatus = recalcResult && (recalcResult.status === "already_running" || recalcResult.summary_status === "already_running");
                     renderAbonentSummaryStatus(lockStatus ? "already_running" : "error", reason);
+                    try { console.log("[full-recalc][ui-status-final]", { abonentId: String(currentAbonentId || ""), status: lockStatus ? "already_running" : "error", reason: reason }); } catch(eUiFinalFailLog) {}
                     alert(manualRecalcErrorMessage(recalcResult, reason));
                     return;
                 }
@@ -4172,6 +4173,7 @@ function bindCalcButtons(){
                 if (__normalizeSummaryStatus(summaryStatus) === "fresh") {
                     if (!window.Data || typeof Data.buildCardSnapshotFromCurrentResult !== "function" || typeof Data.saveCardSnapshotAndWait !== "function") {
                         renderAbonentSummaryStatus("error", "CARD_SNAPSHOT_API_UNAVAILABLE");
+                        try { console.log("[full-recalc][ui-status-final]", { abonentId: String(currentAbonentId || ""), status: "error", reason: "CARD_SNAPSHOT_API_UNAVAILABLE" }); } catch(eUiFinalApiLog) {}
                         alert("Snapshot карточки не сохранён: API snapshot недоступен.");
                         return;
                     }
@@ -4179,22 +4181,38 @@ function bindCalcButtons(){
                     const snapshotRowsById = snapshot && snapshot.rowsById && typeof snapshot.rowsById === "object" && !Array.isArray(snapshot.rowsById) ? snapshot.rowsById : null;
                     if (!snapshot || !snapshotRowsById || !Object.keys(snapshotRowsById).length) {
                         renderAbonentSummaryStatus("error", "EMPTY_ROWS_BY_ID");
+                        try { console.log("[full-recalc][ui-status-final]", { abonentId: String(currentAbonentId || ""), status: "error", reason: "EMPTY_ROWS_BY_ID" }); } catch(eUiFinalEmptyRowsLog) {}
                         alert("Snapshot карточки пуст — пересчёт не дал строк с computed totals");
                         return;
                     }
                     const snapshotSaveResult = await Data.saveCardSnapshotAndWait(currentAbonentId, snapshot);
+                    try {
+                        console.log("[full-recalc][save-snapshot]", {
+                            abonentId: String(currentAbonentId || ""),
+                            uid: String(snapshot && snapshot.uid || ""),
+                            key: String(snapshotSaveResult && snapshotSaveResult.key || ""),
+                            localOk: !!(snapshotSaveResult && snapshotSaveResult.localOk === true),
+                            serverOk: !!(snapshotSaveResult && snapshotSaveResult.serverOk === true),
+                            serverReadbackOk: !!(snapshotSaveResult && snapshotSaveResult.serverReadbackOk === true),
+                            ledgerVersion: String(snapshot && snapshot.ledgerVersion || ""),
+                            snapshotLedgerVersion: String(snapshotSaveResult && snapshotSaveResult.ledgerVersion || "")
+                        });
+                    } catch(eSnapshotSaveLog) {}
                     if (!snapshotSaveResult || snapshotSaveResult.localOk !== true) {
                         renderAbonentSummaryStatus("error", "CARD_SNAPSHOT_SAVE_FAILED");
+                        try { console.log("[full-recalc][ui-status-final]", { abonentId: String(currentAbonentId || ""), status: "error", reason: "CARD_SNAPSHOT_SAVE_FAILED" }); } catch(eUiFinalLocalLog) {}
                         alert("Snapshot карточки не сохранён. Итог не будет отмечен fresh.");
                         return;
                     }
                     if (snapshotSaveResult.serverOk !== true) {
                         renderAbonentSummaryStatus("error", "CARD_SNAPSHOT_SERVER_SAVE_FAILED");
+                        try { console.log("[full-recalc][ui-status-final]", { abonentId: String(currentAbonentId || ""), status: "error", reason: "CARD_SNAPSHOT_SERVER_SAVE_FAILED" }); } catch(eUiFinalServerLog) {}
                         alert("Snapshot карточки не сохранён на сервер. Итог не будет отмечен fresh.");
                         return;
                     }
                     if (snapshotSaveResult.serverReadbackOk !== true) {
                         renderAbonentSummaryStatus("error", "CARD_SNAPSHOT_SERVER_READBACK_FAILED");
+                        try { console.log("[full-recalc][ui-status-final]", { abonentId: String(currentAbonentId || ""), status: "error", reason: "CARD_SNAPSHOT_SERVER_READBACK_FAILED" }); } catch(eUiFinalReadbackLog) {}
                         alert("Snapshot карточки не подтверждён сервером. Итог не будет отмечен fresh.");
                         return;
                     }
@@ -4208,9 +4226,21 @@ function bindCalcButtons(){
                             ledgerVersion: currentLedgerVersion,
                             snapshotLedgerVersion: String(snapshotSaveResult.ledgerVersion || snapshot && snapshot.ledgerVersion || "")
                         });
+                        console.log("[summary-status][fresh-after-full-recalc]", {
+                            uid: String(snapshot && snapshot.uid || snapshotSaveResult.key || ""),
+                            ledgerVersion: currentLedgerVersion,
+                            snapshotLedgerVersion: String(snapshotSaveResult.ledgerVersion || snapshot && snapshot.ledgerVersion || "")
+                        });
                     } catch(eFreshAfterRecalcLog) {}
                 }
                 if (summaryStatus) renderAbonentSummaryStatus(summaryStatus, __normalizeSummaryStatus(summaryStatus) === "fresh" ? "OK" : summaryReason);
+                try {
+                    console.log("[full-recalc][ui-status-final]", {
+                        abonentId: String(currentAbonentId || ""),
+                        status: summaryStatus || "",
+                        reason: __normalizeSummaryStatus(summaryStatus) === "fresh" ? "OK" : summaryReason
+                    });
+                } catch(eUiStatusFinalLog) {}
                 if (__normalizeSummaryStatus(summaryStatus) === "fresh" && summary) {
                     __renderAbonentTotalsFromFreshSummary(summary);
                 }
@@ -4223,6 +4253,23 @@ function bindCalcButtons(){
             if (!recalcHandled) {
                 __safeLoadPaymentTableOnce("manual-full-recalc");
             }
+        } catch (eRecalcHandler) {
+            const reason = String(eRecalcHandler && (eRecalcHandler.message || eRecalcHandler.reason) || eRecalcHandler || "RECALC_EXCEPTION");
+            renderAbonentSummaryStatus("error", reason);
+            try {
+                console.error("[full-recalc][result]", {
+                    abonentId: String(currentAbonentId || ""),
+                    ok: false,
+                    reason: reason,
+                    exception: true
+                });
+                console.log("[full-recalc][ui-status-final]", {
+                    abonentId: String(currentAbonentId || ""),
+                    status: "error",
+                    reason: reason
+                });
+            } catch(eRecalcCatchLog) {}
+            alert("Пересчёт не завершён: " + reason);
         } finally {
             runBtn.disabled = false;
             runBtn.textContent = prevText || "Пересчитать";

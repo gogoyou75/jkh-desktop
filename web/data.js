@@ -5049,20 +5049,34 @@
     if (!isValidUid(uid)) return { ok: false, status: "error", reason: "UID_REQUIRED" };
     var localKey = "stage16_recalc_lock_" + uid;
     var now = Date.now();
+    var lockTtlMs = 60 * 1000;
     try {
       var raw = sessionStorage.getItem(localKey);
       var local = raw ? JSON.parse(raw) : null;
-      if (local && local.running && now - Number(local.startedAt || 0) < 30 * 60 * 1000) {
+      var localAgeMs = local && local.running ? now - Number(local.startedAt || 0) : 0;
+      if (local && local.running && localAgeMs < lockTtlMs) {
+        try { console.log("[recalc-lock][begin]", { uid: uid, status: "already_running", local: true, ageMs: localAgeMs, ttlMs: lockTtlMs }); } catch (eBeginAlreadyLog) {}
         return { ok: true, status: "already_running", account_uid: uid, local: true };
       }
+      if (local && local.running) {
+        try { sessionStorage.removeItem(localKey); } catch (eExpiredRemove) {}
+        try { console.warn("[recalc-lock][expired-cleared]", { uid: uid, ageMs: localAgeMs, ttlMs: lockTtlMs }); } catch (eExpiredLog) {}
+      }
       sessionStorage.setItem(localKey, JSON.stringify({ running: true, startedAt: now }));
+      try { console.log("[recalc-lock][begin]", { uid: uid, status: "started", local: true, startedAt: now, ttlMs: lockTtlMs }); } catch (eBeginLog) {}
     } catch (eLocal) {}
     try {
       var res = await fetch("/api/recalc_lock/" + encodeURIComponent(uid) + "/begin", { method: "POST", credentials: "include" });
       var text = await res.text();
       var data = null;
       try { data = text ? JSON.parse(text) : null; } catch (eParse) { data = null; }
-      if (res.ok && data && data.ok !== false) return data;
+      if (res.ok && data && data.ok !== false) {
+        if (String(data.status || "") === "already_running") {
+          try { sessionStorage.removeItem(localKey); } catch (eServerAlreadyLocalRemove) {}
+        }
+        try { console.log("[recalc-lock][begin]", { uid: uid, status: data.status || "", server: true, local: false }); } catch (eBeginServerLog) {}
+        return data;
+      }
     } catch (e) {
       try { console.warn("[recalc-lock][begin-failed-local-only]", { uid: uid, reason: String(e && e.message || e) }); } catch (eLog) {}
     }
@@ -5074,15 +5088,24 @@
     var abonent = found && found.abonent ? found.abonent : (uid && typeof uid === "object" ? uid : null);
     uid = String(abonent && (abonent.uid || abonent.account_uid || abonent.accountUid) || uid || "").trim();
     if (!isValidUid(uid)) return { ok: false, status: "error", reason: "UID_REQUIRED" };
-    try { sessionStorage.removeItem("stage16_recalc_lock_" + uid); } catch (eLocal) {}
+    var releasedLocal = false;
+    var serverOk = false;
+    var serverStatus = "";
+    try { sessionStorage.removeItem("stage16_recalc_lock_" + uid); releasedLocal = true; } catch (eLocal) {}
     try {
-      await fetch("/api/recalc_lock/" + encodeURIComponent(uid) + "/finish", {
+      var res = await fetch("/api/recalc_lock/" + encodeURIComponent(uid) + "/finish", {
         method: "POST",
         credentials: "include",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ lock_token: token || "" })
       });
-    } catch (e) {}
+      serverOk = !!(res && res.ok);
+      serverStatus = res ? String(res.status || "") : "";
+    } catch (e) {
+      serverStatus = String(e && e.message || e || "FETCH_FAILED");
+    } finally {
+      try { console.log("[recalc-lock][release]", { uid: uid, releasedLocal: releasedLocal, serverOk: serverOk, serverStatus: serverStatus }); } catch (eReleaseLog) {}
+    }
   }
 
   async function recalculateAbonentCard(abonentOrId, options) {
