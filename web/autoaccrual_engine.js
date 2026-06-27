@@ -325,10 +325,58 @@
     }
   }
 
+  function diagnoseTariffServerReadFromAutoaccrual(source){
+    try{
+      const ownerId = getOwnerId();
+      const key = ownerId ? ('tariffs_' + ownerId) : '';
+      if (!ownerId || !key || typeof fetch !== 'function') return;
+      const localRaw = storeGetRaw(key);
+      let localJson = null;
+      try{
+        if (window.JKHStore && typeof JKHStore.getJSON === 'function') localJson = JKHStore.getJSON(key, null, ownerId);
+      }catch(eLocalJson){}
+      fetch('/api/store?key=' + encodeURIComponent(key) + '&client_owner_hint=' + encodeURIComponent(ownerId), { credentials:'include' })
+        .then(r => r.json().catch(() => null))
+        .then(data => {
+          const serverValue = data && Object.prototype.hasOwnProperty.call(data, 'value') && data.value !== null && data.value !== undefined
+            ? String(data.value)
+            : '';
+          let serverJson = null;
+          try{ serverJson = serverValue ? JSON.parse(serverValue) : null; }catch(eServerJson){}
+          let samePayload = false;
+          try{ samePayload = JSON.stringify(serverJson) === JSON.stringify(localJson); }catch(eCompare){}
+          console.log('[diagnose][tariff-server-read]', {
+            source: String(source || 'autoaccrual'),
+            ownerId: ownerId,
+            key: key,
+            localExists: localRaw !== null && localRaw !== undefined && String(localRaw) !== '',
+            serverExists: !!(data && data.ok === true && serverValue !== ''),
+            serverLength: serverValue.length,
+            localLength: localRaw ? String(localRaw).length : 0,
+            jkhStoreJsonExists: localJson !== null && localJson !== undefined,
+            payloadMatchesJKHStoreGetJSON: samePayload
+          });
+        })
+        .catch(e => console.warn('[diagnose][tariff-server-read]', {
+          source: String(source || 'autoaccrual'),
+          ownerId: ownerId,
+          key: key,
+          localExists: localRaw !== null && localRaw !== undefined && String(localRaw) !== '',
+          serverExists: null,
+          serverLength: 0,
+          localLength: localRaw ? String(localRaw).length : 0,
+          error: String(e && e.message || e)
+        }));
+    }catch(e){
+      console.warn('[diagnose][tariff-server-read]', { source:String(source || 'autoaccrual'), error:String(e && e.message || e) });
+    }
+  }
+
   function loadOwnerTariffsRaw(){
     try{
       const key = ownerTariffsKey();
       diagnoseTariffsStorage('autoaccrual:loadOwnerTariffsRaw');
+      diagnoseTariffServerReadFromAutoaccrual('autoaccrual:loadOwnerTariffsRaw');
       if (!key) return [];
       const raw = storeGetRaw(key);
       if (raw === null || raw === undefined) return [];

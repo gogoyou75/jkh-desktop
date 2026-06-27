@@ -4930,6 +4930,20 @@ def store_get():
 
     owner_eff = _effective_owner_for_key(owner, key)
     row = KVStore.query.filter_by(owner=owner_eff, k=key).first()
+    if key.startswith("tariffs_"):
+        app.logger.info(
+            "[diagnose][tariff-server-read] %s",
+            json.dumps(
+                {
+                    "requested_key": key,
+                    "resolved_owner": owner_eff,
+                    "normalized_owner": owner,
+                    "value_exists": bool(row and (row.v or "") != ""),
+                    "value_length": len(row.v or "") if row else 0,
+                },
+                ensure_ascii=False,
+            ),
+        )
     if not row:
         _sync_log("load", owner_eff, server_owner=owner, client_owner_hint=client_owner_hint, key=key, status="not_found")
         return jsonify(ok=False, error="not_found", value=None), 404

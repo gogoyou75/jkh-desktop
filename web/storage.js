@@ -191,9 +191,55 @@
     return Storage.prototype.removeItem.call(localStorage, fullKey);
   }
 
+  var __tariffServerReadDiagSeen = {};
+
+  function _diagnoseTariffServerRead(baseKey, ownerId, localRaw) {
+    try {
+      var key = String(baseKey || "");
+      if (key.indexOf("tariffs_") !== 0) return;
+      var owner = normalizeOwnerId(ownerId || getActiveOwnerId());
+      if (!owner || owner === "guest" || owner === "ALL") return;
+      if (typeof fetch !== "function") return;
+      var sig = owner + "|" + key;
+      var now = Date.now ? Date.now() : (new Date()).getTime();
+      if (__tariffServerReadDiagSeen[sig] && now - __tariffServerReadDiagSeen[sig] < 2000) return;
+      __tariffServerReadDiagSeen[sig] = now;
+      var localValue = (localRaw === null || localRaw === undefined) ? "" : String(localRaw);
+      fetch("/api/store?key=" + encodeURIComponent(key) + "&client_owner_hint=" + encodeURIComponent(owner), { credentials: "include" })
+        .then(function (r) { return r.json().catch(function () { return null; }); })
+        .then(function (data) {
+          var serverValue = data && Object.prototype.hasOwnProperty.call(data, "value") && data.value !== null && data.value !== undefined
+            ? String(data.value)
+            : "";
+          console.log("[diagnose][tariff-server-read]", {
+            source: "JKHStore.getRaw",
+            ownerId: owner,
+            key: key,
+            localExists: localValue !== "",
+            serverExists: !!(data && data.ok === true && serverValue !== ""),
+            serverLength: serverValue.length,
+            localLength: localValue.length
+          });
+        })
+        .catch(function (e) {
+          console.warn("[diagnose][tariff-server-read]", {
+            source: "JKHStore.getRaw",
+            ownerId: owner,
+            key: key,
+            localExists: localValue !== "",
+            serverExists: null,
+            serverLength: 0,
+            localLength: localValue.length,
+            error: String(e && e.message || e)
+          });
+        });
+    } catch (eDiagTariffServerRead) {}
+  }
+
   function getItem(key, ownerId) {
-    if (_isProjectDataKey(key)) return _cacheGet(key, ownerId);
-    return _lsGetDirect(k(key, ownerId));
+    var raw = _isProjectDataKey(key) ? _cacheGet(key, ownerId) : _lsGetDirect(k(key, ownerId));
+    _diagnoseTariffServerRead(key, ownerId, raw);
+    return raw;
   }
 
   function setItem(key, value, ownerId) {
