@@ -862,6 +862,109 @@ function hydrateRuntimeDbFromStore() {
 
 hydrateRuntimeDbFromStore();
 
+function __diagnoseZeroAccrual1001(reason) {
+    try {
+        const requested = String(getAbonentIdFromURL() || "").trim();
+        if (requested !== "1001" && !(new URLSearchParams(window.location.search || "").get("diagnoseZeroAccrual") === "1")) return;
+        const db = window.AbonentsDB || {};
+        const abonents = db.abonents && typeof db.abonents === "object" ? db.abonents : {};
+        const byLs = abonents["1001"] || null;
+        const byFioKey = Object.keys(abonents).find(id => String(abonents[id] && abonents[id].fio || "").toUpperCase().includes("ЗАХАРОВА")) || "";
+        const byUidKey = Object.keys(abonents).find(id => String(abonents[id] && abonents[id].uid || "").trim() === "uid_mqmd4gb4_9ezysv") || "";
+        const resolvedId = byLs ? "1001" : (byUidKey || byFioKey || requested);
+        const abonent = abonents[resolvedId] || null;
+        const uid = String(abonent && abonent.uid || "").trim();
+        const ownerId = (window.JKHStore && typeof JKHStore.getOwnerId === "function") ? String(JKHStore.getOwnerId() || "").trim() : "";
+        const ledgerKey = (window.Data && typeof Data.resolvePaymentLedgerKey === "function") ? String(Data.resolvePaymentLedgerKey(abonent || resolvedId) || "") : (uid ? "payments_" + uid : "");
+        const ledgerRows = (window.Data && typeof Data.readPaymentLedger === "function") ? (Data.readPaymentLedger(abonent || resolvedId) || []) : [];
+        const accruedPositiveCount = ledgerRows.filter(r => Math.abs(Number(r && r.accrued || 0)) > 0.0000001).length;
+        const accruedSum = ledgerRows.reduce((s, r) => s + (Number(r && r.accrued || 0) || 0), 0);
+        const regnum = String(abonent && (abonent.premiseRegnum || abonent.regnum) || "").trim();
+        const premise = regnum && db.premises ? db.premises[regnum] || null : null;
+        const links = Array.isArray(db.links) ? db.links.filter(l => String(l && l.abonentId || "").trim() === String(resolvedId || "").trim()) : [];
+        const activeLink = links.find(l => !String(l && l.dateTo || "").trim()) || null;
+        const tariffKey = ownerId ? "tariffs_" + ownerId : "";
+        const tariffRaw = (window.JKHStore && typeof JKHStore.getRaw === "function" && tariffKey) ? JKHStore.getRaw(tariffKey) : null;
+        let tariffs = [];
+        try { tariffs = tariffRaw ? JSON.parse(String(tariffRaw)) : []; } catch(eTariff) { tariffs = []; }
+        const legacyTariffRaw = (window.JKHStore && typeof JKHStore.getRaw === "function") ? JKHStore.getRaw("tariffs_content_repair_v1") : null;
+        const snapshotKey = uid ? "card_snapshot_" + uid : "";
+        const runtimeKey = uid ? "ledger_runtime_cache_" + uid : "";
+        const snapshotRaw = (window.JKHStore && typeof JKHStore.getRaw === "function" && snapshotKey) ? JKHStore.getRaw(snapshotKey) : null;
+        const runtimeRaw = (window.JKHStore && typeof JKHStore.getRaw === "function" && runtimeKey) ? JKHStore.getRaw(runtimeKey) : null;
+        let snapshot = null, runtime = null;
+        try { snapshot = snapshotRaw ? JSON.parse(String(snapshotRaw)) : null; } catch(eSnapshot) {}
+        try { runtime = runtimeRaw ? JSON.parse(String(runtimeRaw)) : null; } catch(eRuntime) {}
+        const debugMonth = (window.JKHAutoAccrual && typeof JKHAutoAccrual.debugMonth === "function")
+            ? JKHAutoAccrual.debugMonth(resolvedId, 2026, 6)
+            : null;
+
+        console.log("[diagnose][abonent-resolve]", {
+            reason, requested, dbAbonentsType: Array.isArray(db.abonents) ? "array" : typeof db.abonents,
+            abonentsCount: Object.keys(abonents).length,
+            byLs: !!byLs, byFioKey, byUidKey, resolvedId, uid,
+            fio: String(abonent && abonent.fio || ""),
+            abonent: abonent ? {
+                id: abonent.id || "", uid: abonent.uid || "", fio: abonent.fio || "",
+                square: abonent.square, area: abonent.area, totalArea: abonent.totalArea,
+                regnum: abonent.regnum, premiseRegnum: abonent.premiseRegnum,
+                calcStartDate: abonent.calcStartDate, calcEndDate: abonent.calcEndDate
+            } : null
+        });
+        console.log("[diagnose][ledger-state]", {
+            ledgerKey, rowsCount: ledgerRows.length, accruedPositiveCount,
+            accruedSum: Math.round(accruedSum * 100) / 100,
+            first10: ledgerRows.slice(0, 10)
+        });
+        console.log("[diagnose][tariffs-state]", {
+            ownerId, tariffKey, canonicalRawLength: tariffRaw ? String(tariffRaw).length : 0,
+            canonicalCount: Array.isArray(tariffs) ? tariffs.length : 0,
+            activeCount: Array.isArray(tariffs) ? tariffs.filter(t => t && t.active).length : 0,
+            hasRateFrom20070601: Array.isArray(tariffs) && tariffs.some(t => Array.isArray(t.rates) && t.rates.some(r => String(r && (r.from || r.dateFrom || "")).trim() <= "2007-06-01")),
+            legacyRawLength: legacyTariffRaw ? String(legacyTariffRaw).length : 0,
+            debugMonth
+        });
+        console.log("[diagnose][area-resolve]", {
+            abonentSquare: abonent && abonent.square,
+            abonentArea: abonent && abonent.area,
+            abonentTotalArea: abonent && abonent.totalArea,
+            regnum, premiseSquare: premise && premise.square,
+            premiseArea: premise && premise.area,
+            premiseTotalArea: premise && premise.totalArea
+        });
+        console.log("[diagnose][links-state]", {
+            linksCount: links.length, activeLink,
+            hasExpectedDateFrom: !!(activeLink && String(activeLink.dateFrom || "").trim() === "2007-06-01"),
+            dateToEmpty: !!(activeLink && !String(activeLink.dateTo || "").trim()),
+            premiseRegnumMatches: !!(activeLink && regnum && String(activeLink.regnum || "").trim() === regnum),
+            links
+        });
+        console.log("[diagnose][snapshot-vs-ledger]", {
+            snapshotKey, snapshotRawLength: snapshotRaw ? String(snapshotRaw).length : 0,
+            snapshotRows: Array.isArray(snapshot && snapshot.rows) ? snapshot.rows.length : 0,
+            snapshotRowsById: snapshot && snapshot.rowsById && typeof snapshot.rowsById === "object" ? Object.keys(snapshot.rowsById).length : 0,
+            snapshotStatus: String(snapshot && (snapshot.summary_status || snapshot.status) || ""),
+            snapshotDirtyReason: String(snapshot && snapshot.dirtyReason || ""),
+            runtimeKey, runtimeRawLength: runtimeRaw ? String(runtimeRaw).length : 0,
+            runtimeRowsById: runtime && runtime.rowsById && typeof runtime.rowsById === "object" ? Object.keys(runtime.rowsById).length : 0,
+            ledgerRows: ledgerRows.length,
+            ledgerAccruedPositiveCount: accruedPositiveCount
+        });
+        console.log("[diagnose][autoaccrual-zero-reason]", {
+            noLedgerAccruals: accruedPositiveCount === 0,
+            noCanonicalTariffs: !(Array.isArray(tariffs) && tariffs.some(t => t && t.active)),
+            noSquare: !(Number(abonent && (abonent.square || abonent.area || abonent.totalArea) || premise && (premise.square || premise.area || premise.totalArea) || 0) > 0),
+            noActiveLink: !activeLink,
+            dateFrom: activeLink && activeLink.dateFrom || abonent && abonent.calcStartDate || "",
+            regnum, ownerId
+        });
+    } catch (e) {
+        console.warn("[diagnose][zero-accrual-error]", e);
+    }
+}
+window.__diagnoseZeroAccrual1001 = __diagnoseZeroAccrual1001;
+setTimeout(() => __diagnoseZeroAccrual1001("after-hydrate-timeout"), 0);
+
 function showAbonentCardContextError(reason) {
     const msg = reason === "not_found"
         ? "Абонент не найден в текущей базе. Откройте карточку из списка абонентов."
