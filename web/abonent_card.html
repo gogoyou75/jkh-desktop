@@ -3694,6 +3694,16 @@ function bindCalcButtons(){
         if (String(reason || "") === "RECALC_ALREADY_RUNNING" || recalcResult && (recalcResult.status === "already_running" || recalcResult.summary_status === "already_running")) {
             return "Пересчёт уже выполняется в другой вкладке. Дождитесь завершения и обновите карточку.";
         }
+        if (String(reason || "") === "ZERO_ACCRUAL_OVERWRITE_BLOCKED" ||
+            (String(reason || "") === "PAYMENT_LEDGER_WRITE_BLOCKED" && window.__JKH_LAST_AUTOACCRUAL_BLOCK && window.__JKH_LAST_AUTOACCRUAL_BLOCK.reason === "ZERO_ACCRUAL_OVERWRITE_BLOCKED")) {
+            return "Пересчёт заблокирован: результат содержит нулевые начисления вместо существующих.";
+        }
+        if (String(reason || "") === "TARIFFS_NOT_FOUND") {
+            return "Пересчёт не выполнен: не найдены активные тарифы для текущего владельца.";
+        }
+        if (String(reason || "") === "SQUARE_NOT_FOUND") {
+            return "Пересчёт не выполнен: не найдена площадь квартиры для расчёта начислений.";
+        }
         return "Пересчёт не выполнен: " + String(reason || "CALC_FAILED");
     }
 

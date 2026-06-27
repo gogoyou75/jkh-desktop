@@ -236,8 +236,7 @@
   }
   function savePayments(abonentId, arr, ownerId){
     if (window.Data && typeof window.Data.writePaymentLedger === 'function') {
-      window.Data.writePaymentLedger(abonentId, arr || [], { eventType: 'AUTOACCRUAL_WRITE' });
-      return;
+      return window.Data.writePaymentLedger(abonentId, arr || [], { eventType: 'AUTOACCRUAL_WRITE' });
     }
     throw new Error('Data.writePaymentLedger is not available');
   }
@@ -588,6 +587,36 @@
 
     const sq = getSquareForAbonent(ls);
     const regnum = getPremiseRegnumForAbonent(ls);
+    const tariffs = loadNormalizedOwnerTariffs();
+    const hasPerM2Tariffs = tariffs.some(t => t.type === 'per_m2');
+    if (!tariffs.length){
+      const details = {
+        abonentId: String(ls || ''),
+        ownerId: getOwnerId(),
+        tariffsKey: ownerTariffsKey(),
+        regnum: regnum,
+        square: sq,
+        from: range.from || '',
+        to: range.to || '',
+        reason: 'TARIFFS_NOT_FOUND'
+      };
+      try { console.error('[autoaccrual][blocked-invalid-input]', details); } catch(e) {}
+      return { changed:false, reason:'TARIFFS_NOT_FOUND', fatal:true, details:details };
+    }
+    if (hasPerM2Tariffs && !(sq > 0)){
+      const details = {
+        abonentId: String(ls || ''),
+        ownerId: getOwnerId(),
+        tariffsKey: ownerTariffsKey(),
+        regnum: regnum,
+        square: sq,
+        from: range.from || '',
+        to: range.to || '',
+        reason: 'SQUARE_NOT_FOUND'
+      };
+      try { console.error('[autoaccrual][blocked-invalid-input]', details); } catch(e) {}
+      return { changed:false, reason:'SQUARE_NOT_FOUND', fatal:true, details:details };
+    }
     const ownershipHistory = regnum ? getOwnershipHistoryForRegnum(regnum) : [];
 
     const allowedMonths = months.map(m => `${m.year}-${m.month}`);
@@ -718,6 +747,10 @@
     const res = ensureAutoAccrualsForAbonent(id, arr);
     const rows = arr;
 
+    if (res && res.fatal){
+      return { ok:false, ...res, ls:id, rows: dryRun ? beforeRows : rows, proposedRows: rows };
+    }
+
     if (dryRun){
       console.log('[autoaccrual][dry-run]', { id, changed: !!res.changed, len: rows.length });
       return { ok:true, ...res, ls:id, dryRun:true, rows: beforeRows, proposedRows: rows };
@@ -727,7 +760,18 @@
 
     if (res.changed){
       console.log('[autoaccrual][apply]', { id, len: rows.length });
-      savePayments(id, rows, ownerId);
+      const saved = savePayments(id, rows, ownerId);
+      if (saved === false){
+        const block = window.__JKH_LAST_AUTOACCRUAL_BLOCK || null;
+        return {
+          ok:false,
+          changed:true,
+          reason: block && block.reason ? block.reason : 'PAYMENT_LEDGER_WRITE_BLOCKED',
+          blocked: block || null,
+          ls:id,
+          rows: rows
+        };
+      }
       const lenSaved = rows.length;
       const existsSaved = lenSaved > 0;
       console.log('[autoaccrual][save]', { id, len: lenSaved, exists: existsSaved });

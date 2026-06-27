@@ -1783,6 +1783,39 @@
     } catch (e) { }
   }
 
+  function _ledgerAccruedPositiveCount(rows) {
+    if (!Array.isArray(rows)) return 0;
+    var count = 0;
+    rows.forEach(function(row) {
+      if (Math.abs(_summaryNumber(row && row.accrued)) > 0.0000001) count++;
+    });
+    return count;
+  }
+
+  function _hasResponsibilityPeriodForLedgerWrite(abonentId, abonent) {
+    function hasDate(value) {
+      var raw = String(value || "").trim();
+      if (_dateFromIsoLocal(raw)) return true;
+      return /^\d{1,2}\.\d{1,2}\.\d{4}$/.test(raw);
+    }
+    var a = abonent || {};
+    var directFrom = String(a.calcStartDate || a.calc_start_date || a.dateFrom || a.date_from || a.startCalc || a.start_calc || "").trim();
+    var directTo = String(a.calcEndDate || a.calc_end_date || a.dateTo || a.date_to || a.endCalc || a.end_calc || "").trim();
+    if (hasDate(directFrom) || hasDate(directTo)) return true;
+    var db = window.AbonentsDB || {};
+    var links = Array.isArray(db.links) ? db.links : [];
+    return links.some(function(link) {
+      return String(link && link.abonentId || "").trim() === String(abonentId || "").trim() &&
+        (hasDate(link && link.dateFrom) || hasDate(link && link.dateTo));
+    });
+  }
+
+  function _isExplicitLedgerClear(opts) {
+    var eventType = String(opts && opts.eventType || "").trim().toUpperCase();
+    return opts && (opts.explicitClear === true || opts.allowZeroAccrualOverwrite === true || opts.allowEmptyAccrualOverwrite === true) ||
+      eventType.indexOf("CLEAR") >= 0 || eventType.indexOf("RESET") >= 0;
+  }
+
   function writePaymentLedger(abonentOrId, rows, options) {
     if (!Data.ensureWriteOrExplain()) return false;
     var opts = options || {};
@@ -1807,6 +1840,31 @@
         console.warn("[financial][ledger-write-blocked]", { abonentId: id, uid: uid, key: key, reason: "LEDGER_JSON_INVALID" });
         return false;
       }
+    }
+    var oldRows = [];
+    if (currentRaw !== null && currentRaw !== undefined) {
+      try { oldRows = _parseLedgerRows(currentRaw, key); } catch (eOldRows) { oldRows = []; }
+    }
+    var newRows = Array.isArray(rows) ? rows : [];
+    var oldAccruedCount = _ledgerAccruedPositiveCount(oldRows);
+    var newAccruedCount = _ledgerAccruedPositiveCount(newRows);
+    if (String(opts.eventType || "").trim() === "AUTOACCRUAL_WRITE" &&
+        oldAccruedCount > 0 &&
+        newAccruedCount === 0 &&
+        _hasResponsibilityPeriodForLedgerWrite(id, abonent) &&
+        !_isExplicitLedgerClear(opts)) {
+      var blockInfo = {
+        abonentId: id,
+        uid: uid,
+        oldAccruedCount: oldAccruedCount,
+        newAccruedCount: newAccruedCount,
+        rowsOld: oldRows.length,
+        rowsNew: newRows.length,
+        reason: "ZERO_ACCRUAL_OVERWRITE_BLOCKED"
+      };
+      try { window.__JKH_LAST_AUTOACCRUAL_BLOCK = blockInfo; } catch (eBlockState) {}
+      try { console.error("[autoaccrual][blocked-zero-overwrite]", blockInfo); } catch (eBlockLog) {}
+      return false;
     }
     var payload = JSON.stringify(Array.isArray(rows) ? rows : []);
     var ok = _setProjectRaw(key, payload);
