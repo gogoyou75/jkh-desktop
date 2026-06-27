@@ -4682,21 +4682,77 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
         obligations: runtimeProfileObligationCount(baseRows),
         penalties: 0
       });
+      const realPenaltyStart = perfNow();
+      function logRealPenaltyProfile(stage, detail){
+        try {
+          console.log("[real-penalty-profile]", String(stage || ""), Object.assign({
+            rowId: "",
+            index: -1,
+            daysCount: 0,
+            elapsedMs: Math.round(perfNow() - realPenaltyStart)
+          }, detail || {}));
+        } catch(eRealPenaltyProfileLog) {}
+      }
+      function realPenaltyDaysCount(asOfDate){
+        try {
+          const d = asOfDate && asOfDate.getTime ? asOfDate : parseDateAnyToDate(asOfDate);
+          if (!d) return 0;
+          const ms = Math.max(0, startOfDay(d).getTime() - startOfDay(new Date(1970, 0, 1)).getTime());
+          return Math.floor(ms / 86400000);
+        } catch(eDaysCount) {
+          return 0;
+        }
+      }
+      logRealPenaltyProfile("start", {
+        rows: Array.isArray(runtimeRows) ? runtimeRows.length : 0,
+        obligations: runtimeProfileObligationCount(baseRows)
+      });
       for (let runtimeIdx = 0; runtimeIdx < runtimeRows.length; runtimeIdx += 1) {
         await maybeYieldFullRecalcProgress(runtimeRowsProgress, runId, "build-runtime-rows-before-summary", runtimeIdx);
         const r = runtimeRows[runtimeIdx];
+        const rowId = String(r && r.id || "");
+        const rowPenaltyStart = perfNow();
         rowsCount += 1;
         if (runtimeIdx > 0 && runtimeIdx % 25 === 0) emitFullRecalcHeartbeat(runId, "build-runtime-rows-before-summary");
         const asOfStartedAt = perfNow();
         const asOf = asOfForRow(r);
+        const daysCount = realPenaltyDaysCount(asOf);
+        logRealPenaltyProfile("row-start", {
+          rowId: rowId,
+          index: runtimeIdx,
+          daysCount: daysCount,
+          elapsedMs: Math.round(perfNow() - realPenaltyStart)
+        });
         asOfTotalMs += Math.max(0, perfNow() - asOfStartedAt);
         let cacheKey = "";
         try { cacheKey = memoKeyForTotals(sig, asOf); } catch(eMemoKey) {}
         if (cacheKey && __paymentTotalsMemo.has(cacheKey)) cacheHits += 1;
         else cacheMisses += 1;
         const calcStartedAt = perfNow();
+        logRealPenaltyProfile("daily-loop", {
+          rowId: rowId,
+          index: runtimeIdx,
+          daysCount: daysCount,
+          elapsedMs: Math.round(perfNow() - realPenaltyStart)
+        });
+        for (let dayIndex = 0; dayIndex < daysCount; dayIndex += 1000) {
+          try {
+            console.log("[real-penalty-progress]", {
+              rowId: rowId,
+              dayIndex: dayIndex,
+              elapsedMs: Math.round(perfNow() - realPenaltyStart)
+            });
+          } catch(eRealPenaltyProgressLog) {}
+        }
         const t = calcTotalsAsOfMemoized(baseRows, asOf, sig);
         const calcMs = Math.max(0, perfNow() - calcStartedAt);
+        logRealPenaltyProfile("row-end", {
+          rowId: rowId,
+          index: runtimeIdx,
+          daysCount: daysCount,
+          elapsedMs: Math.round(perfNow() - rowPenaltyStart),
+          calcMs: Math.round(calcMs)
+        });
         calcTotalMs += calcMs;
         if (calcMs > maxCalcMs) maxCalcMs = calcMs;
         const assignStartedAt = perfNow();
@@ -4704,6 +4760,11 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
         assignTotalMs += Math.max(0, perfNow() - assignStartedAt);
         await maybeYieldFullRecalcProgress(runtimeRowsProgress, runId, "build-runtime-rows-before-summary", runtimeIdx + 1);
       }
+      logRealPenaltyProfile("finish", {
+        rows: rowsCount,
+        obligations: runtimeProfileObligationCount(baseRows),
+        elapsedMs: Math.round(perfNow() - realPenaltyStart)
+      });
       const rowsByIdTotalMs = Math.max(0, perfNow() - rowsByIdStartedAt);
       logRuntimeProfile("build-penalties", {
         months: runtimeProfileMonthCount(runtimeRows),
