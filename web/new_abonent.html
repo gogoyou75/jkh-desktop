@@ -915,6 +915,7 @@ async function prefillFromQueryParams() {
   let src = "";
   let ret = "";
   let importDraftMissing = false;
+  let importQueryRestored = false;
   let queryFio = "";
   let queryExcelRow = 0;
 
@@ -975,14 +976,20 @@ async function prefillFromQueryParams() {
     src = 'import_xls';
   } else if (isFromImport) {
     importDraftMissing = true;
+    const queryFioLine = [last, first, mid].filter(Boolean).join(' ').trim() || queryFio;
+    importQueryRestored = !!(ls && (queryFioLine || square));
     console.log('[new_abonent][draft-not-found]', {
       reason: 'draft_empty_or_not_found',
       href: String(window.location.href || ''),
       excelRow: queryExcelRow,
-      ls: String(ls || '')
+      ls: String(ls || ''),
+      queryRestored: importQueryRestored
     });
-    if (typeof setCreateStatus === 'function') setCreateStatus('draft_new_abonent_v1 пустой или не найден');
-    if (last || first || mid || ls || square || uid) {
+    if (!importQueryRestored && typeof setCreateStatus === 'function') {
+      setCreateStatus('draft_new_abonent_v1 пустой или не найден');
+    }
+    if (importQueryRestored) {
+      if (typeof setCreateStatus === 'function') setCreateStatus('Данные из Excel восстановлены из параметров импорта.');
       console.log('[new_abonent][fill-from-import]', {
         hasDraft: false,
         source: 'query',
@@ -1024,9 +1031,11 @@ async function prefillFromQueryParams() {
       if (square) parts.push('Площадь: ' + square);
       if (regnum) parts.push('regnum: ' + regnum);
       box.style.display = 'block';
-      txt.textContent = importDraftMissing ? 'draft_new_abonent_v1 пустой или не найден' : parts.join(' | ');
+      txt.textContent = importDraftMissing
+        ? (importQueryRestored ? 'Данные из Excel восстановлены из параметров импорта.' : 'draft_new_abonent_v1 пустой или не найден')
+        : parts.join(' | ');
     }
-  } else if (importDraftMissing) {
+  } else if (importDraftMissing && !importQueryRestored) {
     const box = document.getElementById('importPrefillBox');
     const txt = document.getElementById('importPrefillText');
     if (box && txt) {
