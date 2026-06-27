@@ -2925,6 +2925,24 @@ function logFullRecalcStage(stage, detail){
   } catch(eStageLog) {}
 }
 
+function logFullRecalcDuration(stage, detail){
+  const d = detail && typeof detail === "object" ? detail : {};
+  const running = currentFullRecalcRunState();
+  const now = Date.now();
+  const startedAt = Number(d.startedAt || running && running.startedAt || now);
+  const lastAt = Number(d.lastAt || running && running.__fullRecalcDurationLastAt || startedAt);
+  if (running) running.__fullRecalcDurationLastAt = now;
+  try {
+    console.log("[full-recalc-duration]", {
+      stage: String(stage || ""),
+      elapsedMs: Math.max(0, now - startedAt),
+      deltaMs: Math.max(0, now - lastAt),
+      abonentId: String(d.abonentId || getAbonentId() || ""),
+      uid: String(d.uid || running && running.uid || "")
+    });
+  } catch(eDurationLog) {}
+}
+
 function emitFullRecalcHeartbeat(runId, stage){
   try {
     if (window.__fullRecalcHeartbeat) window.__fullRecalcHeartbeat({ runId: String(runId || ""), stage: String(stage || "") });
@@ -4609,6 +4627,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
       console.time("[recalc-step] begin lock");
       recalcLock = await Data.beginRecalcUidLock(id, { runId: runId, abonentId: id });
       console.timeEnd("[recalc-step] begin lock");
+      logFullRecalcDuration("lock", { abonentId: id, uid: recalcLock && recalcLock.account_uid || "", runId: runId });
       if (runningFullRecalc && recalcLock) {
         runningFullRecalc.uid = String(recalcLock.account_uid || runningFullRecalc.uid || "");
         runningFullRecalc.recalcLockToken = String(recalcLock.lock_token || "");
@@ -4631,6 +4650,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
       const autoResult = await applyControlledAutoAccrualForManualRecalc(id, opts);
       console.timeEnd("[recalc-step] autoaccrual");
       logFullRecalcStage("autoaccrual-done", { abonentId: id, uid: recalcLock && recalcLock.account_uid || "", runId: runId });
+      logFullRecalcDuration("autoaccrual", { abonentId: id, uid: recalcLock && recalcLock.account_uid || "", runId: runId });
       logFullRecalcStepDone(runId, "autoaccrual", { abonentId: id, ok: !!(autoResult && autoResult.ok === true), changed: !!(autoResult && autoResult.changed), reason: autoResult && autoResult.reason || "" });
       await nextUiTick();
       if (!autoResult || autoResult.ok !== true) {
@@ -4923,6 +4943,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
       console.timeEnd("[recalc-detail] build rowsById row loop");
       console.timeEnd("[recalc-step] build runtime rows before summary");
       logFullRecalcStage("build-runtime-rows-done", { abonentId: id, uid: recalcLock && recalcLock.account_uid || "", runId: runId });
+      logFullRecalcDuration("build-runtime-rows-before-summary", { abonentId: id, uid: recalcLock && recalcLock.account_uid || "", runId: runId });
       logFullRecalcStepDone(runId, "build-runtime-rows-before-summary", { abonentId: id, rowsCount: rowsCount, rowsByIdCount: Object.keys(rowsById).length });
       await nextUiTick();
       const payload = { ledgerVersion: ledgerVersion, runtimeSignature: runtimeCacheSignature(ledgerVersion, periodActive, selectedPeriod), periodActive: !!periodActive, period: periodActive && selectedPeriod ? { from: selectedPeriod.from || "", to: selectedPeriod.to || "" } : null, rowsById: rowsById, updatedAt: (new Date()).toISOString() };
@@ -4970,6 +4991,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
       });
       console.timeEnd("[recalc] Data.recalculateAbonentCard");
       logFullRecalcStage("summary-save-done", { abonentId: id, uid: recalcLock && recalcLock.account_uid || "", runId: runId });
+      logFullRecalcDuration("summary-save", { abonentId: id, uid: recalcLock && recalcLock.account_uid || "", runId: runId });
       logFullRecalcStepDone(runId, "summary-save", { abonentId: id, ok: !!(summaryResult && summaryResult.ok === true), status: summaryResult && (summaryResult.summary_status || summaryResult.status) || "", reason: summaryResult && (summaryResult.summary_reason || summaryResult.reason) || "" });
       await nextUiTick();
       logFullRecalcStep(runId, "build-fresh-runtime-rows-after-summary", { abonentId: id });
@@ -4996,6 +5018,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
         await maybeYieldFullRecalcProgress(freshRowsProgress, runId, "build-fresh-runtime-rows-after-summary", freshIdx + 1);
       }
       console.timeEnd("[recalc-step] build fresh runtime rows after summary");
+      logFullRecalcDuration("build-runtime-rows-after-summary", { abonentId: id, uid: recalcLock && recalcLock.account_uid || "", runId: runId });
       logFullRecalcStepDone(runId, "build-fresh-runtime-rows-after-summary", { abonentId: id, rowsByIdCount: Object.keys(freshRowsById).length });
       await nextUiTick();
       const freshPayload = { ledgerVersion: freshLedgerVersion, runtimeSignature: runtimeCacheSignature(freshLedgerVersion, freshPeriodActive, freshSelectedPeriod), periodActive: !!freshPeriodActive, period: freshPeriodActive && freshSelectedPeriod ? { from: freshSelectedPeriod.from || "", to: freshSelectedPeriod.to || "" } : null, rowsById: freshRowsById, updatedAt: (new Date()).toISOString() };

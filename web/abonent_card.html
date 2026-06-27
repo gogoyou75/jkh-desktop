@@ -4174,6 +4174,21 @@ function bindCalcButtons(){
                 });
             } catch(eStageLog) {}
         }
+        function logFullRecalcDuration(stage){
+            try {
+                const now = Date.now();
+                const startedAt = Number(fullRecalcState.startedAt || now);
+                const lastAt = Number(fullRecalcState.__fullRecalcDurationLastAt || startedAt);
+                fullRecalcState.__fullRecalcDurationLastAt = now;
+                console.log("[full-recalc-duration]", {
+                    stage: String(stage || ""),
+                    elapsedMs: Math.max(0, now - startedAt),
+                    deltaMs: Math.max(0, now - lastAt),
+                    abonentId: String(currentAbonentId || ""),
+                    uid: String(fullRecalcState.uid || "")
+                });
+            } catch(eDurationLog) {}
+        }
         logFullRecalcStage("start");
         function fullRecalcStageText(stage){
             const s = String(stage || "").trim();
@@ -4291,6 +4306,7 @@ function bindCalcButtons(){
         function unlockFullRecalcUi(source){
             heartbeatFullRecalc("unlock");
             logFullRecalcStage("unlock");
+            logFullRecalcDuration("unlock");
             clearFullRecalcWatchdog(source || "unlock");
             try { window.removeEventListener("beforeunload", releaseFullRecalcLockOnUnload); } catch(eRemoveUnload) {}
             __setCalcButtonsDisabled(false);
@@ -4495,12 +4511,14 @@ function bindCalcButtons(){
                     }
                     logPostRecalcStage("snapshot-save-done");
                     logFullRecalcStage("snapshot-save-done");
+                    logFullRecalcDuration("snapshot-save");
                 } catch(eSnapshotAsync) {
                     if (typeof window.__setPostRecalcSnapshotSaveResult === "function") window.__setPostRecalcSnapshotSaveResult(recalcRunId, false);
                     logPostRecalcSnapshotCycle({ saveOk: false, validationOk: false, readbackNeeded: false, fallbackTriggered: false });
                     try { console.warn("[card-snapshot][post-recalc-save-failed]", { runId: recalcRunId, reason: String(eSnapshotAsync && eSnapshotAsync.message || eSnapshotAsync) }); } catch(eAsyncWarn) {}
                     logPostRecalcStage("snapshot-save-failed");
                     logFullRecalcStage("snapshot-save-done");
+                    logFullRecalcDuration("snapshot-save");
                 }
             }, 0);
         }
@@ -4516,6 +4534,7 @@ function bindCalcButtons(){
                 uidResult = { ok: false, reason: String(e && e.message || e) };
             }
             try { console.log("[full-recalc][step-done]", { runId: recalcRunId, step: "ensure-uid", ok: !!(uidResult && uidResult.ok === true) }); } catch(eStepDoneLog) {}
+            logFullRecalcDuration("ensure-uid");
             await __fullRecalcUiYield();
 
             if (!uidResult || uidResult.ok !== true || !uidResult.uid) {
@@ -4698,6 +4717,7 @@ function bindCalcButtons(){
                 logFullRecalcStage("final-ui-render");
                 renderExplicitFullRecalcFinal("recalc-success");
                 logPostRecalcStage("final-render-done");
+                logFullRecalcDuration("final-render");
                 if (!watchdogFired) unlockFullRecalcUi("recalc-success");
                 try {
                     console.log("[full-recalc][final-ok]", {
