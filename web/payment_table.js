@@ -74,6 +74,7 @@
   let __runtimeCacheState = { valid: false, reason: "", dataById: {} };
 
   function isReadonlyNoRecalcMode(){ return __paymentTableMode === "readonly_no_recalc"; }
+  function isTemporaryCourtPeriodMode(){ return __paymentTableMode === "temporary_court_period"; }
 
   function runtimePeriodDescriptor(periodActive, selectedPeriod){
     const active = !!periodActive;
@@ -113,6 +114,45 @@
       out[String(r.id)] = { pay_main: t.principal, pay_penalty: t.penalty, total: t.total };
     });
     return out;
+  }
+
+  function summarizeRowsById(rows, rowsById){
+    const map = rowsById && typeof rowsById === "object" && !Array.isArray(rowsById) ? rowsById : {};
+    let selected = null;
+    let selectedMs = -Infinity;
+    (Array.isArray(rows) ? rows : []).forEach(function(r){
+      const id = String(r && r.id || "");
+      const item = map[id] || null;
+      if (!item) return;
+      const ms = asOfForRow(r).getTime();
+      if (ms >= selectedMs) {
+        selectedMs = ms;
+        selected = item;
+      }
+    });
+    const debt = selected ? toNum(selected.pay_main) : 0;
+    const penalty = selected ? toNum(selected.pay_penalty) : 0;
+    return { debt: r2(debt), penalty: r2(penalty), total: r2(debt + penalty) };
+  }
+
+  function buildTemporaryPeriodRowsById(displayRows, visibleRows, selectedPeriod){
+    const responsibility = getActiveResponsibilityRangeISO();
+    const calcFrom = responsibility && responsibility.from ? responsibility.from : String(selectedPeriod && selectedPeriod.from || "");
+    const calcPeriod = { from: calcFrom, to: String(selectedPeriod && selectedPeriod.to || "") };
+    const calcRows = applyResponsibilityRangeToView(applyCalcFilter(displayRows, true, calcPeriod)).filter(function(r){ return !isPaymentDraftRow(r); }).slice();
+    const baseRows = runningTotalsBaseRows(calcRows);
+    const sig = ledgerSignatureForRows(baseRows) + "::temporary_court_period:" + String(calcPeriod.from || "") + ":" + String(calcPeriod.to || "");
+    const rowsById = runtimeRowsByIdFromRows(visibleRows, baseRows, sig);
+    applyRuntimeRowsById(visibleRows, rowsById);
+    const totals = summarizeRowsById(visibleRows, rowsById);
+    try {
+      console.log("[period-recalc][rows-built]", {
+        rowsCount: Array.isArray(visibleRows) ? visibleRows.length : 0,
+        accruedCount: (Array.isArray(visibleRows) ? visibleRows : []).filter(function(r){ return Math.abs(toNum(r && r.accrued || 0)) > 0.0000001; }).length
+      });
+      console.log("[period-recalc][totals-built]", totals);
+    } catch(ePeriodRowsLog) {}
+    return { rowsById: rowsById, totals: totals, calcPeriod: calcPeriod };
   }
 
   function applyRuntimeRowsById(rows, rowsById){
@@ -3073,7 +3113,22 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
       let skipRunningTotalsUpdate = false;
       let restoredFromCardSnapshot = false;
       let normalSnapshotState = { valid: false, reason: "NOT_ATTEMPTED" };
-      if (!isReadonlyNoRecalcMode()) {
+      if (isTemporaryCourtPeriodMode() && periodActive && selectedPeriod) {
+        const temporaryRows = buildTemporaryPeriodRowsById(displayRows, view, selectedPeriod);
+        __runtimeCacheState = { valid: true, reason: "", dataById: temporaryRows.rowsById || {}, periodMatches: true, builtForPeriod: true, temporary: true, totals: temporaryRows.totals || null };
+        runtimeCacheUsed = true;
+        runtimeCachePeriodMatches = true;
+        baseRowsSource = "temporary_court_period";
+        skipRunningTotalsUpdate = true;
+        capturePaymentTableComputedRowsSnapshot(
+          view,
+          temporaryRows.rowsById || {},
+          periodActive,
+          selectedPeriod,
+          runtimeCacheSignature(runtimeLedgerVersion, periodActive, selectedPeriod),
+          runtimeLedgerVersion
+        );
+      } else if (!isReadonlyNoRecalcMode()) {
         try {
           console.log("[card-snapshot][normal-load-restore-attempt]", {
             abonentId: String(getAbonentId() || ""),
@@ -3307,15 +3362,28 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
     } catch(eModeLog) {}
 
     window.JKH_CARD_PERIOD_MODE_ACTIVE = true;
+    __paymentTableMode = "temporary_court_period";
     __paymentTableRenderedSignature = "";
     await loadPaymentTable("temporary_court_period");
 
     try {
+      const snapshot = typeof window.__getPaymentTableComputedRowsSnapshot === "function" ? window.__getPaymentTableComputedRowsSnapshot() : null;
+      const rows = snapshot && Array.isArray(snapshot.rows) ? snapshot.rows : [];
+      const rowsById = snapshot && snapshot.rowsById && typeof snapshot.rowsById === "object" ? snapshot.rowsById : {};
+      const totals = summarizeRowsById(rows, rowsById);
       console.log("[period-recalc][done]", {
         abonentId: id,
         from: selectedPeriod.from,
         to: selectedPeriod.to,
         mode: "temporary_court_period"
+      });
+      console.log("[period-recalc][no-write-confirmed]", {
+        abonentId: id,
+        mode: "temporary_court_period",
+        rowsCount: rows.length,
+        debt: totals.debt,
+        penalty: totals.penalty,
+        total: totals.total
       });
     } catch(eDoneLog) {}
 
