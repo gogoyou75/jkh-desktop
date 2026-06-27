@@ -2481,10 +2481,26 @@ function sortApplications(ob){
 
 // Расчёт пени по ОДНОМУ долгу (обязательству) до даты asOf (включительно)
 function calcPenaltyForObligation(ob, asOf, excludes, rates){
+  const penaltyStart = perfNow();
+  const rowId = String(ob && (ob.rowId || ob.key || "") || "");
+  function logPenaltyProfile(stage, extra){
+    try {
+      console.log("[penalty-profile]", String(stage || ""), Object.assign({
+        rowId: rowId,
+        elapsed: Math.round(perfNow() - penaltyStart)
+      }, extra || {}));
+    } catch(ePenaltyProfileLog) {}
+  }
+  logPenaltyProfile("prepare");
   const asOfDay = startOfDay(asOf);
-  if (asOfDay <= ob.dueDate) return 0;
+  if (asOfDay <= ob.dueDate) {
+    logPenaltyProfile("finalize", { skipped: true });
+    try { console.log("[penalty-row]", { rowId: rowId, elapsed: Math.round(perfNow() - penaltyStart) }); } catch(ePenaltyRowLog) {}
+    return 0;
+  }
 
   sortApplications(ob);
+  logPenaltyProfile("build-debt-periods", { applications: Array.isArray(ob && ob.applications) ? ob.applications.length : 0 });
 
   let penalty = 0;
   let overdueIndex = 0;
@@ -2495,7 +2511,18 @@ function calcPenaltyForObligation(ob, asOf, excludes, rates){
   const hardLimit = addDays(ob.dueDate, 3650);
   const end = (asOfDay < hardLimit) ? asOfDay : hardLimit;
 
+  logPenaltyProfile("daily-loop", { from: toISODateString(day), to: toISODateString(end) });
+  let i = 0;
   while (day <= end){
+    if (i % 1000 === 0) {
+      try {
+        console.log("[penalty-progress]", {
+          rowId: rowId,
+          dayIndex: i,
+          elapsed: Math.round(perfNow() - penaltyStart)
+        });
+      } catch(ePenaltyProgressLog) {}
+    }
     emitActiveFullRecalcHeartbeat("calc-penalty");
     if (!isExcludedDay(day, excludes)){
       overdueIndex += 1;
@@ -2516,8 +2543,12 @@ function calcPenaltyForObligation(ob, asOf, excludes, rates){
       }
     }
     day = addDays(day, 1);
+    i += 1;
   }
 
+  logPenaltyProfile("calc-penalty", { days: i, overdueDays: overdueIndex });
+  logPenaltyProfile("finalize", { penalty: r2(penalty) });
+  try { console.log("[penalty-row]", { rowId: rowId, elapsed: Math.round(perfNow() - penaltyStart) }); } catch(ePenaltyRowLog) {}
   return penalty;
 }
 
@@ -2571,12 +2602,24 @@ function calcTotalsAsOf(rows, asOfDate){
   // Поэтому для расчёта на дату asOfDate берём обязательства
   // только за месяцы <= месяца asOfDate.
   // ---------------------------------------------------------
+  const penaltyTotalsProfileStart = perfNow();
+  function logPenaltyTotalsProfile(stage, extra){
+    try {
+      console.log("[penalty-profile]", String(stage || ""), Object.assign({
+        rowId: "",
+        elapsed: Math.round(perfNow() - penaltyTotalsProfileStart)
+      }, extra || {}));
+    } catch(ePenaltyTotalsProfileLog) {}
+  }
+  logPenaltyTotalsProfile("prepare", { rows: Array.isArray(rows) ? rows.length : 0 });
   const allObligations = buildObligationsFromRows(rows, allowedYm);
+  logPenaltyTotalsProfile("build-debt-periods", { obligations: Array.isArray(allObligations) ? allObligations.length : 0 });
   const asOfYm = `${asOfDate.getFullYear()}-${pad2(asOfDate.getMonth() + 1)}`;
   const obligations = allObligations.filter(ob => String(ob.key || "") <= asOfYm);
 
   const payments = buildPaymentEventsFromRows(rows);
   const advances = allocatePaymentsFIFO(obligations, payments);
+  logPenaltyTotalsProfile("fifo-allocation", { payments: payments.length, advances: advances.length, obligations: obligations.length });
 
   // Переплата (аванс) на дату asOfDate уменьшает задолженность по обяз.
   // Если аванс превышает долг — задолженность становится отрицательной.
@@ -2589,9 +2632,11 @@ function calcTotalsAsOf(rows, asOfDate){
   let principalTotal = 0;
   let penaltyTotal = 0;
 
+  logPenaltyTotalsProfile("daily-loop", { obligations: obligations.length });
   for (let obIdx = 0; obIdx < obligations.length; obIdx += 1){
     emitActiveFullRecalcHeartbeat("calc-totals");
     const ob = obligations[obIdx];
+    const rowStartedAt = perfNow();
     sortApplications(ob);
 
     const applied = sumAppliedUpTo(ob, startOfDay(asOfDate));
@@ -2599,9 +2644,12 @@ function calcTotalsAsOf(rows, asOfDate){
     principalTotal += principal;
 
     penaltyTotal += calcPenaltyForObligation(ob, asOfDate, excludes, rates);
+    try { console.log("[penalty-row]", { rowId: String(ob && ob.key || ""), elapsed: Math.round(perfNow() - rowStartedAt) }); } catch(ePenaltyRowLog) {}
   }
+  logPenaltyTotalsProfile("calc-penalty", { obligations: obligations.length });
 
     const principalAdj = r2(principalTotal - advanceUpTo);
+  logPenaltyTotalsProfile("finalize", { principal: r2(principalTotal), penalty: r2(penaltyTotal), advance: advanceUpTo });
 
   return {
     principal: principalAdj,
