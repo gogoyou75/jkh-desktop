@@ -4526,6 +4526,35 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
         return { ok:false, reason:normalizeManualRecalcReason(autoResult && autoResult.reason), autoaccrual:autoResult, autoaccrual_changed:!!(autoResult && autoResult.changed) };
       }
       logFullRecalcStep(runId, "build-runtime-rows-before-summary", { abonentId: id });
+      const t0 = (window.performance && typeof window.performance.now === "function") ? window.performance.now() : Date.now();
+      function runtimeProfileNow(){
+        return (window.performance && typeof window.performance.now === "function") ? window.performance.now() : Date.now();
+      }
+      function logRuntimeProfile(stage, detail){
+        try {
+          console.log("[runtime-profile]", String(stage || ""), Math.round(runtimeProfileNow() - t0), Object.assign({
+            months: 0,
+            payments: 0,
+            rows: 0,
+            obligations: 0,
+            penalties: 0
+          }, detail || {}));
+        } catch(eRuntimeProfileLog) {}
+      }
+      function runtimeProfileMonthCount(rows){
+        const seen = {};
+        (Array.isArray(rows) ? rows : []).forEach(function(row){
+          const key = String(row && row.year || "") + "-" + String(row && row.month || "");
+          if (key !== "-") seen[key] = true;
+        });
+        return Object.keys(seen).length;
+      }
+      function runtimeProfilePaymentCount(rows){
+        return (Array.isArray(rows) ? rows : []).filter(function(row){ return Math.abs(toNum(row && row.paid || 0)) > 0.0000001; }).length;
+      }
+      function runtimeProfileObligationCount(rows){
+        return (Array.isArray(rows) ? rows : []).filter(function(row){ return Math.abs(toNum(row && row.accrued || 0)) > 0.0000001; }).length;
+      }
       console.time("[recalc-step] build runtime rows before summary");
       console.time("[recalc-detail] get ledger");
       const arr = getPayments();
@@ -4556,6 +4585,13 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
       emitFullRecalcHeartbeat(runId, "build-runtime-rows-before-summary");
       const baseRows = runningTotalsBaseRows(runtimeRows);
       emitFullRecalcHeartbeat(runId, "build-runtime-rows-before-summary");
+      logRuntimeProfile("create-base-rows", {
+        months: runtimeProfileMonthCount(runtimeRows),
+        payments: runtimeProfilePaymentCount(runtimeRows),
+        rows: Array.isArray(runtimeRows) ? runtimeRows.length : 0,
+        obligations: runtimeProfileObligationCount(baseRows),
+        penalties: 0
+      });
       console.timeEnd("[recalc-detail] build baseRows row/month loop");
       console.time("[recalc-detail] build maps/indexes");
       const ledgerVersion = (window.Data && Data.computeLedgerRuntimeVersion) ? String(Data.computeLedgerRuntimeVersion(id) || "") : "";
@@ -4563,6 +4599,13 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
       emitFullRecalcHeartbeat(runId, "build-runtime-rows-before-summary");
       const sig = ledgerSignatureForRows(arr) + "::" + runtimeCacheSignature(ledgerVersion, periodActive, selectedPeriod);
       emitFullRecalcHeartbeat(runId, "build-runtime-rows-before-summary");
+      logRuntimeProfile("signature", {
+        months: runtimeProfileMonthCount(arr),
+        payments: runtimeProfilePaymentCount(arr),
+        rows: Array.isArray(arr) ? arr.length : 0,
+        obligations: runtimeProfileObligationCount(baseRows),
+        penalties: 0
+      });
       console.timeEnd("[recalc-detail] ledgerSignature row loop");
       const rowsById = {};
       console.timeEnd("[recalc-detail] build maps/indexes");
@@ -4577,6 +4620,20 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
       let cacheHits = 0;
       let cacheMisses = 0;
       const runtimeRowsProgress = { lastYieldAt: perfNow() };
+      logRuntimeProfile("build-obligations", {
+        months: runtimeProfileMonthCount(baseRows),
+        payments: runtimeProfilePaymentCount(baseRows),
+        rows: Array.isArray(baseRows) ? baseRows.length : 0,
+        obligations: runtimeProfileObligationCount(baseRows),
+        penalties: 0
+      });
+      logRuntimeProfile("fifo-allocation", {
+        months: runtimeProfileMonthCount(baseRows),
+        payments: runtimeProfilePaymentCount(baseRows),
+        rows: Array.isArray(baseRows) ? baseRows.length : 0,
+        obligations: runtimeProfileObligationCount(baseRows),
+        penalties: 0
+      });
       for (let runtimeIdx = 0; runtimeIdx < runtimeRows.length; runtimeIdx += 1) {
         await maybeYieldFullRecalcProgress(runtimeRowsProgress, runId, "build-runtime-rows-before-summary", runtimeIdx);
         const r = runtimeRows[runtimeIdx];
@@ -4600,6 +4657,20 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
         await maybeYieldFullRecalcProgress(runtimeRowsProgress, runId, "build-runtime-rows-before-summary", runtimeIdx + 1);
       }
       const rowsByIdTotalMs = Math.max(0, perfNow() - rowsByIdStartedAt);
+      logRuntimeProfile("build-penalties", {
+        months: runtimeProfileMonthCount(runtimeRows),
+        payments: runtimeProfilePaymentCount(runtimeRows),
+        rows: rowsCount,
+        obligations: runtimeProfileObligationCount(baseRows),
+        penalties: cacheMisses
+      });
+      logRuntimeProfile("finalize-rows", {
+        months: runtimeProfileMonthCount(runtimeRows),
+        payments: runtimeProfilePaymentCount(runtimeRows),
+        rows: rowsCount,
+        obligations: runtimeProfileObligationCount(baseRows),
+        penalties: cacheMisses
+      });
       try {
         console.log("[rowsById][summary]", {
           rowsCount: rowsCount,
