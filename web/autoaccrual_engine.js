@@ -281,9 +281,54 @@
     return owner ? ('tariffs_' + owner) : '';
   }
 
+  function diagnoseTariffsStorage(source){
+    try{
+      const ownerId = getOwnerId();
+      const canonicalKey = ownerId ? ('tariffs_' + ownerId) : '';
+      const canonicalRaw = canonicalKey ? storeGetRaw(canonicalKey) : null;
+      const legacyRaw = storeGetRaw('tariffs_content_repair_v1');
+      const activeOwner = (window.JKHStore && typeof window.JKHStore.getOwnerId === 'function') ? String(JKHStore.getOwnerId() || '') : '';
+      const scopedKey = (window.JKHStore && typeof window.JKHStore.key === 'function' && canonicalKey) ? JKHStore.key(canonicalKey) : '';
+      const payload = {
+        source: String(source || 'autoaccrual'),
+        ownerId: ownerId,
+        activeOwnerId: activeOwner,
+        canonicalKey: canonicalKey,
+        scopedKey: scopedKey,
+        canonicalExists: canonicalRaw !== null && canonicalRaw !== undefined && String(canonicalRaw) !== '',
+        canonicalLength: canonicalRaw ? String(canonicalRaw).length : 0,
+        legacyExists: legacyRaw !== null && legacyRaw !== undefined && String(legacyRaw) !== '',
+        legacyLength: legacyRaw ? String(legacyRaw).length : 0,
+        serverValueExists: null,
+        localValueExists: canonicalRaw !== null && canonicalRaw !== undefined && String(canonicalRaw) !== ''
+      };
+      console.log('[diagnose][tariffs-storage]', payload);
+      if (ownerId && canonicalKey && typeof fetch === 'function'){
+        fetch('/api/store?key=' + encodeURIComponent(canonicalKey) + '&client_owner_hint=' + encodeURIComponent(ownerId), { credentials:'include' })
+          .then(r => r.json().catch(() => null))
+          .then(data => {
+            const value = data && (data.value !== undefined ? data.value : data.v);
+            console.log('[diagnose][tariffs-storage]', Object.assign({}, payload, {
+              source: String(source || 'autoaccrual') + ':server-readback',
+              serverValueExists: !!(data && data.ok === true && value !== null && value !== undefined && String(value) !== ''),
+              serverValueLength: value ? String(value).length : 0
+            }));
+          })
+          .catch(e => console.warn('[diagnose][tariffs-storage]', Object.assign({}, payload, {
+            source: String(source || 'autoaccrual') + ':server-readback-failed',
+            serverValueExists: null,
+            error: String(e && e.message || e)
+          })));
+      }
+    }catch(e){
+      console.warn('[diagnose][tariffs-storage]', { source:String(source || 'autoaccrual'), error:String(e && e.message || e) });
+    }
+  }
+
   function loadOwnerTariffsRaw(){
     try{
       const key = ownerTariffsKey();
+      diagnoseTariffsStorage('autoaccrual:loadOwnerTariffsRaw');
       if (!key) return [];
       const raw = storeGetRaw(key);
       if (raw === null || raw === undefined) return [];

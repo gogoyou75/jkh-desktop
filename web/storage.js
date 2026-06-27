@@ -1218,6 +1218,22 @@
       var baseKey = sk.indexOf(pref) === 0 ? sk.slice(pref.length) : sk;
       if (!_isProjectDataKeyLocal(baseKey)) continue;
       if (keep[baseKey]) continue;
+      if (baseKey.indexOf("tariffs_") === 0) {
+        var tariffRawBeforeRemove = _readLocalCompat(baseKey, ownerId);
+        try {
+          console.warn("[diagnose][tariffs-storage]", {
+            source: "storage:dump-remove-local",
+            ownerId: ownerId,
+            canonicalKey: baseKey,
+            canonicalExists: tariffRawBeforeRemove !== "",
+            canonicalLength: tariffRawBeforeRemove.length,
+            legacyExists: _readLocalCompat("tariffs_content_repair_v1", ownerId) !== "",
+            legacyLength: _readLocalCompat("tariffs_content_repair_v1", ownerId).length,
+            serverValueExists: false,
+            localValueExists: tariffRawBeforeRemove !== ""
+          });
+        } catch (eTariffRemoveLog) {}
+      }
       if (!serverDbEmpty && baseKey.indexOf("card_snapshot_") === 0) {
         try {
           console.log("[store-dump][preserve-local-card-snapshot]", {
@@ -1256,6 +1272,21 @@
       try {
         _writeServerDumpLocalCompat(kx, (val === null || val === undefined) ? "" : String(val), ownerId);
         written++;
+        if (String(kx || "").indexOf("tariffs_") === 0) {
+          try {
+            console.log("[diagnose][tariffs-storage]", {
+              source: "storage:dump-write-local",
+              ownerId: ownerId,
+              canonicalKey: kx,
+              canonicalExists: val !== null && val !== undefined && String(val) !== "",
+              canonicalLength: val ? String(val).length : 0,
+              legacyExists: _readLocalCompat("tariffs_content_repair_v1", ownerId) !== "",
+              legacyLength: _readLocalCompat("tariffs_content_repair_v1", ownerId).length,
+              serverValueExists: val !== null && val !== undefined && String(val) !== "",
+              localValueExists: _readLocalCompat(kx, ownerId) !== ""
+            });
+          } catch (eTariffWriteLog) {}
+        }
       } catch (eWrite) {
         throw eWrite;
       }
@@ -1427,6 +1458,21 @@
       for (var i = 0; i < keysToSave.length; i++) {
         var baseKey = keysToSave[i];
         var raw = _readLocalCompat(baseKey, ownerId);
+        if (String(baseKey || "").indexOf("tariffs_") === 0) {
+          try {
+            console.log("[diagnose][tariffs-storage]", {
+              source: "storage:upload-read-local",
+              ownerId: ownerId,
+              canonicalKey: baseKey,
+              canonicalExists: raw !== "",
+              canonicalLength: raw.length,
+              legacyExists: _readLocalCompat("tariffs_content_repair_v1", ownerId) !== "",
+              legacyLength: _readLocalCompat("tariffs_content_repair_v1", ownerId).length,
+              serverValueExists: null,
+              localValueExists: raw !== ""
+            });
+          } catch (eTariffUploadLog) {}
+        }
 
         // safeguard: не перезаписываем непустую базу на сервере пустой локальной базой
         if (baseKey === KEY_DB && _isDbEffectivelyEmpty(raw)) {
