@@ -3820,6 +3820,15 @@ function __isFreshCardSnapshotUsable(uid, snapshot){
     if (!snapshot.rowsById || typeof snapshot.rowsById !== "object" || Array.isArray(snapshot.rowsById)) return false;
     if (!Object.keys(snapshot.rowsById).length) return false;
     const currentLedgerVersion = window.Data && typeof Data.computeLedgerRuntimeVersion === "function" ? String(Data.computeLedgerRuntimeVersion(uid) || "") : "";
+    try {
+        console.log("[summary-status][version-check]", {
+            uid: String(uid || ""),
+            ledgerVersion: currentLedgerVersion,
+            snapshotLedgerVersion: String(snapshot.ledgerVersion || ""),
+            summaryStatus: String(snapshot.summary_status || snapshot.status || ""),
+            reason: String(snapshot.dirtyReason || snapshot.summary_reason || "")
+        });
+    } catch(eVersionCheckLog) {}
     return !!currentLedgerVersion && String(snapshot.ledgerVersion || "") === currentLedgerVersion;
 }
 
@@ -3865,9 +3874,17 @@ async function loadAbonentSummaryStatus(){
             totals: snapshot.totals || {}
         };
         window.__lastCardSummaryForDebug = summary;
-        __cardSnapshotFreshValidated = false;
-        __lastCardSnapshotValidation = { valid: false, reason: "CARD_ROWS_NOT_RESTORED", detail: { uid: uid, ledgerVersion: snapshot.ledgerVersion, rowsByIdCount: Object.keys(snapshot.rowsById).length } };
-        renderAbonentSummaryStatus("dirty", "CARD_ROWS_NOT_RESTORED");
+        __cardSnapshotFreshValidated = true;
+        __lastCardSnapshotValidation = { valid: true, reason: "", detail: { uid: uid, ledgerVersion: snapshot.ledgerVersion, rowsByIdCount: Object.keys(snapshot.rowsById).length } };
+        __runtimeCacheFreshBlocked = false;
+        try {
+            console.log("[summary-status][fresh-after-recalc]", {
+                uid: uid,
+                ledgerVersion: String(snapshot.ledgerVersion || ""),
+                snapshotLedgerVersion: String(snapshot.ledgerVersion || "")
+            });
+        } catch(eFreshAfterLoadLog) {}
+        renderAbonentSummaryStatus("fresh", "OK");
         __renderAbonentTotalsFromFreshSummary(summary);
     } catch (e) {
         renderAbonentSummaryStatus("error", String(e && e.message || e || "CARD_SNAPSHOT_READ_ERROR"));
@@ -4184,6 +4201,14 @@ function bindCalcButtons(){
                     __cardSnapshotFreshValidated = true;
                     __lastCardSnapshotValidation = { valid: true, reason: "", detail: { key: snapshotSaveResult.key, ownerId: snapshotSaveResult.ownerId, status: snapshotSaveResult.status } };
                     __runtimeCacheFreshBlocked = false;
+                    try {
+                        const currentLedgerVersion = window.Data && typeof Data.computeLedgerRuntimeVersion === "function" ? String(Data.computeLedgerRuntimeVersion(currentAbonentId) || "") : "";
+                        console.log("[summary-status][fresh-after-recalc]", {
+                            uid: String(snapshot && snapshot.uid || snapshotSaveResult.key || ""),
+                            ledgerVersion: currentLedgerVersion,
+                            snapshotLedgerVersion: String(snapshotSaveResult.ledgerVersion || snapshot && snapshot.ledgerVersion || "")
+                        });
+                    } catch(eFreshAfterRecalcLog) {}
                 }
                 if (summaryStatus) renderAbonentSummaryStatus(summaryStatus, __normalizeSummaryStatus(summaryStatus) === "fresh" ? "OK" : summaryReason);
                 if (__normalizeSummaryStatus(summaryStatus) === "fresh" && summary) {

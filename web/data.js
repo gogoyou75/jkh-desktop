@@ -1012,6 +1012,15 @@
       var currentLedgerVersion = String(currentVersions.ledger_version || computeLedgerRuntimeVersion(abonentOrId) || "");
       var snapshotLedgerVersion = String(snapshot.ledgerVersion || "");
       var rowsByIdCount = _cardSnapshotRowsByIdCount(snapshot.rowsById);
+      try {
+        console.log("[summary-status][version-check]", {
+          uid: String(snapshot.uid || ""),
+          ledgerVersion: currentLedgerVersion,
+          snapshotLedgerVersion: snapshotLedgerVersion,
+          summaryStatus: String(snapshot.summary_status || snapshot.status || ""),
+          reason: String(snapshot.dirtyReason || snapshot.summary_reason || "")
+        });
+      } catch (eVersionLog) {}
       if (snapshot.input_hash && currentVersions.input_hash && snapshot.input_hash !== currentVersions.input_hash) {
         snapshot.dirty = true;
         snapshot.dirtyReason = "INPUT_HASH_CHANGED";
