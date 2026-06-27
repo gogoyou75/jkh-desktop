@@ -920,7 +920,10 @@
 
   function _cardSnapshotRowsById(rows) {
     var out = {};
+    var rowIdx = 0;
     (Array.isArray(rows) ? rows : []).forEach(function(row) {
+      rowIdx += 1;
+      if (rowIdx % 100 === 0) _emitActiveFullRecalcHeartbeat("build-card-snapshot");
       if (!row || typeof row !== "object") return;
       var id = String(row.id || "").trim();
       if (!id) return;
@@ -1347,7 +1350,11 @@
       }
     }
     var ledgerRows = fallback && Array.isArray(fallback.rows) && _cardSnapshotRowsByIdCount(rowsById) > 0 ? fallback.rows : readPaymentLedger(abonent || uid);
+    _emitActiveFullRecalcHeartbeat("build-card-snapshot", true);
+    var snapshotBuildRowIdx = 0;
     var rows = (Array.isArray(ledgerRows) ? ledgerRows : []).map(function(row) {
+      snapshotBuildRowIdx += 1;
+      if (snapshotBuildRowIdx % 100 === 0) _emitActiveFullRecalcHeartbeat("build-card-snapshot");
       var copy = deepClone(row || {});
       var item = rowsById[String(copy.id || "")];
       if (item && typeof item === "object") {
@@ -1358,6 +1365,7 @@
       return copy;
     });
     var snapshotRowsById = _cardSnapshotRowsById(rows);
+    _emitActiveFullRecalcHeartbeat("build-card-snapshot", true);
     var stats = _cardSnapshotLedgerStats(rows);
     var rowsByIdCount = _cardSnapshotRowsByIdCount(snapshotRowsById);
     if (rowsByIdCount <= 0) {
@@ -3464,6 +3472,7 @@
 
     if (!Array.isArray(rows)) rows = [];
     for (var i = 0; i < rows.length; i++) {
+      if (i > 0 && i % 100 === 0) _emitActiveFullRecalcHeartbeat("summary-period-totals");
       var row = rows[i] || {};
       var monthKey = _summaryMonthKey(row);
       var inMonthPeriod = !!(monthKey && monthKey >= fromMonth && monthKey <= toMonth);
@@ -3639,6 +3648,19 @@
 
   function _dataUiYield() {
     return new Promise(function(resolve) { setTimeout(resolve, 0); });
+  }
+
+  var __dataFullRecalcSyncHeartbeatLastAt = 0;
+  function _emitActiveFullRecalcHeartbeat(stage, force) {
+    try {
+      var state = window.__JKH_FULL_RECALC_STATE;
+      if (!state || state.running !== true) return;
+      var now = Date.now();
+      if (!force && (now - __dataFullRecalcSyncHeartbeatLastAt) < 500) return;
+      __dataFullRecalcSyncHeartbeatLastAt = now;
+      if (window.__fullRecalcHeartbeat) window.__fullRecalcHeartbeat({ runId: String(state.runId || ""), stage: String(stage || "") });
+      else if (window.__JKH_FULL_RECALC_HEARTBEAT) window.__JKH_FULL_RECALC_HEARTBEAT(String(state.runId || ""), String(stage || ""));
+    } catch (eHeartbeat) {}
   }
 
   function _logFullRecalcStep(runId, step, extra) {
@@ -4491,21 +4513,26 @@
     }
     console.time("[card-recalc] build rows");
     try {
+      _emitActiveFullRecalcHeartbeat("summary-build-rows", true);
       var rows = window.JKHCalcEngine.loadPaymentsForAbonent(String(abonentId));
+      _emitActiveFullRecalcHeartbeat("summary-build-rows", true);
     } finally {
       console.timeEnd("[card-recalc] build rows");
     }
     console.time("[card-recalc] calc totals");
     try {
+      _emitActiveFullRecalcHeartbeat("summary-calc-totals", true);
       var totals = window.JKHCalcEngine.calcTotalsAsOfAdjusted(rows, asOf, {
         abonentId: String(abonentId),
         applyAdvanceOffset: true,
         allowNegativePrincipal: true
       });
+      _emitActiveFullRecalcHeartbeat("summary-calc-totals", true);
       var principal = Number(totals && totals.principal);
       var penalty = Number(totals && totals.penaltyDebt);
       var total = Number(totals && totals.total);
       var periodTotals = _summaryPeriodTotals(rows, from, to);
+      _emitActiveFullRecalcHeartbeat("summary-period-totals", true);
     } finally {
       console.timeEnd("[card-recalc] calc totals");
     }

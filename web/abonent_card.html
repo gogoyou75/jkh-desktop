@@ -4203,6 +4203,10 @@ function bindCalcButtons(){
             if (!activeRun || String(activeRun.runId || "") !== String(runId || recalcRunId || "")) return;
             heartbeatFullRecalc(stage);
         };
+        window.__fullRecalcHeartbeat = function(detail){
+            const d = detail && typeof detail === "object" ? detail : {};
+            heartbeatFullRecalc(d.stage || "progress");
+        };
         heartbeatFullRecalc("start");
         function hasCalculatedRowsForFullRecalc(){
             try {

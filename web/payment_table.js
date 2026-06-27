@@ -2437,9 +2437,11 @@ function allocatePaymentsFIFO(obligations, payments){
   }
 
   for (const p of payments){
+    emitActiveFullRecalcHeartbeat("allocate-payments-fifo");
     let left = p.amount;
 
     while (left > 0.0000001 && oi < obligations.length){
+      emitActiveFullRecalcHeartbeat("allocate-payments-fifo");
       const ob = obligations[oi];
       const rem = remaining(ob);
       if (rem <= 0.0000001){
@@ -2494,6 +2496,7 @@ function calcPenaltyForObligation(ob, asOf, excludes, rates){
   const end = (asOfDay < hardLimit) ? asOfDay : hardLimit;
 
   while (day <= end){
+    emitActiveFullRecalcHeartbeat("calc-penalty");
     if (!isExcludedDay(day, excludes)){
       overdueIndex += 1;
 
@@ -2586,7 +2589,9 @@ function calcTotalsAsOf(rows, asOfDate){
   let principalTotal = 0;
   let penaltyTotal = 0;
 
-  for (const ob of obligations){
+  for (let obIdx = 0; obIdx < obligations.length; obIdx += 1){
+    emitActiveFullRecalcHeartbeat("calc-totals");
+    const ob = obligations[obIdx];
     sortApplications(ob);
 
     const applied = sumAppliedUpTo(ob, startOfDay(asOfDate));
@@ -2676,7 +2681,10 @@ function ledgerSignatureForRows(rows){
   addPart(abonentId);
   addPart(periodActive ? JSON.stringify(period || {}) : "off");
   addPart(arr.length);
+  let ledgerSigIdx = 0;
   for (const r of arr){
+    ledgerSigIdx += 1;
+    if (ledgerSigIdx % 100 === 0) emitActiveFullRecalcHeartbeat("ledger-signature");
     if (!r || typeof r !== "object") { addPart("null"); continue; }
     addPart(r.id); addPart(r.year); addPart(r.month); addPart(r.accrued); addPart(r.paid); addPart(r.paid_date); addPart(r.source);
     addPart(r.use_period ? 1 : 0); addPart(r.period_from_m); addPart(r.period_from_y); addPart(r.period_to_m); addPart(r.period_to_y);
@@ -2738,7 +2746,10 @@ function runningTotalsBaseRows(allRows){
       console.timeEnd("[baseRows] build month bounds");
 
       console.time("[baseRows] filter row loop");
+      let baseRowsFilterIdx = 0;
       baseRows = baseRows.filter(r => {
+        baseRowsFilterIdx += 1;
+        if (baseRowsFilterIdx % 100 === 0) emitActiveFullRecalcHeartbeat("running-totals-base-rows");
         console.time("[baseRows] row parse year/month");
         let y = parseInt(r?.year, 10);
         let m = parseInt(r?.month, 10);
@@ -2806,6 +2817,36 @@ function logFullRecalcStepDone(runId, step, extra){
       step: String(step || "")
     }, extra || {}));
   } catch(eLog) {}
+}
+
+function emitFullRecalcHeartbeat(runId, stage){
+  try {
+    if (window.__fullRecalcHeartbeat) window.__fullRecalcHeartbeat({ runId: String(runId || ""), stage: String(stage || "") });
+    else if (window.__JKH_FULL_RECALC_HEARTBEAT) window.__JKH_FULL_RECALC_HEARTBEAT(String(runId || ""), String(stage || ""));
+  } catch(eHeartbeat) {}
+}
+
+let __fullRecalcSyncHeartbeatLastAt = 0;
+function emitActiveFullRecalcHeartbeat(stage, force){
+  try {
+    const state = window.__JKH_FULL_RECALC_STATE;
+    if (!state || state.running !== true) return;
+    const now = Date.now();
+    if (!force && (now - __fullRecalcSyncHeartbeatLastAt) < 500) return;
+    __fullRecalcSyncHeartbeatLastAt = now;
+    emitFullRecalcHeartbeat(state.runId || "", stage || state.currentStage || "full-recalc-progress");
+  } catch(eHeartbeat) {}
+}
+
+async function maybeYieldFullRecalcProgress(progress, runId, stage, index){
+  const p = progress && typeof progress === "object" ? progress : {};
+  const now = perfNow();
+  const rowDue = Number.isFinite(Number(index)) && Number(index) > 0 && Number(index) % 100 === 0;
+  const timeDue = !p.lastYieldAt || (now - p.lastYieldAt) >= 500;
+  if (!rowDue && !timeDue) return;
+  p.lastYieldAt = now;
+  emitFullRecalcHeartbeat(runId, stage);
+  await nextUiTick();
 }
 
 // Нарастающий итог: теперь это "состояние долга и пени на дату строки"
@@ -4512,12 +4553,16 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
       }
       console.timeEnd("[recalc-detail] build runtimeRows");
       console.time("[recalc-detail] build baseRows row/month loop");
+      emitFullRecalcHeartbeat(runId, "build-runtime-rows-before-summary");
       const baseRows = runningTotalsBaseRows(runtimeRows);
+      emitFullRecalcHeartbeat(runId, "build-runtime-rows-before-summary");
       console.timeEnd("[recalc-detail] build baseRows row/month loop");
       console.time("[recalc-detail] build maps/indexes");
       const ledgerVersion = (window.Data && Data.computeLedgerRuntimeVersion) ? String(Data.computeLedgerRuntimeVersion(id) || "") : "";
       console.time("[recalc-detail] ledgerSignature row loop");
+      emitFullRecalcHeartbeat(runId, "build-runtime-rows-before-summary");
       const sig = ledgerSignatureForRows(arr) + "::" + runtimeCacheSignature(ledgerVersion, periodActive, selectedPeriod);
+      emitFullRecalcHeartbeat(runId, "build-runtime-rows-before-summary");
       console.timeEnd("[recalc-detail] ledgerSignature row loop");
       const rowsById = {};
       console.timeEnd("[recalc-detail] build maps/indexes");
@@ -4531,9 +4576,12 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
       let maxCalcMs = 0;
       let cacheHits = 0;
       let cacheMisses = 0;
+      const runtimeRowsProgress = { lastYieldAt: perfNow() };
       for (let runtimeIdx = 0; runtimeIdx < runtimeRows.length; runtimeIdx += 1) {
+        await maybeYieldFullRecalcProgress(runtimeRowsProgress, runId, "build-runtime-rows-before-summary", runtimeIdx);
         const r = runtimeRows[runtimeIdx];
         rowsCount += 1;
+        if (runtimeIdx > 0 && runtimeIdx % 25 === 0) emitFullRecalcHeartbeat(runId, "build-runtime-rows-before-summary");
         const asOfStartedAt = perfNow();
         const asOf = asOfForRow(r);
         asOfTotalMs += Math.max(0, perfNow() - asOfStartedAt);
@@ -4549,7 +4597,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
         const assignStartedAt = perfNow();
         rowsById[String(r.id)] = { pay_main: t.principal, pay_penalty: t.penalty, total: t.total };
         assignTotalMs += Math.max(0, perfNow() - assignStartedAt);
-        if (runtimeIdx > 0 && runtimeIdx % 25 === 0) await nextUiTick();
+        await maybeYieldFullRecalcProgress(runtimeRowsProgress, runId, "build-runtime-rows-before-summary", runtimeIdx + 1);
       }
       const rowsByIdTotalMs = Math.max(0, perfNow() - rowsByIdStartedAt);
       try {
@@ -4620,17 +4668,23 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
       const freshArr = getPayments();
       const freshPeriodActive = periodActive;
       const freshSelectedPeriod = selectedPeriod;
+      emitFullRecalcHeartbeat(runId, "build-fresh-runtime-rows-after-summary");
       const freshRuntimeRows = freshPeriodActive && freshSelectedPeriod ? applyResponsibilityRangeToView(applyCalcFilter(freshArr, true, freshSelectedPeriod)).slice() : freshArr;
+      emitFullRecalcHeartbeat(runId, "build-fresh-runtime-rows-after-summary");
       const freshBaseRows = runningTotalsBaseRows(freshRuntimeRows);
+      emitFullRecalcHeartbeat(runId, "build-fresh-runtime-rows-after-summary");
       const freshLedgerVersion = (window.Data && Data.computeLedgerRuntimeVersion) ? String(Data.computeLedgerRuntimeVersion(id) || "") : "";
       const freshSig = ledgerSignatureForRows(freshArr) + "::" + runtimeCacheSignature(freshLedgerVersion, freshPeriodActive, freshSelectedPeriod);
       const freshRowsById = {};
+      const freshRowsProgress = { lastYieldAt: perfNow() };
       for (let freshIdx = 0; freshIdx < freshRuntimeRows.length; freshIdx += 1) {
+        await maybeYieldFullRecalcProgress(freshRowsProgress, runId, "build-fresh-runtime-rows-after-summary", freshIdx);
         const r = freshRuntimeRows[freshIdx];
+        if (freshIdx > 0 && freshIdx % 25 === 0) emitFullRecalcHeartbeat(runId, "build-fresh-runtime-rows-after-summary");
         const asOf = asOfForRow(r);
         const t = calcTotalsAsOfMemoized(freshBaseRows, asOf, freshSig);
         freshRowsById[String(r.id)] = { pay_main: t.principal, pay_penalty: t.penalty, total: t.total };
-        if (freshIdx > 0 && freshIdx % 25 === 0) await nextUiTick();
+        await maybeYieldFullRecalcProgress(freshRowsProgress, runId, "build-fresh-runtime-rows-after-summary", freshIdx + 1);
       }
       console.timeEnd("[recalc-step] build fresh runtime rows after summary");
       logFullRecalcStepDone(runId, "build-fresh-runtime-rows-after-summary", { abonentId: id, rowsByIdCount: Object.keys(freshRowsById).length });
