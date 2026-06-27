@@ -1266,6 +1266,17 @@
       if (keep[baseKey]) continue;
       if (baseKey.indexOf("tariffs_") === 0) {
         var tariffRawBeforeRemove = _readLocalCompat(baseKey, ownerId);
+        if (baseKey === ("tariffs_" + String(ownerId || "").trim()) && tariffRawBeforeRemove !== "") {
+          try {
+            console.warn("[tariffs][preserve-local-canonical]", {
+              ownerId: ownerId,
+              key: baseKey,
+              localLength: tariffRawBeforeRemove.length,
+              reason: "missing-in-server-dump"
+            });
+          } catch (eTariffPreserveLog) {}
+          continue;
+        }
         try {
           console.warn("[diagnose][tariffs-storage]", {
             source: "storage:dump-remove-local",

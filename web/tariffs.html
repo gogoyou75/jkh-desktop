@@ -392,6 +392,52 @@
     diagnoseTariffsStorage("tariffs.html:save-local");
   }
 
+  async function readServerTariffsRaw(ownerId, key){
+    if (!ownerId || !key || typeof fetch !== "function") return { ok:false, value:"" };
+    const res = await fetch("/api/store?key=" + encodeURIComponent(key) + "&client_owner_hint=" + encodeURIComponent(ownerId), { credentials:"include" });
+    const data = await res.json().catch(() => null);
+    const value = data && data.value !== null && data.value !== undefined ? String(data.value) : "";
+    return { ok: !!(res.ok && data && data.ok === true), value };
+  }
+
+  function countTariffsFromRaw(raw){
+    const parsed = safeJsonParse(raw, []);
+    return Array.isArray(parsed) ? parsed.length : 0;
+  }
+
+  async function backfillServerTariffsIfNeeded(tariffs){
+    const ownerId = getOwnerId();
+    const key = cacheKey();
+    const raw = storeGetRaw(key);
+    const localRaw = raw == null ? "" : String(raw);
+    const localCount = Array.isArray(tariffs) ? tariffs.length : countTariffsFromRaw(localRaw);
+    if (!localRaw) return;
+    if (localCount <= 0) return;
+
+    let serverOk = false;
+    let readbackOk = false;
+    try{
+      const serverBefore = await readServerTariffsRaw(ownerId, key);
+      serverOk = !!(serverBefore.ok && serverBefore.value);
+      if (!serverOk){
+        if (!window.JKHPersist || typeof JKHPersist.set !== "function") throw new Error("JKHPersist.set is not available");
+        await JKHPersist.set(key, JSON.stringify(tariffs || []), ownerId);
+      }
+      const readback = await readServerTariffsRaw(ownerId, key);
+      readbackOk = !!(readback.ok && readback.value === JSON.stringify(tariffs || []));
+      console.log("[tariffs][server-backfill]", { ownerId, key, localCount, serverOk, readbackOk });
+    }catch(e){
+      console.warn("[tariffs][server-backfill]", {
+        ownerId,
+        key,
+        localCount,
+        serverOk,
+        readbackOk,
+        error: String(e && e.message || e)
+      });
+    }
+  }
+
   async function saveTariffsToCanonPersist(tariffs){
     const ownerId = getOwnerId();
     if (!ownerId) throw new Error("NO_ACTIVE_OWNER_ID");
@@ -866,6 +912,7 @@
       saveTariffsToCanon([]);
     }
 
+    void backfillServerTariffsIfNeeded(loadTariffsFromCanon());
     renderTariffs();
     refreshEditLocks();
     _pageStarted = true;
@@ -898,6 +945,7 @@
         if (raw == null || raw === ""){
           saveTariffsToCanon([]);
         }
+        void backfillServerTariffsIfNeeded(loadTariffsFromCanon());
         renderTariffs();
         refreshEditLocks();
         _pageStarted = true;

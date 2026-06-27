@@ -388,6 +388,20 @@
     }
   }
 
+  function ownerTariffsStorageState(){
+    const key = ownerTariffsKey();
+    const raw = key ? storeGetRaw(key) : null;
+    const legacyRaw = storeGetRaw('tariffs_content_repair_v1');
+    return {
+      ownerId: getOwnerId(),
+      tariffsKey: key,
+      canonicalMissing: !key || raw === null || raw === undefined || String(raw) === '',
+      canonicalLength: raw ? String(raw).length : 0,
+      legacyExists: legacyRaw !== null && legacyRaw !== undefined && String(legacyRaw) !== '',
+      legacyLength: legacyRaw ? String(legacyRaw).length : 0
+    };
+  }
+
   function normalizeOwnerTariffs(list){
     const out = [];
     (Array.isArray(list) ? list : []).forEach((t, idx) => {
@@ -683,15 +697,21 @@
     const tariffs = loadNormalizedOwnerTariffs();
     const hasPerM2Tariffs = tariffs.some(t => t.type === 'per_m2');
     if (!tariffs.length){
+      const tariffState = ownerTariffsStorageState();
       const details = {
         abonentId: String(ls || ''),
-        ownerId: getOwnerId(),
-        tariffsKey: ownerTariffsKey(),
+        ownerId: tariffState.ownerId,
+        tariffsKey: tariffState.tariffsKey,
+        canonicalMissing: tariffState.canonicalMissing,
+        canonicalLength: tariffState.canonicalLength,
+        legacyExists: tariffState.legacyExists,
+        legacyLength: tariffState.legacyLength,
         regnum: regnum,
         square: sq,
         from: range.from || '',
         to: range.to || '',
-        reason: 'TARIFFS_NOT_FOUND'
+        reason: 'TARIFFS_NOT_FOUND',
+        message: 'Откройте страницу Тарифы и нажмите сохранить всё для переноса тарифов в canonical storage.'
       };
       try { console.error('[autoaccrual][blocked-invalid-input]', details); } catch(e) {}
       return { changed:false, reason:'TARIFFS_NOT_FOUND', fatal:true, details:details };
