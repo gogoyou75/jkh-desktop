@@ -660,6 +660,18 @@
     }
   };
 
+  try {
+    window.__JKHSTORE_INSTANCE_ID = window.__JKHSTORE_INSTANCE_ID || (
+      window.crypto && typeof window.crypto.randomUUID === "function"
+        ? window.crypto.randomUUID()
+        : ("jkhstore_" + Date.now() + "_" + Math.random().toString(36).slice(2))
+    );
+    console.log("[diagnose][store-instance]", {
+      instanceId: window.__JKHSTORE_INSTANCE_ID,
+      sameObject: window.JKHStore === JKHStore
+    });
+  } catch (eStoreInstanceDiag) {}
+
   window.JKHBoot?.markReady?.('storage');
 
   // ============================================================

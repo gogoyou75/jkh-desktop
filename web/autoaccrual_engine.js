@@ -377,6 +377,24 @@
       const key = ownerTariffsKey();
       diagnoseTariffsStorage('autoaccrual:loadOwnerTariffsRaw');
       diagnoseTariffServerReadFromAutoaccrual('autoaccrual:loadOwnerTariffsRaw');
+      try{
+        const storeOwner = JKHStore.getOwnerId();
+        const storeKey = 'tariffs_' + storeOwner;
+        console.log('[diagnose][autoaccrual-store]', {
+          instanceId: window.__JKHSTORE_INSTANCE_ID,
+          sameObject: window.JKHStore === JKHStore,
+          owner: storeOwner,
+          key: storeKey,
+          scopedKey: JKHStore.key(storeKey)
+        });
+        console.log('[diagnose][autoaccrual-tariffs]', {
+          raw: JKHStore.getRaw(storeKey),
+          json: JKHStore.getJSON(storeKey)
+        });
+        console.log('[diagnose][window-storage]', window.JKHStore === JKHStore);
+      }catch(eStoreDiag){
+        console.warn('[diagnose][autoaccrual-store]', { error:String(eStoreDiag && eStoreDiag.message || eStoreDiag) });
+      }
       if (!key) return [];
       const raw = storeGetRaw(key);
       if (raw === null || raw === undefined) return [];
