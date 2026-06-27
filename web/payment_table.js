@@ -3265,6 +3265,71 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
     }
   }
 
+  window.runTemporaryPeriodCalculation = async function runTemporaryPeriodCalculation(options){
+    const opts = options && typeof options === "object" ? options : {};
+    const id = String(opts.abonentId || getAbonentId() || "").trim();
+    const period = opts.period && typeof opts.period === "object" ? opts.period : null;
+    const selectedPeriod = period ? { from: String(period.from || "").trim(), to: String(period.to || "").trim() } : null;
+    try {
+      console.log("[period-recalc][start]", {
+        abonentId: id,
+        period: selectedPeriod,
+        mode: "temporary_court_period"
+      });
+    } catch(eStartLog) {}
+
+    if (!id) return { ok:false, reason:"ABONENT_REQUIRED", mode:"temporary_court_period" };
+    if (!selectedPeriod || !isManualRecalcPeriodValid(selectedPeriod)) {
+      return { ok:false, reason:"PERIOD_INVALID", mode:"temporary_court_period" };
+    }
+    if (!await waitPaymentTableHydratedDatabase("TEMPORARY_PERIOD_RECALC")) {
+      return { ok:false, reason:"DB_NOT_HYDRATED", mode:"temporary_court_period" };
+    }
+
+    try {
+      console.log("[period-recalc][temporary-mode]", {
+        abonentId: id,
+        from: selectedPeriod.from,
+        to: selectedPeriod.to,
+        mode: "temporary_court_period"
+      });
+      console.warn("[period-recalc][blocked-full-write]", {
+        abonentId: id,
+        blocked: [
+          "Data.writePaymentLedger",
+          "Data.recalculateAbonentCard",
+          "Data.recalcAbonentSummaryExplicit",
+          "JKHAutoAccrual AUTOACCRUAL_WRITE",
+          "card_snapshot save"
+        ],
+        reason: "temporary-period-mode"
+      });
+    } catch(eModeLog) {}
+
+    window.JKH_CARD_PERIOD_MODE_ACTIVE = true;
+    __paymentTableRenderedSignature = "";
+    await loadPaymentTable("temporary_court_period");
+
+    try {
+      console.log("[period-recalc][done]", {
+        abonentId: id,
+        from: selectedPeriod.from,
+        to: selectedPeriod.to,
+        mode: "temporary_court_period"
+      });
+    } catch(eDoneLog) {}
+
+    return {
+      ok:true,
+      reason:"OK",
+      mode:"temporary_court_period",
+      period:selectedPeriod,
+      autoaccrual_changed:false,
+      summary_status:"skipped",
+      summary_reason:"TEMPORARY_PERIOD_NOT_SAVED"
+    };
+  };
+
 
   function isPaymentLocked(r){
     // 🔒 Excel-импорт: такие оплаты запрещено менять в таблице программы

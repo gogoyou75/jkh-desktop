@@ -4004,13 +4004,33 @@ function bindCalcButtons(){
                     return;
                 }
                 if (!confirmCalcPeriodSaved()) return;
+                if (typeof window.runTemporaryPeriodCalculation !== "function") {
+                    console.warn("[period-recalc][blocked-full-write]", {
+                        abonentId: String(currentAbonentId || ""),
+                        reason: "TEMPORARY_PERIOD_API_UNAVAILABLE"
+                    });
+                    renderAbonentSummaryStatus("error", "TEMPORARY_PERIOD_API_UNAVAILABLE");
+                    alert("Временный расчёт периода недоступен.");
+                    return;
+                }
+                const periodResult = await window.runTemporaryPeriodCalculation({
+                    abonentId: currentAbonentId,
+                    period: { from: from, to: to },
+                    mode: "temporary_court_period"
+                });
+                if (!periodResult || periodResult.ok !== true) {
+                    const reason = String(periodResult && periodResult.reason || "TEMPORARY_PERIOD_CALC_FAILED");
+                    renderAbonentSummaryStatus("error", reason);
+                    alert("Расчёт периода не выполнен: " + reason);
+                    return;
+                }
+                renderAbonentSummaryStatus("dirty", "TEMPORARY_PERIOD_NOT_SAVED");
+                return;
             }
 
             let recalcHandled = false;
             if (typeof window.fullRecalcForCurrentAbonent === "function") {
-                const recalcResult = await window.fullRecalcForCurrentAbonent(recalcForReportPeriod
-                    ? { period: { from: from, to: to }, runtimePeriod: { from: from, to: to }, applyAutoAccrual: true, recalcMode: "REPORT_PERIOD_CALCULATION", summaryScope: "period" }
-                    : { applyAutoAccrual: true, recalcMode: "FULL_SUMMARY_REBUILD", summaryScope: "full" });
+                const recalcResult = await window.fullRecalcForCurrentAbonent({ applyAutoAccrual: true, recalcMode: "FULL_SUMMARY_REBUILD", summaryScope: "full" });
                 __logCardRecalcResult(recalcResult, currentAbonentId);
                 if (!recalcResult || recalcResult.ok !== true) {
                     const reason = String(recalcResult && (recalcResult.reason || recalcResult.summary_reason) || "CALC_FAILED");
