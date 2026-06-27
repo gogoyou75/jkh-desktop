@@ -509,7 +509,22 @@
     return out;
   }
 
+  function logSecondTariffRead(source, rawLength){
+    try{
+      console.warn('[autoaccrual][second-read]', {
+        source: String(source || ''),
+        rawLength: rawLength || 0,
+        stack: (new Error()).stack || ''
+      });
+    }catch(eSecondReadLog){}
+  }
+
   function loadNormalizedOwnerTariffs(){
+    try{
+      const key = ownerTariffsKey();
+      const raw = key ? storeGetRaw(key) : null;
+      logSecondTariffRead('loadNormalizedOwnerTariffs', raw ? String(raw).length : 0);
+    }catch(eSecondRead){}
     return normalizeOwnerTariffs(loadOwnerTariffsRaw());
   }
 
@@ -522,8 +537,8 @@
     return chosen;
   }
 
-  function sumPerM2ForMonthProRated(month, year, sq){
-    const tariffs = loadNormalizedOwnerTariffs().filter(t => t.type === 'per_m2');
+  function sumPerM2ForMonthProRated(month, year, sq, ownerTariffs){
+    const tariffs = (Array.isArray(ownerTariffs) ? ownerTariffs : loadNormalizedOwnerTariffs()).filter(t => t.type === 'per_m2');
     if (!tariffs.length || !(sq > 0)) return 0;
 
     const y = Number(year);
@@ -563,8 +578,8 @@
     return r2(total);
   }
 
-  function fixedSumForMonthProRated(month, year){
-    const tariffs = loadNormalizedOwnerTariffs().filter(t => t.type === 'fixed_month');
+  function fixedSumForMonthProRated(month, year, ownerTariffs){
+    const tariffs = (Array.isArray(ownerTariffs) ? ownerTariffs : loadNormalizedOwnerTariffs()).filter(t => t.type === 'fixed_month');
     if (!tariffs.length) return 0;
 
     const y = Number(year);
@@ -784,18 +799,23 @@
         }
       };
     }
-    const tariffs = loadNormalizedOwnerTariffs();
+    const tariffs = normalizeOwnerTariffs(tariffsWait.list);
+    try {
+      console.log('[autoaccrual][reuse-loaded-tariffs]', {
+        ownerId: ownerId,
+        tariffsCount: tariffs.length
+      });
+    } catch(eReuseLog) {}
     const hasPerM2Tariffs = tariffs.some(t => t.type === 'per_m2');
     if (!tariffs.length){
-      const tariffState = ownerTariffsStorageState();
       const details = {
         abonentId: String(ls || ''),
-        ownerId: tariffState.ownerId,
-        tariffsKey: tariffState.tariffsKey,
-        canonicalMissing: tariffState.canonicalMissing,
-        canonicalLength: tariffState.canonicalLength,
-        legacyExists: tariffState.legacyExists,
-        legacyLength: tariffState.legacyLength,
+        ownerId: ownerId,
+        tariffsKey: ownerTariffsKey(),
+        canonicalMissing: false,
+        canonicalLength: tariffsWait && tariffsWait.rawLength || 0,
+        legacyExists: false,
+        legacyLength: 0,
         regnum: regnum,
         square: sq,
         from: range.from || '',
@@ -854,8 +874,8 @@
       const key = `${mm.year}-${mm.month}`;
       const rows = byYm.get(key) || [];
 
-      const sqmPart = (sq > 0) ? sumPerM2ForMonthProRated(mm.month, mm.year, sq) : 0;
-      const fixedPart = fixedSumForMonthProRated(mm.month, mm.year);
+      const sqmPart = (sq > 0) ? sumPerM2ForMonthProRated(mm.month, mm.year, sq, tariffs) : 0;
+      const fixedPart = fixedSumForMonthProRated(mm.month, mm.year, tariffs);
       const totalAccr = r2(sqmPart + fixedPart);
 
       let accr = 0;
