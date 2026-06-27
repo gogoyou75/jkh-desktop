@@ -2786,6 +2786,9 @@ function fullRecalcRunIdFromOptions(opts){
 
 function logFullRecalcStep(runId, step, extra){
   try {
+    if (window.__JKH_FULL_RECALC_HEARTBEAT) window.__JKH_FULL_RECALC_HEARTBEAT(String(runId || ""), String(step || ""));
+  } catch(eHeartbeat) {}
+  try {
     console.log("[full-recalc][step]", Object.assign({
       runId: String(runId || ""),
       step: String(step || "")
@@ -2794,6 +2797,9 @@ function logFullRecalcStep(runId, step, extra){
 }
 
 function logFullRecalcStepDone(runId, step, extra){
+  try {
+    if (window.__JKH_FULL_RECALC_HEARTBEAT) window.__JKH_FULL_RECALC_HEARTBEAT(String(runId || ""), String(step || "") + "-done");
+  } catch(eHeartbeat) {}
   try {
     console.log("[full-recalc][step-done]", Object.assign({
       runId: String(runId || ""),

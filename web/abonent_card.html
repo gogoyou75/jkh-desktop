@@ -4149,6 +4149,9 @@ function bindCalcButtons(){
             slowWarningId: null,
             hardTimeoutId: null,
             slowWarningShown: false,
+            timeoutWarningShown: false,
+            lastProgressAt: Date.now(),
+            currentStage: "start",
             source: "abonent_card.click"
         };
         const fullRecalcState = run;
@@ -4161,6 +4164,46 @@ function bindCalcButtons(){
         } catch(eSummaryUiSetLog) {}
         runBtn.textContent = "Пересчёт…";
         let watchdogFired = false;
+        function fullRecalcStageText(stage){
+            const s = String(stage || "").trim();
+            const map = {
+                "ensure-uid": "подготовка UID",
+                "fullRecalcForCurrentAbonent": "полный пересчёт",
+                "begin-lock": "захват lock",
+                "autoaccrual": "автоначисления",
+                "build-runtime-rows-before-summary": "построение таблицы",
+                "save-runtime-cache-before-summary": "сохранение runtime cache",
+                "save-runtime-cache": "сохранение runtime cache",
+                "table-render": "отрисовка таблицы",
+                "summary-save": "сохранение summary",
+                "save-summary": "сохранение summary",
+                "build-fresh-runtime-rows-after-summary": "обновление строк после summary",
+                "save-runtime-cache-after-summary": "сохранение свежего runtime cache",
+                "build-card-snapshot": "построение snapshot",
+                "save-card-snapshot": "сохранение snapshot",
+                "save-card-snapshot-async": "сохранение snapshot",
+                "final-render": "финальная отрисовка",
+                "unlock": "разблокировка UI"
+            };
+            return map[s] || s || "обработка результата";
+        }
+        function heartbeatFullRecalc(stage){
+            fullRecalcState.lastProgressAt = Date.now();
+            fullRecalcState.currentStage = String(stage || fullRecalcState.currentStage || "");
+            try {
+                console.log("[full-recalc][heartbeat]", {
+                    runId: recalcRunId,
+                    stage: fullRecalcState.currentStage,
+                    elapsedMs: Date.now() - fullRecalcState.startedAt
+                });
+            } catch(eHeartbeatLog) {}
+        }
+        window.__JKH_FULL_RECALC_HEARTBEAT = function(runId, stage){
+            const activeRun = window.__JKH_FULL_RECALC_STATE;
+            if (!activeRun || String(activeRun.runId || "") !== String(runId || recalcRunId || "")) return;
+            heartbeatFullRecalc(stage);
+        };
+        heartbeatFullRecalc("start");
         function hasCalculatedRowsForFullRecalc(){
             try {
                 const snapshot = typeof window.__getPaymentTableComputedRowsSnapshot === "function" ? window.__getPaymentTableComputedRowsSnapshot() : null;
@@ -4177,6 +4220,7 @@ function bindCalcButtons(){
             }
         }
         function clearFullRecalcWatchdog(source){
+            heartbeatFullRecalc(source || "watchdog-clear");
             const hadTimer = !!(fullRecalcState.watchdogId || fullRecalcState.slowWarningId || fullRecalcState.hardTimeoutId);
             if (fullRecalcState.slowWarningId) {
                 clearTimeout(fullRecalcState.slowWarningId);
@@ -4219,6 +4263,7 @@ function bindCalcButtons(){
             clearFullRecalcWatchdog(source || "final-render");
         }
         function unlockFullRecalcUi(source){
+            heartbeatFullRecalc("unlock");
             clearFullRecalcWatchdog(source || "unlock");
             __setCalcButtonsDisabled(false);
             runBtn.textContent = prevText || "Пересчитать";
@@ -4231,7 +4276,72 @@ function bindCalcButtons(){
             try { console.log("[full-recalc][ui-unlocked]", { runId: recalcRunId, abonentId: String(currentAbonentId || ""), source: String(source || "") }); } catch(eUnlockLog) {}
         }
         function shouldIgnoreTimeout(){
-            return fullRecalcState.completed || fullRecalcState.cancelled || fullRecalcState.finalRendered || fullRecalcState.resultReceived || fullRecalcState.resultOk || hasCalculatedRowsForFullRecalc();
+            return fullRecalcState.completed || fullRecalcState.cancelled || fullRecalcState.finalRendered || fullRecalcState.resultReceived || fullRecalcState.resultOk;
+        }
+        function scheduleHardTimeoutCheck(delayMs){
+            fullRecalcState.hardTimeoutId = setTimeout(async function(){
+                fullRecalcState.hardTimeoutId = null;
+                if (shouldIgnoreTimeout()) {
+                    try {
+                        console.warn("[full-recalc][watchdog-ignored-after-complete]", {
+                            runId: recalcRunId,
+                            abonentId: String(currentAbonentId || ""),
+                            reason: "hard-timeout-ignored",
+                            completed: !!fullRecalcState.completed,
+                            cancelled: !!fullRecalcState.cancelled,
+                            finalRendered: !!fullRecalcState.finalRendered,
+                            resultReceived: !!fullRecalcState.resultReceived,
+                            resultOk: !!fullRecalcState.resultOk,
+                            rowsPresent: hasCalculatedRowsForFullRecalc(),
+                            elapsedMs: Date.now() - fullRecalcState.startedAt
+                        });
+                    } catch(eWatchdogIgnoredLog) {}
+                    return;
+                }
+                const sinceLastProgressMs = Date.now() - Number(fullRecalcState.lastProgressAt || fullRecalcState.startedAt || Date.now());
+                if (sinceLastProgressMs <= 60000) {
+                    fullRecalcState.timeoutWarningShown = true;
+                    const stageText = fullRecalcStageText(fullRecalcState.currentStage);
+                    renderAbonentSummaryStatus((window.JKH_SUMMARY_STATUS && window.JKH_SUMMARY_STATUS.CALCULATING) || "calculating", "Расчёт продолжается: " + stageText + "…");
+                    try {
+                        console.warn("[full-recalc][hard-timeout-deferred-active-progress]", {
+                            runId: recalcRunId,
+                            currentStage: String(fullRecalcState.currentStage || ""),
+                            sinceLastProgressMs: sinceLastProgressMs
+                        });
+                    } catch(eDeferredLog) {}
+                    scheduleHardTimeoutCheck(60000);
+                    return;
+                }
+                watchdogFired = true;
+                fullRecalcState.timedOut = true;
+                rememberExplicitFullRecalcFinal("error", "RECALC_TIMEOUT_UI", null);
+                explicitFullRecalcStarted = true;
+                renderExplicitFullRecalcFinal("watchdog-timeout");
+                try {
+                    console.warn("[full-recalc][real-timeout-no-progress]", {
+                        runId: recalcRunId,
+                        currentStage: String(fullRecalcState.currentStage || ""),
+                        sinceLastProgressMs: sinceLastProgressMs
+                    });
+                    console.warn("[full-recalc][hard-timeout]", {
+                        runId: recalcRunId,
+                        abonentId: String(currentAbonentId || ""),
+                        uid: String(fullRecalcState.uid || clickMeta.resolvedUid || ""),
+                        elapsedMs: Date.now() - fullRecalcState.startedAt
+                    });
+                } catch(eWatchdogLog) {}
+                try {
+                    const watchdogUid = String(fullRecalcState.uid || clickMeta.resolvedUid || "");
+                    if (window.Data && typeof Data.finishRecalcUidLock === "function" && watchdogUid) {
+                        await Data.finishRecalcUidLock(watchdogUid, "");
+                    }
+                } catch(eWatchdogUnlock) {
+                    try { console.warn("[full-recalc][watchdog-timeout]", { runId: recalcRunId, lockReleaseFailed: String(eWatchdogUnlock && eWatchdogUnlock.message || eWatchdogUnlock) }); } catch(eLockLog) {}
+                }
+                unlockFullRecalcUi("watchdog-timeout");
+            }, delayMs);
+            fullRecalcState.watchdogId = fullRecalcState.hardTimeoutId;
         }
         fullRecalcState.slowWarningId = setTimeout(function(){
             fullRecalcState.slowWarningId = null;
@@ -4263,49 +4373,7 @@ function bindCalcButtons(){
                 });
             } catch(eSlowWarningLog) {}
         }, 20000);
-        fullRecalcState.hardTimeoutId = setTimeout(async function(){
-            fullRecalcState.hardTimeoutId = null;
-            if (shouldIgnoreTimeout()) {
-                try {
-                    console.warn("[full-recalc][watchdog-ignored-after-complete]", {
-                        runId: recalcRunId,
-                        abonentId: String(currentAbonentId || ""),
-                        reason: "hard-timeout-ignored",
-                        completed: !!fullRecalcState.completed,
-                        cancelled: !!fullRecalcState.cancelled,
-                        finalRendered: !!fullRecalcState.finalRendered,
-                        resultReceived: !!fullRecalcState.resultReceived,
-                        resultOk: !!fullRecalcState.resultOk,
-                        rowsPresent: hasCalculatedRowsForFullRecalc(),
-                        elapsedMs: Date.now() - fullRecalcState.startedAt
-                    });
-                } catch(eWatchdogIgnoredLog) {}
-                return;
-            }
-            watchdogFired = true;
-            fullRecalcState.timedOut = true;
-            rememberExplicitFullRecalcFinal("error", "RECALC_TIMEOUT_UI", null);
-            explicitFullRecalcStarted = true;
-            renderExplicitFullRecalcFinal("watchdog-timeout");
-            try {
-                console.warn("[full-recalc][hard-timeout]", {
-                    runId: recalcRunId,
-                    abonentId: String(currentAbonentId || ""),
-                    uid: String(fullRecalcState.uid || clickMeta.resolvedUid || ""),
-                    elapsedMs: Date.now() - fullRecalcState.startedAt
-                });
-            } catch(eWatchdogLog) {}
-            try {
-                const watchdogUid = String(fullRecalcState.uid || clickMeta.resolvedUid || "");
-                if (window.Data && typeof Data.finishRecalcUidLock === "function" && watchdogUid) {
-                    await Data.finishRecalcUidLock(watchdogUid, "");
-                }
-            } catch(eWatchdogUnlock) {
-                try { console.warn("[full-recalc][watchdog-timeout]", { runId: recalcRunId, lockReleaseFailed: String(eWatchdogUnlock && eWatchdogUnlock.message || eWatchdogUnlock) }); } catch(eLockLog) {}
-            }
-            unlockFullRecalcUi("watchdog-timeout");
-        }, 120000);
-        fullRecalcState.watchdogId = fullRecalcState.hardTimeoutId;
+        scheduleHardTimeoutCheck(120000);
         try { console.log("[full-recalc][watchdog-start]", { runId: recalcRunId, abonentId: String(currentAbonentId || ""), slowWarningMs: 20000, hardTimeoutMs: 120000 }); } catch(eWatchdogStartLog) {}
         let explicitFullRecalcStarted = false;
         let explicitFullRecalcFinal = null;
@@ -4343,6 +4411,7 @@ function bindCalcButtons(){
             } catch(eSummaryUiFinalLog) {}
         }
         function logPostRecalcStage(stage){
+            heartbeatFullRecalc(stage || "post-recalc");
             try {
                 console.log("[post-recalc][stage]", {
                     runId: recalcRunId,
@@ -4367,6 +4436,7 @@ function bindCalcButtons(){
             setTimeout(async function(){
                 let snapshotSaveResult = null;
                 try {
+                    heartbeatFullRecalc("save-card-snapshot-async");
                     logPostRecalcStage("snapshot-save-start");
                     try { console.log("[full-recalc][step]", { runId: recalcRunId, step: "save-card-snapshot-async" }); } catch(eStepLog) {}
                     snapshotSaveResult = await Data.saveCardSnapshotAndWait(currentAbonentId, snapshot, { runId: recalcRunId, skipReadback: true });
@@ -4405,6 +4475,7 @@ function bindCalcButtons(){
 
         try {
             let uidResult = null;
+            heartbeatFullRecalc("ensure-uid");
             try { console.log("[full-recalc][step]", { runId: recalcRunId, step: "ensure-uid" }); } catch(eStepLog) {}
             try {
                 uidResult = await Data.ensureAbonentUid(currentAbonentId, { source: "abonent_card.calc" });
@@ -4489,6 +4560,7 @@ function bindCalcButtons(){
             let recalcHandled = false;
             if (typeof window.fullRecalcForCurrentAbonent === "function") {
                 explicitFullRecalcStarted = true;
+                heartbeatFullRecalc("fullRecalcForCurrentAbonent");
                 try { console.log("[full-recalc][step]", { runId: recalcRunId, step: "fullRecalcForCurrentAbonent" }); } catch(eStepLog) {}
                 const recalcResult = await window.fullRecalcForCurrentAbonent({ applyAutoAccrual: true, recalcMode: "FULL_SUMMARY_REBUILD", summaryScope: "full", recalcRunId: recalcRunId });
                 fullRecalcState.resultReceived = true;
@@ -4505,6 +4577,17 @@ function bindCalcButtons(){
                                 rowsPresent: hasCalculatedRowsForFullRecalc()
                             });
                         } catch(eLateSuccessLog) {}
+                    }
+                    if (fullRecalcState.timeoutWarningShown) {
+                        try {
+                            console.log("[full-recalc][late-success-after-timeout-warning]", {
+                                runId: recalcRunId,
+                                abonentId: String(currentAbonentId || ""),
+                                currentStage: String(fullRecalcState.currentStage || ""),
+                                elapsedMs: Date.now() - fullRecalcState.startedAt,
+                                rowsPresent: hasCalculatedRowsForFullRecalc()
+                            });
+                        } catch(eLateTimeoutSuccessLog) {}
                     }
                 }
                 clearFullRecalcWatchdog("result-received");
@@ -4543,6 +4626,7 @@ function bindCalcButtons(){
                         alert("Snapshot карточки не сохранён: API snapshot недоступен.");
                         return;
                     }
+                    heartbeatFullRecalc("build-card-snapshot");
                     try { console.log("[full-recalc][step]", { runId: recalcRunId, step: "build-card-snapshot" }); } catch(eStepLog) {}
                     const snapshot = Data.buildCardSnapshotFromCurrentResult(currentAbonentId, recalcResult);
                     try { console.log("[full-recalc][step-done]", { runId: recalcRunId, step: "build-card-snapshot" }); } catch(eStepDoneLog) {}
@@ -4576,6 +4660,7 @@ function bindCalcButtons(){
                     schedulePostRecalcSnapshotSave(snapshot);
                 }
                 rememberExplicitFullRecalcFinal("fresh", "OK", recalcResult);
+                heartbeatFullRecalc("final-render");
                 logPostRecalcStage("final-render-start");
                 renderExplicitFullRecalcFinal("recalc-success");
                 logPostRecalcStage("final-render-done");
