@@ -4133,7 +4133,7 @@ function bindCalcButtons(){
             return;
         }
 
-        const fullRecalcState = {
+        const run = {
             running: true,
             runId: recalcRunId,
             abonentId: String(currentAbonentId || ""),
@@ -4145,8 +4145,10 @@ function bindCalcButtons(){
             finalRendered: false,
             resultReceived: false,
             resultOk: false,
+            watchdogId: null,
             source: "abonent_card.click"
         };
+        const fullRecalcState = run;
         window.__JKH_FULL_RECALC_STATE = fullRecalcState;
         __setCalcButtonsDisabled(true);
         renderAbonentSummaryStatus((window.JKH_SUMMARY_STATUS && window.JKH_SUMMARY_STATUS.CALCULATING) || "calculating", "EXPLICIT_RECALC");
@@ -4155,7 +4157,6 @@ function bindCalcButtons(){
             console.log("[summary-ui][explicit-recalc-set]", { runId: recalcRunId, abonentId: String(currentAbonentId || ""), reason: "EXPLICIT_RECALC" });
         } catch(eSummaryUiSetLog) {}
         runBtn.textContent = "Пересчёт…";
-        let watchdogTimer = null;
         let watchdogFired = false;
         function hasCalculatedRowsForFullRecalc(){
             try {
@@ -4173,10 +4174,10 @@ function bindCalcButtons(){
             }
         }
         function clearFullRecalcWatchdog(source){
-            const hadTimer = !!watchdogTimer;
-            if (watchdogTimer) {
-                clearTimeout(watchdogTimer);
-                watchdogTimer = null;
+            const hadTimer = !!fullRecalcState.watchdogId;
+            if (fullRecalcState.watchdogId) {
+                clearTimeout(fullRecalcState.watchdogId);
+                fullRecalcState.watchdogId = null;
             }
             try {
                 console.log("[full-recalc][watchdog-clear]", {
@@ -4218,7 +4219,24 @@ function bindCalcButtons(){
             }
             try { console.log("[full-recalc][ui-unlocked]", { runId: recalcRunId, abonentId: String(currentAbonentId || ""), source: String(source || "") }); } catch(eUnlockLog) {}
         }
-        watchdogTimer = setTimeout(async function(){
+        fullRecalcState.watchdogId = setTimeout(async function(){
+            if (!fullRecalcState.watchdogId) {
+                try {
+                    console.warn("[full-recalc][watchdog-ignored-after-complete]", {
+                        runId: recalcRunId,
+                        abonentId: String(currentAbonentId || ""),
+                        reason: "watchdog-id-cleared",
+                        completed: !!fullRecalcState.completed,
+                        cancelled: !!fullRecalcState.cancelled,
+                        finalRendered: !!fullRecalcState.finalRendered,
+                        resultReceived: !!fullRecalcState.resultReceived,
+                        resultOk: !!fullRecalcState.resultOk,
+                        rowsPresent: hasCalculatedRowsForFullRecalc(),
+                        elapsedMs: Date.now() - fullRecalcState.startedAt
+                    });
+                } catch(eWatchdogClearedLog) {}
+                return;
+            }
             if (fullRecalcState.completed || fullRecalcState.cancelled || fullRecalcState.finalRendered || fullRecalcState.resultReceived || fullRecalcState.resultOk || hasCalculatedRowsForFullRecalc()) {
                 try {
                     console.warn("[full-recalc][watchdog-ignored-after-complete]", {
@@ -4236,6 +4254,7 @@ function bindCalcButtons(){
                 clearFullRecalcWatchdog("watchdog-ignored-after-complete");
                 return;
             }
+            fullRecalcState.watchdogId = null;
             watchdogFired = true;
             fullRecalcState.timedOut = true;
             rememberExplicitFullRecalcFinal("error", "RECALC_TIMEOUT_UI", null);
