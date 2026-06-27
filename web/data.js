@@ -6319,7 +6319,7 @@
     return normalizeFinancialMode(mode);
   }
 
-  function __forceResponsibilityLedgerRecalc(ids){
+  async function __forceResponsibilityLedgerRecalc(ids){
     var unique = [];
     (ids || []).forEach(function(id){
       var v = String(id || "").trim();
@@ -6330,7 +6330,7 @@
       console.warn("[transfer-responsibility][ledger-recalc-skipped]", { reason:"AUTOACCRUAL_ENGINE_UNAVAILABLE", abonentIds: unique });
       return { ok:false, reason:"AUTOACCRUAL_ENGINE_UNAVAILABLE", results:[] };
     }
-    var results = window.JKHAutoAccrual.recalcForMany(unique) || [];
+    var results = await window.JKHAutoAccrual.recalcForMany(unique) || [];
     var failed = results.filter(function(r){ return !r || r.ok !== true; });
     if (failed.length) {
       console.warn("[transfer-responsibility][ledger-recalc-failed]", { abonentIds: unique, failed: failed });
@@ -6417,7 +6417,7 @@
     } catch(e) {}
   }
 
-  function transferResponsibility(options){
+  async function transferResponsibility(options){
     if (!Data.ensureWriteOrExplain()) return false;
     var db = window.AbonentsDB;
     if (!db || !db.abonents) return false;
@@ -6544,7 +6544,7 @@
         createdBy: _ownerId()
       });
 
-      var recalc = __forceResponsibilityLedgerRecalc([oldId, newId]);
+      var recalc = await __forceResponsibilityLedgerRecalc([oldId, newId]);
       if (!recalc || recalc.ok !== true) throw new Error("TRANSFER_LEDGER_RECALC_FAILED");
 
       var newLedgerRangeCheck = __verifyNoAccrualBeforeTransferMonth(newId, td);

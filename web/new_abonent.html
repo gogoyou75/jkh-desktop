@@ -1199,7 +1199,7 @@ async function createAbonent() {
         return;
       }
 
-      const transferred = window.Data.transferResponsibility({
+      const transferred = await window.Data.transferResponsibility({
         oldAbonentId: String(__transferCtx.oldId),
         newAbonentId: String(ls),
         regnum: String(regnum),
@@ -1235,7 +1235,7 @@ async function createAbonent() {
 
     try {
       if (window.JKHAutoAccrual && typeof window.JKHAutoAccrual.recalcForAbonent === 'function') {
-        window.JKHAutoAccrual.recalcForAbonent(String(ls));
+        await window.JKHAutoAccrual.recalcForAbonent(String(ls));
       }
     } catch (e) {
       console.warn('[new_abonent] recalcForAbonent failed', e);

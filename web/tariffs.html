@@ -795,10 +795,10 @@
     return { affected: affected.length, ok: ok, failed: failed };
   }
 
-  function recalcAll(){
+  async function recalcAll(){
     try{
       if (window.JKHAutoAccrual && typeof window.JKHAutoAccrual.recalcAll === "function"){
-        const res = window.JKHAutoAccrual.recalcAll();
+        const res = await window.JKHAutoAccrual.recalcAll();
 
         const total = Array.isArray(res) ? res.length : 0;
         const changed = Array.isArray(res) ? res.filter(x => x && x.changed).length : 0;
@@ -842,7 +842,7 @@
     if (_saveBusy || _recalcBusy) return;
     setButtonsBusy("recalc", true);
     try{
-      const recalc = recalcAll();
+      const recalc = await recalcAll();
       if (!recalc.ok) return;
 
       let uploaded = false;

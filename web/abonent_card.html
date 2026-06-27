@@ -1567,9 +1567,9 @@ function __runAutoAccrualRepairOnce(){
 
         if (!window.JKHAutoAccrual || typeof window.JKHAutoAccrual.recalcForAbonent !== 'function') return;
 
-        setTimeout(() => {
+        setTimeout(async () => {
             try {
-                const res = window.JKHAutoAccrual.recalcForAbonent(id);
+                const res = await window.JKHAutoAccrual.recalcForAbonent(id);
                 if (res && res.ok && res.changed) {
                     __safeLoadPaymentTableOnce('autoaccrual_changed');
                 }
@@ -2180,7 +2180,7 @@ async function applyChangeResponsible(mode) {
         return;
     }
 
-    const transferred = window.Data.transferResponsibility({
+    const transferred = await window.Data.transferResponsibility({
         oldAbonentId: currentActiveId,
         newAbonentId: String(newId),
         regnum: String(regnum),

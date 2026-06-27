@@ -3875,7 +3875,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
 
     let result = null;
     try {
-      result = window.JKHAutoAccrual.dryRunForAbonent(abonentId);
+      result = await window.JKHAutoAccrual.dryRunForAbonent(abonentId);
     } catch (e) {
       const reason = normalizeManualRecalcReason(e && (e.code || e.reason || e.message) || e);
       return { ok:false, changed:false, reason:reason, responsibility:responsibility };

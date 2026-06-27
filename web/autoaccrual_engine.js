@@ -420,6 +420,35 @@
     };
   }
 
+  function delay(ms){
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  async function waitForOwnerTariffs(ownerId){
+    const owner = String(ownerId || '').trim();
+    const key = owner ? ('tariffs_' + owner) : '';
+    for (let attempt = 1; attempt <= 30; attempt++){
+      let list = null;
+      try{
+        if (key && window.JKHStore && typeof JKHStore.getJSON === 'function'){
+          list = await JKHStore.getJSON(key);
+        }
+      }catch(e){}
+      const found = Array.isArray(list) && list.length > 0;
+      try {
+        console.log('[autoaccrual][wait-owner-tariffs]', {
+          ownerId: owner,
+          attempt,
+          found,
+          length: Array.isArray(list) ? list.length : 0
+        });
+      } catch(eLog) {}
+      if (found) return list;
+      if (attempt < 30) await delay(100);
+    }
+    return null;
+  }
+
   function normalizeOwnerTariffs(list){
     const out = [];
     (Array.isArray(list) ? list : []).forEach((t, idx) => {
@@ -854,7 +883,7 @@
     return { changed, reason:'OK', diagnostics: diagnostics };
   }
 
-  function recalcForAbonent(ls, opts){
+  async function recalcForAbonent(ls, opts){
     const id = String(ls||'').trim();
     const options = opts && typeof opts === 'object' ? opts : {};
     const dryRun = options.dryRun === true || options.readOnly === true;
@@ -864,6 +893,7 @@
       ? String(window.JKHStore.getOwnerId() || '').trim()
       : '';
     if (!ownerId) return { ok:false, reason:'EMPTY_OWNER', ls:id };
+    await waitForOwnerTariffs(ownerId);
 
     let arr;
     try {
@@ -921,20 +951,20 @@
     return { ok:true, ...res, ls:id };
   }
 
-  function dryRunForAbonent(ls){
+  async function dryRunForAbonent(ls){
     return recalcForAbonent(ls, { dryRun: true });
   }
 
-  function recalcForMany(list){
+  async function recalcForMany(list){
     const ids = Array.from(new Set((list||[]).map(x=>String(x||'').trim()).filter(Boolean)));
     const out = [];
     for (const id of ids){
-      out.push(recalcForAbonent(id));
+      out.push(await recalcForAbonent(id));
     }
     return out;
   }
 
-  function recalcAll(){
+  async function recalcAll(){
     const db = getDb();
     const ids = Object.keys(db?.abonents || {});
     return recalcForMany(ids);
