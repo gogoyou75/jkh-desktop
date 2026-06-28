@@ -2291,6 +2291,7 @@ function ymKey(y, m){ return `${String(y)}-${pad2(m)}`; }
 // allowedYm: необязательный Set вида {"2026-01", } — если задан,
 // то в расчёт попадают ТОЛЬКО месяцы ответственности текущего ЛС.
 function buildObligationsFromRows(rows, allowedYm){
+  incRecalcCallCount("buildObligations", 1);
   const map = new Map();
   for (const r of rows){
     const acc = toNum(r.accrued);
@@ -2334,6 +2335,7 @@ function buildObligationsFromRows(rows, allowedYm){
 
 // Платежи: берём paid > 0 и paid_date (иначе распределять не можем).
 function buildPaymentEventsFromRows(rows){
+  incRecalcCallCount("buildPaymentEvents", 1);
   const pays = [];
   for (const r of rows){
     const paid = toNum(r.paid);
@@ -2407,6 +2409,7 @@ function sortApplications(ob){
 
 // Расчёт пени по ОДНОМУ долгу (обязательству) до даты asOf (включительно)
 function calcPenaltyForObligation(ob, asOf, excludes, rates){
+  incRecalcCallCount("calculatePenaltyForObligation", 1);
   const asOfDay = startOfDay(asOf);
   if (asOfDay <= ob.dueDate) {
     return 0;
@@ -2422,6 +2425,9 @@ function calcPenaltyForObligation(ob, asOf, excludes, rates){
 
   const hardLimit = addDays(ob.dueDate, 3650);
   const end = (asOfDay < hardLimit) ? asOfDay : hardLimit;
+  const loopDays = Math.max(0, Math.floor((startOfDay(end).getTime() - startOfDay(day).getTime()) / 86400000) + 1);
+  addRecalcLoopCount("dailyLoopIterationsTotal", loopDays);
+  setRecalcLoopMaxDays(loopDays, ob && (ob.rowId || ob.key || ""));
 
   while (day <= end){
     emitActiveFullRecalcHeartbeat("calc-penalty");
@@ -2500,6 +2506,7 @@ function calcTotalsAsOf(rows, asOfDate){
   // только за месяцы <= месяца asOfDate.
   // ---------------------------------------------------------
   const allObligations = buildObligationsFromRows(rows, allowedYm);
+  incRecalcCallCount("buildDebtPeriods", 1);
   const asOfYm = `${asOfDate.getFullYear()}-${pad2(asOfDate.getMonth() + 1)}`;
   const obligations = allObligations.filter(ob => String(ob.key || "") <= asOfYm);
 
@@ -2627,6 +2634,7 @@ function memoKeyForTotals(ledgerSignature, asOfDate){
 }
 
 function calcTotalsAsOfMemoized(rows, asOfDate, ledgerSignature){
+  incRecalcCallCount("calcTotalsAsOfMemoized", 1);
   const stats = window.__calcTotalsMemoStats;
   if (stats) stats.totalCalls += 1;
   const key = memoKeyForTotals(ledgerSignature, asOfDate);
@@ -2699,6 +2707,71 @@ function nextUiTick(){
 function currentFullRecalcRunState(){
   const state = window.__JKH_FULL_RECALC_STATE;
   return state && state.running === true ? state : null;
+}
+
+function currentRecalcCallCounts(){
+  const state = window.__JKH_RECALC_CALL_COUNTS;
+  return state && typeof state === "object" ? state : null;
+}
+
+function incRecalcCallCount(name, amount){
+  const state = currentRecalcCallCounts();
+  if (!state || !state.calls) return;
+  const key = String(name || "");
+  if (!key) return;
+  state.calls[key] = Number(state.calls[key] || 0) + (Number(amount) || 1);
+}
+
+function addRecalcLoopCount(name, amount){
+  const state = currentRecalcCallCounts();
+  if (!state || !state.loops) return;
+  const key = String(name || "");
+  if (!key) return;
+  state.loops[key] = Number(state.loops[key] || 0) + (Number(amount) || 0);
+}
+
+function setRecalcLoopMaxDays(days, rowId){
+  const state = currentRecalcCallCounts();
+  if (!state || !state.loops) return;
+  const totalDays = Number(days) || 0;
+  if (totalDays > Number(state.loops.maxDailyLoopDays || 0)) {
+    state.loops.maxDailyLoopDays = totalDays;
+    state.loops.maxDailyLoopRowId = String(rowId || "");
+  }
+}
+
+function setRecalcStageMs(name, elapsedMs){
+  const state = currentRecalcCallCounts();
+  if (!state || !state.stages) return;
+  const key = String(name || "");
+  if (!key) return;
+  state.stages[key] = Math.max(0, Math.round(Number(elapsedMs) || 0));
+}
+
+function countRuntimeMonths(rows){
+  const seen = {};
+  (Array.isArray(rows) ? rows : []).forEach(function(row){
+    const key = String(row && row.year || "") + "-" + String(row && row.month || "");
+    if (key !== "-") seen[key] = true;
+  });
+  return Object.keys(seen).length;
+}
+
+function countRuntimeObligations(rows){
+  return (Array.isArray(rows) ? rows : []).filter(function(row){ return Math.abs(toNum(row && row.accrued || 0)) > 0.0000001; }).length;
+}
+
+function countRuntimePayments(rows){
+  return (Array.isArray(rows) ? rows : []).filter(function(row){ return Math.abs(toNum(row && row.paid || 0)) > 0.0000001; }).length;
+}
+
+async function measureRecalcStage(name, fn){
+  const startedAt = perfNow();
+  try {
+    return await fn();
+  } finally {
+    setRecalcStageMs(name, perfNow() - startedAt);
+  }
 }
 
 function fullRecalcRunIdFromOptions(opts){
@@ -4428,7 +4501,9 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
       }
       logFullRecalcStep(runId, "autoaccrual", { abonentId: id });
       console.time("[recalc-step] autoaccrual");
-      const autoResult = await applyControlledAutoAccrualForManualRecalc(id, opts);
+      const autoResult = await measureRecalcStage("autoaccrualMs", async function(){
+        return await applyControlledAutoAccrualForManualRecalc(id, opts);
+      });
       console.timeEnd("[recalc-step] autoaccrual");
       logFullRecalcStepDone(runId, "autoaccrual", { abonentId: id, ok: !!(autoResult && autoResult.ok === true), changed: !!(autoResult && autoResult.changed), reason: autoResult && autoResult.reason || "" });
       await nextUiTick();
@@ -4440,62 +4515,75 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
       }
       logFullRecalcStep(runId, "build-runtime-rows-before-summary", { abonentId: id });
       console.time("[recalc-step] build runtime rows before summary");
-      console.time("[recalc-detail] get ledger");
-      const arr = getPayments();
-      console.timeEnd("[recalc-detail] get ledger");
-      console.time("[recalc-detail] period selection");
-      const periodActive = !!(explicitReportPeriod || explicitRuntimePeriod);
-      const selectedPeriod = explicitReportPeriod ? { from: String(opts.period.from || ""), to: String(opts.period.to || "") } : explicitRuntimePeriod;
-      console.timeEnd("[recalc-detail] period selection");
-      console.time("[recalc-detail] build runtimeRows");
-      let runtimeRows;
-      if (periodActive && selectedPeriod) {
-        console.time("[recalc-detail] applyCalcFilter row/month loop");
-        const filteredRows = applyCalcFilter(arr, true, selectedPeriod);
-        console.timeEnd("[recalc-detail] applyCalcFilter row/month loop");
-        console.time("[recalc-detail] responsibility month/row loops");
-        const responsibilityRows = applyResponsibilityRangeToView(filteredRows);
-        console.timeEnd("[recalc-detail] responsibility month/row loops");
-        console.time("[recalc-detail] clone/copy rows");
-        runtimeRows = responsibilityRows.slice();
-        console.timeEnd("[recalc-detail] clone/copy rows");
-      } else {
-        console.time("[recalc-detail] clone/copy rows");
-        runtimeRows = arr;
-        console.timeEnd("[recalc-detail] clone/copy rows");
-      }
-      console.timeEnd("[recalc-detail] build runtimeRows");
-      console.time("[recalc-detail] build baseRows row/month loop");
-      emitFullRecalcHeartbeat(runId, "build-runtime-rows-before-summary");
-      const baseRows = runningTotalsBaseRows(runtimeRows);
-      emitFullRecalcHeartbeat(runId, "build-runtime-rows-before-summary");
-      console.timeEnd("[recalc-detail] build baseRows row/month loop");
-      console.time("[recalc-detail] build maps/indexes");
-      const ledgerVersion = (window.Data && Data.computeLedgerRuntimeVersion) ? String(Data.computeLedgerRuntimeVersion(id) || "") : "";
-      console.time("[recalc-detail] ledgerSignature row loop");
-      emitFullRecalcHeartbeat(runId, "build-runtime-rows-before-summary");
-      const sig = ledgerSignatureForRows(arr) + "::" + runtimeCacheSignature(ledgerVersion, periodActive, selectedPeriod);
-      emitFullRecalcHeartbeat(runId, "build-runtime-rows-before-summary");
-      console.timeEnd("[recalc-detail] ledgerSignature row loop");
+      let arr = [];
+      let periodActive = false;
+      let selectedPeriod = null;
+      let runtimeRows = [];
+      let baseRows = [];
+      let ledgerVersion = "";
+      let sig = "";
       const rowsById = {};
-      console.timeEnd("[recalc-detail] build maps/indexes");
-      console.time("[recalc-detail] build rowsById row loop");
-      console.time("[recalc-detail] rowsById row loop");
       let rowsCount = 0;
-      const runtimeRowsProgress = { lastYieldAt: perfNow() };
-      for (let runtimeIdx = 0; runtimeIdx < runtimeRows.length; runtimeIdx += 1) {
-        await maybeYieldFullRecalcProgress(runtimeRowsProgress, runId, "build-runtime-rows-before-summary", runtimeIdx);
-        const r = runtimeRows[runtimeIdx];
-        rowsCount += 1;
-        if (runtimeIdx > 0 && runtimeIdx % 25 === 0) emitFullRecalcHeartbeat(runId, "build-runtime-rows-before-summary");
-        const asOf = asOfForRow(r);
-        const t = calcTotalsAsOfMemoized(baseRows, asOf, sig);
-        rowsById[String(r.id)] = { pay_main: t.principal, pay_penalty: t.penalty, total: t.total };
-        await maybeYieldFullRecalcProgress(runtimeRowsProgress, runId, "build-runtime-rows-before-summary", runtimeIdx + 1);
-      }
-      console.timeEnd("[recalc-detail] rowsById row loop");
-      console.timeEnd("[recalc-detail] build rowsById row loop");
+      await measureRecalcStage("buildRuntimeRowsBeforeSummaryMs", async function(){
+        incRecalcCallCount("buildRuntimeRows", 1);
+        console.time("[recalc-detail] get ledger");
+        arr = getPayments();
+        console.timeEnd("[recalc-detail] get ledger");
+        console.time("[recalc-detail] period selection");
+        periodActive = !!(explicitReportPeriod || explicitRuntimePeriod);
+        selectedPeriod = explicitReportPeriod ? { from: String(opts.period.from || ""), to: String(opts.period.to || "") } : explicitRuntimePeriod;
+        console.timeEnd("[recalc-detail] period selection");
+        console.time("[recalc-detail] build runtimeRows");
+        if (periodActive && selectedPeriod) {
+          console.time("[recalc-detail] applyCalcFilter row/month loop");
+          const filteredRows = applyCalcFilter(arr, true, selectedPeriod);
+          console.timeEnd("[recalc-detail] applyCalcFilter row/month loop");
+          console.time("[recalc-detail] responsibility month/row loops");
+          const responsibilityRows = applyResponsibilityRangeToView(filteredRows);
+          console.timeEnd("[recalc-detail] responsibility month/row loops");
+          console.time("[recalc-detail] clone/copy rows");
+          runtimeRows = responsibilityRows.slice();
+          console.timeEnd("[recalc-detail] clone/copy rows");
+        } else {
+          console.time("[recalc-detail] clone/copy rows");
+          runtimeRows = arr;
+          console.timeEnd("[recalc-detail] clone/copy rows");
+        }
+        console.timeEnd("[recalc-detail] build runtimeRows");
+        console.time("[recalc-detail] build baseRows row/month loop");
+        emitFullRecalcHeartbeat(runId, "build-runtime-rows-before-summary");
+        baseRows = runningTotalsBaseRows(runtimeRows);
+        emitFullRecalcHeartbeat(runId, "build-runtime-rows-before-summary");
+        console.timeEnd("[recalc-detail] build baseRows row/month loop");
+        console.time("[recalc-detail] build maps/indexes");
+        ledgerVersion = (window.Data && Data.computeLedgerRuntimeVersion) ? String(Data.computeLedgerRuntimeVersion(id) || "") : "";
+        console.time("[recalc-detail] ledgerSignature row loop");
+        emitFullRecalcHeartbeat(runId, "build-runtime-rows-before-summary");
+        sig = ledgerSignatureForRows(arr) + "::" + runtimeCacheSignature(ledgerVersion, periodActive, selectedPeriod);
+        emitFullRecalcHeartbeat(runId, "build-runtime-rows-before-summary");
+        console.timeEnd("[recalc-detail] ledgerSignature row loop");
+        console.timeEnd("[recalc-detail] build maps/indexes");
+        console.time("[recalc-detail] build rowsById row loop");
+        console.time("[recalc-detail] rowsById row loop");
+        const runtimeRowsProgress = { lastYieldAt: perfNow() };
+        for (let runtimeIdx = 0; runtimeIdx < runtimeRows.length; runtimeIdx += 1) {
+          await maybeYieldFullRecalcProgress(runtimeRowsProgress, runId, "build-runtime-rows-before-summary", runtimeIdx);
+          const r = runtimeRows[runtimeIdx];
+          rowsCount += 1;
+          if (runtimeIdx > 0 && runtimeIdx % 25 === 0) emitFullRecalcHeartbeat(runId, "build-runtime-rows-before-summary");
+          const asOf = asOfForRow(r);
+          const t = calcTotalsAsOfMemoized(baseRows, asOf, sig);
+          rowsById[String(r.id)] = { pay_main: t.principal, pay_penalty: t.penalty, total: t.total };
+          await maybeYieldFullRecalcProgress(runtimeRowsProgress, runId, "build-runtime-rows-before-summary", runtimeIdx + 1);
+        }
+        console.timeEnd("[recalc-detail] rowsById row loop");
+        console.timeEnd("[recalc-detail] build rowsById row loop");
+      });
       console.timeEnd("[recalc-step] build runtime rows before summary");
+      addRecalcLoopCount("rowsCount", rowsCount);
+      addRecalcLoopCount("monthsCount", countRuntimeMonths(runtimeRows));
+      addRecalcLoopCount("obligationsCount", countRuntimeObligations(baseRows));
+      addRecalcLoopCount("paymentsCount", countRuntimePayments(baseRows));
       logFullRecalcStepDone(runId, "build-runtime-rows-before-summary", { abonentId: id, rowsCount: rowsCount, rowsByIdCount: Object.keys(rowsById).length });
       await nextUiTick();
       const payload = { ledgerVersion: ledgerVersion, runtimeSignature: runtimeCacheSignature(ledgerVersion, periodActive, selectedPeriod), periodActive: !!periodActive, period: periodActive && selectedPeriod ? { from: selectedPeriod.from || "", to: selectedPeriod.to || "" } : null, rowsById: rowsById, updatedAt: (new Date()).toISOString() };
@@ -4530,15 +4618,17 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
       }
       logFullRecalcStep(runId, "summary-save", { abonentId: id });
       console.time("[recalc] Data.recalculateAbonentCard");
-      const summaryResult = await Data.recalculateAbonentCard(id, {
-        period: periodActive && selectedPeriod ? selectedPeriod : undefined,
-        saveSummary: !explicitReportPeriod,
-        summaryScope: explicitReportPeriod ? "period" : "full",
-        periodActive: !!explicitReportPeriod,
-        recalcMode: recalcMode,
-        recalcRunId: runId,
-        recalcLockHeld: true,
-        recalcLockToken: recalcLock.lock_token || ""
+      const summaryResult = await measureRecalcStage("summarySaveMs", async function(){
+        return await Data.recalculateAbonentCard(id, {
+          period: periodActive && selectedPeriod ? selectedPeriod : undefined,
+          saveSummary: !explicitReportPeriod,
+          summaryScope: explicitReportPeriod ? "period" : "full",
+          periodActive: !!explicitReportPeriod,
+          recalcMode: recalcMode,
+          recalcRunId: runId,
+          recalcLockHeld: true,
+          recalcLockToken: recalcLock.lock_token || ""
+        });
       });
       console.timeEnd("[recalc] Data.recalculateAbonentCard");
       logFullRecalcStepDone(runId, "summary-save", { abonentId: id, ok: !!(summaryResult && summaryResult.ok === true), status: summaryResult && (summaryResult.summary_status || summaryResult.status) || "", reason: summaryResult && (summaryResult.summary_reason || summaryResult.reason) || "" });
@@ -4548,25 +4638,36 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
       const freshArr = getPayments();
       const freshPeriodActive = periodActive;
       const freshSelectedPeriod = selectedPeriod;
-      emitFullRecalcHeartbeat(runId, "build-fresh-runtime-rows-after-summary");
-      const freshRuntimeRows = freshPeriodActive && freshSelectedPeriod ? applyResponsibilityRangeToView(applyCalcFilter(freshArr, true, freshSelectedPeriod)).slice() : freshArr;
-      emitFullRecalcHeartbeat(runId, "build-fresh-runtime-rows-after-summary");
-      const freshBaseRows = runningTotalsBaseRows(freshRuntimeRows);
-      emitFullRecalcHeartbeat(runId, "build-fresh-runtime-rows-after-summary");
-      const freshLedgerVersion = (window.Data && Data.computeLedgerRuntimeVersion) ? String(Data.computeLedgerRuntimeVersion(id) || "") : "";
-      const freshSig = ledgerSignatureForRows(freshArr) + "::" + runtimeCacheSignature(freshLedgerVersion, freshPeriodActive, freshSelectedPeriod);
+      let freshRuntimeRows = [];
+      let freshBaseRows = [];
+      let freshLedgerVersion = "";
+      let freshSig = "";
       const freshRowsById = {};
       const freshRowsProgress = { lastYieldAt: perfNow() };
-      for (let freshIdx = 0; freshIdx < freshRuntimeRows.length; freshIdx += 1) {
-        await maybeYieldFullRecalcProgress(freshRowsProgress, runId, "build-fresh-runtime-rows-after-summary", freshIdx);
-        const r = freshRuntimeRows[freshIdx];
-        if (freshIdx > 0 && freshIdx % 25 === 0) emitFullRecalcHeartbeat(runId, "build-fresh-runtime-rows-after-summary");
-        const asOf = asOfForRow(r);
-        const t = calcTotalsAsOfMemoized(freshBaseRows, asOf, freshSig);
-        freshRowsById[String(r.id)] = { pay_main: t.principal, pay_penalty: t.penalty, total: t.total };
-        await maybeYieldFullRecalcProgress(freshRowsProgress, runId, "build-fresh-runtime-rows-after-summary", freshIdx + 1);
-      }
+      await measureRecalcStage("buildRuntimeRowsAfterSummaryMs", async function(){
+        incRecalcCallCount("buildRuntimeRows", 1);
+        emitFullRecalcHeartbeat(runId, "build-fresh-runtime-rows-after-summary");
+        freshRuntimeRows = freshPeriodActive && freshSelectedPeriod ? applyResponsibilityRangeToView(applyCalcFilter(freshArr, true, freshSelectedPeriod)).slice() : freshArr;
+        emitFullRecalcHeartbeat(runId, "build-fresh-runtime-rows-after-summary");
+        freshBaseRows = runningTotalsBaseRows(freshRuntimeRows);
+        emitFullRecalcHeartbeat(runId, "build-fresh-runtime-rows-after-summary");
+        freshLedgerVersion = (window.Data && Data.computeLedgerRuntimeVersion) ? String(Data.computeLedgerRuntimeVersion(id) || "") : "";
+        freshSig = ledgerSignatureForRows(freshArr) + "::" + runtimeCacheSignature(freshLedgerVersion, freshPeriodActive, freshSelectedPeriod);
+        for (let freshIdx = 0; freshIdx < freshRuntimeRows.length; freshIdx += 1) {
+          await maybeYieldFullRecalcProgress(freshRowsProgress, runId, "build-fresh-runtime-rows-after-summary", freshIdx);
+          const r = freshRuntimeRows[freshIdx];
+          if (freshIdx > 0 && freshIdx % 25 === 0) emitFullRecalcHeartbeat(runId, "build-fresh-runtime-rows-after-summary");
+          const asOf = asOfForRow(r);
+          const t = calcTotalsAsOfMemoized(freshBaseRows, asOf, freshSig);
+          freshRowsById[String(r.id)] = { pay_main: t.principal, pay_penalty: t.penalty, total: t.total };
+          await maybeYieldFullRecalcProgress(freshRowsProgress, runId, "build-fresh-runtime-rows-after-summary", freshIdx + 1);
+        }
+      });
       console.timeEnd("[recalc-step] build fresh runtime rows after summary");
+      addRecalcLoopCount("rowsCount", Array.isArray(freshRuntimeRows) ? freshRuntimeRows.length : 0);
+      addRecalcLoopCount("monthsCount", countRuntimeMonths(freshRuntimeRows));
+      addRecalcLoopCount("obligationsCount", countRuntimeObligations(freshBaseRows));
+      addRecalcLoopCount("paymentsCount", countRuntimePayments(freshBaseRows));
       logFullRecalcStepDone(runId, "build-fresh-runtime-rows-after-summary", { abonentId: id, rowsByIdCount: Object.keys(freshRowsById).length });
       await nextUiTick();
       const freshPayload = { ledgerVersion: freshLedgerVersion, runtimeSignature: runtimeCacheSignature(freshLedgerVersion, freshPeriodActive, freshSelectedPeriod), periodActive: !!freshPeriodActive, period: freshPeriodActive && freshSelectedPeriod ? { from: freshSelectedPeriod.from || "", to: freshSelectedPeriod.to || "" } : null, rowsById: freshRowsById, updatedAt: (new Date()).toISOString() };
