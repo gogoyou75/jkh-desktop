@@ -2994,6 +2994,19 @@ function hasStoredTransferOrFreezeForFastRecalc(abonentId){
   return false;
 }
 
+function hasPeriodTargetedPaymentsForFastRecalc(rows){
+  const list = Array.isArray(rows) ? rows : [];
+  for (let i = 0; i < list.length; i += 1) {
+    const r = list[i] || {};
+    if (toNum(r.paid) <= 0) continue;
+    if (r.use_period === true || r.pay_for_period === true || r.usePeriod === true) return true;
+    const periodFrom = String(r.pay_period_from || r.for_period_from || r.periodFrom || r.from_period || r.from || "").trim();
+    const periodTo = String(r.pay_period_to || r.for_period_to || r.periodTo || r.to_period || r.to || "").trim();
+    if (periodFrom || periodTo) return true;
+  }
+  return false;
+}
+
 function fastFullRecalcPreconditionFailure(rows, selectedPeriod, abonentId, options){
   const opts = options && typeof options === "object" ? options : {};
   if (String(opts.recalcMode || "").toUpperCase() !== "FULL_SUMMARY_REBUILD") return "NOT_FULL_RECALC";
@@ -3002,6 +3015,7 @@ function fastFullRecalcPreconditionFailure(rows, selectedPeriod, abonentId, opti
   try { if (typeof isCalcPeriodActive === "function" && isCalcPeriodActive()) return "GLOBAL_PERIOD_ACTIVE"; } catch(ePeriodActive) {}
   if (!Array.isArray(rows)) return "ROWS_NOT_ARRAY";
   if (hasStoredTransferOrFreezeForFastRecalc(abonentId)) return "TRANSFER_OR_FREEZE_ACTIVE";
+  if (hasPeriodTargetedPaymentsForFastRecalc(rows)) return "PERIOD_TARGETED_PAYMENTS";
   const required = [buildObligationsFromRows, buildPaymentEventsFromRows, allocatePaymentsFIFO, calcPenaltyForObligation, loadExcludes, loadRates, runningTotalsBaseRows];
   if (required.some(function(fn){ return typeof fn !== "function"; })) return "HELPER_UNAVAILABLE";
   for (let i = 0; i < rows.length; i += 1) {
@@ -3057,6 +3071,15 @@ function fastPaymentRowPeriod(row){
 }
 
 function buildFastPaymentEventsFromRows(rows){
+  try {
+    const eng = window.JKHCalcEngine;
+    if (eng && typeof eng.buildPaymentEventsFromRows === "function") {
+      const events = eng.buildPaymentEventsFromRows(rows, getAbonentId());
+      if (Array.isArray(events)) return events;
+    }
+  } catch(eEngineEvents) {
+    if (isRatesFatalError(eEngineEvents) || isExcludesFatalError(eEngineEvents)) throw eEngineEvents;
+  }
   const pays = [];
   const list = Array.isArray(rows) ? rows : [];
   for (let i = 0; i < list.length; i += 1) {
@@ -3080,6 +3103,15 @@ function buildFastPaymentEventsFromRows(rows){
 }
 
 function allocateFastPaymentsFIFO(obligations, payments){
+  try {
+    const eng = window.JKHCalcEngine;
+    if (eng && typeof eng.allocatePaymentsFIFO === "function") {
+      const advances = eng.allocatePaymentsFIFO(obligations, payments);
+      if (Array.isArray(advances)) return advances;
+    }
+  } catch(eEngineAllocate) {
+    if (isRatesFatalError(eEngineAllocate) || isExcludesFatalError(eEngineAllocate)) throw eEngineAllocate;
+  }
   const advances = [];
   function remaining(ob){
     const applied = ob.applications.reduce(function(sum, x){ return sum + x.amount; }, 0);
@@ -3103,6 +3135,19 @@ function allocateFastPaymentsFIFO(obligations, payments){
     if (left > 0.0000001) advances.push({ date: p.date, amount: r2(left) });
   }
   return advances;
+}
+
+function buildFastObligationsFromRows(rows, allowedYm){
+  try {
+    const eng = window.JKHCalcEngine;
+    if (eng && typeof eng.buildObligationsFromRows === "function") {
+      const obligations = eng.buildObligationsFromRows(rows, allowedYm);
+      if (Array.isArray(obligations)) return obligations;
+    }
+  } catch(eEngineObligations) {
+    if (isRatesFatalError(eEngineObligations) || isExcludesFatalError(eEngineObligations)) throw eEngineObligations;
+  }
+  return buildObligationsFromRows(rows, allowedYm);
 }
 
 function compareRowsByIdWithTolerance(expected, actual, rows, tolerance){
@@ -3149,10 +3194,14 @@ function buildRowsByIdFastCore(rows, selectedPeriod, abonentId, options){
   const runtimeRows = Array.isArray(rows) ? rows : [];
   const startedAt = perfNow();
   const baseRows = Array.isArray(opts.baseRows) ? opts.baseRows : runningTotalsBaseRows(runtimeRows);
-  const excludes = loadExcludes();
-  const rates = loadRates();
-  const allObligations = buildObligationsFromRows(baseRows, fastResponsibilityAllowedYm());
+  const id = String(abonentId || getAbonentId() || "");
+  const excludes = loadExcludes(id);
+  const rates = loadRates(id);
+  const allObligations = buildFastObligationsFromRows(baseRows, fastResponsibilityAllowedYm());
   const paymentsAll = buildFastPaymentEventsFromRows(baseRows);
+  const advancesAll = allocateFastPaymentsFIFO(allObligations, paymentsAll);
+  for (let obSortIdx = 0; obSortIdx < allObligations.length; obSortIdx += 1) sortApplications(allObligations[obSortIdx]);
+  advancesAll.sort(function(a,b){ return (a.date && a.date.getTime ? a.date.getTime() : 0) - (b.date && b.date.getTime ? b.date.getTime() : 0); });
   const rowsById = {};
   const byAsOf = new Map();
   for (let i = 0; i < runtimeRows.length; i += 1) {
@@ -3163,31 +3212,79 @@ function buildRowsByIdFastCore(rows, selectedPeriod, abonentId, options){
     byAsOf.get(key).rows.push(row);
   }
   const dates = Array.from(byAsOf.keys()).sort();
+  const penaltyStates = new Map();
+  function stateForObligation(ob){
+    const key = String(ob && ob.key || "");
+    let state = penaltyStates.get(key);
+    if (state) return state;
+    const start = startOfDay(addDays(ob.dueDate, 1));
+    state = {
+      day: start,
+      hardEnd: startOfDay(addDays(ob.dueDate, 3650)),
+      appIdx: 0,
+      applied: 0,
+      overdueIndex: 0,
+      penalty: 0
+    };
+    penaltyStates.set(key, state);
+    return state;
+  }
+  function advancePenaltyTo(ob, asOfDay){
+    if (asOfDay <= ob.dueDate) return 0;
+    const state = stateForObligation(ob);
+    const end = asOfDay < state.hardEnd ? asOfDay : state.hardEnd;
+    while (state.day <= end) {
+      emitActiveFullRecalcHeartbeat(opts.stage || "build-runtime-rows-fast");
+      while (state.appIdx < ob.applications.length && ob.applications[state.appIdx].date.getTime() <= state.day.getTime()) {
+        state.applied += toNum(ob.applications[state.appIdx].amount);
+        state.appIdx += 1;
+      }
+      if (!isExcludedDay(state.day, excludes)) {
+        state.overdueIndex += 1;
+        const principal = Math.max(ob.amount - state.applied, 0);
+        if (principal > 0.0000001 && state.overdueIndex > 30) {
+          const denom = (state.overdueIndex <= 90) ? 300 : 130;
+          const rawRate = rateOnDate(state.day, rates);
+          if (!Number.isFinite(rawRate)) {
+            throwRatesFatal("MISSING_REQUIRED_RATE", "", { date: toISODateString(state.day), reason: "MISSING_REQUIRED_RATE" });
+          }
+          const rate = capRateUntil2027(state.day, rawRate);
+          state.penalty += principal * (rate / 100) / denom;
+        }
+      }
+      state.day = addDays(state.day, 1);
+    }
+    return state.penalty;
+  }
+  function appliedUpToSorted(ob, asOfDay){
+    return sumAppliedUpTo(ob, asOfDay);
+  }
+  function advanceUpTo(asOfDay){
+    let total = 0;
+    const t = asOfDay.getTime();
+    for (let i = 0; i < advancesAll.length; i += 1) {
+      const a = advancesAll[i];
+      if (!a || !a.date || a.date.getTime() > t) break;
+      total += toNum(a.amount);
+    }
+    return r2(total);
+  }
   for (let i = 0; i < dates.length; i += 1) {
     throwIfFullRecalcAborted(opts.stage || "build-runtime-rows-fast");
     const item = byAsOf.get(dates[i]);
     const asOfDate = item.asOf;
     const asOfDay = startOfDay(asOfDate);
     const asOfYm = `${asOfDate.getFullYear()}-${pad2(asOfDate.getMonth() + 1)}`;
-    const obligations = allObligations
-      .filter(function(ob){ return String(ob.key || "") <= asOfYm; })
-      .map(cloneFastObligation);
-    const payments = paymentsAll.filter(function(p){ return p && p.date && p.date.getTime() <= asOfDay.getTime(); });
-    const advances = allocateFastPaymentsFIFO(obligations, payments);
-    const advanceUpTo = r2((advances || []).reduce(function(sum, a){
-      if (a && a.date && a.date.getTime() <= asOfDay.getTime()) return sum + toNum(a.amount);
-      return sum;
-    }, 0));
     let principalTotal = 0;
     let penaltyTotal = 0;
-    for (let obIdx = 0; obIdx < obligations.length; obIdx += 1) {
-      const ob = obligations[obIdx];
-      sortApplications(ob);
-      const applied = sumAppliedUpTo(ob, asOfDay);
+    for (let obIdx = 0; obIdx < allObligations.length; obIdx += 1) {
+      const ob = allObligations[obIdx];
+      if (String(ob.key || "") > asOfYm) break;
+      const applied = appliedUpToSorted(ob, asOfDay);
       principalTotal += Math.max(ob.amount - applied, 0);
-      penaltyTotal += calcPenaltyForObligation(ob, asOfDate, excludes, rates);
+      penaltyTotal += advancePenaltyTo(ob, asOfDay);
     }
-    let principal = r2(principalTotal - advanceUpTo);
+    let principal = r2(principalTotal - advanceUpTo(asOfDay));
     let penaltyDebt = r2(penaltyTotal);
     if (principal < 0) {
       let extra = r2(-principal);
@@ -3314,6 +3411,87 @@ async function buildRowsByIdFastVerified(rows, selectedPeriod, abonentId, option
     } catch(eSummaryLog) {}
   }
   return slow;
+}
+
+function tryReuseFreshFullRecalcRuntimeCache(abonentId, options){
+  const opts = options && typeof options === "object" ? options : {};
+  const startedAt = perfNow();
+  const id = String(abonentId || getAbonentId() || "");
+  const out = { ok: false, reason: "NOT_CHECKED" };
+  if (!id || !window.Data) { out.reason = "DATA_UNAVAILABLE"; return out; }
+  if (String(opts.recalcMode || "").toUpperCase() !== "FULL_SUMMARY_REBUILD") { out.reason = "NOT_FULL_RECALC"; return out; }
+  if (opts.periodActive === true || opts.selectedPeriod) { out.reason = "PERIOD_ACTIVE"; return out; }
+  if (opts.autoaccrualChanged === true) { out.reason = "AUTOACCRUAL_CHANGED"; return out; }
+  if (window.JKH_CARD_PERIOD_MODE_ACTIVE === true) { out.reason = "TEMPORARY_PERIOD_MODE_ACTIVE"; return out; }
+  if (typeof Data.computeLedgerRuntimeVersion !== "function" || typeof Data.readLedgerRuntimeCache !== "function" || typeof Data.isLedgerRuntimeCacheValid !== "function") {
+    out.reason = "RUNTIME_CACHE_API_UNAVAILABLE";
+    return out;
+  }
+  const rows = Array.isArray(opts.rows) ? opts.rows : getPayments();
+  const ledgerVersion = String(Data.computeLedgerRuntimeVersion(id) || "");
+  const runtimeSignatureValue = runtimeCacheSignature(ledgerVersion, false, null);
+  const validationOptions = {
+    rows: rows,
+    visibleRows: typeof Data.getVisibleFinancialRowsForCacheValidation === "function"
+      ? Data.getVisibleFinancialRowsForCacheValidation(rows, { periodActive: false, selectedPeriod: null })
+      : rows,
+    periodActive: false,
+    selectedPeriod: null,
+    runtimeSignature: runtimeSignatureValue
+  };
+  const cache = Data.readLedgerRuntimeCache(id, validationOptions);
+  const validity = Data.isLedgerRuntimeCacheValid(id, cache, validationOptions);
+  if (!validity || validity.valid !== true) {
+    out.reason = String(validity && validity.reason || "RUNTIME_CACHE_INVALID");
+    return out;
+  }
+  const rowsById = cache && cache.rowsById && typeof cache.rowsById === "object" && !Array.isArray(cache.rowsById) ? cache.rowsById : {};
+  if (!Object.keys(rowsById).length) { out.reason = "RUNTIME_CACHE_ROWS_MISSING"; return out; }
+  let snapshot = null;
+  if (typeof Data.readCardSnapshot === "function") snapshot = Data.readCardSnapshot(id);
+  const snapshotStatus = String(snapshot && (snapshot.summary_status || snapshot.status) || "").toLowerCase();
+  if (!snapshot || snapshot.dirty === true || snapshotStatus !== "fresh") {
+    out.reason = snapshot && snapshot.dirty === true ? String(snapshot.dirtyReason || "CARD_SNAPSHOT_DIRTY") : "FRESH_SUMMARY_SNAPSHOT_MISSING";
+    return out;
+  }
+  if (String(snapshot.ledgerVersion || "") !== ledgerVersion) { out.reason = "CARD_SNAPSHOT_STALE"; return out; }
+  if (snapshot.periodActive === true) { out.reason = "CARD_SNAPSHOT_PERIOD_ACTIVE"; return out; }
+  capturePaymentTableComputedRowsSnapshot(rows, rowsById, false, null, runtimeSignatureValue, ledgerVersion);
+  const summary = {
+    status: "fresh",
+    reason: "OK",
+    summary_status: "fresh",
+    summary_reason: "OK",
+    totals: snapshot.totals && typeof snapshot.totals === "object" ? Object.assign({}, snapshot.totals) : {}
+  };
+  try {
+    console.log("[full-recalc][already-fresh]", {
+      runId: String(opts.runId || ""),
+      abonentId: id,
+      ledgerVersion: ledgerVersion,
+      runtimeSignature: runtimeSignatureValue,
+      rowsByIdCount: Object.keys(rowsById).length,
+      elapsedMs: Math.round(Math.max(0, perfNow() - startedAt))
+    });
+    console.log("[fast-recalc-summary]", {
+      usedPath: "runtime_cache_already_fresh",
+      fallbackReason: "",
+      elapsedMs: Math.round(Math.max(0, perfNow() - startedAt)),
+      oldCallsAvoided: countRuntimeMonths(rows)
+    });
+  } catch(eLog) {}
+  return {
+    ok: true,
+    reason: "ALREADY_FRESH",
+    usedPath: "runtime_cache_already_fresh",
+    rows: rows,
+    rowsById: rowsById,
+    rowsCount: rows.length,
+    ledgerVersion: ledgerVersion,
+    runtimeSignature: runtimeSignatureValue,
+    summary: summary,
+    elapsedMs: Math.round(Math.max(0, perfNow() - startedAt))
+  };
 }
 
 // Нарастающий итог: теперь это "состояние долга и пени на дату строки"
@@ -4999,6 +5177,50 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
         try { console.log("[full-recalc][result]", { abonentId: id, ok: false, summaryStatus: "error", summaryReason: normalizeManualRecalcReason(autoResult && autoResult.reason), autoaccrualChanged: !!(autoResult && autoResult.changed) }); } catch(eFullAutoFailLog) {}
         endRecalcTotalTimer();
         return { ok:false, reason:normalizeManualRecalcReason(autoResult && autoResult.reason), autoaccrual:autoResult, autoaccrual_changed:!!(autoResult && autoResult.changed) };
+      }
+      const alreadyFresh = tryReuseFreshFullRecalcRuntimeCache(id, {
+        runId: runId,
+        recalcMode: recalcMode,
+        periodActive: !!(explicitReportPeriod || explicitRuntimePeriod),
+        selectedPeriod: explicitReportPeriod ? { from: String(opts.period.from || ""), to: String(opts.period.to || "") } : explicitRuntimePeriod,
+        autoaccrualChanged: !!(autoResult && autoResult.changed)
+      });
+      if (alreadyFresh && alreadyFresh.ok === true) {
+        try { console.log("[payment-table][recalc-explicit]", { runId: runId, abonentId: id, stage: "already_fresh", recalcMode: recalcMode }); } catch(eAlreadyFreshLog) {}
+        try {
+          console.log("[full-recalc][result]", {
+            runId: runId,
+            abonentId: id,
+            ok: true,
+            summaryStatus: "fresh",
+            summaryReason: "ALREADY_FRESH",
+            autoaccrualChanged: !!autoResult.changed,
+            usedPath: alreadyFresh.usedPath || "runtime_cache_already_fresh"
+          });
+        } catch(eAlreadyFreshResultLog) {}
+        endRecalcTotalTimer();
+        return {
+          ok: true,
+          reason: "ALREADY_FRESH",
+          autoaccrual_changed: !!autoResult.changed,
+          autoaccrual: autoResult,
+          summary_status: "fresh",
+          summary_reason: "OK",
+          summary: alreadyFresh.summary,
+          rowsById: alreadyFresh.rowsById,
+          ledgerVersion: alreadyFresh.ledgerVersion,
+          runtimeCacheHit: true,
+          rowsByIdSource: alreadyFresh.usedPath || "runtime_cache_already_fresh",
+          runId: runId
+        };
+      } else {
+        try {
+          console.log("[full-recalc][already-fresh-skip]", {
+            runId: runId,
+            abonentId: id,
+            reason: alreadyFresh && alreadyFresh.reason || "NOT_AVAILABLE"
+          });
+        } catch(eAlreadyFreshSkipLog) {}
       }
       logFullRecalcStep(runId, "build-runtime-rows-before-summary", { abonentId: id });
       console.time("[recalc-step] build runtime rows before summary");
