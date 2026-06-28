@@ -516,12 +516,28 @@ prepare_deploy() {
 
 infra_lock_hint() {
   echo
-  echo "Infra-файлы ЦУП не восстанавливает автоматически."
-  echo "Восстанови вручную из lock-копий выбранной среды:"
-  echo "  ls -la /root/INFRA_LOCK_*"
-  echo "  cp /root/INFRA_LOCK_${ENVIRONMENT}_env $PROJECT_DIR/.env"
-  echo "  cp /root/INFRA_LOCK_${ENVIRONMENT}_docker-compose.yml $PROJECT_DIR/docker-compose.yml"
-  echo "  cp /root/INFRA_LOCK_${ENVIRONMENT}_nginx_default.conf $PROJECT_DIR/nginx/default.conf"
+  echo "Infra-файлы ЦУП не восстанавливает автоматически из INFRA_LOCK."
+  case "$ENVIRONMENT" in
+    PROD)
+      echo "Ручное восстановление PROD из lock-копии:"
+      echo "  ls -td /root/INFRA_LOCK_*/PROD | head -1"
+      echo "  cp /root/INFRA_LOCK_YYYYMMDD_HHMMSS/PROD/.env /root/jkh/.env"
+      echo "  cp /root/INFRA_LOCK_YYYYMMDD_HHMMSS/PROD/docker-compose.yml /root/jkh/docker-compose.yml"
+      echo "  cp /root/INFRA_LOCK_YYYYMMDD_HHMMSS/PROD/default.conf /root/jkh/nginx/default.conf"
+      ;;
+    LAB)
+      echo "Ручное восстановление LAB из lock-копии:"
+      echo "  ls -td /root/INFRA_LOCK_*/LAB | head -1"
+      echo "  cp /root/INFRA_LOCK_YYYYMMDD_HHMMSS/LAB/.env /root/jkh-lab/.env"
+      echo "  cp /root/INFRA_LOCK_YYYYMMDD_HHMMSS/LAB/docker-compose.yml /root/jkh-lab/docker-compose.yml"
+      echo "  cp /root/INFRA_LOCK_YYYYMMDD_HHMMSS/LAB/default.conf /root/jkh-lab/nginx/default.conf"
+      ;;
+    *)
+      echo "Ручное восстановление из lock-копии выбранной среды:"
+      echo "  ls -td /root/INFRA_LOCK_*/PROD | head -1"
+      echo "  ls -td /root/INFRA_LOCK_*/LAB | head -1"
+      ;;
+  esac
   echo "После восстановления снова запусти проверку."
 }
 
@@ -550,20 +566,51 @@ infra_sha256sum() {
   fi
 }
 
-infra_snapshot_before_git() {
-  local snapshot_file="$1"
+infra_backup_before_git() {
+  local backup_dir="$1"
 
-  infra_files_guard || return 1
-  if ! infra_sha256sum > "$snapshot_file"; then
-    echo "ОШИБКА: не удалось сохранить sha256sum infra-файлов перед git-операцией."
+  mkdir -p "$backup_dir" || {
+    echo "ОШИБКА: не удалось создать temp backup dir для infra-файлов."
     LAST_ERROR=1
     return 1
-  fi
+  }
+
+  cp -p .env "$backup_dir/.env" || return 1
+  cp -p docker-compose.yml "$backup_dir/docker-compose.yml" || return 1
+  cp -p nginx/default.conf "$backup_dir/default.conf" || return 1
+}
+
+infra_snapshot_before_git() {
+  local snapshot_file="$1"
+  local backup_dir
+
+  infra_files_guard || return 1
+  backup_dir="$(mktemp -d)" || {
+    echo "ОШИБКА: не удалось создать temp backup dir для infra-файлов."
+    LAST_ERROR=1
+    return 1
+  }
+
+  infra_backup_before_git "$backup_dir" || {
+    rm -rf "$backup_dir"
+    LAST_ERROR=1
+    return 1
+  }
+
+  {
+    echo "BACKUP_DIR=$backup_dir"
+    infra_sha256sum
+  } > "$snapshot_file" || {
+    rm -rf "$backup_dir"
+    echo "ОШИБКА: не удалось сохранить backup и sha256sum infra-файлов перед git-операцией."
+    LAST_ERROR=1
+    return 1
+  }
 }
 
 infra_check_after_git() {
   local snapshot_file="$1"
-  local current_file
+  local current_file backup_dir
 
   current_file="$(mktemp)" || {
     echo "ОШИБКА: не удалось создать временный файл для проверки infra sha256sum."
@@ -578,21 +625,58 @@ infra_check_after_git() {
     return 1
   fi
 
-  if ! cmp -s "$snapshot_file" "$current_file"; then
+  if ! cmp -s <(tail -n +2 "$snapshot_file") "$current_file"; then
     echo "BLOCKED: git-операция изменила infra-файлы выбранной среды."
     echo
     echo "Было до git:"
-    cat "$snapshot_file" || true
+    tail -n +2 "$snapshot_file" || true
     echo
     echo "Стало после git:"
     cat "$current_file" || true
+    backup_dir="$(grep '^BACKUP_DIR=' "$snapshot_file" | tail -n 1 | cut -d= -f2-)"
+
+    if [ -n "$backup_dir" ] && [ -d "$backup_dir" ]; then
+      cp -p "$backup_dir/.env" .env || {
+        rm -f "$current_file"
+        rm -rf "$backup_dir"
+        block_operation "BLOCKED: не удалось восстановить .env из локального backup"
+        infra_lock_hint
+        return 1
+      }
+      cp -p "$backup_dir/docker-compose.yml" docker-compose.yml || {
+        rm -f "$current_file"
+        rm -rf "$backup_dir"
+        block_operation "BLOCKED: не удалось восстановить docker-compose.yml из локального backup"
+        infra_lock_hint
+        return 1
+      }
+      cp -p "$backup_dir/default.conf" nginx/default.conf || {
+        rm -f "$current_file"
+        rm -rf "$backup_dir"
+        block_operation "BLOCKED: не удалось восстановить nginx/default.conf из локального backup"
+        infra_lock_hint
+        return 1
+      }
+
+      if infra_sha256sum > "$current_file" && cmp -s <(tail -n +2 "$snapshot_file") "$current_file"; then
+        echo "OK: infra-файлы восстановлены в состояние до git-операции"
+        rm -f "$current_file"
+        rm -rf "$backup_dir"
+        block_operation "BLOCKED: infra-файлы были изменены и восстановлены из локального backup"
+        return 1
+      fi
+    fi
+
     rm -f "$current_file"
+    [ -n "$backup_dir" ] && rm -rf "$backup_dir"
     block_operation "BLOCKED: infra-файлы изменились после git-операции"
     infra_lock_hint
     return 1
   fi
 
   rm -f "$current_file"
+  backup_dir="$(grep '^BACKUP_DIR=' "$snapshot_file" | tail -n 1 | cut -d= -f2-)"
+  [ -n "$backup_dir" ] && rm -rf "$backup_dir"
   echo "OK: infra-файлы не изменились после git-операции."
 }
 
