@@ -236,6 +236,52 @@
     return CANON_PREFIX + owner;
   }
 
+  function diagnoseTariffsStorage(source){
+    try{
+      const ownerId = getOwnerId();
+      const canonicalKey = ownerId ? (CANON_PREFIX + ownerId) : "";
+      const canonicalRaw = canonicalKey && window.JKHStore && typeof JKHStore.getRaw === "function" ? JKHStore.getRaw(canonicalKey, ownerId) : null;
+      const canonicalRawActive = canonicalKey && window.JKHStore && typeof JKHStore.getRaw === "function" ? JKHStore.getRaw(canonicalKey) : null;
+      const legacyRaw = window.JKHStore && typeof JKHStore.getRaw === "function" ? JKHStore.getRaw("tariffs_content_repair_v1", ownerId) : null;
+      const activeOwnerId = window.JKHStore && typeof JKHStore.getOwnerId === "function" ? String(JKHStore.getOwnerId() || "") : "";
+      const scopedKey = window.JKHStore && typeof JKHStore.key === "function" && canonicalKey ? JKHStore.key(canonicalKey, ownerId) : "";
+      const payload = {
+        source: String(source || PAGE_TITLE),
+        ownerId,
+        activeOwnerId,
+        canonicalKey,
+        scopedKey,
+        canonicalExists: canonicalRaw !== null && canonicalRaw !== undefined && String(canonicalRaw) !== "",
+        canonicalLength: canonicalRaw ? String(canonicalRaw).length : 0,
+        canonicalActiveOwnerLength: canonicalRawActive ? String(canonicalRawActive).length : 0,
+        legacyExists: legacyRaw !== null && legacyRaw !== undefined && String(legacyRaw) !== "",
+        legacyLength: legacyRaw ? String(legacyRaw).length : 0,
+        serverValueExists: null,
+        localValueExists: canonicalRaw !== null && canonicalRaw !== undefined && String(canonicalRaw) !== ""
+      };
+      console.log("[diagnose][tariffs-storage]", payload);
+      if (ownerId && canonicalKey && typeof fetch === "function"){
+        fetch("/api/store?key=" + encodeURIComponent(canonicalKey) + "&client_owner_hint=" + encodeURIComponent(ownerId), { credentials:"include" })
+          .then(r => r.json().catch(() => null))
+          .then(data => {
+            const value = data && (data.value !== undefined ? data.value : data.v);
+            console.log("[diagnose][tariffs-storage]", Object.assign({}, payload, {
+              source: String(source || PAGE_TITLE) + ":server-readback",
+              serverValueExists: !!(data && data.ok === true && value !== null && value !== undefined && String(value) !== ""),
+              serverValueLength: value ? String(value).length : 0
+            }));
+          })
+          .catch(e => console.warn("[diagnose][tariffs-storage]", Object.assign({}, payload, {
+            source: String(source || PAGE_TITLE) + ":server-readback-failed",
+            serverValueExists: null,
+            error: String(e && e.message || e)
+          })));
+      }
+    }catch(e){
+      console.warn("[diagnose][tariffs-storage]", { source:String(source || PAGE_TITLE), error:String(e && e.message || e) });
+    }
+  }
+
   function canEditTariffs(){
     try{
       const role = getCurrentRole();
@@ -319,6 +365,7 @@
 
   function loadTariffsFromCanon(){
     const key = cacheKey();
+    diagnoseTariffsStorage("tariffs.html:load");
     const parsed = safeJsonParse(storeGetRaw(key), []);
     if (!Array.isArray(parsed)) return [];
 
@@ -342,6 +389,53 @@
   function saveTariffsToCanon(tariffs){
     const key = cacheKey();
     storeSetRaw(key, JSON.stringify(tariffs));
+    diagnoseTariffsStorage("tariffs.html:save-local");
+  }
+
+  async function readServerTariffsRaw(ownerId, key){
+    if (!ownerId || !key || typeof fetch !== "function") return { ok:false, value:"" };
+    const res = await fetch("/api/store?key=" + encodeURIComponent(key) + "&client_owner_hint=" + encodeURIComponent(ownerId), { credentials:"include" });
+    const data = await res.json().catch(() => null);
+    const value = data && data.value !== null && data.value !== undefined ? String(data.value) : "";
+    return { ok: !!(res.ok && data && data.ok === true), value };
+  }
+
+  function countTariffsFromRaw(raw){
+    const parsed = safeJsonParse(raw, []);
+    return Array.isArray(parsed) ? parsed.length : 0;
+  }
+
+  async function backfillServerTariffsIfNeeded(tariffs){
+    const ownerId = getOwnerId();
+    const key = cacheKey();
+    const raw = storeGetRaw(key);
+    const localRaw = raw == null ? "" : String(raw);
+    const localCount = Array.isArray(tariffs) ? tariffs.length : countTariffsFromRaw(localRaw);
+    if (!localRaw) return;
+    if (localCount <= 0) return;
+
+    let serverOk = false;
+    let readbackOk = false;
+    try{
+      const serverBefore = await readServerTariffsRaw(ownerId, key);
+      serverOk = !!(serverBefore.ok && serverBefore.value);
+      if (!serverOk){
+        if (!window.JKHPersist || typeof JKHPersist.set !== "function") throw new Error("JKHPersist.set is not available");
+        await JKHPersist.set(key, JSON.stringify(tariffs || []), ownerId);
+      }
+      const readback = await readServerTariffsRaw(ownerId, key);
+      readbackOk = !!(readback.ok && readback.value === JSON.stringify(tariffs || []));
+      console.log("[tariffs][server-backfill]", { ownerId, key, localCount, serverOk, readbackOk });
+    }catch(e){
+      console.warn("[tariffs][server-backfill]", {
+        ownerId,
+        key,
+        localCount,
+        serverOk,
+        readbackOk,
+        error: String(e && e.message || e)
+      });
+    }
   }
 
   async function saveTariffsToCanonPersist(tariffs){
@@ -350,6 +444,7 @@
     const key = cacheKey();
     console.log("[tariffs][persist] key=" + key + " owner=" + ownerId);
     await window.JKHPersist.set(key, JSON.stringify(tariffs), ownerId);
+    diagnoseTariffsStorage("tariffs.html:save-persist");
     console.log("[tariffs][persist] ok");
   }
 
@@ -700,10 +795,10 @@
     return { affected: affected.length, ok: ok, failed: failed };
   }
 
-  function recalcAll(){
+  async function recalcAll(){
     try{
       if (window.JKHAutoAccrual && typeof window.JKHAutoAccrual.recalcAll === "function"){
-        const res = window.JKHAutoAccrual.recalcAll();
+        const res = await window.JKHAutoAccrual.recalcAll();
 
         const total = Array.isArray(res) ? res.length : 0;
         const changed = Array.isArray(res) ? res.filter(x => x && x.changed).length : 0;
@@ -747,7 +842,7 @@
     if (_saveBusy || _recalcBusy) return;
     setButtonsBusy("recalc", true);
     try{
-      const recalc = recalcAll();
+      const recalc = await recalcAll();
       if (!recalc.ok) return;
 
       let uploaded = false;
@@ -817,6 +912,7 @@
       saveTariffsToCanon([]);
     }
 
+    void backfillServerTariffsIfNeeded(loadTariffsFromCanon());
     renderTariffs();
     refreshEditLocks();
     _pageStarted = true;
@@ -849,6 +945,7 @@
         if (raw == null || raw === ""){
           saveTariffsToCanon([]);
         }
+        void backfillServerTariffsIfNeeded(loadTariffsFromCanon());
         renderTariffs();
         refreshEditLocks();
         _pageStarted = true;

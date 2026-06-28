@@ -920,7 +920,10 @@
 
   function _cardSnapshotRowsById(rows) {
     var out = {};
+    var rowIdx = 0;
     (Array.isArray(rows) ? rows : []).forEach(function(row) {
+      rowIdx += 1;
+      if (rowIdx % 100 === 0) _emitActiveFullRecalcHeartbeat("build-card-snapshot");
       if (!row || typeof row !== "object") return;
       var id = String(row.id || "").trim();
       if (!id) return;
@@ -1112,8 +1115,11 @@
     return data;
   }
 
-  async function saveCardSnapshotAndWait(abonentOrId, snapshot) {
+  async function saveCardSnapshotAndWait(abonentOrId, snapshot, options) {
+    var opts = options && typeof options === "object" ? options : {};
     var result = { ok: false, localOk: false, serverOk: false, serverReadbackOk: false, key: "", ownerId: "", status: 0, reason: "", rowsByIdCount: 0, ledgerVersion: "" };
+    var runId = String(opts.runId || _fullRecalcRunId({}) || "");
+    var skipReadback = opts.skipReadback === true;
     try {
       if (!Data.ensureWriteOrExplain()) {
         result.reason = "WRITE_BLOCKED";
@@ -1136,7 +1142,8 @@
       result.ledgerVersion = String(normalized.ledgerVersion || "");
       var localOk = _setProjectRaw(key, serialized);
       result.localOk = localOk !== false;
-      try { console.log("[card-snapshot][save]", { key: key, ok: result.localOk, rows: normalized.rows.length, ledgerVersion: normalized.ledgerVersion }); } catch (eSaveLog) {}
+      try { console.log("[card-snapshot][save]", { runId: runId, key: key, ok: result.localOk, rows: normalized.rows.length, ledgerVersion: normalized.ledgerVersion }); } catch (eSaveLog) {}
+      await _dataUiYield();
       if (!result.localOk) {
         result.reason = "LOCAL_SAVE_FAILED";
         try { console.warn("[card-snapshot][save-and-wait-failed]", result); } catch (eLocalLog) {}
@@ -1151,6 +1158,7 @@
       var serverResult = await _serverStoreSet(ownerId, key, serialized);
       result.status = Number(serverResult && serverResult.status || 0);
       result.serverOk = !!(serverResult && serverResult.ok === true);
+      await _dataUiYield();
       if (!result.serverOk) {
         result.reason = serverResult && (serverResult.text || serverResult.data && serverResult.data.error) || "SERVER_STORE_FAILED";
         try { console.warn("[card-snapshot][server-save-failed]", { ownerId: ownerId, key: key, status: result.status, reason: result.reason }); } catch (eServerFailLog) {}
@@ -1168,6 +1176,13 @@
       result.ok = true;
       result.reason = "";
       try { console.log("[card-snapshot][server-save-ok]", { ownerId: ownerId, key: key, status: result.status }); } catch (eServerOkLog) {}
+      await _dataUiYield();
+      if (skipReadback) {
+        result.serverReadbackOk = true;
+        try { console.log("[card-snapshot][server-readback-skipped]", { runId: runId, ownerId: ownerId, key: key, reason: "post-recalc-save-ok" }); } catch (eReadbackSkipLog) {}
+        try { console.log("[card-snapshot][save-and-wait-ok]", result); } catch (eWaitSkipOkLog) {}
+        return result;
+      }
       var readback = await _serverStoreGet(ownerId, key);
       var readbackParsed = _parseCardSnapshotRawForDiagnostics(readback && readback.raw);
       result.serverReadbackOk = !!(readback && readback.ok === true && readbackParsed.ok === true && readbackParsed.ledgerVersion === result.ledgerVersion);
@@ -1326,7 +1341,11 @@
       }
     }
     var ledgerRows = fallback && Array.isArray(fallback.rows) && _cardSnapshotRowsByIdCount(rowsById) > 0 ? fallback.rows : readPaymentLedger(abonent || uid);
+    _emitActiveFullRecalcHeartbeat("build-card-snapshot", true);
+    var snapshotBuildRowIdx = 0;
     var rows = (Array.isArray(ledgerRows) ? ledgerRows : []).map(function(row) {
+      snapshotBuildRowIdx += 1;
+      if (snapshotBuildRowIdx % 100 === 0) _emitActiveFullRecalcHeartbeat("build-card-snapshot");
       var copy = deepClone(row || {});
       var item = rowsById[String(copy.id || "")];
       if (item && typeof item === "object") {
@@ -1337,6 +1356,7 @@
       return copy;
     });
     var snapshotRowsById = _cardSnapshotRowsById(rows);
+    _emitActiveFullRecalcHeartbeat("build-card-snapshot", true);
     var stats = _cardSnapshotLedgerStats(rows);
     var rowsByIdCount = _cardSnapshotRowsByIdCount(snapshotRowsById);
     if (rowsByIdCount <= 0) {
@@ -1783,9 +1803,46 @@
     } catch (e) { }
   }
 
+  function _ledgerAccruedPositiveCount(rows) {
+    if (!Array.isArray(rows)) return 0;
+    var count = 0;
+    rows.forEach(function(row) {
+      if (Math.abs(_summaryNumber(row && row.accrued)) > 0.0000001) count++;
+    });
+    return count;
+  }
+
+  function _hasResponsibilityPeriodForLedgerWrite(abonentId, abonent) {
+    function hasDate(value) {
+      var raw = String(value || "").trim();
+      if (_dateFromIsoLocal(raw)) return true;
+      return /^\d{1,2}\.\d{1,2}\.\d{4}$/.test(raw);
+    }
+    var a = abonent || {};
+    var directFrom = String(a.calcStartDate || a.calc_start_date || a.dateFrom || a.date_from || a.startCalc || a.start_calc || "").trim();
+    var directTo = String(a.calcEndDate || a.calc_end_date || a.dateTo || a.date_to || a.endCalc || a.end_calc || "").trim();
+    if (hasDate(directFrom) || hasDate(directTo)) return true;
+    var db = window.AbonentsDB || {};
+    var links = Array.isArray(db.links) ? db.links : [];
+    return links.some(function(link) {
+      return String(link && link.abonentId || "").trim() === String(abonentId || "").trim() &&
+        (hasDate(link && link.dateFrom) || hasDate(link && link.dateTo));
+    });
+  }
+
+  function _isExplicitLedgerClear(opts) {
+    var eventType = String(opts && opts.eventType || "").trim().toUpperCase();
+    return opts && (opts.explicitClear === true || opts.allowZeroAccrualOverwrite === true || opts.allowEmptyAccrualOverwrite === true) ||
+      eventType.indexOf("CLEAR") >= 0 || eventType.indexOf("RESET") >= 0;
+  }
+
   function writePaymentLedger(abonentOrId, rows, options) {
     if (!Data.ensureWriteOrExplain()) return false;
     var opts = options || {};
+    if (!_isHydratedDatabaseReady() && String(opts.eventType || "").trim() === "AUTOACCRUAL_WRITE") {
+      _logBlockedBeforeHydrateData(abonentOrId, "AUTOACCRUAL_WRITE");
+      return false;
+    }
     var found = _findAbonentByIdOrUid(abonentOrId);
     var id = String(found && found.id || (typeof abonentOrId === "object" ? abonentOrId && abonentOrId.id : abonentOrId) || "").trim();
     var abonent = found && found.abonent ? found.abonent : null;
@@ -1807,6 +1864,31 @@
         console.warn("[financial][ledger-write-blocked]", { abonentId: id, uid: uid, key: key, reason: "LEDGER_JSON_INVALID" });
         return false;
       }
+    }
+    var oldRows = [];
+    if (currentRaw !== null && currentRaw !== undefined) {
+      try { oldRows = _parseLedgerRows(currentRaw, key); } catch (eOldRows) { oldRows = []; }
+    }
+    var newRows = Array.isArray(rows) ? rows : [];
+    var oldAccruedCount = _ledgerAccruedPositiveCount(oldRows);
+    var newAccruedCount = _ledgerAccruedPositiveCount(newRows);
+    if (String(opts.eventType || "").trim() === "AUTOACCRUAL_WRITE" &&
+        oldAccruedCount > 0 &&
+        newAccruedCount === 0 &&
+        _hasResponsibilityPeriodForLedgerWrite(id, abonent) &&
+        !_isExplicitLedgerClear(opts)) {
+      var blockInfo = {
+        abonentId: id,
+        uid: uid,
+        oldAccruedCount: oldAccruedCount,
+        newAccruedCount: newAccruedCount,
+        rowsOld: oldRows.length,
+        rowsNew: newRows.length,
+        reason: "ZERO_ACCRUAL_OVERWRITE_BLOCKED"
+      };
+      try { window.__JKH_LAST_AUTOACCRUAL_BLOCK = blockInfo; } catch (eBlockState) {}
+      try { console.error("[autoaccrual][blocked-zero-overwrite]", blockInfo); } catch (eBlockLog) {}
+      return false;
     }
     var payload = JSON.stringify(Array.isArray(rows) ? rows : []);
     var ok = _setProjectRaw(key, payload);
@@ -2424,8 +2506,61 @@
     return out;
   }
 
+  function unwrapRuntimeDb(raw) {
+    if (window.unwrapRuntimeDb && window.unwrapRuntimeDb !== unwrapRuntimeDb) {
+      return window.unwrapRuntimeDb(raw);
+    }
+    if (!raw) return null;
+    try {
+      const parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
+      if (parsed && typeof parsed === "object" && Object.prototype.hasOwnProperty.call(parsed, "value") && parsed.value) {
+        return typeof parsed.value === "string" ? JSON.parse(parsed.value) : parsed.value;
+      }
+      return parsed;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function logRuntimeDbShape(reason) {
+    try {
+      console.log("[runtime-db-keys]", Object.keys(window.AbonentsDB || {}));
+      console.log(
+        "[runtime-abonents-count]",
+        window.AbonentsDB && window.AbonentsDB.abonents
+          ? Object.keys(window.AbonentsDB.abonents).length
+          : "missing"
+      );
+      if (reason) {
+        console.log("[runtime-db-shape]", {
+          reason: String(reason || ""),
+          hasAbonents: !!(window.AbonentsDB && window.AbonentsDB.abonents && typeof window.AbonentsDB.abonents === "object"),
+          hasPremises: !!(window.AbonentsDB && window.AbonentsDB.premises && typeof window.AbonentsDB.premises === "object"),
+          hasLinks: !!(window.AbonentsDB && Array.isArray(window.AbonentsDB.links))
+        });
+      }
+    } catch (e) {}
+  }
+
   function loadFromStorage() {
     if (!_canReadLocalCacheAsSource()) {
+      try {
+        var blockedRaw = _getRawScoped(KEY_DB, _ownerId());
+        var blockedParsed = unwrapRuntimeDb(blockedRaw);
+        if (blockedParsed && typeof blockedParsed === "object" && !Array.isArray(blockedParsed) && !_isDbEffectivelyEmpty(blockedParsed)) {
+          try {
+            console.info("[data][runtime-hydrate-ok]", {
+              ownerId: _ownerId(),
+              reason: "bootstrap-blocked-local-cache",
+              hydratedFrom: "storage.raw",
+              dbCount: Object.keys(blockedParsed.abonents || {}).length,
+              premiseCount: Object.keys(blockedParsed.premises || {}).length,
+              linkCount: Array.isArray(blockedParsed.links) ? blockedParsed.links.length : 0
+            });
+          } catch (hydrateLogErr) {}
+          return blockedParsed;
+        }
+      } catch (eBlockedHydrate) {}
       try { console.warn("[data][server-first-block-local-cache]", { ownerId: _ownerId(), hosted: _isHostedMode() }); } catch (eBlockLog) {}
       return null;
     }
@@ -2489,7 +2624,19 @@
 
     window.JKH_DB_READONLY = false;
     const raw = _getRawScoped(KEY_DB);
-    const parsed = safeJsonParse(raw, null);
+    const parsed = unwrapRuntimeDb(raw);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed) && !_isDbEffectivelyEmpty(parsed)) {
+      try {
+        console.info("[data][runtime-hydrate-ok]", {
+          ownerId: _ownerId(),
+          reason: "bootstrap-local-cache",
+          hydratedFrom: "storage.raw",
+          dbCount: Object.keys(parsed.abonents || {}).length,
+          premiseCount: Object.keys(parsed.premises || {}).length,
+          linkCount: Array.isArray(parsed.links) ? parsed.links.length : 0
+        });
+      } catch (hydrateLogErr2) {}
+    }
     return parsed && typeof parsed === "object" ? parsed : null;
   }
 
@@ -2821,12 +2968,14 @@
   // INIT global DB
   // ============================================================
   const stored = loadFromStorage();
-  if (!_isAllMode()) window.JKH_DATA_READY = !!stored;
-  window.AbonentsDB = stored ? mergePreferStored(BASE_DB, stored) : deepClone(BASE_DB);
+  const storedHasContent = !!(stored && stored.abonents && typeof stored.abonents === "object" && Object.keys(stored.abonents).length || stored && stored.premises && typeof stored.premises === "object" && Object.keys(stored.premises).length || stored && Array.isArray(stored.links) && stored.links.length);
+  if (!_isAllMode()) window.JKH_DATA_READY = !!storedHasContent;
+  window.AbonentsDB = storedHasContent ? mergePreferStored(BASE_DB, stored) : deepClone(BASE_DB);
   normalizeDb(window.AbonentsDB);
+  logRuntimeDbShape("bootstrap-init");
   scanAndRepairInvalidUids(window.AbonentsDB);
   migrateLegacyCalcPeriodKeysForDb(window.AbonentsDB);
-  if (stored && _canWriteStorage()) saveToStorage(window.AbonentsDB);
+  if (storedHasContent && _canWriteStorage()) saveToStorage(window.AbonentsDB);
   _resetPaymentKeyResolveCache('initial-load');
 
   window.saveAbonentsDB = function () {
@@ -2950,6 +3099,55 @@
     } catch (e) {
       return false;
     }
+  }
+
+  function _hydratedDbCounts() {
+    var db = window.AbonentsDB && typeof window.AbonentsDB === "object" ? window.AbonentsDB : {};
+    return {
+      abonentsCount: db && db.abonents && typeof db.abonents === "object" ? Object.keys(db.abonents).length : 0,
+      premisesCount: db && db.premises && typeof db.premises === "object" ? Object.keys(db.premises).length : 0,
+      linksCount: db && Array.isArray(db.links) ? db.links.length : 0
+    };
+  }
+
+  function _isHydratedDatabaseReady() {
+    return _hydratedDbCounts().abonentsCount > 0;
+  }
+
+  function _logBlockedBeforeHydrateData(abonentOrId, reason) {
+    var counts = _hydratedDbCounts();
+    var ownerId = "";
+    try { ownerId = (window.JKHStore && typeof JKHStore.getOwnerId === "function") ? String(JKHStore.getOwnerId() || "") : ""; } catch (eOwner) {}
+    var payload = {
+      abonentId: String(abonentOrId && typeof abonentOrId === "object" ? (abonentOrId.id || abonentOrId.uid || "") : (abonentOrId || "")),
+      abonentsCount: counts.abonentsCount,
+      linksCount: counts.linksCount,
+      premisesCount: counts.premisesCount,
+      ownerId: ownerId,
+      reason: String(reason || "DB_NOT_HYDRATED")
+    };
+    try { console.warn("[card][blocked-before-hydrate]", payload); } catch (eLog) {}
+    return payload;
+  }
+
+  async function waitForHydratedDatabase(options) {
+    var opts = options || {};
+    var timeoutMs = Number(opts.timeoutMs || opts.timeout || 10000);
+    if (!Number.isFinite(timeoutMs) || timeoutMs < 0) timeoutMs = 10000;
+    var startedAt = Date.now();
+    while ((Date.now() - startedAt) <= timeoutMs) {
+      if (_isHydratedDatabaseReady()) return { ok: true, counts: _hydratedDbCounts() };
+      if (window.waitForHydratedDatabase && window.waitForHydratedDatabase !== waitForHydratedDatabase && typeof window.waitForHydratedDatabase === "function") {
+        try {
+          var external = await window.waitForHydratedDatabase({ timeoutMs: Math.min(1000, timeoutMs), reason: opts.reason || "data" });
+          if (external && external.ok === true && _isHydratedDatabaseReady()) return { ok: true, counts: _hydratedDbCounts() };
+        } catch (eExternal) {}
+      }
+      var ready = await waitForServerFirstDataReady({ timeoutMs: 1000 });
+      if (ready && ready.ok === true && _isHydratedDatabaseReady()) return { ok: true, counts: _hydratedDbCounts() };
+      await new Promise(function(resolve) { setTimeout(resolve, 150); });
+    }
+    return { ok: false, reason: "DB_NOT_HYDRATED", counts: _hydratedDbCounts() };
   }
 
   async function waitForServerFirstDataReady(options) {
@@ -3265,6 +3463,7 @@
 
     if (!Array.isArray(rows)) rows = [];
     for (var i = 0; i < rows.length; i++) {
+      if (i > 0 && i % 100 === 0) _emitActiveFullRecalcHeartbeat("summary-period-totals");
       var row = rows[i] || {};
       var monthKey = _summaryMonthKey(row);
       var inMonthPeriod = !!(monthKey && monthKey >= fromMonth && monthKey <= toMonth);
@@ -3427,6 +3626,57 @@
 
   var SUMMARY_RECALC_MODE_FULL = "FULL_SUMMARY_REBUILD";
   var SUMMARY_RECALC_MODE_REPORT = "REPORT_PERIOD_CALCULATION";
+
+  function _fullRecalcRunId(options) {
+    var opts = options || {};
+    try {
+      var state = window.__JKH_FULL_RECALC_STATE;
+      return String(opts.recalcRunId || opts.runId || state && state.runId || "");
+    } catch (e) {
+      return String(opts.recalcRunId || opts.runId || "");
+    }
+  }
+
+  function _dataUiYield() {
+    return new Promise(function(resolve) { setTimeout(resolve, 0); });
+  }
+
+  var __dataFullRecalcSyncHeartbeatLastAt = 0;
+  function _emitActiveFullRecalcHeartbeat(stage, force) {
+    try {
+      var state = window.__JKH_FULL_RECALC_STATE;
+      if (!state || state.running !== true) return;
+      var now = Date.now();
+      if (!force && (now - __dataFullRecalcSyncHeartbeatLastAt) < 500) return;
+      __dataFullRecalcSyncHeartbeatLastAt = now;
+      if (window.__fullRecalcHeartbeat) window.__fullRecalcHeartbeat({ runId: String(state.runId || ""), stage: String(stage || "") });
+      else if (window.__JKH_FULL_RECALC_HEARTBEAT) window.__JKH_FULL_RECALC_HEARTBEAT(String(state.runId || ""), String(stage || ""));
+    } catch (eHeartbeat) {}
+  }
+
+  function _logFullRecalcStep(runId, step, extra) {
+    try {
+      if (window.__JKH_FULL_RECALC_HEARTBEAT) window.__JKH_FULL_RECALC_HEARTBEAT(String(runId || ""), String(step || ""));
+    } catch (eHeartbeat) {}
+    try {
+      console.log("[full-recalc][step]", Object.assign({
+        runId: String(runId || ""),
+        step: String(step || "")
+      }, extra || {}));
+    } catch (eLog) {}
+  }
+
+  function _logFullRecalcStepDone(runId, step, extra) {
+    try {
+      if (window.__JKH_FULL_RECALC_HEARTBEAT) window.__JKH_FULL_RECALC_HEARTBEAT(String(runId || ""), String(step || "") + "-done");
+    } catch (eHeartbeat) {}
+    try {
+      console.log("[full-recalc][step-done]", Object.assign({
+        runId: String(runId || ""),
+        step: String(step || "")
+      }, extra || {}));
+    } catch (eLog) {}
+  }
 
   function _normalizeSummaryRecalcMode(options) {
     var opts = options || {};
@@ -4254,21 +4504,26 @@
     }
     console.time("[card-recalc] build rows");
     try {
+      _emitActiveFullRecalcHeartbeat("summary-build-rows", true);
       var rows = window.JKHCalcEngine.loadPaymentsForAbonent(String(abonentId));
+      _emitActiveFullRecalcHeartbeat("summary-build-rows", true);
     } finally {
       console.timeEnd("[card-recalc] build rows");
     }
     console.time("[card-recalc] calc totals");
     try {
+      _emitActiveFullRecalcHeartbeat("summary-calc-totals", true);
       var totals = window.JKHCalcEngine.calcTotalsAsOfAdjusted(rows, asOf, {
         abonentId: String(abonentId),
         applyAdvanceOffset: true,
         allowNegativePrincipal: true
       });
+      _emitActiveFullRecalcHeartbeat("summary-calc-totals", true);
       var principal = Number(totals && totals.principal);
       var penalty = Number(totals && totals.penaltyDebt);
       var total = Number(totals && totals.total);
       var periodTotals = _summaryPeriodTotals(rows, from, to);
+      _emitActiveFullRecalcHeartbeat("summary-period-totals", true);
     } finally {
       console.timeEnd("[card-recalc] calc totals");
     }
@@ -4772,6 +5027,12 @@
 
   async function recalcAbonentSummaryExplicit(abonentOrId, options) {
     var opts = options || {};
+    var runId = _fullRecalcRunId(opts);
+    var hydrated = await waitForHydratedDatabase({ timeoutMs: opts.timeoutMs || opts.timeout || 10000, reason: opts.recalcMode || "recalcAbonentSummaryExplicit" });
+    if (!hydrated || hydrated.ok !== true) {
+      _logBlockedBeforeHydrateData(abonentOrId, opts.recalcMode || "FULL_SUMMARY_REBUILD");
+      return { ok: false, summary_status: "error", summary_reason: "DB_NOT_HYDRATED", reason: "DB_NOT_HYDRATED", summary: null };
+    }
     var summary = null;
     var mode = _normalizeSummaryRecalcMode(opts);
     var period = await _resolveAbonentSummaryRecalcPeriod(abonentOrId, opts.period, { mode: mode, summaryScope: opts.summaryScope || opts.summary_scope, saveSummary: opts.saveSummary });
@@ -4779,7 +5040,11 @@
 
     try {
       if (!period.ok) throw new Error(period.error || "PERIOD_INVALID");
+      _logFullRecalcStep(runId, "calc-totals", { mode: mode, periodFrom: String(period.from || ""), periodTo: String(period.to || "") });
+      await _dataUiYield();
       summary = buildAbonentSummaryAfterExplicitRecalc(abonentOrId, period.from, period.to);
+      _logFullRecalcStepDone(runId, "calc-totals", { status: summary && (summary.summary_status || summary.status) || "" });
+      await _dataUiYield();
       if (periodActive) {
         summary.summary_scope = "period";
         summary.report_scope = "period";
@@ -4790,6 +5055,7 @@
       }
     } catch (e) {
       var reason = _summaryCalcErrorCode(e);
+      _logFullRecalcStepDone(runId, "calc-totals", { status: "error", reason: reason });
       summary = buildAbonentSummaryErrorAfterExplicitRecalc(abonentOrId, period, reason);
       if (periodActive) {
         summary.summary_scope = "period";
@@ -4822,6 +5088,7 @@
     } else {
       try {
         console.log("[summary][save-full-summary]", {
+          runId: runId,
           uid: String(summary.account_uid || summary.uid || ""),
           periodActive: false,
           periodFrom: String(period && period.from || ""),
@@ -4830,7 +5097,10 @@
       } catch (eFullLog) {}
       console.time("[card-recalc] save summary");
       try {
+        _logFullRecalcStep(runId, "summary-save", { uid: String(summary.account_uid || summary.uid || "") });
         saveResult = await saveAbonentSummaryAfterRecalc(abonentOrId, summary);
+        _logFullRecalcStepDone(runId, "summary-save", { ok: !!(saveResult && saveResult.ok === true), status: saveResult && (saveResult.summary_status || saveResult.status) || "", reason: saveResult && (saveResult.summary_reason || saveResult.reason) || "" });
+        await _dataUiYield();
       } finally {
         console.timeEnd("[card-recalc] save summary");
       }
@@ -4849,7 +5119,42 @@
     };
   }
 
-  async function beginRecalcUidLock(uid) {
+  function _recalcLockAgeFromServer(data) {
+    var d = data && typeof data === "object" ? data : {};
+    var direct = Number(d.lockAgeMs || d.lock_age_ms || d.ageMs || d.age_ms || 0);
+    if (Number.isFinite(direct) && direct > 0) return direct;
+    var startedRaw = d.startedAt || d.started_at || d.lockStartedAt || d.lock_started_at || "";
+    var startedMs = 0;
+    if (typeof startedRaw === "number") startedMs = startedRaw;
+    else if (startedRaw) startedMs = Date.parse(String(startedRaw));
+    return startedMs && Number.isFinite(startedMs) ? Math.max(0, Date.now() - startedMs) : 0;
+  }
+
+  function releaseRecalcUidLockOnUnload(uid, token, options) {
+    var opts = options || {};
+    var found = _findAbonentByIdOrUid(uid);
+    var abonent = found && found.abonent ? found.abonent : (uid && typeof uid === "object" ? uid : null);
+    uid = String(abonent && (abonent.uid || abonent.account_uid || abonent.accountUid) || uid || "").trim();
+    if (!isValidUid(uid)) return false;
+    var lockKey = "stage16_recalc_lock_" + uid;
+    try { sessionStorage.removeItem(lockKey); } catch (eLocal) {}
+    try {
+      var body = JSON.stringify({ lock_token: token || "" });
+      var url = "/api/recalc_lock/" + encodeURIComponent(uid) + "/finish";
+      if (navigator && typeof navigator.sendBeacon === "function") {
+        var blob = new Blob([body], { type: "application/json" });
+        return navigator.sendBeacon(url, blob);
+      }
+      if (typeof fetch === "function") {
+        fetch(url, { method: "POST", credentials: "include", headers: { "Content-Type": "application/json" }, body: body, keepalive: true }).catch(function(){});
+        return true;
+      }
+    } catch (eBeacon) {}
+    return false;
+  }
+
+  async function beginRecalcUidLock(uid, options) {
+    var opts = options || {};
     var found = _findAbonentByIdOrUid(uid);
     var abonent = found && found.abonent ? found.abonent : (uid && typeof uid === "object" ? uid : null);
     var resolvedUid = String(abonent && (abonent.uid || abonent.account_uid || abonent.accountUid) || uid || "").trim();
@@ -4857,40 +5162,78 @@
     if (!isValidUid(uid)) return { ok: false, status: "error", reason: "UID_REQUIRED" };
     var localKey = "stage16_recalc_lock_" + uid;
     var now = Date.now();
+    var lockTtlMs = 60 * 1000;
     try {
       var raw = sessionStorage.getItem(localKey);
       var local = raw ? JSON.parse(raw) : null;
-      if (local && local.running && now - Number(local.startedAt || 0) < 30 * 60 * 1000) {
+      var localAgeMs = local && local.running ? now - Number(local.startedAt || 0) : 0;
+      if (local && local.running && localAgeMs < lockTtlMs) {
+        try { console.log("[recalc-lock][begin]", { uid: uid, status: "already_running", local: true, ageMs: localAgeMs, ttlMs: lockTtlMs }); } catch (eBeginAlreadyLog) {}
         return { ok: true, status: "already_running", account_uid: uid, local: true };
       }
-      sessionStorage.setItem(localKey, JSON.stringify({ running: true, startedAt: now }));
+      if (local && local.running) {
+        try { sessionStorage.removeItem(localKey); } catch (eExpiredRemove) {}
+        try { console.warn("[recalc-lock][expired-cleared]", { uid: uid, ageMs: localAgeMs, ttlMs: lockTtlMs }); } catch (eExpiredLog) {}
+      }
+      sessionStorage.setItem(localKey, JSON.stringify({ running: true, startedAt: now, runId: String(opts.runId || "") }));
+      try { console.log("[recalc-lock][begin]", { uid: uid, status: "started", local: true, startedAt: now, ttlMs: lockTtlMs }); } catch (eBeginLog) {}
     } catch (eLocal) {}
     try {
       var res = await fetch("/api/recalc_lock/" + encodeURIComponent(uid) + "/begin", { method: "POST", credentials: "include" });
       var text = await res.text();
       var data = null;
       try { data = text ? JSON.parse(text) : null; } catch (eParse) { data = null; }
-      if (res.ok && data && data.ok !== false) return data;
+      if (res.ok && data && data.ok !== false) {
+        var serverAgeMs = _recalcLockAgeFromServer(data);
+        if (String(data.status || "") === "already_running") {
+          if (serverAgeMs > lockTtlMs) {
+            try { await finishRecalcUidLock(uid, data.lock_token || "", { runId: opts.runId || "", reason: "server-expired-cleared" }); } catch (eFinishExpired) {}
+            try {
+              var retryRes = await fetch("/api/recalc_lock/" + encodeURIComponent(uid) + "/begin", { method: "POST", credentials: "include" });
+              var retryText = await retryRes.text();
+              var retryData = null;
+              try { retryData = retryText ? JSON.parse(retryText) : null; } catch (eRetryParse) { retryData = null; }
+              if (retryRes.ok && retryData && retryData.ok !== false) {
+                return retryData;
+              }
+            } catch (eRetry) {}
+          }
+          try { sessionStorage.removeItem(localKey); } catch (eServerAlreadyLocalRemove) {}
+        }
+        try { console.log("[recalc-lock][begin]", { uid: uid, status: data.status || "", server: true, local: false }); } catch (eBeginServerLog) {}
+        return data;
+      }
     } catch (e) {
       try { console.warn("[recalc-lock][begin-failed-local-only]", { uid: uid, reason: String(e && e.message || e) }); } catch (eLog) {}
     }
     return { ok: true, status: "started", account_uid: uid, local: true };
   }
 
-  async function finishRecalcUidLock(uid, token) {
+  async function finishRecalcUidLock(uid, token, options) {
+    var opts = options || {};
     var found = _findAbonentByIdOrUid(uid);
     var abonent = found && found.abonent ? found.abonent : (uid && typeof uid === "object" ? uid : null);
     uid = String(abonent && (abonent.uid || abonent.account_uid || abonent.accountUid) || uid || "").trim();
     if (!isValidUid(uid)) return { ok: false, status: "error", reason: "UID_REQUIRED" };
-    try { sessionStorage.removeItem("stage16_recalc_lock_" + uid); } catch (eLocal) {}
+    var releasedLocal = false;
+    var serverOk = false;
+    var serverStatus = "";
+    var lockKey = "stage16_recalc_lock_" + uid;
+    try { sessionStorage.removeItem(lockKey); releasedLocal = true; } catch (eLocal) {}
     try {
-      await fetch("/api/recalc_lock/" + encodeURIComponent(uid) + "/finish", {
+      var res = await fetch("/api/recalc_lock/" + encodeURIComponent(uid) + "/finish", {
         method: "POST",
         credentials: "include",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ lock_token: token || "" })
       });
-    } catch (e) {}
+      serverOk = !!(res && res.ok);
+      serverStatus = res ? String(res.status || "") : "";
+    } catch (e) {
+      serverStatus = String(e && e.message || e || "FETCH_FAILED");
+    } finally {
+      try { console.log("[recalc-lock][release]", { uid: uid, releasedLocal: releasedLocal, serverOk: serverOk, serverStatus: serverStatus }); } catch (eReleaseLog) {}
+    }
   }
 
   async function recalculateAbonentCard(abonentOrId, options) {
@@ -4906,6 +5249,12 @@
     if (!ready || ready.ok !== true) {
       endCardRecalcFullTimer();
       return { ok: false, uid: "", summary_status: "error", summary_reason: "SERVER_FIRST_DATA_NOT_READY", summary: null };
+    }
+    var hydrated = await waitForHydratedDatabase({ timeoutMs: opts.timeoutMs || opts.timeout || 10000, reason: opts.recalcMode || "recalculateAbonentCard" });
+    if (!hydrated || hydrated.ok !== true) {
+      _logBlockedBeforeHydrateData(abonentOrId, opts.recalcMode || "FULL_SUMMARY_REBUILD");
+      endCardRecalcFullTimer();
+      return { ok: false, uid: "", summary_status: "error", summary_reason: "DB_NOT_HYDRATED", reason: "DB_NOT_HYDRATED", summary: null };
     }
 
     var found = _findAbonentByIdOrUid(abonentOrId);
@@ -4930,7 +5279,7 @@
 
     var lock = opts.recalcLockHeld === true
       ? { ok: true, status: "started", account_uid: uid, lock_token: opts.recalcLockToken || "", external: true }
-      : await beginRecalcUidLock(uid);
+      : await beginRecalcUidLock(uid, { runId: opts.recalcRunId || opts.runId || "", abonentId: abonentId, reason: "recalculateAbonentCard" });
     if (lock && lock.status === "already_running") {
       endCardRecalcFullTimer();
       return {
@@ -5031,7 +5380,7 @@
       };
     } finally {
       if (!(lock && lock.external === true)) {
-        await finishRecalcUidLock(uid, lock && lock.lock_token);
+        await finishRecalcUidLock(uid, lock && lock.lock_token, { runId: opts.recalcRunId || opts.runId || "", abonentId: abonentId, reason: "recalculateAbonentCard-finally" });
       }
       endCardRecalcFullTimer();
     }
@@ -5453,7 +5802,9 @@
     recalculateAbonentCardWithRows: recalculateAbonentCardWithRows,
     beginRecalcUidLock: beginRecalcUidLock,
     finishRecalcUidLock: finishRecalcUidLock,
+    releaseRecalcUidLockOnUnload: releaseRecalcUidLockOnUnload,
     waitForServerFirstDataReady: waitForServerFirstDataReady,
+    waitForHydratedDatabase: waitForHydratedDatabase,
     saveAbonentSummaryAfterRecalc: saveAbonentSummaryAfterRecalc,
     markAbonentSummaryDirty: markAbonentSummaryDirty,
     writePaymentLedger: writePaymentLedger,
@@ -6129,7 +6480,7 @@
     return normalizeFinancialMode(mode);
   }
 
-  function __forceResponsibilityLedgerRecalc(ids){
+  async function __forceResponsibilityLedgerRecalc(ids){
     var unique = [];
     (ids || []).forEach(function(id){
       var v = String(id || "").trim();
@@ -6140,7 +6491,7 @@
       console.warn("[transfer-responsibility][ledger-recalc-skipped]", { reason:"AUTOACCRUAL_ENGINE_UNAVAILABLE", abonentIds: unique });
       return { ok:false, reason:"AUTOACCRUAL_ENGINE_UNAVAILABLE", results:[] };
     }
-    var results = window.JKHAutoAccrual.recalcForMany(unique) || [];
+    var results = await window.JKHAutoAccrual.recalcForMany(unique) || [];
     var failed = results.filter(function(r){ return !r || r.ok !== true; });
     if (failed.length) {
       console.warn("[transfer-responsibility][ledger-recalc-failed]", { abonentIds: unique, failed: failed });
@@ -6227,7 +6578,7 @@
     } catch(e) {}
   }
 
-  function transferResponsibility(options){
+  async function transferResponsibility(options){
     if (!Data.ensureWriteOrExplain()) return false;
     var db = window.AbonentsDB;
     if (!db || !db.abonents) return false;
@@ -6354,7 +6705,7 @@
         createdBy: _ownerId()
       });
 
-      var recalc = __forceResponsibilityLedgerRecalc([oldId, newId]);
+      var recalc = await __forceResponsibilityLedgerRecalc([oldId, newId]);
       if (!recalc || recalc.ok !== true) throw new Error("TRANSFER_LEDGER_RECALC_FAILED");
 
       var newLedgerRangeCheck = __verifyNoAccrualBeforeTransferMonth(newId, td);

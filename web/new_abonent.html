@@ -391,6 +391,7 @@
 </div>
 
 <script>
+window.new_abonent = window.new_abonent || {};
 /* =========================
    УТИЛИТЫ
    ========================= */
@@ -564,6 +565,11 @@ function saveImportCreatedUid(uid){
     resume.createdUid = cleanUid;
     resume.resolvedUid = cleanUid;
     JKHStore.setJSON('import_xls_resume_v1', resume, null);
+    console.log('[new_abonent][draft-save]', {
+      kind: 'import_resume',
+      createdUid: cleanUid,
+      resolvedUid: cleanUid
+    });
   }catch(e){}
 }
 function isImportReturnScenario(){
@@ -678,7 +684,50 @@ function refreshDebtTransferBox() {
    ========================= */
 function loadDraftNewAbonent(){
   if (!window.JKHStore || !JKHStore.getJSON) return null;
-  try{ return JKHStore.getJSON('draft_new_abonent_v1', null, null); }catch(e){ return null; }
+  try{
+    const draft = JKHStore.getJSON('draft_new_abonent_v1', null, null);
+    const hasData = !!(draft && String(draft.ls || '').trim() && String(draft.fio || draft.fam || '').trim());
+    console.log('[new_abonent][draft-load-shape]', {
+      hasDraft: !!draft,
+      hasData: hasData,
+      ownerId: String(draft && draft.ownerId || ''),
+      currentOwnerId: (window.JKHStore && typeof JKHStore.getOwnerId === 'function') ? String(JKHStore.getOwnerId() || '') : '',
+      ls: String(draft && draft.ls || ''),
+      regnum: String(draft && draft.regnum || ''),
+      excelRow: Number(draft && draft.excelRow) || 0
+    });
+    console.log('[new_abonent][draft-load]', {
+      hasDraft: !!draft,
+      ls: String(draft && draft.ls || ''),
+      regnum: String(draft && draft.regnum || ''),
+      excelRow: Number(draft && draft.excelRow) || 0
+    });
+    return draft;
+  }catch(e){ return null; }
+}
+function hasDraftNewAbonentData(draft){
+  return !!(draft && String(draft.ls || '').trim() && String(draft.fio || draft.fam || '').trim());
+}
+function sleepNewAbonent(ms){
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+async function waitDraftNewAbonent(){
+  for (let i = 0; i < 10; i++){
+    const draft = loadDraftNewAbonent();
+    if (hasDraftNewAbonentData(draft)) return draft;
+    await sleepNewAbonent(200);
+  }
+  return null;
+}
+async function __waitForNewAbonentReady(){
+  try{
+    if (window.Data && typeof Data.waitForServerFirstDataReady === 'function'){
+      await Data.waitForServerFirstDataReady({ timeoutMs: 8000 });
+    } else if (window.JKHDataLoader && typeof window.JKHDataLoader.loadFromServer === 'function'){
+      await window.JKHDataLoader.loadFromServer({ force: false, reason: 'new_abonent_prefill' });
+    }
+  }catch(e){}
+  return !!(window.JKHStore && typeof JKHStore.getJSON === 'function');
 }
 function clearDraftNewAbonent(){
   if (!window.JKHStore || !JKHStore.setJSON) return;
@@ -859,39 +908,97 @@ function importPaymentsFromDraftForNewAbonent(ls, abonentObj){
 /* =========================
    ПРЕДЗАПОЛНЕНИЕ ИЗ QUERY
    ========================= */
-function prefillFromQueryParams() {
+async function prefillFromQueryParams() {
   let regnum = "";
   let last = "", first = "", mid = "";
   let ls = "", square = "", uid = "";
   let src = "";
   let ret = "";
+  let importDraftMissing = false;
+  let importQueryRestored = false;
+  let queryFio = "";
+  let queryExcelRow = 0;
 
   try {
     const params = new URLSearchParams(window.location.search || "");
     regnum = (params.get("regnum") || "").trim();
-    last = (params.get("last") || "").trim();
+    last = (params.get("fam") || params.get("last") || "").trim();
     first = (params.get("first") || "").trim();
     mid = (params.get("mid") || "").trim();
     ls = (params.get("ls") || "").trim();
     square = (params.get("square") || "").trim();
-    uid = (params.get("uid") || "").trim();
+    uid = (params.get("excelUid") || params.get("uid") || "").trim();
     src = (params.get("src") || "").trim();
     ret = (params.get("return") || "").trim();
+    queryFio = (params.get("fio") || "").trim();
+    queryExcelRow = Number(params.get("excelRow") || 0) || 0;
   } catch {}
+
+  if ((!last || !first) && queryFio) {
+    const queryFioParts = queryFio.split(/\s+/).filter(Boolean);
+    if (!last) last = String(queryFioParts[0] || "").trim();
+    if (!first) first = String(queryFioParts[1] || "").trim();
+    if (!mid) mid = String(queryFioParts.slice(2).join(" ") || "").trim();
+  }
 
   if (String(new URLSearchParams(window.location.search || '').get('from') || '').trim() === 'import') {
     src = 'import_xls';
   }
 
-  const draft = loadDraftNewAbonent();
-  if (draft) {
-    last = String(draft.fam || last || '').trim();
-    first = String(draft.name || first || '').trim();
-    mid = String(draft.otch || mid || '').trim();
+  const isFromImport = String(new URLSearchParams(window.location.search || '').get('from') || '').trim() === 'import';
+  if (isFromImport) {
+    console.log('[new_abonent][from-import-detected]', {
+      href: String(window.location.href || ''),
+      excelRow: queryExcelRow,
+      ls: String(ls || ''),
+      hasQueryFio: !!queryFio,
+      hasQueryUid: !!uid
+    });
+  }
+  const draft = isFromImport ? await waitDraftNewAbonent() : loadDraftNewAbonent();
+  if (hasDraftNewAbonentData(draft)) {
+    const draftFioParts = String(draft.fio || '').trim().split(/\s+/).filter(Boolean);
+    console.log('[new_abonent][fill-from-import]', {
+      hasDraft: true,
+      ls: String(draft.ls || ''),
+      regnum: String(draft.regnum || ''),
+      square: String(draft.square || ''),
+      excelRow: Number(draft.excelRow) || 0,
+      source: String(draft.source || '')
+    });
+    last = String(draft.fam || draftFioParts[0] || last || '').trim();
+    first = String(draft.name || draftFioParts[1] || first || '').trim();
+    mid = String(draft.otch || draftFioParts.slice(2).join(' ') || mid || '').trim();
     ls = String(draft.ls || ls || '').trim();
     square = String(draft.square || square || '').trim();
     regnum = String(draft.regnum || regnum || '').trim();
+    uid = String(draft.excelUid || draft.uid_import || uid || '').trim();
     src = 'import_xls';
+  } else if (isFromImport) {
+    importDraftMissing = true;
+    const queryFioLine = [last, first, mid].filter(Boolean).join(' ').trim() || queryFio;
+    importQueryRestored = !!(ls && (queryFioLine || square));
+    console.log('[new_abonent][draft-not-found]', {
+      reason: 'draft_empty_or_not_found',
+      href: String(window.location.href || ''),
+      excelRow: queryExcelRow,
+      ls: String(ls || ''),
+      queryRestored: importQueryRestored
+    });
+    if (!importQueryRestored && typeof setCreateStatus === 'function') {
+      setCreateStatus('draft_new_abonent_v1 пустой или не найден');
+    }
+    if (importQueryRestored) {
+      if (typeof setCreateStatus === 'function') setCreateStatus('Данные из Excel восстановлены из параметров импорта.');
+      console.log('[new_abonent][fill-from-import]', {
+        hasDraft: false,
+        source: 'query',
+        excelRow: queryExcelRow,
+        ls: String(ls || ''),
+        square: String(square || ''),
+        hasUid: !!uid
+      });
+    }
   }
 
   document.getElementById("na_src").value = src;
@@ -924,12 +1031,21 @@ function prefillFromQueryParams() {
       if (square) parts.push('Площадь: ' + square);
       if (regnum) parts.push('regnum: ' + regnum);
       box.style.display = 'block';
-      txt.textContent = parts.join(' | ');
+      txt.textContent = importDraftMissing
+        ? (importQueryRestored ? 'Данные из Excel восстановлены из параметров импорта.' : 'draft_new_abonent_v1 пустой или не найден')
+        : parts.join(' | ');
+    }
+  } else if (importDraftMissing && !importQueryRestored) {
+    const box = document.getElementById('importPrefillBox');
+    const txt = document.getElementById('importPrefillText');
+    if (box && txt) {
+      box.style.display = 'block';
+      txt.textContent = 'draft_new_abonent_v1 пустой или не найден';
     }
   }
 
   populatePremiseSelect(regnum);
-  applyPremiseByRegnum(regnum);
+  if (regnum) applyPremiseByRegnum(regnum);
 
   const df = document.getElementById("na_date_from");
   if (df && !df.value) df.value = getDefaultCalcStartDate();
@@ -1083,7 +1199,7 @@ async function createAbonent() {
         return;
       }
 
-      const transferred = window.Data.transferResponsibility({
+      const transferred = await window.Data.transferResponsibility({
         oldAbonentId: String(__transferCtx.oldId),
         newAbonentId: String(ls),
         regnum: String(regnum),
@@ -1110,7 +1226,6 @@ async function createAbonent() {
     const src = String(document.getElementById("na_src").value || "").trim();
     if (src === 'import_xls') {
       try { importPaymentsFromDraftForNewAbonent(String(ls), dbRoot.abonents[ls]); } catch (e) {}
-      saveImportCreatedUid(uid);
     }
 
     if (!(window.saveAbonentsDB && window.saveAbonentsDB())) {
@@ -1120,7 +1235,7 @@ async function createAbonent() {
 
     try {
       if (window.JKHAutoAccrual && typeof window.JKHAutoAccrual.recalcForAbonent === 'function') {
-        window.JKHAutoAccrual.recalcForAbonent(String(ls));
+        await window.JKHAutoAccrual.recalcForAbonent(String(ls));
       }
     } catch (e) {
       console.warn('[new_abonent] recalcForAbonent failed', e);
@@ -1141,6 +1256,10 @@ async function createAbonent() {
       console.warn('[new_abonent] upload failed', e);
       setCreateStatus("Ошибка записи на сервер. Данные сохранены локально, но не выгружены.");
       return;
+    }
+
+    if (src === 'import_xls') {
+      saveImportCreatedUid(uid);
     }
 
     const ret = safeReturnUrl(String(document.getElementById("na_return").value || "").trim());
@@ -1287,43 +1406,48 @@ function initAbonentsList(){
 /* =========================
    INIT
    ========================= */
-document.addEventListener("DOMContentLoaded", () => {
-  prefillFromQueryParams();
+document.addEventListener("DOMContentLoaded", async () => {
+  try {
+    await __waitForNewAbonentReady();
+    await prefillFromQueryParams();
 
-  document.getElementById("btnBackToImport")?.addEventListener("click", goBackToImport);
+    document.getElementById("btnBackToImport")?.addEventListener("click", goBackToImport);
 
-  const ps = document.getElementById("premiseSelect");
-  if (ps) {
-    ps.addEventListener("change", () => {
-      const reg = String(ps.value || "").trim();
-      applyPremiseByRegnum(reg);
+    const ps = document.getElementById("premiseSelect");
+    if (ps) {
+      ps.addEventListener("change", () => {
+        const reg = String(ps.value || "").trim();
+        applyPremiseByRegnum(reg);
+      });
+    }
+
+    // обновлять превью дат передачи при изменении даты
+    document.getElementById("na_date_from")?.addEventListener("change", refreshDebtTransferBox);
+
+    document.getElementById("na_ls")?.addEventListener("blur", (e) => {
+      e.target.value = normalizeLs4(e.target.value);
     });
+
+    document.getElementById("btnCreate").addEventListener("click", () => { createAbonent(); });
+
+    document.getElementById('btnTransferWithDebt')?.addEventListener('click', async () => {
+      __transferMode = 'WITH_DEBT';
+      __jkhTransferConfirmed = true;
+      try{ __updateNewDebtStartPreview(); }catch(e){}
+      await createAbonent();
+    });
+
+    document.getElementById('btnTransferNoDebt')?.addEventListener('click', async () => {
+      __transferMode = 'NO_DEBT';
+      __jkhTransferConfirmed = true;
+      try{ __updateNewDebtStartPreview(); }catch(e){}
+      await createAbonent();
+    });
+
+    initAbonentsList();
+  } catch (e) {
+    console.warn('[new_abonent][init-error]', e);
   }
-
-  // обновлять превью дат передачи при изменении даты
-  document.getElementById("na_date_from")?.addEventListener("change", refreshDebtTransferBox);
-
-  document.getElementById("na_ls")?.addEventListener("blur", (e) => {
-    e.target.value = normalizeLs4(e.target.value);
-  });
-
-  document.getElementById("btnCreate").addEventListener("click", () => { createAbonent(); });
-
-  document.getElementById('btnTransferWithDebt')?.addEventListener('click', async () => {
-    __transferMode = 'WITH_DEBT';
-    __jkhTransferConfirmed = true;
-    try{ __updateNewDebtStartPreview(); }catch(e){}
-    await createAbonent();
-  });
-
-  document.getElementById('btnTransferNoDebt')?.addEventListener('click', async () => {
-    __transferMode = 'NO_DEBT';
-    __jkhTransferConfirmed = true;
-    try{ __updateNewDebtStartPreview(); }catch(e){}
-    await createAbonent();
-  });
-
-  initAbonentsList();
 });
 </script>
 

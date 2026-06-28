@@ -3,6 +3,15 @@
    Не ломает существующий проект: работает поверх window.AbonentsDB
 */
 
+const PREMISES_ADMIN_VERSION = '20260626-runtime-db';
+window.PREMISES_FILE_VERSION = '20260626-A';
+console.log('PREMISES FILE EXECUTED');
+console.log('[premises][script-loaded]', {
+    file: 'premises_admin.js',
+    version: PREMISES_ADMIN_VERSION,
+    src: document.currentScript && document.currentScript.src ? document.currentScript.src : null
+});
+
 window.PremisesAdmin = (function () {
     function q(id) { return document.getElementById(id); }
 
@@ -137,9 +146,56 @@ window.PremisesAdmin = (function () {
         const raw = (window.JKHStore && typeof JKHStore.getRaw === "function")
             ? JKHStore.getRaw(KEY_DB, ownerId)
             : null;
-        const parsed = safeParse(raw, null);
+        const parsed = window.unwrapRuntimeDb ? window.unwrapRuntimeDb(raw) : safeParse(raw, null);
         if (parsed && typeof parsed === "object") return parsed;
         return { premises: {}, links: [], abonents: {} };
+    }
+
+    function countDb(db) {
+        return {
+            abonentsCount: db && db.abonents && typeof db.abonents === 'object' ? Object.keys(db.abonents).length : 0,
+            premisesCount: db && db.premises && typeof db.premises === 'object' ? Object.keys(db.premises).length : 0,
+            linksCount: db && Array.isArray(db.links) ? db.links.length : 0
+        };
+    }
+
+    function hasDbContent(db) {
+        const c = countDb(db);
+        return !!(c.abonentsCount || c.premisesCount || c.linksCount);
+    }
+
+    async function hydrateRuntimeDbFromStore(reason) {
+        const current = window.AbonentsDB;
+        if (hasDbContent(current)) {
+            return countDb(current);
+        }
+
+        const raw = (window.JKHStore && typeof JKHStore.getRaw === "function")
+            ? JKHStore.getRaw(KEY_DB, getActiveOwnerId())
+            : null;
+        const parsed = window.unwrapRuntimeDb ? window.unwrapRuntimeDb(raw) : safeParse(raw, null);
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed) && hasDbContent(parsed)) {
+            window.AbonentsDB = parsed;
+        } else if (!hasDbContent(current)) {
+            window.AbonentsDB = current && typeof current === 'object'
+                ? current
+                : { abonents: {}, premises: {}, links: [] };
+        }
+
+        const ready = countDb(window.AbonentsDB);
+        console.log('[premises][db-ready]', ready);
+        return ready;
+    }
+
+    async function ensureRuntimeHydration(reason) {
+        try {
+            if (window.Data && typeof Data.waitForServerFirstDataReady === 'function') {
+                await Data.waitForServerFirstDataReady({ timeoutMs: 8000 });
+            } else if (window.JKHDataLoader && typeof window.JKHDataLoader.loadFromServer === 'function') {
+                await window.JKHDataLoader.loadFromServer({ force: false, reason: reason || 'premises_init' });
+            }
+        } catch (e) {}
+        return await hydrateRuntimeDbFromStore(reason);
     }
 
     const GROUP_COLORS = [
@@ -765,6 +821,13 @@ window.PremisesAdmin = (function () {
     function restoreFromTxSnapshot(snapshot) {
         if (!snapshot || !snapshot.db) return;
         window.AbonentsDB = deepCloneRuntimeDb(snapshot.db);
+        console.log("[runtime-db-keys]", Object.keys(window.AbonentsDB || {}));
+        console.log(
+            "[runtime-abonents-count]",
+            window.AbonentsDB && window.AbonentsDB.abonents
+                ? Object.keys(window.AbonentsDB.abonents).length
+                : "missing"
+        );
         state.editingRegnum = snapshot.editingRegnum ?? null;
         renderTable();
         refreshAddressDatalists();
@@ -1236,7 +1299,8 @@ window.PremisesAdmin = (function () {
         return premiseSortWeight(p) > 0;
     }
 
-    function renderTable() {
+    async function renderTable() {
+        await ensureRuntimeHydration('render');
         const tbody = q('premisesTable')?.querySelector('tbody');
         if (!tbody) return;
 
@@ -1316,6 +1380,7 @@ window.PremisesAdmin = (function () {
             });
 
             q('premCount').textContent = `Показано: ${totalShown} / ${totalAll} (все базы)`;
+            console.log('[premises][render]', { premisesCount: totalAll, visibleCount: totalShown });
             return;
         }
 
@@ -1369,6 +1434,7 @@ window.PremisesAdmin = (function () {
         });
 
         q('premCount').textContent = `Показано: ${shown} / ${Object.keys(premises).length}`;
+        console.log('[premises][render]', { premisesCount: Object.keys(premises).length, visibleCount: shown });
 
         tbody.querySelectorAll('button[data-act]')?.forEach(btn => {
             btn.addEventListener('click', () => {
@@ -1656,49 +1722,69 @@ function onSave() {
         });
     }
 
-    function init() {
-        window.AbonentsDB = window.AbonentsDB || { abonents: {}, premises: {}, links: [] };
-        window.AbonentsDB.premises = window.AbonentsDB.premises || {};
-        window.AbonentsDB.links = window.AbonentsDB.links || [];
-
-        // ALL-mode: только просмотр — блокируем форму добавления/редактирования
-        if (isAllMode()) {
-            try {
-                const saveBtn = q('btnPremSave');
-                if (saveBtn) { saveBtn.disabled = true; saveBtn.style.opacity = '0.6'; saveBtn.title = 'Режим "все базы" — только просмотр'; }
-                const resetBtn = q('btnPremReset');
-                if (resetBtn) { resetBtn.disabled = true; resetBtn.style.opacity = '0.6'; }
-                const formTitle = q('premFormTitle');
-                if (formTitle) formTitle.textContent = 'Добавить квартиру (объект) — недоступно в режиме "все базы"';
-                const warn = q('premFormWarn');
-                if (warn) { warn.textContent = 'Режим "все базы" — только просмотр. Выберите конкретную базу (админ/юзер), чтобы добавлять/редактировать.'; warn.style.display = 'block'; }
-                // поля формы
-                ['p_regnum','p_official_regnum','p_created','p_city','p_street','p_house','p_flat','p_square','p_regnum_unknown'].forEach(id=>{
-                    const el = q(id);
-                    if (el) { el.disabled = true; el.style.opacity = '0.7'; }
-                });
-            } catch (e) {}
-        }
-
-        bind();
-        importOpenContext = readImportOpenContext();
-        setFormModeAdd();
-        renderTable();
-        if (importOpenContext && importOpenContext.regnum) {
-            const ctxCheck = checkImportOpenContext(importOpenContext);
-            logPremisesImportContextCheck(importOpenContext, ctxCheck.ok ? (ctxCheck.result || 'ok') : 'blocked', ctxCheck.reason);
-            if (ctxCheck.ok) {
-                setFormModeEdit(importOpenContext.regnum);
+    async function init() {
+        try {
+            await hydrateRuntimeDbFromStore('init');
+            console.log('[premises][init-enter]');
+            if (!hasDbContent(window.AbonentsDB)) {
+                window.AbonentsDB = { abonents: {}, premises: {}, links: [] };
             } else {
-                importOpenContextBlocked = true;
-                setWarn(getImportContextBlockedMessage(), false);
+                window.AbonentsDB.abonents = window.AbonentsDB.abonents || {};
+                window.AbonentsDB.premises = window.AbonentsDB.premises || {};
+                window.AbonentsDB.links = window.AbonentsDB.links || [];
             }
-        }
+            console.log("[runtime-db-keys]", Object.keys(window.AbonentsDB || {}));
+            console.log(
+                "[runtime-abonents-count]",
+                window.AbonentsDB && window.AbonentsDB.abonents
+                    ? Object.keys(window.AbonentsDB.abonents).length
+                    : "missing"
+            );
 
-        // ✅ первичная загрузка подсказок
-        refreshAddressDatalists();
-        refreshHouseChoices();
+            // ALL-mode: только просмотр — блокируем форму добавления/редактирования
+            if (isAllMode()) {
+                try {
+                    const saveBtn = q('btnPremSave');
+                    if (saveBtn) { saveBtn.disabled = true; saveBtn.style.opacity = '0.6'; saveBtn.title = 'Режим "все базы" — только просмотр'; }
+                    const resetBtn = q('btnPremReset');
+                    if (resetBtn) { resetBtn.disabled = true; resetBtn.style.opacity = '0.6'; }
+                    const formTitle = q('premFormTitle');
+                    if (formTitle) formTitle.textContent = 'Добавить квартиру (объект) — недоступно в режиме "все базы"';
+                    const warn = q('premFormWarn');
+                    if (warn) { warn.textContent = 'Режим "все базы" — только просмотр. Выберите конкретную базу (админ/юзер), чтобы добавлять/редактировать.'; warn.style.display = 'block'; }
+                    // поля формы
+                    ['p_regnum','p_official_regnum','p_created','p_city','p_street','p_house','p_flat','p_square','p_regnum_unknown'].forEach(id=>{
+                        const el = q(id);
+                        if (el) { el.disabled = true; el.style.opacity = '0.7'; }
+                    });
+                } catch (e) {}
+            }
+
+            bind();
+            importOpenContext = readImportOpenContext();
+            setFormModeAdd();
+            await renderTable();
+            if (importOpenContext && importOpenContext.regnum) {
+                const ctxCheck = checkImportOpenContext(importOpenContext);
+                logPremisesImportContextCheck(importOpenContext, ctxCheck.ok ? (ctxCheck.result || 'ok') : 'blocked', ctxCheck.reason);
+                if (ctxCheck.ok) {
+                    setFormModeEdit(importOpenContext.regnum);
+                } else {
+                    importOpenContextBlocked = true;
+                    setWarn(getImportContextBlockedMessage(), false);
+                }
+            }
+
+            // ✅ первичная загрузка подсказок
+            refreshAddressDatalists();
+            refreshHouseChoices();
+        } catch (e) {
+            console.warn('[premises][init-error]', e);
+            throw e;
+        }
     }
 
-    return { init };
+    const api = { init };
+    api.__version = PREMISES_ADMIN_VERSION;
+    return api;
 })();

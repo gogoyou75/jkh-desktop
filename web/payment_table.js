@@ -74,6 +74,54 @@
   let __runtimeCacheState = { valid: false, reason: "", dataById: {} };
 
   function isReadonlyNoRecalcMode(){ return __paymentTableMode === "readonly_no_recalc"; }
+  function isTemporaryCourtPeriodMode(){ return __paymentTableMode === "temporary_court_period"; }
+
+  function postRecalcState(){
+    const state = window.__JKH_POST_RECALC_SNAPSHOT;
+    return state && typeof state === "object" ? state : null;
+  }
+
+  window.__markPostRecalcSnapshotFresh = function(runId, snapshot){
+    const s = snapshot && typeof snapshot === "object" ? snapshot : {};
+    const map = s.rowsById && typeof s.rowsById === "object" && !Array.isArray(s.rowsById) ? s.rowsById : {};
+    window.__JKH_POST_RECALC_SNAPSHOT = {
+      runId: String(runId || ""),
+      uid: String(s.uid || getAbonentId() || ""),
+      ledgerVersion: String(s.ledgerVersion || ""),
+      runtimeSignature: String(s.runtimeSignature || ""),
+      summaryStatus: String(s.summary_status || s.status || ""),
+      snapshotMode: String(s.snapshotMode || ""),
+      periodActive: s.periodActive === true,
+      period: s.period && typeof s.period === "object" ? { from: String(s.period.from || ""), to: String(s.period.to || "") } : null,
+      rowsById: map,
+      createdAt: Date.now(),
+      startedAt: currentFullRecalcRunState() && currentFullRecalcRunState().startedAt || Date.now(),
+      saveOk: false
+    };
+  };
+
+  window.__setPostRecalcSnapshotSaveResult = function(runId, saveOk){
+    const state = postRecalcState();
+    if (!state || String(state.runId || "") !== String(runId || "")) return;
+    state.saveOk = saveOk === true;
+  };
+
+  function getFreshPostRecalcSnapshotRows(expectedLedgerVersion, periodActive, selectedPeriod, expectedSignature){
+    const state = postRecalcState();
+    if (!state) return null;
+    if (Date.now() - Number(state.createdAt || 0) > 120000) return null;
+    if (String(state.summaryStatus || "").toLowerCase() !== "fresh") return null;
+    if (String(state.uid || "") !== String(getAbonentId() || "")) return null;
+    if (String(state.ledgerVersion || "") !== String(expectedLedgerVersion || "")) return null;
+    if (expectedSignature && state.runtimeSignature && String(state.runtimeSignature) !== String(expectedSignature)) return null;
+    if ((state.periodActive === true) !== !!periodActive) return null;
+    if (periodActive) {
+      const p = state.period || {};
+      if (String(p.from || "") !== String(selectedPeriod && selectedPeriod.from || "") || String(p.to || "") !== String(selectedPeriod && selectedPeriod.to || "")) return null;
+    }
+    const map = state.rowsById && typeof state.rowsById === "object" && !Array.isArray(state.rowsById) ? state.rowsById : null;
+    return map && Object.keys(map).length ? map : null;
+  }
 
   function runtimePeriodDescriptor(periodActive, selectedPeriod){
     const active = !!periodActive;
@@ -109,10 +157,57 @@
     const sig = ledgerSignature || ledgerSignatureForRows(calcRows);
     (Array.isArray(rows) ? rows : []).forEach(function(r){
       const asOf = asOfForRow(r);
-      const t = calcTotalsAsOfMemoized(calcRows, asOf, sig);
+      const t = calcTotalsAsOfMemoized(calcRows, asOf, sig, "runtimeRowsByIdFromRows");
       out[String(r.id)] = { pay_main: t.principal, pay_penalty: t.penalty, total: t.total };
     });
     return out;
+  }
+
+  function summarizeRowsById(rows, rowsById){
+    const map = rowsById && typeof rowsById === "object" && !Array.isArray(rowsById) ? rowsById : {};
+    let selected = null;
+    let selectedMs = -Infinity;
+    (Array.isArray(rows) ? rows : []).forEach(function(r){
+      const id = String(r && r.id || "");
+      const item = map[id] || null;
+      if (!item) return;
+      const ms = asOfForRow(r).getTime();
+      if (ms >= selectedMs) {
+        selectedMs = ms;
+        selected = item;
+      }
+    });
+    const debt = selected ? toNum(selected.pay_main) : 0;
+    const penalty = selected ? toNum(selected.pay_penalty) : 0;
+    return { debt: r2(debt), penalty: r2(penalty), total: r2(debt + penalty) };
+  }
+
+  function buildTemporaryPeriodRowsById(displayRows, visibleRows, selectedPeriod){
+    const responsibility = getActiveResponsibilityRangeISO();
+    const calcFrom = responsibility && responsibility.from ? responsibility.from : String(selectedPeriod && selectedPeriod.from || "");
+    const calcPeriod = { from: calcFrom, to: String(selectedPeriod && selectedPeriod.to || "") };
+    const calcRows = applyResponsibilityRangeToView(applyCalcFilter(displayRows, true, calcPeriod)).filter(function(r){ return !isPaymentDraftRow(r); }).slice();
+    const baseRows = runningTotalsBaseRows(calcRows);
+    const sig = ledgerSignatureForRows(baseRows) + "::temporary_court_period:" + String(calcPeriod.from || "") + ":" + String(calcPeriod.to || "");
+    const rowsById = runtimeRowsByIdFromRows(visibleRows, baseRows, sig);
+    applyRuntimeRowsById(visibleRows, rowsById);
+    const totals = summarizeRowsById(visibleRows, rowsById);
+    try {
+      const months = (Array.isArray(visibleRows) ? visibleRows : []).map(function(r){ return ymKeyOfRow(r); }).filter(Boolean).sort();
+      console.log("[period-recalc][rows-built]", {
+        rowsCount: Array.isArray(visibleRows) ? visibleRows.length : 0,
+        accruedCount: (Array.isArray(visibleRows) ? visibleRows : []).filter(function(r){ return Math.abs(toNum(r && r.accrued || 0)) > 0.0000001; }).length
+      });
+      console.log("[period-recalc][range-rendered]", {
+        periodFrom: String(selectedPeriod && selectedPeriod.from || ""),
+        periodTo: String(selectedPeriod && selectedPeriod.to || ""),
+        rowsCount: Array.isArray(visibleRows) ? visibleRows.length : 0,
+        firstRowMonth: months.length ? months[0] : "",
+        lastRowMonth: months.length ? months[months.length - 1] : ""
+      });
+      console.log("[period-recalc][totals-built]", totals);
+    } catch(ePeriodRowsLog) {}
+    return { rowsById: rowsById, totals: totals, calcPeriod: calcPeriod };
   }
 
   function applyRuntimeRowsById(rows, rowsById){
@@ -156,6 +251,58 @@
       out[id] = { pay_main: pm, pay_penalty: pp, total: total };
     });
     return out;
+  }
+
+  function computedRowsStats(rows, rowsById){
+    const map = rowsById && typeof rowsById === "object" && !Array.isArray(rowsById) ? rowsById : null;
+    let rowsCount = 0;
+    let debtTotalsCount = 0;
+    let penaltyTotalsCount = 0;
+    let totalTotalsCount = 0;
+    let rowsWithAnyTotals = 0;
+    let rowsWithZeroTotals = 0;
+    (Array.isArray(rows) ? rows : []).forEach(function(row){
+      const item = map ? (map[String(row && row.id || "")] || {}) : (row || {});
+      rowsCount += 1;
+      const pm = Number(item.pay_main);
+      const pp = Number(item.pay_penalty);
+      const totalRaw = Object.prototype.hasOwnProperty.call(item, "total") ? item.total : (pm + pp);
+      const total = Number(totalRaw);
+      const hasDebt = Number.isFinite(pm) && Math.abs(pm) > 0.0000001;
+      const hasPenalty = Number.isFinite(pp) && Math.abs(pp) > 0.0000001;
+      const hasTotal = Number.isFinite(total) && Math.abs(total) > 0.0000001;
+      if (hasDebt) debtTotalsCount += 1;
+      if (hasPenalty) penaltyTotalsCount += 1;
+      if (hasTotal) totalTotalsCount += 1;
+      if (hasDebt || hasPenalty || hasTotal) rowsWithAnyTotals += 1;
+      if (Number.isFinite(pm) && Number.isFinite(pp) && Number.isFinite(total) && Math.abs(pm) <= 0.0000001 && Math.abs(pp) <= 0.0000001 && Math.abs(total) <= 0.0000001) rowsWithZeroTotals += 1;
+    });
+    return {
+      rowsCount: rowsCount,
+      hasDebtTotals: debtTotalsCount > 0,
+      hasPenaltyTotals: penaltyTotalsCount > 0,
+      hasTotalTotals: totalTotalsCount > 0,
+      rowsWithTotals: rowsWithAnyTotals,
+      rowsWithZeroTotals: rowsWithZeroTotals
+    };
+  }
+
+  function logCardReloadRestoreRowsSource(source, rows, rowsById, extra){
+    const stats = computedRowsStats(rows, rowsById);
+    try {
+      console.log("[card-reload][restore-rows-source]", Object.assign({
+        source: String(source || ""),
+        rowsCount: stats.rowsCount,
+        hasDebtTotals: stats.hasDebtTotals,
+        hasPenaltyTotals: stats.hasPenaltyTotals,
+        hasTotalTotals: stats.hasTotalTotals,
+        rowsWithTotals: stats.rowsWithTotals,
+        rowsWithZeroTotals: stats.rowsWithZeroTotals,
+        snapshotStatus: "",
+        snapshotReason: ""
+      }, extra || {}));
+    } catch(eRestoreSourceLog) {}
+    return stats;
   }
 
   function capturePaymentTableComputedRowsSnapshot(rows, rowsById, periodActive, selectedPeriod, runtimeSignatureValue, ledgerVersionValue){
@@ -227,6 +374,28 @@
     }
     if (!window.Data || typeof Data.readCardSnapshot !== "function") return dispatchInvalid("CARD_SNAPSHOT_MISSING");
     const id = String(getAbonentId() || "");
+    const freshPostRecalcRowsById = getFreshPostRecalcSnapshotRows(expectedLedgerVersion, periodActive, selectedPeriod, expectedSignature);
+    if (freshPostRecalcRowsById) {
+      applyRuntimeRowsById(rows, freshPostRecalcRowsById);
+      out.valid = true;
+      out.reason = "";
+      out.dataById = freshPostRecalcRowsById;
+      out.periodMatches = true;
+      try {
+        window.dispatchEvent(new CustomEvent("jkh:card-snapshot-valid", {
+          detail: {
+            uid: id,
+            ledgerVersion: expectedLedgerVersion,
+            runtimeSignature: expectedSignature,
+            periodActive: !!periodActive,
+            selectedPeriod: selectedPeriod || null,
+            rowsByIdCount: Object.keys(freshPostRecalcRowsById).length,
+            source: "post-recalc-memory"
+          }
+        }));
+      } catch(eMemoryEvent) {}
+      return out;
+    }
     const snapshot = Data.readCardSnapshot(id);
     snapshotForDiagnostics = snapshot;
     if (!snapshot) return dispatchInvalid("CARD_SNAPSHOT_MISSING");
@@ -316,6 +485,18 @@
         selectedPeriod: selectedPeriod || null,
         rowsByIdCount: Object.keys(map).length
       });
+      logCardReloadRestoreRowsSource("card_snapshot", rows, map, {
+        uid: id,
+        reason: "valid",
+        snapshotStatus: "fresh",
+        snapshotReason: "",
+        ledgerVersion: expectedLedgerVersion,
+        snapshotLedgerVersion: String(snapshot.ledgerVersion || ""),
+        runtimeSignature: expectedSignature,
+        periodActive: !!periodActive,
+        selectedPeriod: selectedPeriod || null,
+        rowsByIdCount: Object.keys(map).length
+      });
     } catch(eLog) {}
     try { console.log("[card-snapshot][validation-ok]", { snapshotMode: snapshotMode, rowsByIdCount: Object.keys(map).length }); } catch(eValidationOkLog) {}
     try {
@@ -330,6 +511,44 @@
         }
       }));
     } catch(eEvent) {}
+    return out;
+  }
+
+  function tryApplyDisplayOnlyCardSnapshotRows(rows, reason, periodActive, selectedPeriod, expectedLedgerVersion, expectedSignature){
+    const out = { valid: false, reason: reason || "CARD_SNAPSHOT_DISPLAY_ONLY", dataById: {}, periodMatches: false, missingRows: [] };
+    if (!window.Data || typeof Data.readCardSnapshot !== "function") return out;
+    const id = String(getAbonentId() || "");
+    const snapshot = Data.readCardSnapshot(id);
+    const map = snapshot && snapshot.rowsById && typeof snapshot.rowsById === "object" && !Array.isArray(snapshot.rowsById) ? snapshot.rowsById : null;
+    if (!map || !Object.keys(map).length) return out;
+    const rawStatsBeforeApply = computedRowsStats(rows, null);
+    applyRuntimeRowsById(rows, map);
+    out.dataById = map;
+    out.reason = String(snapshot.dirtyReason || snapshot.summary_reason || reason || "CARD_SNAPSHOT_DISPLAY_ONLY");
+    try {
+      const stats = logCardReloadRestoreRowsSource(snapshot.dirty === true ? "dirty_card_snapshot" : "card_snapshot_display_only", rows, map, {
+        uid: id,
+        reason: out.reason,
+        snapshotStatus: snapshot.dirty === true ? "dirty" : "display_only",
+        snapshotReason: out.reason,
+        ledgerVersion: String(expectedLedgerVersion || ""),
+        snapshotLedgerVersion: String(snapshot.ledgerVersion || ""),
+        runtimeSignature: String(expectedSignature || ""),
+        periodActive: !!periodActive,
+        selectedPeriod: selectedPeriod || null,
+        rowsByIdCount: Object.keys(map).length
+      });
+      console.warn("[card-reload][dirty-snapshot-display-fallback]", {
+        uid: id,
+        rowsCount: stats.rowsCount,
+        reason: out.reason
+      });
+      console.warn("[card-reload][prevent-zero-overwrite]", {
+        uid: id,
+        oldRowsWithTotals: stats.rowsWithTotals,
+        newRowsWithZeroTotals: rawStatsBeforeApply.rowsWithZeroTotals
+      });
+    } catch(eRestoreRowsLog) {}
     return out;
   }
 
@@ -355,6 +574,10 @@
     const cacheVersion = cache && typeof cache === "object" ? String(cache.ledgerVersion || "") : "";
     const map = cache && cache.rowsById && typeof cache.rowsById === "object" ? cache.rowsById : null;
     const validity = (typeof Data.isLedgerRuntimeCacheValid === "function") ? Data.isLedgerRuntimeCacheValid(id, cache, validationOptions) : null;
+    const snapshotFirstState = tryApplyCardSnapshotToRows(rows, version, periodActive, selectedPeriod, expectedSignature);
+    if (snapshotFirstState.valid) return snapshotFirstState;
+    const displayOnlyFirstSnapshot = tryApplyDisplayOnlyCardSnapshotRows(rows, snapshotFirstState.reason || "CARD_SNAPSHOT_DISPLAY_ONLY", periodActive, selectedPeriod, version, expectedSignature);
+    if (displayOnlyFirstSnapshot.dataById && Object.keys(displayOnlyFirstSnapshot.dataById).length) return displayOnlyFirstSnapshot;
     if (validity && validity.valid !== true) {
       const rawReason = String(validity.reason || "");
       out.reason = rawReason || "RUNTIME_CACHE_STALE";
@@ -371,8 +594,6 @@
           missingRows: out.missingRows.slice(0, 20)
         });
       } catch(eInvalidLog) {}
-      const snapshotState = tryApplyCardSnapshotToRows(rows, version, periodActive, selectedPeriod, expectedSignature);
-      if (snapshotState.valid) return snapshotState;
       return out;
     }
     if (!version || !cache || !map || !cacheVersion || cacheVersion !== version) {
@@ -388,8 +609,6 @@
           missingRowsCount: 0
         });
       } catch(eFallbackInvalidLog) {}
-      const snapshotState = tryApplyCardSnapshotToRows(rows, version, periodActive, selectedPeriod, expectedSignature);
-      if (snapshotState.valid) return snapshotState;
       return out;
     }
     out.periodMatches = runtimeCachePeriodMatches(cache, version, periodActive, selectedPeriod);
@@ -406,8 +625,6 @@
           missingRowsCount: 0
         });
       } catch(ePeriodInvalidLog) {}
-      const snapshotState = tryApplyCardSnapshotToRows(rows, version, periodActive, selectedPeriod, expectedSignature);
-      if (snapshotState.valid) return snapshotState;
       return out;
     }
     out.valid = true;
@@ -425,6 +642,17 @@
       });
       console.log("[payment-table][runtime-cache-applied]", {
         uid: id,
+        ledgerVersion: version,
+        runtimeSignature: expectedSignature,
+        periodActive: periodActive,
+        selectedPeriod: selectedPeriod || null,
+        rowsByIdCount: Object.keys(map).length
+      });
+      logCardReloadRestoreRowsSource("runtime_cache", rows, map, {
+        uid: id,
+        reason: "valid",
+        snapshotStatus: "runtime_cache",
+        snapshotReason: "",
         ledgerVersion: version,
         runtimeSignature: expectedSignature,
         periodActive: periodActive,
@@ -458,7 +686,8 @@
       selectedPeriod: selectedPeriod || null,
       missingRows: Array.isArray(s.missingRows) ? s.missingRows : [],
       missingRowsCount: Array.isArray(s.missingRows) ? s.missingRows.length : 0,
-      rowsByIdCount: s.dataById && typeof s.dataById === "object" ? Object.keys(s.dataById).length : 0
+      rowsByIdCount: s.dataById && typeof s.dataById === "object" ? Object.keys(s.dataById).length : 0,
+      temporary: s.temporary === true || isTemporaryCourtPeriodMode()
     };
     try {
       if (window.Data && typeof Data.computeLedgerRuntimeVersion === "function") {
@@ -2062,6 +2291,7 @@ function ymKey(y, m){ return `${String(y)}-${pad2(m)}`; }
 // allowedYm: необязательный Set вида {"2026-01", } — если задан,
 // то в расчёт попадают ТОЛЬКО месяцы ответственности текущего ЛС.
 function buildObligationsFromRows(rows, allowedYm){
+  incRecalcCallCount("buildObligations", 1);
   const map = new Map();
   for (const r of rows){
     const acc = toNum(r.accrued);
@@ -2105,6 +2335,7 @@ function buildObligationsFromRows(rows, allowedYm){
 
 // Платежи: берём paid > 0 и paid_date (иначе распределять не можем).
 function buildPaymentEventsFromRows(rows){
+  incRecalcCallCount("buildPaymentEvents", 1);
   const pays = [];
   for (const r of rows){
     const paid = toNum(r.paid);
@@ -2134,9 +2365,11 @@ function allocatePaymentsFIFO(obligations, payments){
   }
 
   for (const p of payments){
+    emitActiveFullRecalcHeartbeat("allocate-payments-fifo");
     let left = p.amount;
 
     while (left > 0.0000001 && oi < obligations.length){
+      emitActiveFullRecalcHeartbeat("allocate-payments-fifo");
       const ob = obligations[oi];
       const rem = remaining(ob);
       if (rem <= 0.0000001){
@@ -2176,8 +2409,11 @@ function sortApplications(ob){
 
 // Расчёт пени по ОДНОМУ долгу (обязательству) до даты asOf (включительно)
 function calcPenaltyForObligation(ob, asOf, excludes, rates){
+  incRecalcCallCount("calculatePenaltyForObligation", 1);
   const asOfDay = startOfDay(asOf);
-  if (asOfDay <= ob.dueDate) return 0;
+  if (asOfDay <= ob.dueDate) {
+    return 0;
+  }
 
   sortApplications(ob);
 
@@ -2189,8 +2425,12 @@ function calcPenaltyForObligation(ob, asOf, excludes, rates){
 
   const hardLimit = addDays(ob.dueDate, 3650);
   const end = (asOfDay < hardLimit) ? asOfDay : hardLimit;
+  const loopDays = Math.max(0, Math.floor((startOfDay(end).getTime() - startOfDay(day).getTime()) / 86400000) + 1);
+  addRecalcLoopCount("dailyLoopIterationsTotal", loopDays);
+  setRecalcLoopMaxDays(loopDays, ob && (ob.rowId || ob.key || ""));
 
   while (day <= end){
+    emitActiveFullRecalcHeartbeat("calc-penalty");
     if (!isExcludedDay(day, excludes)){
       overdueIndex += 1;
 
@@ -2266,6 +2506,7 @@ function calcTotalsAsOf(rows, asOfDate){
   // только за месяцы <= месяца asOfDate.
   // ---------------------------------------------------------
   const allObligations = buildObligationsFromRows(rows, allowedYm);
+  incRecalcCallCount("buildDebtPeriods", 1);
   const asOfYm = `${asOfDate.getFullYear()}-${pad2(asOfDate.getMonth() + 1)}`;
   const obligations = allObligations.filter(ob => String(ob.key || "") <= asOfYm);
 
@@ -2283,7 +2524,9 @@ function calcTotalsAsOf(rows, asOfDate){
   let principalTotal = 0;
   let penaltyTotal = 0;
 
-  for (const ob of obligations){
+  for (let obIdx = 0; obIdx < obligations.length; obIdx += 1){
+    emitActiveFullRecalcHeartbeat("calc-totals");
+    const ob = obligations[obIdx];
     sortApplications(ob);
 
     const applied = sumAppliedUpTo(ob, startOfDay(asOfDate));
@@ -2373,7 +2616,10 @@ function ledgerSignatureForRows(rows){
   addPart(abonentId);
   addPart(periodActive ? JSON.stringify(period || {}) : "off");
   addPart(arr.length);
+  let ledgerSigIdx = 0;
   for (const r of arr){
+    ledgerSigIdx += 1;
+    if (ledgerSigIdx % 100 === 0) emitActiveFullRecalcHeartbeat("ledger-signature");
     if (!r || typeof r !== "object") { addPart("null"); continue; }
     addPart(r.id); addPart(r.year); addPart(r.month); addPart(r.accrued); addPart(r.paid); addPart(r.paid_date); addPart(r.source);
     addPart(r.use_period ? 1 : 0); addPart(r.period_from_m); addPart(r.period_from_y); addPart(r.period_to_m); addPart(r.period_to_y);
@@ -2387,76 +2633,70 @@ function memoKeyForTotals(ledgerSignature, asOfDate){
   return String(getAbonentId() || "") + "::" + String(ledgerSignature || "") + "::" + toISODateString(d);
 }
 
-function calcTotalsAsOfMemoized(rows, asOfDate, ledgerSignature){
+function calcTotalsAsOfMemoized(rows, asOfDate, ledgerSignature, caller){
+  const hotspotStartedAt = perfNow();
+  const hotspotCaller = String(caller || "unknown");
+  const hotspotRowsLength = Array.isArray(rows) ? rows.length : 0;
+  const hotspotMonthsLength = countRuntimeMonths(rows);
+  incRecalcCallCount("calcTotalsAsOfMemoized", 1);
   const stats = window.__calcTotalsMemoStats;
-  if (stats) stats.totalCalls += 1;
-  const key = memoKeyForTotals(ledgerSignature, asOfDate);
-  const cached = __paymentTotalsMemo.get(key);
-  if (cached) {
-    if (stats) stats.memoHits += 1;
-    return cached;
+  try {
+    if (stats) stats.totalCalls += 1;
+    const key = memoKeyForTotals(ledgerSignature, asOfDate);
+    const cached = __paymentTotalsMemo.get(key);
+    if (cached) {
+      if (stats) stats.memoHits += 1;
+      return cached;
+    }
+    if (stats) stats.memoMisses += 1;
+    const calcStartedAt = perfNow();
+    const t = calcTotalsAsOf(rows, asOfDate);
+    const calcMs = Math.max(0, perfNow() - calcStartedAt);
+    if (stats) {
+      stats.calcCalls += 1;
+      stats.calcTotalMs += calcMs;
+      if (calcMs > stats.calcMaxMs) stats.calcMaxMs = calcMs;
+    }
+    const out = { principal: t.principal, penalty: t.penalty, total: t.total };
+    __paymentTotalsMemo.set(key, out);
+    if (__paymentTotalsMemo.size > 2000) {
+      try { __paymentTotalsMemo.clear(); } catch(e) {}
+    }
+    return out;
+  } finally {
+    recordCalcTotalsHotspot(hotspotCaller, Math.max(0, perfNow() - hotspotStartedAt), hotspotRowsLength, hotspotMonthsLength);
   }
-  if (stats) stats.memoMisses += 1;
-  const calcStartedAt = perfNow();
-  const t = calcTotalsAsOf(rows, asOfDate);
-  const calcMs = Math.max(0, perfNow() - calcStartedAt);
-  if (stats) {
-    stats.calcCalls += 1;
-    stats.calcTotalMs += calcMs;
-    if (calcMs > stats.calcMaxMs) stats.calcMaxMs = calcMs;
-  }
-  const out = { principal: t.principal, penalty: t.penalty, total: t.total };
-  __paymentTotalsMemo.set(key, out);
-  if (__paymentTotalsMemo.size > 2000) {
-    try { __paymentTotalsMemo.clear(); } catch(e) {}
-  }
-  return out;
 }
 
 function runningTotalsBaseRows(allRows){
-  console.time("[baseRows] full");
   let baseRows = Array.isArray(allRows) ? allRows : [];
-  console.time("[baseRows] isCalcPeriodActive");
   const periodActive = isCalcPeriodActive();
-  console.timeEnd("[baseRows] isCalcPeriodActive");
   if (periodActive) {
-    console.time("[baseRows] getCalcPeriod");
     const p = getCalcPeriod();
-    console.timeEnd("[baseRows] getCalcPeriod");
-    console.time("[baseRows] parse period bounds");
     const fromD = p ? parseDateAnyToDate(p.from) : null;
     const toD   = p ? parseDateAnyToDate(p.to)   : null;
-    console.timeEnd("[baseRows] parse period bounds");
 
     if (fromD && toD) {
-      console.time("[baseRows] build month bounds");
       const fromKey = (fromD.getFullYear() * 12) + (fromD.getMonth() + 1);
       const toKey   = (toD.getFullYear()   * 12) + (toD.getMonth() + 1);
-      console.timeEnd("[baseRows] build month bounds");
 
-      console.time("[baseRows] filter row loop");
+      let baseRowsFilterIdx = 0;
       baseRows = baseRows.filter(r => {
-        console.time("[baseRows] row parse year/month");
+        baseRowsFilterIdx += 1;
+        if (baseRowsFilterIdx % 100 === 0) emitActiveFullRecalcHeartbeat("running-totals-base-rows");
         let y = parseInt(r?.year, 10);
         let m = parseInt(r?.month, 10);
-        console.timeEnd("[baseRows] row parse year/month");
         if (!(Number.isFinite(y) && Number.isFinite(m) && y > 0 && m >= 1 && m <= 12)) {
-          console.time("[baseRows] paid_date fallback parse");
           const d = parseDateAnyToDate(r?.paid_date);
-          console.timeEnd("[baseRows] paid_date fallback parse");
           if (d) { y = d.getFullYear(); m = d.getMonth() + 1; }
         }
         if (!(Number.isFinite(y) && Number.isFinite(m) && y > 0 && m >= 1 && m <= 12)) return false;
-        console.time("[baseRows] row month key/check");
         const key = (y * 12) + m;
         const keep = key >= fromKey && key <= toKey;
-        console.timeEnd("[baseRows] row month key/check");
         return keep;
       });
-      console.timeEnd("[baseRows] filter row loop");
     }
   }
-  console.timeEnd("[baseRows] full");
   return baseRows;
 }
 
@@ -2470,6 +2710,788 @@ function nextUiTick(){
     } catch(e) {}
     setTimeout(resolve, 0);
   });
+}
+
+function currentFullRecalcRunState(){
+  const state = window.__JKH_FULL_RECALC_STATE;
+  return state && state.running === true ? state : null;
+}
+
+function fullRecalcAbortError(reason, message){
+  const err = new Error(String(reason || "FULL_RECALC_ABORTED"));
+  err.code = String(reason || "FULL_RECALC_ABORTED");
+  err.reason = String(reason || "FULL_RECALC_ABORTED");
+  err.summary_reason = err.reason;
+  err.abortMessage = String(message || "");
+  err.fullRecalcAbort = true;
+  err.cancelled = err.reason === "FULL_RECALC_CANCELLED";
+  err.timedOut = err.reason === "FULL_RECALC_TIMEOUT";
+  return err;
+}
+
+function getFullRecalcAbortReason(){
+  const state = currentFullRecalcRunState();
+  if (!state || state.abortRequested !== true) return "";
+  return String(state.abortReason || (state.timedOut ? "FULL_RECALC_TIMEOUT" : "FULL_RECALC_CANCELLED"));
+}
+
+function throwIfFullRecalcAborted(stage){
+  const state = currentFullRecalcRunState();
+  if (!state || state.abortRequested !== true) return;
+  const reason = getFullRecalcAbortReason() || "FULL_RECALC_CANCELLED";
+  state.currentStage = String(stage || state.currentStage || "abort-check");
+  state.cancelled = true;
+  throw fullRecalcAbortError(reason, state.abortMessage || "");
+}
+
+function fullRecalcAbortResult(error, runId, abonentId){
+  const reason = String(error && (error.reason || error.code || error.message) || "FULL_RECALC_ABORTED");
+  return {
+    ok: false,
+    cancelled: reason === "FULL_RECALC_CANCELLED",
+    timedOut: reason === "FULL_RECALC_TIMEOUT",
+    reason: reason,
+    summary_status: "error",
+    summary_reason: reason,
+    status: "error",
+    runId: runId,
+    abonentId: abonentId
+  };
+}
+
+function currentRecalcCallCounts(){
+  const state = window.__JKH_RECALC_CALL_COUNTS;
+  return state && typeof state === "object" ? state : null;
+}
+
+function incRecalcCallCount(name, amount){
+  const state = currentRecalcCallCounts();
+  if (!state || !state.calls) return;
+  const key = String(name || "");
+  if (!key) return;
+  state.calls[key] = Number(state.calls[key] || 0) + (Number(amount) || 1);
+}
+
+function addRecalcLoopCount(name, amount){
+  const state = currentRecalcCallCounts();
+  if (!state || !state.loops) return;
+  const key = String(name || "");
+  if (!key) return;
+  state.loops[key] = Number(state.loops[key] || 0) + (Number(amount) || 0);
+}
+
+function setRecalcLoopMaxDays(days, rowId){
+  const state = currentRecalcCallCounts();
+  if (!state || !state.loops) return;
+  const totalDays = Number(days) || 0;
+  if (totalDays > Number(state.loops.maxDailyLoopDays || 0)) {
+    state.loops.maxDailyLoopDays = totalDays;
+    state.loops.maxDailyLoopRowId = String(rowId || "");
+  }
+}
+
+function setRecalcStageMs(name, elapsedMs){
+  const state = currentRecalcCallCounts();
+  if (!state || !state.stages) return;
+  const key = String(name || "");
+  if (!key) return;
+  state.stages[key] = Math.max(0, Math.round(Number(elapsedMs) || 0));
+}
+
+function countRuntimeMonths(rows){
+  const seen = {};
+  (Array.isArray(rows) ? rows : []).forEach(function(row){
+    const key = String(row && row.year || "") + "-" + String(row && row.month || "");
+    if (key !== "-") seen[key] = true;
+  });
+  return Object.keys(seen).length;
+}
+
+function countRuntimeObligations(rows){
+  return (Array.isArray(rows) ? rows : []).filter(function(row){ return Math.abs(toNum(row && row.accrued || 0)) > 0.0000001; }).length;
+}
+
+function countRuntimePayments(rows){
+  return (Array.isArray(rows) ? rows : []).filter(function(row){ return Math.abs(toNum(row && row.paid || 0)) > 0.0000001; }).length;
+}
+
+function resetCalcTotalsHotspotReport(runId, abonentId){
+  window.__JKH_CALC_TOTALS_HOTSPOT = {
+    runId: String(runId || ""),
+    abonentId: String(abonentId || ""),
+    printed: false,
+    totalCallCount: 0,
+    totalElapsedMs: 0,
+    maxElapsedMs: 0,
+    maxRowsLength: 0,
+    maxMonthsLength: 0,
+    byCaller: {}
+  };
+}
+
+function recordCalcTotalsHotspot(caller, elapsedMs, rowsLength, monthsLength){
+  const state = window.__JKH_CALC_TOTALS_HOTSPOT;
+  if (!state || typeof state !== "object" || state.printed === true) return;
+  const name = String(caller || "unknown");
+  const ms = Math.max(0, Number(elapsedMs) || 0);
+  const rows = Math.max(0, Number(rowsLength) || 0);
+  const months = Math.max(0, Number(monthsLength) || 0);
+  const item = state.byCaller[name] || {
+    caller: name,
+    callCount: 0,
+    totalElapsedMs: 0,
+    avgElapsedMs: 0,
+    maxElapsedMs: 0,
+    rowsLength: 0,
+    monthsLength: 0
+  };
+  item.callCount += 1;
+  item.totalElapsedMs += ms;
+  item.maxElapsedMs = Math.max(item.maxElapsedMs, ms);
+  item.rowsLength = Math.max(item.rowsLength, rows);
+  item.monthsLength = Math.max(item.monthsLength, months);
+  item.avgElapsedMs = item.callCount ? item.totalElapsedMs / item.callCount : 0;
+  state.byCaller[name] = item;
+  state.totalCallCount += 1;
+  state.totalElapsedMs += ms;
+  state.maxElapsedMs = Math.max(state.maxElapsedMs, ms);
+  state.maxRowsLength = Math.max(state.maxRowsLength, rows);
+  state.maxMonthsLength = Math.max(state.maxMonthsLength, months);
+}
+
+function printCalcTotalsHotspotReport(){
+  const state = window.__JKH_CALC_TOTALS_HOTSPOT;
+  if (!state || typeof state !== "object" || state.printed === true) return;
+  if (!state.totalCallCount) {
+    if (window.__JKH_CALC_TOTALS_HOTSPOT === state) window.__JKH_CALC_TOTALS_HOTSPOT = null;
+    return;
+  }
+  state.printed = true;
+  const callers = Object.keys(state.byCaller || {}).map(function(key){
+    const item = state.byCaller[key] || {};
+    return {
+      caller: String(item.caller || key),
+      callCount: Number(item.callCount || 0),
+      totalElapsedMs: Math.round(Number(item.totalElapsedMs || 0)),
+      avgElapsedMs: item.callCount ? Math.round((Number(item.totalElapsedMs || 0) / Number(item.callCount || 1)) * 100) / 100 : 0,
+      maxElapsedMs: Math.round(Number(item.maxElapsedMs || 0)),
+      rowsLength: Number(item.rowsLength || 0),
+      monthsLength: Number(item.monthsLength || 0)
+    };
+  }).sort(function(a, b){ return b.totalElapsedMs - a.totalElapsedMs; });
+  try {
+    console.log("[calc-totals-hotspot]", {
+      caller: "all",
+      callCount: Number(state.totalCallCount || 0),
+      totalElapsedMs: Math.round(Number(state.totalElapsedMs || 0)),
+      avgElapsedMs: state.totalCallCount ? Math.round((Number(state.totalElapsedMs || 0) / Number(state.totalCallCount || 1)) * 100) / 100 : 0,
+      maxElapsedMs: Math.round(Number(state.maxElapsedMs || 0)),
+      rowsLength: Number(state.maxRowsLength || 0),
+      monthsLength: Number(state.maxMonthsLength || 0),
+      callers: callers
+    });
+  } catch(eHotspotLog) {}
+  if (window.__JKH_CALC_TOTALS_HOTSPOT === state) window.__JKH_CALC_TOTALS_HOTSPOT = null;
+}
+
+async function measureRecalcStage(name, fn){
+  const startedAt = perfNow();
+  try {
+    return await fn();
+  } finally {
+    setRecalcStageMs(name, perfNow() - startedAt);
+  }
+}
+
+function fullRecalcRunIdFromOptions(opts){
+  return String(opts && (opts.recalcRunId || opts.runId) || currentFullRecalcRunState() && currentFullRecalcRunState().runId || "");
+}
+
+function logFullRecalcStep(runId, step, extra){
+  try {
+    if (window.__JKH_FULL_RECALC_HEARTBEAT) window.__JKH_FULL_RECALC_HEARTBEAT(String(runId || ""), String(step || ""));
+  } catch(eHeartbeat) {}
+  try {
+    console.log("[full-recalc][step]", Object.assign({
+      runId: String(runId || ""),
+      step: String(step || "")
+    }, extra || {}));
+  } catch(eLog) {}
+}
+
+function logFullRecalcStepDone(runId, step, extra){
+  try {
+    if (window.__JKH_FULL_RECALC_HEARTBEAT) window.__JKH_FULL_RECALC_HEARTBEAT(String(runId || ""), String(step || "") + "-done");
+  } catch(eHeartbeat) {}
+  try {
+    console.log("[full-recalc][step-done]", Object.assign({
+      runId: String(runId || ""),
+      step: String(step || "")
+    }, extra || {}));
+  } catch(eLog) {}
+}
+
+function emitFullRecalcHeartbeat(runId, stage){
+  try {
+    if (window.__fullRecalcHeartbeat) window.__fullRecalcHeartbeat({ runId: String(runId || ""), stage: String(stage || "") });
+    else if (window.__JKH_FULL_RECALC_HEARTBEAT) window.__JKH_FULL_RECALC_HEARTBEAT(String(runId || ""), String(stage || ""));
+  } catch(eHeartbeat) {}
+}
+
+let __fullRecalcSyncHeartbeatLastAt = 0;
+function emitActiveFullRecalcHeartbeat(stage, force){
+  try {
+    const state = window.__JKH_FULL_RECALC_STATE;
+    if (!state || state.running !== true) return;
+    const now = Date.now();
+    if (!force && (now - __fullRecalcSyncHeartbeatLastAt) < 500) return;
+    __fullRecalcSyncHeartbeatLastAt = now;
+    emitFullRecalcHeartbeat(state.runId || "", stage || state.currentStage || "full-recalc-progress");
+  } catch(eHeartbeat) {}
+}
+
+async function maybeYieldFullRecalcProgress(progress, runId, stage, index){
+  const p = progress && typeof progress === "object" ? progress : {};
+  const now = perfNow();
+  const rowDue = Number.isFinite(Number(index)) && Number(index) > 0 && Number(index) % 100 === 0;
+  const timeDue = !p.lastYieldAt || (now - p.lastYieldAt) >= 500;
+  if (!rowDue && !timeDue) return;
+  throwIfFullRecalcAborted(stage);
+  p.lastYieldAt = now;
+  emitFullRecalcHeartbeat(runId, stage);
+  await nextUiTick();
+  throwIfFullRecalcAborted(stage);
+}
+
+async function buildRowsByIdSlowLegacy(rows, baseRows, sig, options){
+  const opts = options && typeof options === "object" ? options : {};
+  const rowsById = {};
+  const runtimeRows = Array.isArray(rows) ? rows : [];
+  const progress = { lastYieldAt: perfNow() };
+  const startedAt = perfNow();
+  for (let idx = 0; idx < runtimeRows.length; idx += 1) {
+    await maybeYieldFullRecalcProgress(progress, opts.runId || "", opts.stage || "build-runtime-rows", idx);
+    const r = runtimeRows[idx];
+    if (idx > 0 && idx % 25 === 0) emitFullRecalcHeartbeat(opts.runId || "", opts.stage || "build-runtime-rows");
+    const asOf = asOfForRow(r);
+    const t = calcTotalsAsOfMemoized(baseRows, asOf, sig, opts.caller || "fullRecalc.buildRowsByIdSlowLegacy");
+    rowsById[String(r.id)] = { pay_main: t.principal, pay_penalty: t.penalty, total: t.total };
+    await maybeYieldFullRecalcProgress(progress, opts.runId || "", opts.stage || "build-runtime-rows", idx + 1);
+  }
+  return { ok: true, usedPath: "slow", rowsById, rowsCount: runtimeRows.length, elapsedMs: Math.round(Math.max(0, perfNow() - startedAt)), calcCalls: runtimeRows.length };
+}
+
+function hasStoredTransferOrFreezeForFastRecalc(abonentId){
+  try {
+    const id = String(abonentId || "");
+    if (!id) return false;
+    if (String(storeGetRaw("jkh_freeze_to_v1:" + id) || "").trim()) return true;
+    if (String(storeGetRaw("jkh_transfer_to_v1:" + id) || "").trim()) return true;
+    const abonent = window.AbonentsDB && window.AbonentsDB.abonents && window.AbonentsDB.abonents[id] || null;
+    const regnum = String(abonent && (abonent.premiseRegnum || abonent.regnum) || "").trim();
+    if (regnum && String(storeGetRaw("jkh_transfer_balance_v1:" + id + ":" + regnum) || "").trim()) return true;
+  } catch(e) {}
+  return false;
+}
+
+function hasPeriodTargetedPaymentsForFastRecalc(rows){
+  const list = Array.isArray(rows) ? rows : [];
+  for (let i = 0; i < list.length; i += 1) {
+    const r = list[i] || {};
+    if (toNum(r.paid) <= 0) continue;
+    if (r.use_period === true || r.pay_for_period === true || r.usePeriod === true) return true;
+    const periodFrom = String(r.pay_period_from || r.for_period_from || r.periodFrom || r.from_period || r.from || "").trim();
+    const periodTo = String(r.pay_period_to || r.for_period_to || r.periodTo || r.to_period || r.to || "").trim();
+    if (periodFrom || periodTo) return true;
+  }
+  return false;
+}
+
+function fastFullRecalcPreconditionFailure(rows, selectedPeriod, abonentId, options){
+  const opts = options && typeof options === "object" ? options : {};
+  if (String(opts.recalcMode || "").toUpperCase() !== "FULL_SUMMARY_REBUILD") return "NOT_FULL_RECALC";
+  if (opts.periodActive === true || selectedPeriod) return "PERIOD_ACTIVE";
+  if (window.JKH_CARD_PERIOD_MODE_ACTIVE === true) return "TEMPORARY_PERIOD_MODE_ACTIVE";
+  try { if (typeof isCalcPeriodActive === "function" && isCalcPeriodActive()) return "GLOBAL_PERIOD_ACTIVE"; } catch(ePeriodActive) {}
+  if (!Array.isArray(rows)) return "ROWS_NOT_ARRAY";
+  if (hasStoredTransferOrFreezeForFastRecalc(abonentId)) return "TRANSFER_OR_FREEZE_ACTIVE";
+  if (hasPeriodTargetedPaymentsForFastRecalc(rows)) return "PERIOD_TARGETED_PAYMENTS";
+  const required = [buildObligationsFromRows, buildPaymentEventsFromRows, allocatePaymentsFIFO, calcPenaltyForObligation, loadExcludes, loadRates, runningTotalsBaseRows];
+  if (required.some(function(fn){ return typeof fn !== "function"; })) return "HELPER_UNAVAILABLE";
+  for (let i = 0; i < rows.length; i += 1) {
+    const r = rows[i] || {};
+    if (String(r.id || "").trim() === "") return "ROW_ID_MISSING";
+    const asOf = asOfForRow(r);
+    if (!asOf || asOf.toString() === "Invalid Date") return "ROW_ASOF_INVALID";
+    const y = parseInt(r.year, 10);
+    const m = parseInt(r.month, 10);
+    if (!(Number.isFinite(y) && y > 0 && Number.isFinite(m) && m >= 1 && m <= 12)) return "ROW_MONTH_INVALID";
+  }
+  return "";
+}
+
+function cloneFastObligation(ob){
+  return {
+    key: ob.key,
+    serviceYear: ob.serviceYear,
+    serviceMonth: ob.serviceMonth,
+    amount: ob.amount,
+    dueDate: ob.dueDate,
+    applications: []
+  };
+}
+
+function fastResponsibilityAllowedYm(){
+  try {
+    const range = getActiveResponsibilityRangeISO();
+    if (range && range.from) {
+      const ms = monthIter(range.from, range.to);
+      return new Set(ms.map(function(m){ return `${m.year}-${m.month}`; }));
+    }
+  } catch(e) {
+    throw e;
+  }
+  return null;
+}
+
+function fastMonthKeyFromISO(iso){
+  if (!iso || typeof iso !== "string") return null;
+  const m = iso.match(/^(\d{4})-(\d{2})/);
+  return m ? (m[1] + "-" + m[2]) : null;
+}
+
+function fastPaymentRowPeriod(row){
+  const r = row || {};
+  const pf = r.period_from || r.pay_period_from || r.for_period_from || r.periodFrom || r.from_period || r.from || "";
+  const pt = r.period_to || r.pay_period_to || r.for_period_to || r.periodTo || r.to_period || r.to || "";
+  const mkFrom = fastMonthKeyFromISO(pf);
+  const mkTo = fastMonthKeyFromISO(pt);
+  if (mkFrom || mkTo) return { mkFrom: mkFrom || mkTo, mkTo: mkTo || mkFrom };
+  return null;
+}
+
+function buildFastPaymentEventsFromRows(rows){
+  try {
+    const eng = window.JKHCalcEngine;
+    if (eng && typeof eng.buildPaymentEventsFromRows === "function") {
+      const events = eng.buildPaymentEventsFromRows(rows, getAbonentId());
+      if (Array.isArray(events)) return events;
+    }
+  } catch(eEngineEvents) {
+    if (isRatesFatalError(eEngineEvents) || isExcludesFatalError(eEngineEvents)) throw eEngineEvents;
+  }
+  const pays = [];
+  const list = Array.isArray(rows) ? rows : [];
+  for (let i = 0; i < list.length; i += 1) {
+    const row = list[i] || {};
+    const paid = toNum(row.paid);
+    if (paid <= 0) continue;
+    const d = parseDateAnyToDate(row.paid_date);
+    if (!d) continue;
+    const payMonthKey = d.getFullYear() + "-" + pad2(d.getMonth() + 1);
+    let minKey = "0000-00";
+    let maxKey = payMonthKey;
+    const rp = fastPaymentRowPeriod(row);
+    if (rp) {
+      minKey = rp.mkFrom || minKey;
+      maxKey = rp.mkTo || maxKey;
+    }
+    pays.push({ date: startOfDay(d), amount: r2(paid), rowId: row.id, minKey, maxKey, payMonthKey });
+  }
+  pays.sort(function(a,b){ return a.date - b.date || (Number(a.rowId) || 0) - (Number(b.rowId) || 0); });
+  return pays;
+}
+
+function allocateFastPaymentsFIFO(obligations, payments){
+  try {
+    const eng = window.JKHCalcEngine;
+    if (eng && typeof eng.allocatePaymentsFIFO === "function") {
+      const advances = eng.allocatePaymentsFIFO(obligations, payments);
+      if (Array.isArray(advances)) return advances;
+    }
+  } catch(eEngineAllocate) {
+    if (isRatesFatalError(eEngineAllocate) || isExcludesFatalError(eEngineAllocate)) throw eEngineAllocate;
+  }
+  const advances = [];
+  function remaining(ob){
+    const applied = ob.applications.reduce(function(sum, x){ return sum + x.amount; }, 0);
+    return Math.max(ob.amount - applied, 0);
+  }
+  for (let pIdx = 0; pIdx < payments.length; pIdx += 1) {
+    const p = payments[pIdx];
+    let left = p.amount;
+    const minKey = String(p.minKey || "0000-00");
+    const maxKey = String(p.maxKey || "9999-99");
+    for (let i = 0; i < obligations.length && left > 0.0000001; i += 1) {
+      const ob = obligations[i];
+      const key = String(ob.key || "");
+      if (key < minKey || key > maxKey) continue;
+      const rem = remaining(ob);
+      if (rem <= 0.0000001) continue;
+      const take = Math.min(rem, left);
+      ob.applications.push({ date: p.date, amount: r2(take) });
+      left = r2(left - take);
+    }
+    if (left > 0.0000001) advances.push({ date: p.date, amount: r2(left) });
+  }
+  return advances;
+}
+
+function buildFastObligationsFromRows(rows, allowedYm){
+  try {
+    const eng = window.JKHCalcEngine;
+    if (eng && typeof eng.buildObligationsFromRows === "function") {
+      const obligations = eng.buildObligationsFromRows(rows, allowedYm);
+      if (Array.isArray(obligations)) return obligations;
+    }
+  } catch(eEngineObligations) {
+    if (isRatesFatalError(eEngineObligations) || isExcludesFatalError(eEngineObligations)) throw eEngineObligations;
+  }
+  return buildObligationsFromRows(rows, allowedYm);
+}
+
+function compareRowsByIdWithTolerance(expected, actual, rows, tolerance){
+  const tol = Number.isFinite(Number(tolerance)) ? Number(tolerance) : 0.01;
+  const mismatches = [];
+  const list = Array.isArray(rows) ? rows : [];
+  const fields = [
+    { oldKey: "pay_main", newKey: "pay_main", label: "principal" },
+    { oldKey: "pay_penalty", newKey: "pay_penalty", label: "penalty" },
+    { oldKey: "total", newKey: "total", label: "total" }
+  ];
+  for (let i = 0; i < list.length; i += 1) {
+    const rowId = String(list[i] && list[i].id || "");
+    const oldItem = expected && expected[rowId] || null;
+    const newItem = actual && actual[rowId] || null;
+    if (!oldItem || !newItem) {
+      mismatches.push({ rowId, field: "missing", expected: oldItem || null, actual: newItem || null });
+      continue;
+    }
+    for (let f = 0; f < fields.length; f += 1) {
+      const field = fields[f];
+      const oldValue = r2(toNum(oldItem[field.oldKey]));
+      const newValue = r2(toNum(newItem[field.newKey]));
+      if (Math.abs(oldValue - newValue) > tol) {
+        mismatches.push({ rowId, field: field.label, expected: oldValue, actual: newValue });
+        break;
+      }
+    }
+  }
+  return mismatches;
+}
+
+function sampleRowsForFastVerify(rows){
+  const list = Array.isArray(rows) ? rows : [];
+  if (!list.length) return [];
+  const indexes = [0, Math.floor((list.length - 1) / 2), list.length - 1].filter(function(value, index, arr){
+    return value >= 0 && arr.indexOf(value) === index;
+  });
+  return indexes.map(function(idx){ return list[idx]; });
+}
+
+function buildRowsByIdFastCore(rows, selectedPeriod, abonentId, options){
+  const opts = options && typeof options === "object" ? options : {};
+  const runtimeRows = Array.isArray(rows) ? rows : [];
+  const startedAt = perfNow();
+  const baseRows = Array.isArray(opts.baseRows) ? opts.baseRows : runningTotalsBaseRows(runtimeRows);
+  const id = String(abonentId || getAbonentId() || "");
+  const excludes = loadExcludes(id);
+  const rates = loadRates(id);
+  const allObligations = buildFastObligationsFromRows(baseRows, fastResponsibilityAllowedYm());
+  const paymentsAll = buildFastPaymentEventsFromRows(baseRows);
+  const advancesAll = allocateFastPaymentsFIFO(allObligations, paymentsAll);
+  for (let obSortIdx = 0; obSortIdx < allObligations.length; obSortIdx += 1) sortApplications(allObligations[obSortIdx]);
+  advancesAll.sort(function(a,b){ return (a.date && a.date.getTime ? a.date.getTime() : 0) - (b.date && b.date.getTime ? b.date.getTime() : 0); });
+  const rowsById = {};
+  const byAsOf = new Map();
+  for (let i = 0; i < runtimeRows.length; i += 1) {
+    const row = runtimeRows[i];
+    const asOf = asOfForRow(row);
+    const key = `${asOf.getFullYear()}-${pad2(asOf.getMonth() + 1)}-${pad2(asOf.getDate())}`;
+    if (!byAsOf.has(key)) byAsOf.set(key, { asOf, rows: [] });
+    byAsOf.get(key).rows.push(row);
+  }
+  const dates = Array.from(byAsOf.keys()).sort();
+  const penaltyStates = new Map();
+  function stateForObligation(ob){
+    const key = String(ob && ob.key || "");
+    let state = penaltyStates.get(key);
+    if (state) return state;
+    const start = startOfDay(addDays(ob.dueDate, 1));
+    state = {
+      day: start,
+      hardEnd: startOfDay(addDays(ob.dueDate, 3650)),
+      appIdx: 0,
+      applied: 0,
+      overdueIndex: 0,
+      penalty: 0
+    };
+    penaltyStates.set(key, state);
+    return state;
+  }
+  function advancePenaltyTo(ob, asOfDay){
+    if (asOfDay <= ob.dueDate) return 0;
+    const state = stateForObligation(ob);
+    const end = asOfDay < state.hardEnd ? asOfDay : state.hardEnd;
+    while (state.day <= end) {
+      emitActiveFullRecalcHeartbeat(opts.stage || "build-runtime-rows-fast");
+      while (state.appIdx < ob.applications.length && ob.applications[state.appIdx].date.getTime() <= state.day.getTime()) {
+        state.applied += toNum(ob.applications[state.appIdx].amount);
+        state.appIdx += 1;
+      }
+      if (!isExcludedDay(state.day, excludes)) {
+        state.overdueIndex += 1;
+        const principal = Math.max(ob.amount - state.applied, 0);
+        if (principal > 0.0000001 && state.overdueIndex > 30) {
+          const denom = (state.overdueIndex <= 90) ? 300 : 130;
+          const rawRate = rateOnDate(state.day, rates);
+          if (!Number.isFinite(rawRate)) {
+            throwRatesFatal("MISSING_REQUIRED_RATE", "", { date: toISODateString(state.day), reason: "MISSING_REQUIRED_RATE" });
+          }
+          const rate = capRateUntil2027(state.day, rawRate);
+          state.penalty += principal * (rate / 100) / denom;
+        }
+      }
+      state.day = addDays(state.day, 1);
+    }
+    return state.penalty;
+  }
+  function appliedUpToSorted(ob, asOfDay){
+    return sumAppliedUpTo(ob, asOfDay);
+  }
+  function advanceUpTo(asOfDay){
+    let total = 0;
+    const t = asOfDay.getTime();
+    for (let i = 0; i < advancesAll.length; i += 1) {
+      const a = advancesAll[i];
+      if (!a || !a.date || a.date.getTime() > t) break;
+      total += toNum(a.amount);
+    }
+    return r2(total);
+  }
+  for (let i = 0; i < dates.length; i += 1) {
+    throwIfFullRecalcAborted(opts.stage || "build-runtime-rows-fast");
+    const item = byAsOf.get(dates[i]);
+    const asOfDate = item.asOf;
+    const asOfDay = startOfDay(asOfDate);
+    const asOfYm = `${asOfDate.getFullYear()}-${pad2(asOfDate.getMonth() + 1)}`;
+    let principalTotal = 0;
+    let penaltyTotal = 0;
+    for (let obIdx = 0; obIdx < allObligations.length; obIdx += 1) {
+      const ob = allObligations[obIdx];
+      if (String(ob.key || "") > asOfYm) break;
+      const applied = appliedUpToSorted(ob, asOfDay);
+      principalTotal += Math.max(ob.amount - applied, 0);
+      penaltyTotal += advancePenaltyTo(ob, asOfDay);
+    }
+    let principal = r2(principalTotal - advanceUpTo(asOfDay));
+    let penaltyDebt = r2(penaltyTotal);
+    if (principal < 0) {
+      let extra = r2(-principal);
+      const usedOnPenalty = r2(Math.min(extra, penaltyDebt));
+      penaltyDebt = r2(Math.max(penaltyDebt - usedOnPenalty, 0));
+      extra = r2(extra - usedOnPenalty);
+      principal = r2(-extra);
+    }
+    const total = r2(principal + penaltyDebt);
+    for (let rowIdx = 0; rowIdx < item.rows.length; rowIdx += 1) {
+      rowsById[String(item.rows[rowIdx].id)] = { pay_main: principal, pay_penalty: penaltyDebt, total: total };
+    }
+  }
+  return {
+    ok: true,
+    usedPath: "fast",
+    rowsById,
+    rowsCount: runtimeRows.length,
+    uniqueAsOfCount: dates.length,
+    oldCallsAvoided: runtimeRows.length,
+    elapsedMs: Math.round(Math.max(0, perfNow() - startedAt))
+  };
+}
+
+async function buildRowsByIdFastVerified(rows, selectedPeriod, abonentId, options){
+  const opts = options && typeof options === "object" ? options : {};
+  const startedAt = perfNow();
+  const runtimeRows = Array.isArray(rows) ? rows : [];
+  const verify = window.JKH_VERIFY_FAST_FULL_RECALC === true;
+  const fallbackReason = fastFullRecalcPreconditionFailure(runtimeRows, selectedPeriod, abonentId, opts);
+  const baseRows = Array.isArray(opts.baseRows) ? opts.baseRows : runningTotalsBaseRows(runtimeRows);
+  const sig = String(opts.signature || "");
+  const slowOptions = Object.assign({}, opts, { caller: opts.slowCaller || opts.caller || "fullRecalc.buildRowsByIdSlowLegacy" });
+  let fast = null;
+  let usedPath = "slow";
+  let reason = fallbackReason;
+  if (!fallbackReason) {
+    try {
+      fast = buildRowsByIdFastCore(runtimeRows, selectedPeriod, abonentId, Object.assign({}, opts, { baseRows }));
+      reason = "";
+      if (!verify) {
+        const sampleRows = sampleRowsForFastVerify(runtimeRows);
+        const expected = {};
+        for (let i = 0; i < sampleRows.length; i += 1) {
+          const row = sampleRows[i];
+          const t = calcTotalsAsOfMemoized(baseRows, asOfForRow(row), sig, "fullRecalc.fastSampleVerify");
+          expected[String(row.id)] = { pay_main: t.principal, pay_penalty: t.penalty, total: t.total };
+        }
+        const sampleMismatches = compareRowsByIdWithTolerance(expected, fast.rowsById, sampleRows, 0.01);
+        if (sampleMismatches.length) reason = "SAMPLE_MISMATCH";
+      }
+    } catch(eFast) {
+      reason = String(eFast && (eFast.reason || eFast.code || eFast.message) || eFast || "FAST_FAILED");
+      if (eFast && eFast.fullRecalcAbort === true) throw eFast;
+    }
+  }
+  if (verify) {
+    const slow = await buildRowsByIdSlowLegacy(runtimeRows, baseRows, sig, slowOptions);
+    const mismatches = fast && !reason ? compareRowsByIdWithTolerance(slow.rowsById, fast.rowsById, runtimeRows, 0.01) : [{ reason: reason || "FAST_NOT_AVAILABLE" }];
+    if (opts.suppressSummaryLog !== true) {
+      try {
+        console.log("[fast-recalc-verify]", {
+          rowsCount: runtimeRows.length,
+          mismatches: mismatches.length,
+          firstMismatch: mismatches[0] || null,
+          oldElapsedMs: slow.elapsedMs,
+          newElapsedMs: fast ? fast.elapsedMs : 0
+        });
+      } catch(eVerifyLog) {}
+    }
+    if (!mismatches.length && fast) {
+      usedPath = "fast";
+      if (opts.suppressSummaryLog !== true) {
+        try {
+          console.log("[fast-recalc-summary]", {
+            usedPath: "fast",
+            fallbackReason: "",
+            rowsCount: runtimeRows.length,
+            oldCallsAvoided: fast.oldCallsAvoided || runtimeRows.length,
+            elapsedMs: Math.round(Math.max(0, perfNow() - startedAt))
+          });
+        } catch(eSummaryLog) {}
+      }
+      return fast;
+    }
+    if (opts.suppressSummaryLog !== true) {
+      try {
+        console.log("[fast-recalc-summary]", {
+          usedPath: "slow",
+          fallbackReason: mismatches[0] && (mismatches[0].reason || "VERIFY_MISMATCH") || "VERIFY_MISMATCH",
+          rowsCount: runtimeRows.length,
+          oldCallsAvoided: 0,
+          elapsedMs: Math.round(Math.max(0, perfNow() - startedAt))
+        });
+      } catch(eSummaryLog) {}
+    }
+    return slow;
+  }
+  if (!reason && fast) {
+    usedPath = "fast";
+    if (opts.suppressSummaryLog !== true) {
+      try {
+        console.log("[fast-recalc-summary]", {
+          usedPath,
+          fallbackReason: "",
+          rowsCount: runtimeRows.length,
+          oldCallsAvoided: fast.oldCallsAvoided || runtimeRows.length,
+          elapsedMs: Math.round(Math.max(0, perfNow() - startedAt))
+        });
+      } catch(eSummaryLog) {}
+    }
+    return fast;
+  }
+  const slow = await buildRowsByIdSlowLegacy(runtimeRows, baseRows, sig, slowOptions);
+  if (opts.suppressSummaryLog !== true) {
+    try {
+      console.log("[fast-recalc-summary]", {
+        usedPath: "slow",
+        fallbackReason: reason || "FAST_PRECONDITION_FAILED",
+        rowsCount: runtimeRows.length,
+        oldCallsAvoided: 0,
+        elapsedMs: Math.round(Math.max(0, perfNow() - startedAt))
+      });
+    } catch(eSummaryLog) {}
+  }
+  return slow;
+}
+
+function tryReuseFreshFullRecalcRuntimeCache(abonentId, options){
+  const opts = options && typeof options === "object" ? options : {};
+  const startedAt = perfNow();
+  const id = String(abonentId || getAbonentId() || "");
+  const out = { ok: false, reason: "NOT_CHECKED" };
+  if (!id || !window.Data) { out.reason = "DATA_UNAVAILABLE"; return out; }
+  if (String(opts.recalcMode || "").toUpperCase() !== "FULL_SUMMARY_REBUILD") { out.reason = "NOT_FULL_RECALC"; return out; }
+  if (opts.periodActive === true || opts.selectedPeriod) { out.reason = "PERIOD_ACTIVE"; return out; }
+  if (opts.autoaccrualChanged === true) { out.reason = "AUTOACCRUAL_CHANGED"; return out; }
+  if (window.JKH_CARD_PERIOD_MODE_ACTIVE === true) { out.reason = "TEMPORARY_PERIOD_MODE_ACTIVE"; return out; }
+  if (typeof Data.computeLedgerRuntimeVersion !== "function" || typeof Data.readLedgerRuntimeCache !== "function" || typeof Data.isLedgerRuntimeCacheValid !== "function") {
+    out.reason = "RUNTIME_CACHE_API_UNAVAILABLE";
+    return out;
+  }
+  const rows = Array.isArray(opts.rows) ? opts.rows : getPayments();
+  const ledgerVersion = String(Data.computeLedgerRuntimeVersion(id) || "");
+  const runtimeSignatureValue = runtimeCacheSignature(ledgerVersion, false, null);
+  const validationOptions = {
+    rows: rows,
+    visibleRows: typeof Data.getVisibleFinancialRowsForCacheValidation === "function"
+      ? Data.getVisibleFinancialRowsForCacheValidation(rows, { periodActive: false, selectedPeriod: null })
+      : rows,
+    periodActive: false,
+    selectedPeriod: null,
+    runtimeSignature: runtimeSignatureValue
+  };
+  const cache = Data.readLedgerRuntimeCache(id, validationOptions);
+  const validity = Data.isLedgerRuntimeCacheValid(id, cache, validationOptions);
+  if (!validity || validity.valid !== true) {
+    out.reason = String(validity && validity.reason || "RUNTIME_CACHE_INVALID");
+    return out;
+  }
+  const rowsById = cache && cache.rowsById && typeof cache.rowsById === "object" && !Array.isArray(cache.rowsById) ? cache.rowsById : {};
+  if (!Object.keys(rowsById).length) { out.reason = "RUNTIME_CACHE_ROWS_MISSING"; return out; }
+  let snapshot = null;
+  if (typeof Data.readCardSnapshot === "function") snapshot = Data.readCardSnapshot(id);
+  const snapshotStatus = String(snapshot && (snapshot.summary_status || snapshot.status) || "").toLowerCase();
+  if (!snapshot || snapshot.dirty === true || snapshotStatus !== "fresh") {
+    out.reason = snapshot && snapshot.dirty === true ? String(snapshot.dirtyReason || "CARD_SNAPSHOT_DIRTY") : "FRESH_SUMMARY_SNAPSHOT_MISSING";
+    return out;
+  }
+  if (String(snapshot.ledgerVersion || "") !== ledgerVersion) { out.reason = "CARD_SNAPSHOT_STALE"; return out; }
+  if (snapshot.periodActive === true) { out.reason = "CARD_SNAPSHOT_PERIOD_ACTIVE"; return out; }
+  capturePaymentTableComputedRowsSnapshot(rows, rowsById, false, null, runtimeSignatureValue, ledgerVersion);
+  const summary = {
+    status: "fresh",
+    reason: "OK",
+    summary_status: "fresh",
+    summary_reason: "OK",
+    totals: snapshot.totals && typeof snapshot.totals === "object" ? Object.assign({}, snapshot.totals) : {}
+  };
+  try {
+    console.log("[full-recalc][already-fresh]", {
+      runId: String(opts.runId || ""),
+      abonentId: id,
+      ledgerVersion: ledgerVersion,
+      runtimeSignature: runtimeSignatureValue,
+      rowsByIdCount: Object.keys(rowsById).length,
+      elapsedMs: Math.round(Math.max(0, perfNow() - startedAt))
+    });
+    console.log("[fast-recalc-summary]", {
+      usedPath: "runtime_cache_already_fresh",
+      fallbackReason: "",
+      elapsedMs: Math.round(Math.max(0, perfNow() - startedAt)),
+      oldCallsAvoided: countRuntimeMonths(rows)
+    });
+  } catch(eLog) {}
+  return {
+    ok: true,
+    reason: "ALREADY_FRESH",
+    usedPath: "runtime_cache_already_fresh",
+    rows: rows,
+    rowsById: rowsById,
+    rowsCount: rows.length,
+    ledgerVersion: ledgerVersion,
+    runtimeSignature: runtimeSignatureValue,
+    summary: summary,
+    elapsedMs: Math.round(Math.max(0, perfNow() - startedAt))
+  };
 }
 
 // Нарастающий итог: теперь это "состояние долга и пени на дату строки"
@@ -2514,7 +3536,7 @@ function applyRunningTotals(viewRows, ledgerSignature) {
   const sig = ledgerSignature || ledgerSignatureForRows(baseRows);
   for (const r of sortedAsc){
     const asOf = asOfForRow(r);
-    const t = calcTotalsAsOfMemoized(baseRows, asOf, sig);
+        const t = calcTotalsAsOfMemoized(baseRows, asOf, sig, "scheduleRunningTotalsUpdate");
     r.pay_main = t.principal;
     r.pay_penalty = t.penalty;
     r.total = t.total;
@@ -2552,7 +3574,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
       while (idx < rows.length && (perfNow() - sliceStarted) < 24) {
         const r = rows[idx++];
         const asOf = asOfForRow(r);
-        const t = calcTotalsAsOfMemoized(calcRows, asOf, ledgerSignature);
+        const t = calcTotalsAsOfMemoized(calcRows, asOf, ledgerSignature, "scheduleRunningTotalsUpdate.step");
         r.pay_main = t.principal;
         r.pay_penalty = t.penalty;
         r.total = t.total;
@@ -2933,6 +3955,13 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
     const totalStartedAt = perfNow();
     try { console.time('[payment-table] init-total'); } catch(e) {}
     try {
+      if (!await waitPaymentTableHydratedDatabase("PAYMENT_TABLE_LOAD")) {
+        const tbodyBlocked = qs("#paymentTableBody");
+        if (tbodyBlocked) tbodyBlocked.innerHTML = '<tr><td colspan="20" style="color:#7a5300;font-weight:700;">База данных ещё загружается. Повторите через несколько секунд.</td></tr>';
+        const statusBlocked = qs("#paymentTableStatus") || qs("#paymentStatus") || qs("#paymentsStatus");
+        if (statusBlocked) statusBlocked.textContent = "База данных ещё загружается. Повторите через несколько секунд.";
+        return;
+      }
       if (!isDataReady()) {
         try { console.warn('[payment-table] load skipped: DATA_NOT_READY'); } catch(e) {}
         return;
@@ -3066,7 +4095,22 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
       let skipRunningTotalsUpdate = false;
       let restoredFromCardSnapshot = false;
       let normalSnapshotState = { valid: false, reason: "NOT_ATTEMPTED" };
-      if (!isReadonlyNoRecalcMode()) {
+      if (isTemporaryCourtPeriodMode() && periodActive && selectedPeriod) {
+        const temporaryRows = buildTemporaryPeriodRowsById(displayRows, view, selectedPeriod);
+        __runtimeCacheState = { valid: true, reason: "", dataById: temporaryRows.rowsById || {}, periodMatches: true, builtForPeriod: true, temporary: true, totals: temporaryRows.totals || null };
+        runtimeCacheUsed = true;
+        runtimeCachePeriodMatches = true;
+        baseRowsSource = "temporary_court_period";
+        skipRunningTotalsUpdate = true;
+        capturePaymentTableComputedRowsSnapshot(
+          view,
+          temporaryRows.rowsById || {},
+          periodActive,
+          selectedPeriod,
+          runtimeCacheSignature(runtimeLedgerVersion, periodActive, selectedPeriod),
+          runtimeLedgerVersion
+        );
+      } else if (!isReadonlyNoRecalcMode()) {
         try {
           console.log("[card-snapshot][normal-load-restore-attempt]", {
             abonentId: String(getAbonentId() || ""),
@@ -3100,6 +4144,17 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
               selectedPeriod: selectedPeriod || null
             });
           } catch(eSnapshotRestoredLog) {}
+        } else {
+          const displayOnlySnapshotState = tryApplyDisplayOnlyCardSnapshotRows(view, normalSnapshotState && normalSnapshotState.reason || "CARD_SNAPSHOT_DISPLAY_ONLY", periodActive, selectedPeriod, runtimeLedgerVersion, runtimeCacheSignature(runtimeLedgerVersion, periodActive, selectedPeriod));
+          if (displayOnlySnapshotState && displayOnlySnapshotState.dataById && Object.keys(displayOnlySnapshotState.dataById).length) {
+            __runtimeCacheState = displayOnlySnapshotState;
+            runtimeCacheUsed = false;
+            runtimeCachePeriodMatches = false;
+            baseRowsSource = "dirty_card_snapshot_display_only";
+            restoredFromCardSnapshot = true;
+            skipRunningTotalsUpdate = true;
+            notifyRuntimeCacheSummaryState(__runtimeCacheState, periodActive, selectedPeriod);
+          }
         }
       }
       if (!restoredFromCardSnapshot && periodActive && selectedPeriod && !isReadonlyNoRecalcMode()) {
@@ -3124,6 +4179,19 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
         );
       }
       if (!restoredFromCardSnapshot) notifyRuntimeCacheSummaryState(__runtimeCacheState, periodActive, selectedPeriod);
+      const viewTotalsStats = computedRowsStats(view, null);
+      if (Array.isArray(view) && view.length && viewTotalsStats.rowsWithTotals <= 0) {
+        try {
+          console.warn("[card-reload][raw-ledger-no-totals]", {
+            uid: String(getAbonentId() || ""),
+            source: "raw_payments_ledger",
+            rowsCount: view.length,
+            periodActive: !!periodActive,
+            selectedPeriod: selectedPeriod || null,
+            runtimeCacheReason: String(__runtimeCacheState && __runtimeCacheState.reason || "")
+          });
+        } catch(eRawLedgerNoTotalsLog) {}
+      }
       try {
         if (isReadonlyNoRecalcMode()) {
           console.log("[payment-table][readonly-no-recalc]", {
@@ -3224,6 +4292,19 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
     if (opts.mode) __paymentTableMode = String(opts.mode);
     if (opts.force) __paymentTableRenderedSignature = "";
     const reason = String(opts.reason || opts.mode || "scheduled");
+    const runningFullRecalc = currentFullRecalcRunState();
+    const allowDuringFullRecalc = reason === "full_recalc_completed" || reason === "manual-full-recalc" || reason === "temporary_court_period";
+    if (runningFullRecalc && !allowDuringFullRecalc) {
+      try {
+        console.log("[full-recalc][event-ignored-during-run]", {
+          runId: runningFullRecalc.runId || "",
+          event: "requestLoadPaymentTable",
+          reason: reason,
+          abonentId: String(getAbonentId() || "")
+        });
+      } catch(eFullRunIgnoreLog) {}
+      return;
+    }
     if (reason.toLowerCase().indexOf("import") >= 0) {
       __paymentTableRenderedSignature = "";
       try { console.log("[payment-table][import-render-no-recalc]", { reason: reason, mode: __paymentTableMode }); } catch(eImportLog) {}
@@ -3257,6 +4338,90 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
       __paymentTableLoadRunning = false;
     }
   }
+
+  window.runTemporaryPeriodCalculation = async function runTemporaryPeriodCalculation(options){
+    const opts = options && typeof options === "object" ? options : {};
+    const id = String(opts.abonentId || getAbonentId() || "").trim();
+    const period = opts.period && typeof opts.period === "object" ? opts.period : null;
+    const selectedPeriod = period ? { from: String(period.from || "").trim(), to: String(period.to || "").trim() } : null;
+    try {
+      console.log("[period-recalc][start]", {
+        abonentId: id,
+        period: selectedPeriod,
+        mode: "temporary_court_period"
+      });
+    } catch(eStartLog) {}
+
+    if (!id) return { ok:false, reason:"ABONENT_REQUIRED", mode:"temporary_court_period" };
+    if (!selectedPeriod || !isManualRecalcPeriodValid(selectedPeriod)) {
+      return { ok:false, reason:"PERIOD_INVALID", mode:"temporary_court_period" };
+    }
+    if (!await waitPaymentTableHydratedDatabase("TEMPORARY_PERIOD_RECALC")) {
+      return { ok:false, reason:"DB_NOT_HYDRATED", mode:"temporary_court_period" };
+    }
+
+    try {
+      console.log("[period-recalc][temporary-mode]", {
+        abonentId: id,
+        from: selectedPeriod.from,
+        to: selectedPeriod.to,
+        mode: "temporary_court_period"
+      });
+      console.warn("[period-recalc][blocked-full-write]", {
+        abonentId: id,
+        blocked: [
+          "Data.writePaymentLedger",
+          "Data.recalculateAbonentCard",
+          "Data.recalcAbonentSummaryExplicit",
+          "JKHAutoAccrual AUTOACCRUAL_WRITE",
+          "card_snapshot save"
+        ],
+        reason: "temporary-period-mode"
+      });
+    } catch(eModeLog) {}
+
+    window.JKH_CARD_PERIOD_MODE_ACTIVE = true;
+    __paymentTableMode = "temporary_court_period";
+    __paymentTableRenderedSignature = "";
+    await loadPaymentTable("temporary_court_period");
+
+    let renderedRowsCount = 0;
+    let renderedTotals = { debt: 0, penalty: 0, total: 0 };
+    try {
+      const snapshot = typeof window.__getPaymentTableComputedRowsSnapshot === "function" ? window.__getPaymentTableComputedRowsSnapshot() : null;
+      const rows = snapshot && Array.isArray(snapshot.rows) ? snapshot.rows : [];
+      const rowsById = snapshot && snapshot.rowsById && typeof snapshot.rowsById === "object" ? snapshot.rowsById : {};
+      const totals = summarizeRowsById(rows, rowsById);
+      renderedRowsCount = rows.length;
+      renderedTotals = totals;
+      console.log("[period-recalc][done]", {
+        abonentId: id,
+        from: selectedPeriod.from,
+        to: selectedPeriod.to,
+        mode: "temporary_court_period"
+      });
+      console.log("[period-recalc][no-write-confirmed]", {
+        abonentId: id,
+        mode: "temporary_court_period",
+        rowsCount: renderedRowsCount,
+        debt: totals.debt,
+        penalty: totals.penalty,
+        total: totals.total
+      });
+    } catch(eDoneLog) {}
+
+    return {
+      ok:true,
+      reason:"OK",
+      mode:"temporary_court_period",
+      period:selectedPeriod,
+      renderedPeriodRows: renderedRowsCount,
+      totals: renderedTotals,
+      autoaccrual_changed:false,
+      summary_status:"skipped",
+      summary_reason:"TEMPORARY_PERIOD_NOT_SAVED"
+    };
+  };
 
 
   function isPaymentLocked(r){
@@ -3800,9 +4965,55 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
     return !!(fromD && toD && startOfDay(fromD) <= startOfDay(toD));
   }
 
+  function getHydratedDbCountsForPaymentTable(){
+    const db = window.AbonentsDB && typeof window.AbonentsDB === "object" ? window.AbonentsDB : {};
+    return {
+      abonentsCount: db && db.abonents && typeof db.abonents === "object" ? Object.keys(db.abonents).length : 0,
+      premisesCount: db && db.premises && typeof db.premises === "object" ? Object.keys(db.premises).length : 0,
+      linksCount: db && Array.isArray(db.links) ? db.links.length : 0
+    };
+  }
+
+  function logPaymentTableBlockedBeforeHydrate(reason){
+    const counts = getHydratedDbCountsForPaymentTable();
+    const ownerId = (window.JKHStore && typeof JKHStore.getOwnerId === "function") ? String(JKHStore.getOwnerId() || "") : "";
+    const payload = {
+      abonentId: String(getAbonentId() || ""),
+      abonentsCount: counts.abonentsCount,
+      linksCount: counts.linksCount,
+      premisesCount: counts.premisesCount,
+      ownerId: ownerId,
+      reason: String(reason || "DB_NOT_HYDRATED")
+    };
+    try { console.warn("[card][blocked-before-hydrate]", payload); } catch(e) {}
+    return payload;
+  }
+
+  async function waitPaymentTableHydratedDatabase(reason){
+    if (window.waitForHydratedDatabase && typeof window.waitForHydratedDatabase === "function") {
+      const ready = await window.waitForHydratedDatabase({ timeoutMs: 10000, reason: reason || "payment_table" });
+      if (ready && ready.ok === true) return true;
+      logPaymentTableBlockedBeforeHydrate(reason || "WAIT_TIMEOUT");
+      return false;
+    }
+    if (window.Data && typeof Data.waitForHydratedDatabase === "function") {
+      const ready = await Data.waitForHydratedDatabase({ timeoutMs: 10000, reason: reason || "payment_table" });
+      if (ready && ready.ok === true) return true;
+      logPaymentTableBlockedBeforeHydrate(reason || "DATA_WAIT_TIMEOUT");
+      return false;
+    }
+    const counts = getHydratedDbCountsForPaymentTable();
+    if (counts.abonentsCount > 0) return true;
+    logPaymentTableBlockedBeforeHydrate(reason || "NO_GLOBAL_WAIT");
+    return false;
+  }
+
   async function applyControlledAutoAccrualForManualRecalc(abonentId, options){
     const opts = options || {};
     if (opts.applyAutoAccrual !== true) return { ok:true, changed:false, reason:"SKIPPED" };
+    if (!await waitPaymentTableHydratedDatabase("AUTOACCRUAL_WRITE")) {
+      return { ok:false, changed:false, reason:"DB_NOT_HYDRATED" };
+    }
     if (!window.JKHAutoAccrual || typeof window.JKHAutoAccrual.dryRunForAbonent !== "function") {
       return { ok:false, changed:false, reason:"AUTOACCRUAL_UNAVAILABLE" };
     }
@@ -3822,7 +5033,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
 
     let result = null;
     try {
-      result = window.JKHAutoAccrual.dryRunForAbonent(abonentId);
+      result = await window.JKHAutoAccrual.dryRunForAbonent(abonentId);
     } catch (e) {
       const reason = normalizeManualRecalcReason(e && (e.code || e.reason || e.message) || e);
       return { ok:false, changed:false, reason:reason, responsibility:responsibility };
@@ -3843,6 +5054,14 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
       if (!(window.Data && typeof Data.writePaymentLedger === "function")) return { ok:false, changed:true, reason:"LEDGER_WRITE_UNAVAILABLE", autoaccrual:result };
       const savedLedger = window.Data.writePaymentLedger(abonentId, proposedRows, { eventType:"AUTOACCRUAL_WRITE", summaryDirtyReason:false });
       if (savedLedger === false) return { ok:false, changed:true, reason:"PAYMENT_LEDGER_WRITE_BLOCKED", autoaccrual:result };
+      try {
+        console.log("[full-recalc][save-ledger]", {
+          abonentId: String(abonentId || ""),
+          rows: proposedRows.length,
+          changed: true,
+          eventType: "AUTOACCRUAL_WRITE"
+        });
+      } catch(eSaveLedgerLog) {}
       clearPaymentLedgerReadCache("manual-recalc-autoaccrual");
       try {
         if (window.Data && typeof Data.invalidateLedgerRuntimeCache === "function") Data.invalidateLedgerRuntimeCache(abonentId);
@@ -3864,14 +5083,47 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
   window.fullRecalcForCurrentAbonent = async function fullRecalcForCurrentAbonent(options){
     console.time("[recalc] total");
     if (window.__calcTotalsMemoStats) window.__calcTotalsMemoStats.reset();
+    let recalcTotalTimerEnded = false;
     function endRecalcTotalTimer(){
+      if (recalcTotalTimerEnded) return;
+      recalcTotalTimerEnded = true;
       try { console.timeEnd("[recalc] total"); } catch(eTimer) {}
     }
     const opts = options && typeof options === "object" ? options : {};
     const id = String(getAbonentId() || "");
+    const runId = fullRecalcRunIdFromOptions(opts);
+    const runningFullRecalc = currentFullRecalcRunState();
+    if (runningFullRecalc && runningFullRecalc.paymentTableFullActive === true) {
+      try {
+        console.log("[full-recalc][duplicate-call-ignored]", {
+          runId: runningFullRecalc.runId || runId,
+          abonentId: id,
+          source: "payment_table.fullRecalcForCurrentAbonent",
+          reason: "same-tab-full-path-active"
+        });
+      } catch(eDupSameRunLog) {}
+      endRecalcTotalTimer();
+      return { ok:false, reason:"RECALC_ALREADY_RUNNING", summary_status:"already_running", summary_reason:"RECALC_ALREADY_RUNNING", status:"already_running", duplicateIgnored:true, runId:runningFullRecalc.runId || runId };
+    }
+    if (runningFullRecalc && runningFullRecalc.abonentId && String(runningFullRecalc.abonentId) !== id) {
+      try {
+        console.log("[full-recalc][duplicate-call-ignored]", {
+          runId: runningFullRecalc.runId || runId,
+          abonentId: id,
+          activeAbonentId: String(runningFullRecalc.abonentId || ""),
+          source: "payment_table.fullRecalcForCurrentAbonent"
+        });
+      } catch(eDupLog) {}
+      endRecalcTotalTimer();
+      return { ok:false, reason:"RECALC_ALREADY_RUNNING", summary_status:"already_running", summary_reason:"RECALC_ALREADY_RUNNING", status:"already_running", duplicateIgnored:true, runId:runningFullRecalc.runId || runId };
+    }
     if (!id) {
       endRecalcTotalTimer();
       return { ok:false, reason:"ABONENT_REQUIRED" };
+    }
+    if (!await waitPaymentTableHydratedDatabase("FULL_SUMMARY_REBUILD")) {
+      endRecalcTotalTimer();
+      return { ok:false, reason:"DB_NOT_HYDRATED", summary_status:"error", summary_reason:"DB_NOT_HYDRATED" };
     }
     const mode = String(opts.recalcMode || opts.mode || "").trim().toUpperCase();
     const explicitReportPeriod = (mode === "REPORT_PERIOD_CALCULATION" || mode === "REPORT" || mode === "PERIOD" || String(opts.summaryScope || opts.summary_scope || "").toLowerCase() === "period")
@@ -3881,161 +5133,305 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
       ? { from: String(opts.runtimePeriod.from || ""), to: String(opts.runtimePeriod.to || "") }
       : null;
     let recalcLock = null;
-    try { console.log("[payment-table][recalc-explicit]", { abonentId: id, stage: "start", recalcMode: recalcMode }); } catch(eLogStart) {}
+    if (runningFullRecalc) runningFullRecalc.paymentTableFullActive = true;
+    try { console.log("[full-recalc][start]", { runId: runId, abonentId: id, recalcMode: "FULL_SUMMARY_REBUILD", requestedMode: mode || "" }); } catch(eFullStartLog) {}
+    try { console.log("[payment-table][recalc-explicit]", { runId: runId, abonentId: id, stage: "start", recalcMode: recalcMode }); } catch(eLogStart) {}
     try {
       if (!window.Data || typeof Data.beginRecalcUidLock !== "function" || typeof Data.finishRecalcUidLock !== "function") {
         endRecalcTotalTimer();
         return { ok:false, reason:"RECALC_LOCK_UNAVAILABLE", summary_status:"error", summary_reason:"RECALC_LOCK_UNAVAILABLE" };
       }
+      logFullRecalcStep(runId, "begin-lock", { abonentId: id });
       console.time("[recalc-step] begin lock");
-      recalcLock = await Data.beginRecalcUidLock(id);
+      recalcLock = await Data.beginRecalcUidLock(id, { runId: runId, abonentId: id });
       console.timeEnd("[recalc-step] begin lock");
+      if (runningFullRecalc && recalcLock) {
+        runningFullRecalc.uid = String(recalcLock.account_uid || runningFullRecalc.uid || "");
+        runningFullRecalc.recalcLockToken = String(recalcLock.lock_token || "");
+      }
+      logFullRecalcStepDone(runId, "begin-lock", { abonentId: id, status: recalcLock && recalcLock.status || "" });
       if (recalcLock && recalcLock.status === "already_running") {
-        try { console.log("[payment-table][recalc-explicit]", { abonentId: id, stage: "already_running", recalcMode: recalcMode }); } catch(eLogLock) {}
+        try { console.log("[payment-table][recalc-explicit]", { runId: runId, abonentId: id, stage: "already_running", recalcMode: recalcMode }); } catch(eLogLock) {}
+        try { console.log("[full-recalc][duplicate-call-ignored]", { runId: runId, abonentId: id, source: "recalc-lock", reason: "RECALC_ALREADY_RUNNING" }); } catch(eFullAlreadyLog) {}
         endRecalcTotalTimer();
         return { ok:false, reason:"RECALC_ALREADY_RUNNING", summary_status:"already_running", summary_reason:"RECALC_ALREADY_RUNNING", status:"already_running", recalc_lock:recalcLock };
       }
       if (!recalcLock || recalcLock.ok !== true || recalcLock.status !== "started") {
+        try { console.log("[full-recalc][result]", { abonentId: id, ok: false, summaryStatus: "error", summaryReason: "RECALC_LOCK_FAILED" }); } catch(eFullLockFailedLog) {}
         endRecalcTotalTimer();
         return { ok:false, reason:(recalcLock && (recalcLock.reason || recalcLock.error)) || "RECALC_LOCK_FAILED", summary_status:"error", summary_reason:"RECALC_LOCK_FAILED", recalc_lock:recalcLock };
       }
+      resetCalcTotalsHotspotReport(runId, id);
+      throwIfFullRecalcAborted("autoaccrual");
+      logFullRecalcStep(runId, "autoaccrual", { abonentId: id });
       console.time("[recalc-step] autoaccrual");
-      const autoResult = await applyControlledAutoAccrualForManualRecalc(id, opts);
+      const autoResult = await measureRecalcStage("autoaccrualMs", async function(){
+        return await applyControlledAutoAccrualForManualRecalc(id, opts);
+      });
       console.timeEnd("[recalc-step] autoaccrual");
+      logFullRecalcStepDone(runId, "autoaccrual", { abonentId: id, ok: !!(autoResult && autoResult.ok === true), changed: !!(autoResult && autoResult.changed), reason: autoResult && autoResult.reason || "" });
+      await nextUiTick();
+      throwIfFullRecalcAborted("build-runtime-rows-before-summary");
       if (!autoResult || autoResult.ok !== true) {
         try { console.log("[payment-table][recalc-explicit]", { abonentId: id, stage: "autoaccrual_failed", reason: normalizeManualRecalcReason(autoResult && autoResult.reason) }); } catch(eLogAuto) {}
+        try { console.log("[full-recalc][result]", { abonentId: id, ok: false, summaryStatus: "error", summaryReason: normalizeManualRecalcReason(autoResult && autoResult.reason), autoaccrualChanged: !!(autoResult && autoResult.changed) }); } catch(eFullAutoFailLog) {}
         endRecalcTotalTimer();
         return { ok:false, reason:normalizeManualRecalcReason(autoResult && autoResult.reason), autoaccrual:autoResult, autoaccrual_changed:!!(autoResult && autoResult.changed) };
       }
-      console.time("[recalc-step] build runtime rows before summary");
-      console.time("[recalc-detail] get ledger");
-      const arr = getPayments();
-      console.timeEnd("[recalc-detail] get ledger");
-      console.time("[recalc-detail] period selection");
-      const periodActive = !!(explicitReportPeriod || explicitRuntimePeriod);
-      const selectedPeriod = explicitReportPeriod ? { from: String(opts.period.from || ""), to: String(opts.period.to || "") } : explicitRuntimePeriod;
-      console.timeEnd("[recalc-detail] period selection");
-      console.time("[recalc-detail] build runtimeRows");
-      let runtimeRows;
-      if (periodActive && selectedPeriod) {
-        console.time("[recalc-detail] applyCalcFilter row/month loop");
-        const filteredRows = applyCalcFilter(arr, true, selectedPeriod);
-        console.timeEnd("[recalc-detail] applyCalcFilter row/month loop");
-        console.time("[recalc-detail] responsibility month/row loops");
-        const responsibilityRows = applyResponsibilityRangeToView(filteredRows);
-        console.timeEnd("[recalc-detail] responsibility month/row loops");
-        console.time("[recalc-detail] clone/copy rows");
-        runtimeRows = responsibilityRows.slice();
-        console.timeEnd("[recalc-detail] clone/copy rows");
-      } else {
-        console.time("[recalc-detail] clone/copy rows");
-        runtimeRows = arr;
-        console.timeEnd("[recalc-detail] clone/copy rows");
-      }
-      console.timeEnd("[recalc-detail] build runtimeRows");
-      console.time("[recalc-detail] build baseRows row/month loop");
-      const baseRows = runningTotalsBaseRows(runtimeRows);
-      console.timeEnd("[recalc-detail] build baseRows row/month loop");
-      console.time("[recalc-detail] build maps/indexes");
-      const ledgerVersion = (window.Data && Data.computeLedgerRuntimeVersion) ? String(Data.computeLedgerRuntimeVersion(id) || "") : "";
-      console.time("[recalc-detail] ledgerSignature row loop");
-      const sig = ledgerSignatureForRows(arr) + "::" + runtimeCacheSignature(ledgerVersion, periodActive, selectedPeriod);
-      console.timeEnd("[recalc-detail] ledgerSignature row loop");
-      const rowsById = {};
-      console.timeEnd("[recalc-detail] build maps/indexes");
-      console.time("[recalc-detail] build rowsById row loop");
-      console.time("[recalc-detail] rowsById row loop");
-      const rowsByIdStartedAt = perfNow();
-      let rowsCount = 0;
-      let calcTotalMs = 0;
-      let asOfTotalMs = 0;
-      let assignTotalMs = 0;
-      let maxCalcMs = 0;
-      let cacheHits = 0;
-      let cacheMisses = 0;
-      runtimeRows.forEach(function(r){
-        rowsCount += 1;
-        const asOfStartedAt = perfNow();
-        const asOf = asOfForRow(r);
-        asOfTotalMs += Math.max(0, perfNow() - asOfStartedAt);
-        let cacheKey = "";
-        try { cacheKey = memoKeyForTotals(sig, asOf); } catch(eMemoKey) {}
-        if (cacheKey && __paymentTotalsMemo.has(cacheKey)) cacheHits += 1;
-        else cacheMisses += 1;
-        const calcStartedAt = perfNow();
-        const t = calcTotalsAsOfMemoized(baseRows, asOf, sig);
-        const calcMs = Math.max(0, perfNow() - calcStartedAt);
-        calcTotalMs += calcMs;
-        if (calcMs > maxCalcMs) maxCalcMs = calcMs;
-        const assignStartedAt = perfNow();
-        rowsById[String(r.id)] = { pay_main: t.principal, pay_penalty: t.penalty, total: t.total };
-        assignTotalMs += Math.max(0, perfNow() - assignStartedAt);
+      const alreadyFresh = tryReuseFreshFullRecalcRuntimeCache(id, {
+        runId: runId,
+        recalcMode: recalcMode,
+        periodActive: !!(explicitReportPeriod || explicitRuntimePeriod),
+        selectedPeriod: explicitReportPeriod ? { from: String(opts.period.from || ""), to: String(opts.period.to || "") } : explicitRuntimePeriod,
+        autoaccrualChanged: !!(autoResult && autoResult.changed)
       });
-      const rowsByIdTotalMs = Math.max(0, perfNow() - rowsByIdStartedAt);
-      try {
-        console.log("[rowsById][summary]", {
-          rowsCount: rowsCount,
-          totalMs: Math.round(rowsByIdTotalMs),
-          asOfTotalMs: Math.round(asOfTotalMs),
-          calcTotalMs: Math.round(calcTotalMs),
-          assignTotalMs: Math.round(assignTotalMs),
-          maxCalcMs: Math.round(maxCalcMs),
-          avgCalcMs: rowsCount ? Math.round((calcTotalMs / rowsCount) * 100) / 100 : 0,
-          cacheHits: cacheHits,
-          cacheMisses: cacheMisses
+      if (alreadyFresh && alreadyFresh.ok === true) {
+        try { console.log("[payment-table][recalc-explicit]", { runId: runId, abonentId: id, stage: "already_fresh", recalcMode: recalcMode }); } catch(eAlreadyFreshLog) {}
+        try {
+          console.log("[full-recalc][result]", {
+            runId: runId,
+            abonentId: id,
+            ok: true,
+            summaryStatus: "fresh",
+            summaryReason: "ALREADY_FRESH",
+            autoaccrualChanged: !!autoResult.changed,
+            usedPath: alreadyFresh.usedPath || "runtime_cache_already_fresh"
+          });
+        } catch(eAlreadyFreshResultLog) {}
+        endRecalcTotalTimer();
+        return {
+          ok: true,
+          reason: "ALREADY_FRESH",
+          autoaccrual_changed: !!autoResult.changed,
+          autoaccrual: autoResult,
+          summary_status: "fresh",
+          summary_reason: "OK",
+          summary: alreadyFresh.summary,
+          rowsById: alreadyFresh.rowsById,
+          ledgerVersion: alreadyFresh.ledgerVersion,
+          runtimeCacheHit: true,
+          rowsByIdSource: alreadyFresh.usedPath || "runtime_cache_already_fresh",
+          runId: runId
+        };
+      } else {
+        try {
+          console.log("[full-recalc][already-fresh-skip]", {
+            runId: runId,
+            abonentId: id,
+            reason: alreadyFresh && alreadyFresh.reason || "NOT_AVAILABLE"
+          });
+        } catch(eAlreadyFreshSkipLog) {}
+      }
+      logFullRecalcStep(runId, "build-runtime-rows-before-summary", { abonentId: id });
+      console.time("[recalc-step] build runtime rows before summary");
+      let arr = [];
+      let periodActive = false;
+      let selectedPeriod = null;
+      let runtimeRows = [];
+      let baseRows = [];
+      let ledgerVersion = "";
+      let sig = "";
+      let rowsById = {};
+      let rowsCount = 0;
+      let rowsByIdBuildResult = null;
+      await measureRecalcStage("buildRuntimeRowsBeforeSummaryMs", async function(){
+        incRecalcCallCount("buildRuntimeRows", 1);
+        console.time("[recalc-detail] get ledger");
+        arr = getPayments();
+        console.timeEnd("[recalc-detail] get ledger");
+        console.time("[recalc-detail] period selection");
+        periodActive = !!(explicitReportPeriod || explicitRuntimePeriod);
+        selectedPeriod = explicitReportPeriod ? { from: String(opts.period.from || ""), to: String(opts.period.to || "") } : explicitRuntimePeriod;
+        console.timeEnd("[recalc-detail] period selection");
+        console.time("[recalc-detail] build runtimeRows");
+        if (periodActive && selectedPeriod) {
+          console.time("[recalc-detail] applyCalcFilter row/month loop");
+          const filteredRows = applyCalcFilter(arr, true, selectedPeriod);
+          console.timeEnd("[recalc-detail] applyCalcFilter row/month loop");
+          console.time("[recalc-detail] responsibility month/row loops");
+          const responsibilityRows = applyResponsibilityRangeToView(filteredRows);
+          console.timeEnd("[recalc-detail] responsibility month/row loops");
+          console.time("[recalc-detail] clone/copy rows");
+          runtimeRows = responsibilityRows.slice();
+          console.timeEnd("[recalc-detail] clone/copy rows");
+        } else {
+          console.time("[recalc-detail] clone/copy rows");
+          runtimeRows = arr;
+          console.timeEnd("[recalc-detail] clone/copy rows");
+        }
+        console.timeEnd("[recalc-detail] build runtimeRows");
+        console.time("[recalc-detail] build baseRows row/month loop");
+        emitFullRecalcHeartbeat(runId, "build-runtime-rows-before-summary");
+        baseRows = runningTotalsBaseRows(runtimeRows);
+        emitFullRecalcHeartbeat(runId, "build-runtime-rows-before-summary");
+        console.timeEnd("[recalc-detail] build baseRows row/month loop");
+        console.time("[recalc-detail] build maps/indexes");
+        ledgerVersion = (window.Data && Data.computeLedgerRuntimeVersion) ? String(Data.computeLedgerRuntimeVersion(id) || "") : "";
+        console.time("[recalc-detail] ledgerSignature row loop");
+        emitFullRecalcHeartbeat(runId, "build-runtime-rows-before-summary");
+        sig = ledgerSignatureForRows(arr) + "::" + runtimeCacheSignature(ledgerVersion, periodActive, selectedPeriod);
+        emitFullRecalcHeartbeat(runId, "build-runtime-rows-before-summary");
+        console.timeEnd("[recalc-detail] ledgerSignature row loop");
+        console.timeEnd("[recalc-detail] build maps/indexes");
+        console.time("[recalc-detail] build rowsById row loop");
+        console.time("[recalc-detail] rowsById row loop");
+        rowsByIdBuildResult = await buildRowsByIdFastVerified(runtimeRows, selectedPeriod, id, {
+          runId: runId,
+          stage: "build-runtime-rows-before-summary",
+          recalcMode: recalcMode,
+          periodActive: periodActive,
+          baseRows: baseRows,
+          signature: sig,
+          caller: "fullRecalc.buildRuntimeRowsBeforeSummary",
+          slowCaller: "fullRecalc.buildRuntimeRowsBeforeSummary"
         });
-      } catch(eRowsSummary) {}
-      console.timeEnd("[recalc-detail] rowsById row loop");
-      console.timeEnd("[recalc-detail] build rowsById row loop");
+        rowsById = rowsByIdBuildResult.rowsById || {};
+        rowsCount = rowsByIdBuildResult.rowsCount || runtimeRows.length;
+        console.timeEnd("[recalc-detail] rowsById row loop");
+        console.timeEnd("[recalc-detail] build rowsById row loop");
+      });
       console.timeEnd("[recalc-step] build runtime rows before summary");
+      throwIfFullRecalcAborted("save-runtime-cache-before-summary");
+      addRecalcLoopCount("rowsCount", rowsCount);
+      addRecalcLoopCount("monthsCount", countRuntimeMonths(runtimeRows));
+      addRecalcLoopCount("obligationsCount", countRuntimeObligations(baseRows));
+      addRecalcLoopCount("paymentsCount", countRuntimePayments(baseRows));
+      logFullRecalcStepDone(runId, "build-runtime-rows-before-summary", { abonentId: id, rowsCount: rowsCount, rowsByIdCount: Object.keys(rowsById).length });
+      await nextUiTick();
       const payload = { ledgerVersion: ledgerVersion, runtimeSignature: runtimeCacheSignature(ledgerVersion, periodActive, selectedPeriod), periodActive: !!periodActive, period: periodActive && selectedPeriod ? { from: selectedPeriod.from || "", to: selectedPeriod.to || "" } : null, rowsById: rowsById, updatedAt: (new Date()).toISOString() };
+      throwIfFullRecalcAborted("save-runtime-cache-before-summary");
+      logFullRecalcStep(runId, "save-runtime-cache-before-summary", { abonentId: id });
       console.time("[recalc] save runtime cache");
       if (window.Data && typeof Data.writeLedgerRuntimeCache === "function") Data.writeLedgerRuntimeCache(id, payload);
+      try {
+        console.log("[full-recalc][save-snapshot]", {
+          abonentId: id,
+          target: "ledger_runtime_cache",
+          ledgerVersion: ledgerVersion,
+          rowsByIdCount: Object.keys(rowsById).length,
+          periodActive: !!periodActive
+        });
+      } catch(eRuntimeSaveLog) {}
       console.timeEnd("[recalc] save runtime cache");
+      logFullRecalcStepDone(runId, "save-runtime-cache-before-summary", { abonentId: id, rowsByIdCount: Object.keys(rowsById).length });
+      await nextUiTick();
+      throwIfFullRecalcAborted("table-render");
       __paymentTableRenderedSignature = "";
       __paymentTableMode = "readonly_no_recalc";
+      logFullRecalcStep(runId, "table-render", { abonentId: id, reason: "full_recalc_completed" });
       console.time("[recalc] loadPaymentTable");
       console.time("[recalc-step] loadPaymentTable before summary");
       await loadPaymentTable("full_recalc_completed");
       console.timeEnd("[recalc-step] loadPaymentTable before summary");
       console.timeEnd("[recalc] loadPaymentTable");
+      logFullRecalcStepDone(runId, "table-render", { abonentId: id });
+      await nextUiTick();
+      throwIfFullRecalcAborted("summary-save");
       if (!window.Data || typeof Data.recalculateAbonentCard !== "function") {
         endRecalcTotalTimer();
         return { ok:false, reason:"SUMMARY_RECALC_UNAVAILABLE", autoaccrual_changed:!!autoResult.changed, summary_status:"error", summary_reason:"SUMMARY_RECALC_UNAVAILABLE", summary:null, summary_save:{ ok:false, reason:"SUMMARY_RECALC_UNAVAILABLE" } };
       }
+      logFullRecalcStep(runId, "summary-save", { abonentId: id });
       console.time("[recalc] Data.recalculateAbonentCard");
-      const summaryResult = await Data.recalculateAbonentCard(id, {
-        period: periodActive && selectedPeriod ? selectedPeriod : undefined,
-        saveSummary: !explicitReportPeriod,
-        summaryScope: explicitReportPeriod ? "period" : "full",
-        periodActive: !!explicitReportPeriod,
-        recalcMode: recalcMode,
-        recalcLockHeld: true,
-        recalcLockToken: recalcLock.lock_token || ""
+      const summaryResult = await measureRecalcStage("summarySaveMs", async function(){
+        throwIfFullRecalcAborted("summary-save");
+        return await Data.recalculateAbonentCard(id, {
+          period: periodActive && selectedPeriod ? selectedPeriod : undefined,
+          saveSummary: !explicitReportPeriod,
+          summaryScope: explicitReportPeriod ? "period" : "full",
+          periodActive: !!explicitReportPeriod,
+          recalcMode: recalcMode,
+          recalcRunId: runId,
+          recalcLockHeld: true,
+          recalcLockToken: recalcLock.lock_token || ""
+        });
       });
       console.timeEnd("[recalc] Data.recalculateAbonentCard");
+      logFullRecalcStepDone(runId, "summary-save", { abonentId: id, ok: !!(summaryResult && summaryResult.ok === true), status: summaryResult && (summaryResult.summary_status || summaryResult.status) || "", reason: summaryResult && (summaryResult.summary_reason || summaryResult.reason) || "" });
+      await nextUiTick();
+      throwIfFullRecalcAborted("build-fresh-runtime-rows-after-summary");
+      logFullRecalcStep(runId, "build-fresh-runtime-rows-after-summary", { abonentId: id });
       console.time("[recalc-step] build fresh runtime rows after summary");
       const freshArr = getPayments();
       const freshPeriodActive = periodActive;
       const freshSelectedPeriod = selectedPeriod;
-      const freshRuntimeRows = freshPeriodActive && freshSelectedPeriod ? applyResponsibilityRangeToView(applyCalcFilter(freshArr, true, freshSelectedPeriod)).slice() : freshArr;
-      const freshBaseRows = runningTotalsBaseRows(freshRuntimeRows);
-      const freshLedgerVersion = (window.Data && Data.computeLedgerRuntimeVersion) ? String(Data.computeLedgerRuntimeVersion(id) || "") : "";
-      const freshSig = ledgerSignatureForRows(freshArr) + "::" + runtimeCacheSignature(freshLedgerVersion, freshPeriodActive, freshSelectedPeriod);
-      const freshRowsById = {};
-      freshRuntimeRows.forEach(function(r){
-        const asOf = asOfForRow(r);
-        const t = calcTotalsAsOfMemoized(freshBaseRows, asOf, freshSig);
-        freshRowsById[String(r.id)] = { pay_main: t.principal, pay_penalty: t.penalty, total: t.total };
+      let freshRuntimeRows = [];
+      let freshBaseRows = [];
+      let freshLedgerVersion = "";
+      let freshSig = "";
+      let freshRowsById = {};
+      await measureRecalcStage("buildRuntimeRowsAfterSummaryMs", async function(){
+        incRecalcCallCount("buildRuntimeRows", 1);
+        emitFullRecalcHeartbeat(runId, "build-fresh-runtime-rows-after-summary");
+        freshRuntimeRows = freshPeriodActive && freshSelectedPeriod ? applyResponsibilityRangeToView(applyCalcFilter(freshArr, true, freshSelectedPeriod)).slice() : freshArr;
+        emitFullRecalcHeartbeat(runId, "build-fresh-runtime-rows-after-summary");
+        freshBaseRows = runningTotalsBaseRows(freshRuntimeRows);
+        emitFullRecalcHeartbeat(runId, "build-fresh-runtime-rows-after-summary");
+        freshLedgerVersion = (window.Data && Data.computeLedgerRuntimeVersion) ? String(Data.computeLedgerRuntimeVersion(id) || "") : "";
+        freshSig = ledgerSignatureForRows(freshArr) + "::" + runtimeCacheSignature(freshLedgerVersion, freshPeriodActive, freshSelectedPeriod);
+        if (!freshPeriodActive && !periodActive && freshSig === sig && Array.isArray(freshRuntimeRows) && Array.isArray(runtimeRows) && freshRuntimeRows.length === runtimeRows.length) {
+          freshRowsById = rowsById;
+        } else {
+          const freshBuild = await buildRowsByIdFastVerified(freshRuntimeRows, freshSelectedPeriod, id, {
+            runId: runId,
+            stage: "build-fresh-runtime-rows-after-summary",
+            recalcMode: recalcMode,
+            periodActive: freshPeriodActive,
+            baseRows: freshBaseRows,
+            signature: freshSig,
+            caller: "fullRecalc.buildRuntimeRowsAfterSummary",
+            slowCaller: "fullRecalc.buildRuntimeRowsAfterSummary",
+            suppressSummaryLog: true
+          });
+          freshRowsById = freshBuild.rowsById || {};
+        }
       });
       console.timeEnd("[recalc-step] build fresh runtime rows after summary");
+      throwIfFullRecalcAborted("save-runtime-cache-after-summary");
+      addRecalcLoopCount("rowsCount", Array.isArray(freshRuntimeRows) ? freshRuntimeRows.length : 0);
+      addRecalcLoopCount("monthsCount", countRuntimeMonths(freshRuntimeRows));
+      addRecalcLoopCount("obligationsCount", countRuntimeObligations(freshBaseRows));
+      addRecalcLoopCount("paymentsCount", countRuntimePayments(freshBaseRows));
+      logFullRecalcStepDone(runId, "build-fresh-runtime-rows-after-summary", { abonentId: id, rowsByIdCount: Object.keys(freshRowsById).length });
+      await nextUiTick();
       const freshPayload = { ledgerVersion: freshLedgerVersion, runtimeSignature: runtimeCacheSignature(freshLedgerVersion, freshPeriodActive, freshSelectedPeriod), periodActive: !!freshPeriodActive, period: freshPeriodActive && freshSelectedPeriod ? { from: freshSelectedPeriod.from || "", to: freshSelectedPeriod.to || "" } : null, rowsById: freshRowsById, updatedAt: (new Date()).toISOString() };
+      throwIfFullRecalcAborted("snapshot-save");
       capturePaymentTableComputedRowsSnapshot(freshRuntimeRows, freshRowsById, freshPeriodActive, freshSelectedPeriod, freshPayload.runtimeSignature, freshLedgerVersion);
+      logFullRecalcStep(runId, "save-runtime-cache-after-summary", { abonentId: id });
       console.time("[recalc] save runtime cache");
       if (window.Data && typeof Data.writeLedgerRuntimeCache === "function") Data.writeLedgerRuntimeCache(id, freshPayload);
+      try {
+        console.log("[full-recalc][save-snapshot]", {
+          abonentId: id,
+          target: "ledger_runtime_cache_after_summary",
+          ledgerVersion: freshLedgerVersion,
+          rowsByIdCount: Object.keys(freshRowsById).length,
+          periodActive: !!freshPeriodActive
+        });
+      } catch(eFreshRuntimeSaveLog) {}
       console.timeEnd("[recalc] save runtime cache");
+      logFullRecalcStepDone(runId, "save-runtime-cache-after-summary", { abonentId: id, rowsByIdCount: Object.keys(freshRowsById).length });
+      await nextUiTick();
       const summary = summaryResult && summaryResult.summary && typeof summaryResult.summary === "object" ? summaryResult.summary : null;
-      try { console.log("[payment-table][recalc-explicit]", { abonentId: id, stage: "done", recalcMode: recalcMode, ok: !!(summaryResult && summaryResult.ok === true), summary_status: summaryResult && (summaryResult.summary_status || summaryResult.status) || "error" }); } catch(eLogDone) {}
+      try {
+        console.log("[full-recalc][save-summary]", {
+          abonentId: id,
+          ok: !!(summaryResult && summaryResult.ok === true),
+          summaryStatus: summaryResult && (summaryResult.summary_status || summaryResult.status) || "error",
+          summaryReason: summaryResult && (summaryResult.summary_reason || summaryResult.reason) || ""
+        });
+      } catch(eSaveSummaryLog) {}
+      try { console.log("[payment-table][recalc-explicit]", { runId: runId, abonentId: id, stage: "done", recalcMode: recalcMode, ok: !!(summaryResult && summaryResult.ok === true), summary_status: summaryResult && (summaryResult.summary_status || summaryResult.status) || "error" }); } catch(eLogDone) {}
+      try {
+        console.log("[full-recalc][result]", {
+          runId: runId,
+          abonentId: id,
+          ok: !!(summaryResult && summaryResult.ok === true),
+          summaryStatus: summaryResult && (summaryResult.summary_status || summaryResult.status) || "error",
+          summaryReason: summaryResult && (summaryResult.summary_reason || summaryResult.reason) || "",
+          autoaccrualChanged: !!autoResult.changed
+        });
+      } catch(eFullResultLog) {}
       try {
         const memoStats = window.__calcTotalsMemoStats || {};
         const calcCalls = Number(memoStats.calcCalls) || 0;
@@ -4059,17 +5455,30 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
         summary_status: summaryResult && (summaryResult.summary_status || summaryResult.status) || "error",
         summary_reason: summaryResult && (summaryResult.summary_reason || summaryResult.reason) || "",
         summary: summary,
-        summary_save: summaryResult
+        summary_save: summaryResult,
+        runId: runId
       };
+    } catch(eFullRecalcAbort) {
+      if (eFullRecalcAbort && eFullRecalcAbort.fullRecalcAbort === true) {
+        endRecalcTotalTimer();
+        return fullRecalcAbortResult(eFullRecalcAbort, runId, id);
+      }
+      throw eFullRecalcAbort;
     } finally {
+      if (runningFullRecalc && runningFullRecalc.runId === runId) runningFullRecalc.paymentTableFullActive = false;
+      printCalcTotalsHotspotReport();
       if (recalcLock && recalcLock.status === "started" && window.Data && typeof Data.finishRecalcUidLock === "function") {
+        logFullRecalcStep(runId, "finish-lock", { abonentId: id });
         console.time("[recalc-step] finish lock");
         try {
-          await Data.finishRecalcUidLock(recalcLock.account_uid || id, recalcLock.lock_token || "");
+          await Data.finishRecalcUidLock(recalcLock.account_uid || id, recalcLock.lock_token || "", { runId: runId, abonentId: id, reason: "payment-table-finally" });
         } finally {
+          try { console.log("[recalc-lock][release-finally]", { runId: runId, uid: String(recalcLock.account_uid || id || ""), status: recalcLock.status || "" }); } catch(eReleaseFinallyLog) {}
           console.timeEnd("[recalc-step] finish lock");
+          logFullRecalcStepDone(runId, "finish-lock", { abonentId: id });
         }
       }
+      endRecalcTotalTimer();
     }
   };
 

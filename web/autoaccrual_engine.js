@@ -236,8 +236,7 @@
   }
   function savePayments(abonentId, arr, ownerId){
     if (window.Data && typeof window.Data.writePaymentLedger === 'function') {
-      window.Data.writePaymentLedger(abonentId, arr || [], { eventType: 'AUTOACCRUAL_WRITE' });
-      return;
+      return window.Data.writePaymentLedger(abonentId, arr || [], { eventType: 'AUTOACCRUAL_WRITE' });
     }
     throw new Error('Data.writePaymentLedger is not available');
   }
@@ -282,9 +281,120 @@
     return owner ? ('tariffs_' + owner) : '';
   }
 
+  function diagnoseTariffsStorage(source){
+    try{
+      const ownerId = getOwnerId();
+      const canonicalKey = ownerId ? ('tariffs_' + ownerId) : '';
+      const canonicalRaw = canonicalKey ? storeGetRaw(canonicalKey) : null;
+      const legacyRaw = storeGetRaw('tariffs_content_repair_v1');
+      const activeOwner = (window.JKHStore && typeof window.JKHStore.getOwnerId === 'function') ? String(JKHStore.getOwnerId() || '') : '';
+      const scopedKey = (window.JKHStore && typeof window.JKHStore.key === 'function' && canonicalKey) ? JKHStore.key(canonicalKey) : '';
+      const payload = {
+        source: String(source || 'autoaccrual'),
+        ownerId: ownerId,
+        activeOwnerId: activeOwner,
+        canonicalKey: canonicalKey,
+        scopedKey: scopedKey,
+        canonicalExists: canonicalRaw !== null && canonicalRaw !== undefined && String(canonicalRaw) !== '',
+        canonicalLength: canonicalRaw ? String(canonicalRaw).length : 0,
+        legacyExists: legacyRaw !== null && legacyRaw !== undefined && String(legacyRaw) !== '',
+        legacyLength: legacyRaw ? String(legacyRaw).length : 0,
+        serverValueExists: null,
+        localValueExists: canonicalRaw !== null && canonicalRaw !== undefined && String(canonicalRaw) !== ''
+      };
+      console.log('[diagnose][tariffs-storage]', payload);
+      if (ownerId && canonicalKey && typeof fetch === 'function'){
+        fetch('/api/store?key=' + encodeURIComponent(canonicalKey) + '&client_owner_hint=' + encodeURIComponent(ownerId), { credentials:'include' })
+          .then(r => r.json().catch(() => null))
+          .then(data => {
+            const value = data && (data.value !== undefined ? data.value : data.v);
+            console.log('[diagnose][tariffs-storage]', Object.assign({}, payload, {
+              source: String(source || 'autoaccrual') + ':server-readback',
+              serverValueExists: !!(data && data.ok === true && value !== null && value !== undefined && String(value) !== ''),
+              serverValueLength: value ? String(value).length : 0
+            }));
+          })
+          .catch(e => console.warn('[diagnose][tariffs-storage]', Object.assign({}, payload, {
+            source: String(source || 'autoaccrual') + ':server-readback-failed',
+            serverValueExists: null,
+            error: String(e && e.message || e)
+          })));
+      }
+    }catch(e){
+      console.warn('[diagnose][tariffs-storage]', { source:String(source || 'autoaccrual'), error:String(e && e.message || e) });
+    }
+  }
+
+  function diagnoseTariffServerReadFromAutoaccrual(source){
+    try{
+      const ownerId = getOwnerId();
+      const key = ownerId ? ('tariffs_' + ownerId) : '';
+      if (!ownerId || !key || typeof fetch !== 'function') return;
+      const localRaw = storeGetRaw(key);
+      let localJson = null;
+      try{
+        if (window.JKHStore && typeof JKHStore.getJSON === 'function') localJson = JKHStore.getJSON(key, null, ownerId);
+      }catch(eLocalJson){}
+      fetch('/api/store?key=' + encodeURIComponent(key) + '&client_owner_hint=' + encodeURIComponent(ownerId), { credentials:'include' })
+        .then(r => r.json().catch(() => null))
+        .then(data => {
+          const serverValue = data && Object.prototype.hasOwnProperty.call(data, 'value') && data.value !== null && data.value !== undefined
+            ? String(data.value)
+            : '';
+          let serverJson = null;
+          try{ serverJson = serverValue ? JSON.parse(serverValue) : null; }catch(eServerJson){}
+          let samePayload = false;
+          try{ samePayload = JSON.stringify(serverJson) === JSON.stringify(localJson); }catch(eCompare){}
+          console.log('[diagnose][tariff-server-read]', {
+            source: String(source || 'autoaccrual'),
+            ownerId: ownerId,
+            key: key,
+            localExists: localRaw !== null && localRaw !== undefined && String(localRaw) !== '',
+            serverExists: !!(data && data.ok === true && serverValue !== ''),
+            serverLength: serverValue.length,
+            localLength: localRaw ? String(localRaw).length : 0,
+            jkhStoreJsonExists: localJson !== null && localJson !== undefined,
+            payloadMatchesJKHStoreGetJSON: samePayload
+          });
+        })
+        .catch(e => console.warn('[diagnose][tariff-server-read]', {
+          source: String(source || 'autoaccrual'),
+          ownerId: ownerId,
+          key: key,
+          localExists: localRaw !== null && localRaw !== undefined && String(localRaw) !== '',
+          serverExists: null,
+          serverLength: 0,
+          localLength: localRaw ? String(localRaw).length : 0,
+          error: String(e && e.message || e)
+        }));
+    }catch(e){
+      console.warn('[diagnose][tariff-server-read]', { source:String(source || 'autoaccrual'), error:String(e && e.message || e) });
+    }
+  }
+
   function loadOwnerTariffsRaw(){
     try{
       const key = ownerTariffsKey();
+      diagnoseTariffsStorage('autoaccrual:loadOwnerTariffsRaw');
+      diagnoseTariffServerReadFromAutoaccrual('autoaccrual:loadOwnerTariffsRaw');
+      try{
+        const storeOwner = JKHStore.getOwnerId();
+        const storeKey = 'tariffs_' + storeOwner;
+        console.log('[diagnose][autoaccrual-store]', {
+          instanceId: window.__JKHSTORE_INSTANCE_ID,
+          sameObject: window.JKHStore === JKHStore,
+          owner: storeOwner,
+          key: storeKey,
+          scopedKey: JKHStore.key(storeKey)
+        });
+        console.log('[diagnose][autoaccrual-tariffs]', {
+          raw: JKHStore.getRaw(storeKey),
+          json: JKHStore.getJSON(storeKey)
+        });
+        console.log('[diagnose][window-storage]', window.JKHStore === JKHStore);
+      }catch(eStoreDiag){
+        console.warn('[diagnose][autoaccrual-store]', { error:String(eStoreDiag && eStoreDiag.message || eStoreDiag) });
+      }
       if (!key) return [];
       const raw = storeGetRaw(key);
       if (raw === null || raw === undefined) return [];
@@ -294,6 +404,71 @@
       console.warn('[JKHAutoAccrual] loadOwnerTariffsRaw failed', e);
       return [];
     }
+  }
+
+  function ownerTariffsStorageState(){
+    const key = ownerTariffsKey();
+    const raw = key ? storeGetRaw(key) : null;
+    const legacyRaw = storeGetRaw('tariffs_content_repair_v1');
+    return {
+      ownerId: getOwnerId(),
+      tariffsKey: key,
+      canonicalMissing: !key || raw === null || raw === undefined || String(raw) === '',
+      canonicalLength: raw ? String(raw).length : 0,
+      legacyExists: legacyRaw !== null && legacyRaw !== undefined && String(legacyRaw) !== '',
+      legacyLength: legacyRaw ? String(legacyRaw).length : 0
+    };
+  }
+
+  function delay(ms){
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  async function waitForOwnerTariffs(ownerId){
+    const owner = String(ownerId || '').trim();
+    const key = owner ? ('tariffs_' + owner) : '';
+    let lastRaw = '';
+    let attempts = 0;
+    for (let attempt = 1; attempt <= 30; attempt++){
+      attempts = attempt;
+      let list = null;
+      try{
+        if (key && window.JKHStore && typeof JKHStore.getRaw === 'function'){
+          const raw = JKHStore.getRaw(key);
+          lastRaw = raw === null || raw === undefined ? '' : String(raw);
+        }
+        if (key && window.JKHStore && typeof JKHStore.getJSON === 'function'){
+          list = await JKHStore.getJSON(key);
+        }
+      }catch(e){}
+      const found = Array.isArray(list) && list.length > 0;
+      try {
+        console.log('[autoaccrual][wait-owner-tariffs]', {
+          ownerId: owner,
+          found,
+          attempts,
+          rawLength: lastRaw ? lastRaw.length : 0
+        });
+      } catch(eLog) {}
+      if (found) {
+        try {
+          console.log('[autoaccrual][tariffs-ready]', {
+            ownerId: owner,
+            attempts,
+            rawLength: lastRaw ? lastRaw.length : 0,
+            length: Array.isArray(list) ? list.length : 0
+          });
+        } catch(eReadyLog) {}
+        return {
+          found,
+          list,
+          attempts,
+          rawLength: lastRaw ? lastRaw.length : 0
+        };
+      }
+      if (attempt < 30) await delay(100);
+    }
+    return { found:false, list:null, attempts, rawLength: lastRaw ? lastRaw.length : 0 };
   }
 
   function normalizeOwnerTariffs(list){
@@ -334,7 +509,22 @@
     return out;
   }
 
+  function logSecondTariffRead(source, rawLength){
+    try{
+      console.warn('[autoaccrual][second-read]', {
+        source: String(source || ''),
+        rawLength: rawLength || 0,
+        stack: (new Error()).stack || ''
+      });
+    }catch(eSecondReadLog){}
+  }
+
   function loadNormalizedOwnerTariffs(){
+    try{
+      const key = ownerTariffsKey();
+      const raw = key ? storeGetRaw(key) : null;
+      logSecondTariffRead('loadNormalizedOwnerTariffs', raw ? String(raw).length : 0);
+    }catch(eSecondRead){}
     return normalizeOwnerTariffs(loadOwnerTariffsRaw());
   }
 
@@ -347,8 +537,8 @@
     return chosen;
   }
 
-  function sumPerM2ForMonthProRated(month, year, sq){
-    const tariffs = loadNormalizedOwnerTariffs().filter(t => t.type === 'per_m2');
+  function sumPerM2ForMonthProRated(month, year, sq, ownerTariffs){
+    const tariffs = (Array.isArray(ownerTariffs) ? ownerTariffs : loadNormalizedOwnerTariffs()).filter(t => t.type === 'per_m2');
     if (!tariffs.length || !(sq > 0)) return 0;
 
     const y = Number(year);
@@ -388,8 +578,8 @@
     return r2(total);
   }
 
-  function fixedSumForMonthProRated(month, year){
-    const tariffs = loadNormalizedOwnerTariffs().filter(t => t.type === 'fixed_month');
+  function fixedSumForMonthProRated(month, year, ownerTariffs){
+    const tariffs = (Array.isArray(ownerTariffs) ? ownerTariffs : loadNormalizedOwnerTariffs()).filter(t => t.type === 'fixed_month');
     if (!tariffs.length) return 0;
 
     const y = Number(year);
@@ -578,7 +768,7 @@
     return arr.length ? Math.max(...arr.map(x => Number(x.id) || 0)) + 1 : 1;
   }
 
-  function ensureAutoAccrualsForAbonent(ls, arr){
+  async function ensureAutoAccrualsForAbonent(ls, arr){
     const range = getActiveRangeISOForAbonent(ls);
     if (range && range.__fatal) return { changed:false, reason:range.code, code:range.code, message:range.message, fatal:true, details:range.details };
     if (!range) return { changed:false, reason:'NO_RANGE' };
@@ -588,6 +778,68 @@
 
     const sq = getSquareForAbonent(ls);
     const regnum = getPremiseRegnumForAbonent(ls);
+    const ownerId = getOwnerId();
+    const tariffsWait = await waitForOwnerTariffs(ownerId);
+    if (!tariffsWait || tariffsWait.found !== true){
+      return {
+        ok:false,
+        changed:false,
+        reason:'TARIFFS_NOT_FOUND_AFTER_WAIT',
+        fatal:true,
+        ownerId: ownerId,
+        attempts: tariffsWait && tariffsWait.attempts || 30,
+        details:{
+          abonentId: String(ls || ''),
+          ownerId: ownerId,
+          attempts: tariffsWait && tariffsWait.attempts || 30,
+          rawLength: tariffsWait && tariffsWait.rawLength || 0,
+          tariffsKey: ownerTariffsKey(),
+          regnum: regnum,
+          square: sq
+        }
+      };
+    }
+    const tariffs = normalizeOwnerTariffs(tariffsWait.list);
+    try {
+      console.log('[autoaccrual][reuse-loaded-tariffs]', {
+        ownerId: ownerId,
+        tariffsCount: tariffs.length
+      });
+    } catch(eReuseLog) {}
+    const hasPerM2Tariffs = tariffs.some(t => t.type === 'per_m2');
+    if (!tariffs.length){
+      const details = {
+        abonentId: String(ls || ''),
+        ownerId: ownerId,
+        tariffsKey: ownerTariffsKey(),
+        canonicalMissing: false,
+        canonicalLength: tariffsWait && tariffsWait.rawLength || 0,
+        legacyExists: false,
+        legacyLength: 0,
+        regnum: regnum,
+        square: sq,
+        from: range.from || '',
+        to: range.to || '',
+        reason: 'TARIFFS_NOT_FOUND',
+        message: 'Откройте страницу Тарифы и нажмите сохранить всё для переноса тарифов в canonical storage.'
+      };
+      try { console.error('[autoaccrual][blocked-invalid-input]', details); } catch(e) {}
+      return { changed:false, reason:'TARIFFS_NOT_FOUND', fatal:true, details:details };
+    }
+    if (hasPerM2Tariffs && !(sq > 0)){
+      const details = {
+        abonentId: String(ls || ''),
+        ownerId: getOwnerId(),
+        tariffsKey: ownerTariffsKey(),
+        regnum: regnum,
+        square: sq,
+        from: range.from || '',
+        to: range.to || '',
+        reason: 'SQUARE_NOT_FOUND'
+      };
+      try { console.error('[autoaccrual][blocked-invalid-input]', details); } catch(e) {}
+      return { changed:false, reason:'SQUARE_NOT_FOUND', fatal:true, details:details };
+    }
     const ownershipHistory = regnum ? getOwnershipHistoryForRegnum(regnum) : [];
 
     const allowedMonths = months.map(m => `${m.year}-${m.month}`);
@@ -622,8 +874,8 @@
       const key = `${mm.year}-${mm.month}`;
       const rows = byYm.get(key) || [];
 
-      const sqmPart = (sq > 0) ? sumPerM2ForMonthProRated(mm.month, mm.year, sq) : 0;
-      const fixedPart = fixedSumForMonthProRated(mm.month, mm.year);
+      const sqmPart = (sq > 0) ? sumPerM2ForMonthProRated(mm.month, mm.year, sq, tariffs) : 0;
+      const fixedPart = fixedSumForMonthProRated(mm.month, mm.year, tariffs);
       const totalAccr = r2(sqmPart + fixedPart);
 
       let accr = 0;
@@ -694,7 +946,7 @@
     return { changed, reason:'OK', diagnostics: diagnostics };
   }
 
-  function recalcForAbonent(ls, opts){
+  async function recalcForAbonent(ls, opts){
     const id = String(ls||'').trim();
     const options = opts && typeof opts === 'object' ? opts : {};
     const dryRun = options.dryRun === true || options.readOnly === true;
@@ -715,8 +967,12 @@
       throw e;
     }
     const beforeRows = dryRun ? JSON.parse(JSON.stringify(arr || [])) : null;
-    const res = ensureAutoAccrualsForAbonent(id, arr);
+    const res = await ensureAutoAccrualsForAbonent(id, arr);
     const rows = arr;
+
+    if (res && res.fatal){
+      return { ok:false, ...res, ls:id, rows: dryRun ? beforeRows : rows, proposedRows: rows };
+    }
 
     if (dryRun){
       console.log('[autoaccrual][dry-run]', { id, changed: !!res.changed, len: rows.length });
@@ -727,7 +983,18 @@
 
     if (res.changed){
       console.log('[autoaccrual][apply]', { id, len: rows.length });
-      savePayments(id, rows, ownerId);
+      const saved = savePayments(id, rows, ownerId);
+      if (saved === false){
+        const block = window.__JKH_LAST_AUTOACCRUAL_BLOCK || null;
+        return {
+          ok:false,
+          changed:true,
+          reason: block && block.reason ? block.reason : 'PAYMENT_LEDGER_WRITE_BLOCKED',
+          blocked: block || null,
+          ls:id,
+          rows: rows
+        };
+      }
       const lenSaved = rows.length;
       const existsSaved = lenSaved > 0;
       console.log('[autoaccrual][save]', { id, len: lenSaved, exists: existsSaved });
@@ -746,20 +1013,20 @@
     return { ok:true, ...res, ls:id };
   }
 
-  function dryRunForAbonent(ls){
+  async function dryRunForAbonent(ls){
     return recalcForAbonent(ls, { dryRun: true });
   }
 
-  function recalcForMany(list){
+  async function recalcForMany(list){
     const ids = Array.from(new Set((list||[]).map(x=>String(x||'').trim()).filter(Boolean)));
     const out = [];
     for (const id of ids){
-      out.push(recalcForAbonent(id));
+      out.push(await recalcForAbonent(id));
     }
     return out;
   }
 
-  function recalcAll(){
+  async function recalcAll(){
     const db = getDb();
     const ids = Object.keys(db?.abonents || {});
     return recalcForMany(ids);

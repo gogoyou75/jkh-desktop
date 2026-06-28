@@ -69,6 +69,19 @@
     return value;
   }
 
+  window.unwrapRuntimeDb = window.unwrapRuntimeDb || function unwrapRuntimeDb(raw) {
+    if (!raw) return null;
+    try {
+      var parsed = (typeof raw === "string") ? JSON.parse(raw) : raw;
+      if (parsed && typeof parsed === "object" && Object.prototype.hasOwnProperty.call(parsed, "value") && parsed.value) {
+        return (typeof parsed.value === "string") ? JSON.parse(parsed.value) : parsed.value;
+      }
+      return parsed;
+    } catch (e) {
+      return null;
+    }
+  };
+
   function hasServerEnvType() {
     return !!getEnvType();
   }
@@ -178,9 +191,55 @@
     return Storage.prototype.removeItem.call(localStorage, fullKey);
   }
 
+  var __tariffServerReadDiagSeen = {};
+
+  function _diagnoseTariffServerRead(baseKey, ownerId, localRaw) {
+    try {
+      var key = String(baseKey || "");
+      if (key.indexOf("tariffs_") !== 0) return;
+      var owner = normalizeOwnerId(ownerId || getActiveOwnerId());
+      if (!owner || owner === "guest" || owner === "ALL") return;
+      if (typeof fetch !== "function") return;
+      var sig = owner + "|" + key;
+      var now = Date.now ? Date.now() : (new Date()).getTime();
+      if (__tariffServerReadDiagSeen[sig] && now - __tariffServerReadDiagSeen[sig] < 2000) return;
+      __tariffServerReadDiagSeen[sig] = now;
+      var localValue = (localRaw === null || localRaw === undefined) ? "" : String(localRaw);
+      fetch("/api/store?key=" + encodeURIComponent(key) + "&client_owner_hint=" + encodeURIComponent(owner), { credentials: "include" })
+        .then(function (r) { return r.json().catch(function () { return null; }); })
+        .then(function (data) {
+          var serverValue = data && Object.prototype.hasOwnProperty.call(data, "value") && data.value !== null && data.value !== undefined
+            ? String(data.value)
+            : "";
+          console.log("[diagnose][tariff-server-read]", {
+            source: "JKHStore.getRaw",
+            ownerId: owner,
+            key: key,
+            localExists: localValue !== "",
+            serverExists: !!(data && data.ok === true && serverValue !== ""),
+            serverLength: serverValue.length,
+            localLength: localValue.length
+          });
+        })
+        .catch(function (e) {
+          console.warn("[diagnose][tariff-server-read]", {
+            source: "JKHStore.getRaw",
+            ownerId: owner,
+            key: key,
+            localExists: localValue !== "",
+            serverExists: null,
+            serverLength: 0,
+            localLength: localValue.length,
+            error: String(e && e.message || e)
+          });
+        });
+    } catch (eDiagTariffServerRead) {}
+  }
+
   function getItem(key, ownerId) {
-    if (_isProjectDataKey(key)) return _cacheGet(key, ownerId);
-    return _lsGetDirect(k(key, ownerId));
+    var raw = _isProjectDataKey(key) ? _cacheGet(key, ownerId) : _lsGetDirect(k(key, ownerId));
+    _diagnoseTariffServerRead(key, ownerId, raw);
+    return raw;
   }
 
   function setItem(key, value, ownerId) {
@@ -600,6 +659,18 @@
       setRawForOwner: function (ownerId, baseKey, value) { return _adminSetItemForOwner(ownerId, baseKey, value); }
     }
   };
+
+  try {
+    window.__JKHSTORE_INSTANCE_ID = window.__JKHSTORE_INSTANCE_ID || (
+      window.crypto && typeof window.crypto.randomUUID === "function"
+        ? window.crypto.randomUUID()
+        : ("jkhstore_" + Date.now() + "_" + Math.random().toString(36).slice(2))
+    );
+    console.log("[diagnose][store-instance]", {
+      instanceId: window.__JKHSTORE_INSTANCE_ID,
+      sameObject: window.JKHStore === JKHStore
+    });
+  } catch (eStoreInstanceDiag) {}
 
   window.JKHBoot?.markReady?.('storage');
 
@@ -1205,6 +1276,33 @@
       var baseKey = sk.indexOf(pref) === 0 ? sk.slice(pref.length) : sk;
       if (!_isProjectDataKeyLocal(baseKey)) continue;
       if (keep[baseKey]) continue;
+      if (baseKey.indexOf("tariffs_") === 0) {
+        var tariffRawBeforeRemove = _readLocalCompat(baseKey, ownerId);
+        if (baseKey === ("tariffs_" + String(ownerId || "").trim()) && tariffRawBeforeRemove !== "") {
+          try {
+            console.warn("[tariffs][preserve-local-canonical]", {
+              ownerId: ownerId,
+              key: baseKey,
+              localLength: tariffRawBeforeRemove.length,
+              reason: "missing-in-server-dump"
+            });
+          } catch (eTariffPreserveLog) {}
+          continue;
+        }
+        try {
+          console.warn("[diagnose][tariffs-storage]", {
+            source: "storage:dump-remove-local",
+            ownerId: ownerId,
+            canonicalKey: baseKey,
+            canonicalExists: tariffRawBeforeRemove !== "",
+            canonicalLength: tariffRawBeforeRemove.length,
+            legacyExists: _readLocalCompat("tariffs_content_repair_v1", ownerId) !== "",
+            legacyLength: _readLocalCompat("tariffs_content_repair_v1", ownerId).length,
+            serverValueExists: false,
+            localValueExists: tariffRawBeforeRemove !== ""
+          });
+        } catch (eTariffRemoveLog) {}
+      }
       if (!serverDbEmpty && baseKey.indexOf("card_snapshot_") === 0) {
         try {
           console.log("[store-dump][preserve-local-card-snapshot]", {
@@ -1243,6 +1341,21 @@
       try {
         _writeServerDumpLocalCompat(kx, (val === null || val === undefined) ? "" : String(val), ownerId);
         written++;
+        if (String(kx || "").indexOf("tariffs_") === 0) {
+          try {
+            console.log("[diagnose][tariffs-storage]", {
+              source: "storage:dump-write-local",
+              ownerId: ownerId,
+              canonicalKey: kx,
+              canonicalExists: val !== null && val !== undefined && String(val) !== "",
+              canonicalLength: val ? String(val).length : 0,
+              legacyExists: _readLocalCompat("tariffs_content_repair_v1", ownerId) !== "",
+              legacyLength: _readLocalCompat("tariffs_content_repair_v1", ownerId).length,
+              serverValueExists: val !== null && val !== undefined && String(val) !== "",
+              localValueExists: _readLocalCompat(kx, ownerId) !== ""
+            });
+          } catch (eTariffWriteLog) {}
+        }
       } catch (eWrite) {
         throw eWrite;
       }
@@ -1260,6 +1373,14 @@
       var ln = Array.isArray(db.links) ? db.links.length : 0;
       return (ab + pr + ln) === 0;
     } catch (e) { return true; }
+  }
+
+  function _isDbObjectEffectivelyEmpty(db) {
+    if (!db || typeof db !== "object") return true;
+    var ab = db.abonents && typeof db.abonents === "object" ? Object.keys(db.abonents).length : 0;
+    var pr = db.premises && typeof db.premises === "object" ? Object.keys(db.premises).length : 0;
+    var ln = Array.isArray(db.links) ? db.links.length : 0;
+    return (ab + pr + ln) === 0;
   }
 
   function _validateAbonentsDbRaw(rawDb) {
@@ -1406,6 +1527,21 @@
       for (var i = 0; i < keysToSave.length; i++) {
         var baseKey = keysToSave[i];
         var raw = _readLocalCompat(baseKey, ownerId);
+        if (String(baseKey || "").indexOf("tariffs_") === 0) {
+          try {
+            console.log("[diagnose][tariffs-storage]", {
+              source: "storage:upload-read-local",
+              ownerId: ownerId,
+              canonicalKey: baseKey,
+              canonicalExists: raw !== "",
+              canonicalLength: raw.length,
+              legacyExists: _readLocalCompat("tariffs_content_repair_v1", ownerId) !== "",
+              legacyLength: _readLocalCompat("tariffs_content_repair_v1", ownerId).length,
+              serverValueExists: null,
+              localValueExists: raw !== ""
+            });
+          } catch (eTariffUploadLog) {}
+        }
 
         // safeguard: не перезаписываем непустую базу на сервере пустой локальной базой
         if (baseKey === KEY_DB && _isDbEffectivelyEmpty(raw)) {
@@ -1625,13 +1761,60 @@
         }
 
         var applied = replaced.written;
-        var status = replaced.serverDbEmpty ? "empty" : "ready";
-        var loadedAt = _nowISO();
-        if (status === "empty") {
+        var runtimeBefore = window.AbonentsDB || null;
+        var rawRuntimeDb = _readLocalCompat(KEY_DB, ownerId);
+        var parsedRuntimeDb = window.unwrapRuntimeDb ? window.unwrapRuntimeDb(rawRuntimeDb) : safeJsonParse(rawRuntimeDb, null);
+        var runtimeCounts = {
+          abonents: runtimeBefore && runtimeBefore.abonents && typeof runtimeBefore.abonents === "object" ? Object.keys(runtimeBefore.abonents).length : 0,
+          premises: runtimeBefore && runtimeBefore.premises && typeof runtimeBefore.premises === "object" ? Object.keys(runtimeBefore.premises).length : 0,
+          links: runtimeBefore && Array.isArray(runtimeBefore.links) ? runtimeBefore.links.length : 0
+        };
+        var runtimeHadContent = !_isDbObjectEffectivelyEmpty(runtimeBefore);
+        var parsedHasContent = !!(parsedRuntimeDb && typeof parsedRuntimeDb === "object" && !Array.isArray(parsedRuntimeDb) && !_isDbObjectEffectivelyEmpty(parsedRuntimeDb));
+        if (!replaced.serverDbEmpty && parsedHasContent) {
+          window.AbonentsDB = parsedRuntimeDb;
           try {
-            window.AbonentsDB = { orgName: "", orgInn: "", chairman: "", premises: {}, links: [], premiseEvents: [], abonents: {} };
-          } catch (eRuntimeEmpty) {}
+            console.log("[runtime-db-keys]", Object.keys(window.AbonentsDB || {}));
+            console.log(
+              "[runtime-abonents-count]",
+              window.AbonentsDB && window.AbonentsDB.abonents
+                ? Object.keys(window.AbonentsDB.abonents).length
+                : "missing"
+            );
+          } catch (shapeLogErr) {}
+          try {
+            console.info("[data][runtime-hydrate-ok]", {
+              ownerId: ownerId,
+              reason: String(options && options.reason || "server-first"),
+              hydratedFrom: "storage.raw",
+              dbCount: Object.keys(parsedRuntimeDb.abonents || {}).length,
+              premiseCount: Object.keys(parsedRuntimeDb.premises || {}).length,
+              linkCount: Array.isArray(parsedRuntimeDb.links) ? parsedRuntimeDb.links.length : 0
+            });
+          } catch (hydrateLogErr) {}
+        } else if (replaced.serverDbEmpty && (parsedHasContent || runtimeHadContent)) {
+          try {
+            console.warn("[data][runtime-hydrate-empty-blocked]", {
+              status: "empty",
+              rawLen: String(rawRuntimeDb || "").length,
+              runtimeCounts: runtimeCounts
+            });
+          } catch (emptyBlockedLogErr) {}
+          if (parsedHasContent && !runtimeHadContent) {
+            window.AbonentsDB = parsedRuntimeDb;
+            try {
+              console.log("[runtime-db-keys]", Object.keys(window.AbonentsDB || {}));
+              console.log(
+                "[runtime-abonents-count]",
+                window.AbonentsDB && window.AbonentsDB.abonents
+                  ? Object.keys(window.AbonentsDB.abonents).length
+                  : "missing"
+              );
+            } catch (shapeLogErr2) {}
+          }
         }
+        var status = (!replaced.serverDbEmpty || runtimeHadContent || parsedHasContent) ? "ready" : "empty";
+        var loadedAt = _nowISO();
         _setUIState({
           server: { status: "online", checkedAt: _nowISO(), message: "" },
           data: { status: status, loadedAt: loadedAt, source: "server", message: (status === "empty" ? "Серверный dump пуст" : "") }

@@ -186,6 +186,8 @@ Doc: docs/LOGIC_SPEC_v1.5.3.md
         .summary-status-calculating { background:#d9ecff; color:#064f8f; }
         .summary-status-missing { background:#f1f1f1; color:#555; }
         .summary-status-error { background:#fde2e2; color:#9b0015; }
+        .summary-status-cancelled { background:#f1f1f1; color:#555; }
+        .summary-status-timeout { background:#fff3cd; color:#7a5300; }
         .summary-reason { display:block; margin-top:3px; font-size:11px; color:#666; }
         .readonly-hint {
             font-size: 12px;
@@ -493,6 +495,7 @@ Doc: docs/LOGIC_SPEC_v1.5.3.md
 
     <div class="calc-inline-actions">
         <button class="calc-btn" id="calcRunBtn" type="button">Пересчитать</button>
+        <button class="calc-btn" id="calcStopBtn" type="button" style="display:none;">Остановить пересчёт</button>
         <button class="calc-btn" id="calcReportsBtn" type="button">справки</button>
         <button class="calc-btn" id="calcResetBtn" type="button">сбросить</button>
     </div>
@@ -728,6 +731,328 @@ function hasExplicitAbonentCardContext() {
     return !!String(params.get("abonent") || params.get("uid") || "").trim();
 }
 
+function __countRuntimeDb(db) {
+    return {
+        abonentsCount: db && db.abonents && typeof db.abonents === "object" ? Object.keys(db.abonents).length : 0,
+        premisesCount: db && db.premises && typeof db.premises === "object" ? Object.keys(db.premises).length : 0,
+        linksCount: db && Array.isArray(db.links) ? db.links.length : 0
+    };
+}
+
+function __installAbonentCardRuntimeDbGuard(rawHasContent) {
+    try {
+        if (window.__ABONENTS_DB_GUARD_INSTALLED) return true;
+        const desc = Object.getOwnPropertyDescriptor(window, "AbonentsDB");
+        if (desc && desc.configurable === false) return false;
+
+        let currentDb = window.AbonentsDB && typeof window.AbonentsDB === "object"
+            ? window.AbonentsDB
+            : { abonents: {}, premises: {}, links: [] };
+
+        Object.defineProperty(window, "AbonentsDB", {
+            configurable: true,
+            enumerable: true,
+            get() {
+                return currentDb;
+            },
+            set(next) {
+                const nextDb = next && typeof next === "object" ? next : null;
+                const currentCounts = __countRuntimeDb(currentDb || {});
+                const nextCounts = __countRuntimeDb(nextDb || {});
+                const currentHasContent = !!(currentCounts.abonentsCount || currentCounts.premisesCount || currentCounts.linksCount);
+                const nextHasContent = !!(nextCounts.abonentsCount || nextCounts.premisesCount || nextCounts.linksCount);
+                if (rawHasContent && currentHasContent && !nextHasContent) {
+                    console.warn("[abonent_card][runtime-overwrite-blocked]", {
+                        reason: "empty_overwrite_blocked",
+                        currentCounts,
+                        nextCounts
+                    });
+                    return;
+                }
+                currentDb = nextDb || { abonents: {}, premises: {}, links: [] };
+            }
+        });
+        window.__ABONENTS_DB_GUARD_INSTALLED = true;
+        return true;
+    } catch (e) {
+        console.warn("[abonent_card][runtime-guard-error]", e);
+        return false;
+    }
+}
+
+function hydrateRuntimeDbFromStore() {
+    try {
+        console.log("[abonent_card][hydrate-start]");
+        const rawBlob = (window.JKHStore && typeof window.JKHStore.getRaw === "function")
+            ? window.JKHStore.getRaw("abonents_db_v1")
+            : null;
+        const rawType = rawBlob === null ? "null" : Array.isArray(rawBlob) ? "array" : typeof rawBlob;
+        const rawStr = typeof rawBlob === "string" ? rawBlob : JSON.stringify(rawBlob || null);
+        console.log("[abonent_card][raw-check]", {
+            rawType,
+            rawLen: rawStr.length,
+            rawStart: rawStr.slice(0, 120)
+        });
+
+        const parsed = rawStr ? JSON.parse(rawStr) : null;
+        console.log("[abonent_card][parsed-keys]", {
+            keys: Object.keys(parsed || {}),
+            abonentsType: typeof (parsed && parsed.abonents),
+            abonentsKeysCount: parsed && parsed.abonents ? Object.keys(parsed.abonents).length : 0,
+            has1001: !!(parsed && parsed.abonents && parsed.abonents["1001"])
+        });
+
+        let db = window.unwrapRuntimeDb ? window.unwrapRuntimeDb(rawBlob) : (parsed && Object.prototype.hasOwnProperty.call(parsed, "value") ? parsed.value : parsed);
+        if (typeof db === "string" && db.trim()) {
+            try { db = JSON.parse(db); } catch (innerParseErr) { console.warn("[abonent_card][hydrate-inner-parse-error]", innerParseErr); }
+        }
+        if (!db || typeof db !== "object" || Array.isArray(db)) {
+            db = null;
+        }
+
+        const dbHasContent = !!(db && db.abonents && typeof db.abonents === "object" && Object.keys(db.abonents).length);
+        const rawLen = rawStr.length;
+        if (dbHasContent) {
+            window.AbonentsDB = db;
+            window.AbonentsDB.abonents = db.abonents || {};
+            window.AbonentsDB.premises = db.premises || {};
+            window.AbonentsDB.links = db.links || [];
+            __installAbonentCardRuntimeDbGuard(true);
+        } else if (rawLen > 1000) {
+            console.warn("[abonent_card][hydrate-large-raw-no-db]", {
+                rawLen,
+                currentKeys: Object.keys(window.AbonentsDB || {})
+            });
+            __installAbonentCardRuntimeDbGuard(true);
+        } else if (!window.AbonentsDB || typeof window.AbonentsDB !== "object") {
+            window.AbonentsDB = { abonents: {}, premises: {}, links: [] };
+            __installAbonentCardRuntimeDbGuard(false);
+        } else {
+            window.AbonentsDB.abonents = window.AbonentsDB.abonents || {};
+            window.AbonentsDB.premises = window.AbonentsDB.premises || {};
+            window.AbonentsDB.links = window.AbonentsDB.links || [];
+            __installAbonentCardRuntimeDbGuard(false);
+        }
+        const counts = __countRuntimeDb(window.AbonentsDB);
+        console.log("[abonent_card][hydrate-done]", counts);
+        console.log("[abonent_card][hydrate-after-assign]", {
+            abonentsCount: Object.keys(window.AbonentsDB.abonents || {}).length,
+            premisesCount: Object.keys(window.AbonentsDB.premises || {}).length,
+            linksCount: (window.AbonentsDB.links || []).length,
+            has1001: !!(window.AbonentsDB && window.AbonentsDB.abonents && window.AbonentsDB.abonents["1001"])
+        });
+        setTimeout(() => {
+            const tickCounts = __countRuntimeDb(window.AbonentsDB);
+            window.__JKH_HYDRATE_AFTER_TICK_COUNT = (Number(window.__JKH_HYDRATE_AFTER_TICK_COUNT) || 0) + 1;
+            console.log("[abonent_card][hydrate-after-tick]", {
+                count: window.__JKH_HYDRATE_AFTER_TICK_COUNT,
+                abonentsCount: tickCounts.abonentsCount,
+                has1001: !!(window.AbonentsDB && window.AbonentsDB.abonents && window.AbonentsDB.abonents["1001"])
+            });
+        }, 0);
+        return {
+            rawLen: String(rawBlob || "").length,
+            counts: counts,
+            foundTarget: !!(String(getAbonentIdFromURL() || "").trim() && window.AbonentsDB && window.AbonentsDB.abonents && window.AbonentsDB.abonents[String(getAbonentIdFromURL() || "").trim()])
+        };
+    } catch (e) {
+        console.warn("[abonent_card][hydrate-error]", e);
+        return {
+            rawLen: 0,
+            counts: __countRuntimeDb(window.AbonentsDB || {}),
+            foundTarget: !!(String(getAbonentIdFromURL() || "").trim() && window.AbonentsDB && window.AbonentsDB.abonents && window.AbonentsDB.abonents[String(getAbonentIdFromURL() || "").trim()])
+        };
+    }
+}
+
+function __hydratedDbCounts(){
+    const db = window.AbonentsDB && typeof window.AbonentsDB === "object" ? window.AbonentsDB : {};
+    return {
+        abonentsCount: db && db.abonents && typeof db.abonents === "object" ? Object.keys(db.abonents).length : 0,
+        premisesCount: db && db.premises && typeof db.premises === "object" ? Object.keys(db.premises).length : 0,
+        linksCount: db && Array.isArray(db.links) ? db.links.length : 0
+    };
+}
+
+function __cardHydrateOwnerId(){
+    try { return (window.JKHStore && typeof JKHStore.getOwnerId === "function") ? String(JKHStore.getOwnerId() || "").trim() : ""; }
+    catch(e){ return ""; }
+}
+
+function __logBlockedBeforeHydrate(reason){
+    const counts = __hydratedDbCounts();
+    const payload = {
+        abonentId: String(getAbonentIdFromURL() || ""),
+        abonentsCount: counts.abonentsCount,
+        linksCount: counts.linksCount,
+        premisesCount: counts.premisesCount,
+        ownerId: __cardHydrateOwnerId(),
+        reason: String(reason || "DB_NOT_HYDRATED")
+    };
+    try { console.warn("[card][blocked-before-hydrate]", payload); } catch(e) {}
+    return payload;
+}
+
+function __showDbStillLoadingMessage(){
+    let box = document.getElementById("cardDbHydrateBlockedBox");
+    if (!box) {
+        box = document.createElement("div");
+        box.id = "cardDbHydrateBlockedBox";
+        box.style.cssText = "margin:10px 0;padding:10px 12px;border:1px solid #f0c36d;background:#fff8e1;color:#7a5300;font-size:13px;";
+        const anchor = document.getElementById("abonentSummaryStatusCard") || document.body.firstChild;
+        if (anchor && anchor.parentNode) anchor.parentNode.insertBefore(box, anchor);
+        else document.body.appendChild(box);
+    }
+    box.textContent = "База данных ещё загружается. Повторите через несколько секунд.";
+}
+
+function __hideDbStillLoadingMessage(){
+    const box = document.getElementById("cardDbHydrateBlockedBox");
+    if (box) box.remove();
+}
+
+function __isHydratedDatabaseReady(){
+    const counts = __hydratedDbCounts();
+    return counts.abonentsCount > 0;
+}
+
+async function waitForHydratedDatabase(options){
+    const opts = options || {};
+    const timeoutMs = Number(opts.timeoutMs || opts.timeout || 10000);
+    const startedAt = Date.now();
+    while ((Date.now() - startedAt) <= timeoutMs) {
+        const hydration = hydrateRuntimeDbFromStore();
+        if (__isHydratedDatabaseReady()) {
+            window.__ABONENT_CARD_DB_HYDRATED = true;
+            __hideDbStillLoadingMessage();
+            return { ok:true, counts: __hydratedDbCounts(), hydration: hydration || null };
+        }
+        try {
+            if (window.Data && typeof Data.waitForServerFirstDataReady === "function") {
+                await Data.waitForServerFirstDataReady({ timeoutMs: 1000 });
+            } else if (window.JKHDataLoader && typeof window.JKHDataLoader.loadFromServer === "function") {
+                await window.JKHDataLoader.loadFromServer({ force:false, reason:"waitForHydratedDatabase" });
+            }
+        } catch(e) {}
+        if (__isHydratedDatabaseReady()) {
+            window.__ABONENT_CARD_DB_HYDRATED = true;
+            __hideDbStillLoadingMessage();
+            return { ok:true, counts: __hydratedDbCounts(), hydration: hydration || null };
+        }
+        await new Promise(resolve => setTimeout(resolve, 150));
+    }
+    window.__ABONENT_CARD_DB_HYDRATED = false;
+    const blocked = __logBlockedBeforeHydrate("TIMEOUT");
+    __showDbStillLoadingMessage();
+    return { ok:false, reason:"DB_NOT_HYDRATED", counts: __hydratedDbCounts(), blocked: blocked };
+}
+window.waitForHydratedDatabase = waitForHydratedDatabase;
+
+hydrateRuntimeDbFromStore();
+
+function __diagnoseZeroAccrual1001(reason) {
+    try {
+        const requested = String(getAbonentIdFromURL() || "").trim();
+        if (requested !== "1001" && !(new URLSearchParams(window.location.search || "").get("diagnoseZeroAccrual") === "1")) return;
+        const db = window.AbonentsDB || {};
+        const abonents = db.abonents && typeof db.abonents === "object" ? db.abonents : {};
+        const byLs = abonents["1001"] || null;
+        const byFioKey = Object.keys(abonents).find(id => String(abonents[id] && abonents[id].fio || "").toUpperCase().includes("ЗАХАРОВА")) || "";
+        const byUidKey = Object.keys(abonents).find(id => String(abonents[id] && abonents[id].uid || "").trim() === "uid_mqmd4gb4_9ezysv") || "";
+        const resolvedId = byLs ? "1001" : (byUidKey || byFioKey || requested);
+        const abonent = abonents[resolvedId] || null;
+        const uid = String(abonent && abonent.uid || "").trim();
+        const ownerId = (window.JKHStore && typeof JKHStore.getOwnerId === "function") ? String(JKHStore.getOwnerId() || "").trim() : "";
+        const ledgerKey = (window.Data && typeof Data.resolvePaymentLedgerKey === "function") ? String(Data.resolvePaymentLedgerKey(abonent || resolvedId) || "") : (uid ? "payments_" + uid : "");
+        const ledgerRows = (window.Data && typeof Data.readPaymentLedger === "function") ? (Data.readPaymentLedger(abonent || resolvedId) || []) : [];
+        const accruedPositiveCount = ledgerRows.filter(r => Math.abs(Number(r && r.accrued || 0)) > 0.0000001).length;
+        const accruedSum = ledgerRows.reduce((s, r) => s + (Number(r && r.accrued || 0) || 0), 0);
+        const regnum = String(abonent && (abonent.premiseRegnum || abonent.regnum) || "").trim();
+        const premise = regnum && db.premises ? db.premises[regnum] || null : null;
+        const links = Array.isArray(db.links) ? db.links.filter(l => String(l && l.abonentId || "").trim() === String(resolvedId || "").trim()) : [];
+        const activeLink = links.find(l => !String(l && l.dateTo || "").trim()) || null;
+        const tariffKey = ownerId ? "tariffs_" + ownerId : "";
+        const tariffRaw = (window.JKHStore && typeof JKHStore.getRaw === "function" && tariffKey) ? JKHStore.getRaw(tariffKey) : null;
+        let tariffs = [];
+        try { tariffs = tariffRaw ? JSON.parse(String(tariffRaw)) : []; } catch(eTariff) { tariffs = []; }
+        const legacyTariffRaw = (window.JKHStore && typeof JKHStore.getRaw === "function") ? JKHStore.getRaw("tariffs_content_repair_v1") : null;
+        const snapshotKey = uid ? "card_snapshot_" + uid : "";
+        const runtimeKey = uid ? "ledger_runtime_cache_" + uid : "";
+        const snapshotRaw = (window.JKHStore && typeof JKHStore.getRaw === "function" && snapshotKey) ? JKHStore.getRaw(snapshotKey) : null;
+        const runtimeRaw = (window.JKHStore && typeof JKHStore.getRaw === "function" && runtimeKey) ? JKHStore.getRaw(runtimeKey) : null;
+        let snapshot = null, runtime = null;
+        try { snapshot = snapshotRaw ? JSON.parse(String(snapshotRaw)) : null; } catch(eSnapshot) {}
+        try { runtime = runtimeRaw ? JSON.parse(String(runtimeRaw)) : null; } catch(eRuntime) {}
+        const debugMonth = (window.JKHAutoAccrual && typeof JKHAutoAccrual.debugMonth === "function")
+            ? JKHAutoAccrual.debugMonth(resolvedId, 2026, 6)
+            : null;
+
+        console.log("[diagnose][abonent-resolve]", {
+            reason, requested, dbAbonentsType: Array.isArray(db.abonents) ? "array" : typeof db.abonents,
+            abonentsCount: Object.keys(abonents).length,
+            byLs: !!byLs, byFioKey, byUidKey, resolvedId, uid,
+            fio: String(abonent && abonent.fio || ""),
+            abonent: abonent ? {
+                id: abonent.id || "", uid: abonent.uid || "", fio: abonent.fio || "",
+                square: abonent.square, area: abonent.area, totalArea: abonent.totalArea,
+                regnum: abonent.regnum, premiseRegnum: abonent.premiseRegnum,
+                calcStartDate: abonent.calcStartDate, calcEndDate: abonent.calcEndDate
+            } : null
+        });
+        console.log("[diagnose][ledger-state]", {
+            ledgerKey, rowsCount: ledgerRows.length, accruedPositiveCount,
+            accruedSum: Math.round(accruedSum * 100) / 100,
+            first10: ledgerRows.slice(0, 10)
+        });
+        console.log("[diagnose][tariffs-state]", {
+            ownerId, tariffKey, canonicalRawLength: tariffRaw ? String(tariffRaw).length : 0,
+            canonicalCount: Array.isArray(tariffs) ? tariffs.length : 0,
+            activeCount: Array.isArray(tariffs) ? tariffs.filter(t => t && t.active).length : 0,
+            hasRateFrom20070601: Array.isArray(tariffs) && tariffs.some(t => Array.isArray(t.rates) && t.rates.some(r => String(r && (r.from || r.dateFrom || "")).trim() <= "2007-06-01")),
+            legacyRawLength: legacyTariffRaw ? String(legacyTariffRaw).length : 0,
+            debugMonth
+        });
+        console.log("[diagnose][area-resolve]", {
+            abonentSquare: abonent && abonent.square,
+            abonentArea: abonent && abonent.area,
+            abonentTotalArea: abonent && abonent.totalArea,
+            regnum, premiseSquare: premise && premise.square,
+            premiseArea: premise && premise.area,
+            premiseTotalArea: premise && premise.totalArea
+        });
+        console.log("[diagnose][links-state]", {
+            linksCount: links.length, activeLink,
+            hasExpectedDateFrom: !!(activeLink && String(activeLink.dateFrom || "").trim() === "2007-06-01"),
+            dateToEmpty: !!(activeLink && !String(activeLink.dateTo || "").trim()),
+            premiseRegnumMatches: !!(activeLink && regnum && String(activeLink.regnum || "").trim() === regnum),
+            links
+        });
+        console.log("[diagnose][snapshot-vs-ledger]", {
+            snapshotKey, snapshotRawLength: snapshotRaw ? String(snapshotRaw).length : 0,
+            snapshotRows: Array.isArray(snapshot && snapshot.rows) ? snapshot.rows.length : 0,
+            snapshotRowsById: snapshot && snapshot.rowsById && typeof snapshot.rowsById === "object" ? Object.keys(snapshot.rowsById).length : 0,
+            snapshotStatus: String(snapshot && (snapshot.summary_status || snapshot.status) || ""),
+            snapshotDirtyReason: String(snapshot && snapshot.dirtyReason || ""),
+            runtimeKey, runtimeRawLength: runtimeRaw ? String(runtimeRaw).length : 0,
+            runtimeRowsById: runtime && runtime.rowsById && typeof runtime.rowsById === "object" ? Object.keys(runtime.rowsById).length : 0,
+            ledgerRows: ledgerRows.length,
+            ledgerAccruedPositiveCount: accruedPositiveCount
+        });
+        console.log("[diagnose][autoaccrual-zero-reason]", {
+            noLedgerAccruals: accruedPositiveCount === 0,
+            noCanonicalTariffs: !(Array.isArray(tariffs) && tariffs.some(t => t && t.active)),
+            noSquare: !(Number(abonent && (abonent.square || abonent.area || abonent.totalArea) || premise && (premise.square || premise.area || premise.totalArea) || 0) > 0),
+            noActiveLink: !activeLink,
+            dateFrom: activeLink && activeLink.dateFrom || abonent && abonent.calcStartDate || "",
+            regnum, ownerId
+        });
+    } catch (e) {
+        console.warn("[diagnose][zero-accrual-error]", e);
+    }
+}
+window.__diagnoseZeroAccrual1001 = __diagnoseZeroAccrual1001;
+setTimeout(() => __diagnoseZeroAccrual1001("after-hydrate-timeout"), 0);
+
 function showAbonentCardContextError(reason) {
     const msg = reason === "not_found"
         ? "Абонент не найден в текущей базе. Откройте карточку из списка абонентов."
@@ -747,26 +1072,14 @@ function showAbonentCardContextError(reason) {
 }
 
 function getDb() {
-    if (window.Data && typeof window.Data.getDb === "function") {
-        const db = window.Data.getDb();
-        return db?.abonents || {};
-    }
     return window.AbonentsDB?.abonents || {};
 }
 
 function getPremisesDb(){
-    if (window.Data && typeof window.Data.getDb === "function") {
-        const db = window.Data.getDb();
-        return db?.premises || {};
-    }
     return window.AbonentsDB?.premises || {};
 }
 
 function getLinks(){
-    if (window.Data && typeof window.Data.getDb === "function") {
-        const db = window.Data.getDb();
-        return Array.isArray(db?.links) ? db.links : [];
-    }
     return Array.isArray(window.AbonentsDB?.links) ? window.AbonentsDB.links : [];
 }
 
@@ -809,8 +1122,9 @@ function getActiveLinkForPremise(regnum){
 
 function getCurrentAbonent() {
     const id = String(getAbonentIdFromURL() || "").trim();
-    const db = getDb();
-    return { id, a: id ? (db[id] || null) : null };
+    const db = window.AbonentsDB && typeof window.AbonentsDB === "object" ? window.AbonentsDB : { abonents: {}, premises: {}, links: [] };
+    const abonent = db.abonents && typeof db.abonents === "object" ? db.abonents[id] || null : null;
+    return { id, a: abonent };
 }
 
 function splitFio(fio) {
@@ -909,7 +1223,7 @@ function fillAbonentCard() {
 
     const activePremiseLink = regnum ? getActiveLinkForPremise(regnum) : null;
     const activeAbId = String(activePremiseLink?.abonentId || '').trim();
-    const activeAb = activeAbId ? (getDb()[activeAbId] || null) : null;
+    const activeAb = activeAbId && window.AbonentsDB && window.AbonentsDB.abonents ? (window.AbonentsDB.abonents[activeAbId] || null) : null;
     const activeName = String(activeAb?.fio || '').trim();
 
     // кто ответственный по квартире
@@ -1140,6 +1454,11 @@ function __clearBrokenExcludesAndReload(){
 
 function __safeLoadPaymentTableOnce(reason, options){
     const opts = options || {};
+    if (!__isHydratedDatabaseReady()) {
+        __logBlockedBeforeHydrate("PAYMENT_TABLE_LOAD:" + String(reason || ""));
+        __showDbStillLoadingMessage();
+        return;
+    }
     if (!__abonentCardServerRepairDone) {
         try { console.warn('[abonent_card] payment table load skipped before server repair:', reason); } catch(e){}
         return;
@@ -1158,7 +1477,7 @@ function __safeLoadPaymentTableOnce(reason, options){
         __paymentTableLoadScheduled = false;
         __paymentTableLoading = true;
         try {
-            window.__loadPaymentTable({ mode: 'readonly_no_recalc', reason: reason || 'abonent-card', force: !!opts.force });
+            window.__loadPaymentTable({ mode: opts.mode || 'readonly_no_recalc', reason: reason || 'abonent-card', force: !!opts.force });
             __hideExcludesFatalBox();
         } catch(e) {
             if (__isExcludesFatalError(e)) __showExcludesFatalBox(e);
@@ -1167,6 +1486,37 @@ function __safeLoadPaymentTableOnce(reason, options){
             setTimeout(() => { __paymentTableLoading = false; }, 300);
         }
     }, 0);
+}
+
+function __periodSessionKey(abonentId){
+    return "jkh_period_recalc_state_v1:" + String(abonentId || getAbonentIdFromURL() || "");
+}
+
+function __saveTemporaryPeriodState(period, extra){
+    try {
+        const p = period && typeof period === "object" ? period : {};
+        const payload = Object.assign({
+            mode: "temporary_court_period",
+            period_from: String(p.from || ""),
+            period_to: String(p.to || ""),
+            savedAt: (new Date()).toISOString()
+        }, extra || {});
+        if (!payload.period_from || !payload.period_to) return;
+        sessionStorage.setItem(__periodSessionKey(payload.abonentId), JSON.stringify(payload));
+    } catch(e) {}
+}
+
+function __readTemporaryPeriodState(abonentId){
+    try {
+        const raw = sessionStorage.getItem(__periodSessionKey(abonentId));
+        if (!raw) return null;
+        const parsed = JSON.parse(raw);
+        if (!parsed || parsed.mode !== "temporary_court_period") return null;
+        if (!isValidPeriod(parsed.period_from, parsed.period_to)) return null;
+        return parsed;
+    } catch(e) {
+        return null;
+    }
 }
 
 function __isCardReturnFromSpravkaUrl(){
@@ -1229,6 +1579,10 @@ function __showCardInitTimeoutAfterReturn(){
 
 function __runAutoAccrualRepairOnce(){
     try {
+        if (!__isHydratedDatabaseReady()) {
+            __logBlockedBeforeHydrate("AUTOACCRUAL_REPAIR_ONCE");
+            return;
+        }
         if (!__abonentCardServerRepairDone) {
             try { console.warn('[abonent_card] skip autoaccrual before server repair'); } catch(e){}
             return;
@@ -1249,9 +1603,9 @@ function __runAutoAccrualRepairOnce(){
 
         if (!window.JKHAutoAccrual || typeof window.JKHAutoAccrual.recalcForAbonent !== 'function') return;
 
-        setTimeout(() => {
+        setTimeout(async () => {
             try {
-                const res = window.JKHAutoAccrual.recalcForAbonent(id);
+                const res = await window.JKHAutoAccrual.recalcForAbonent(id);
                 if (res && res.ok && res.changed) {
                     __safeLoadPaymentTableOnce('autoaccrual_changed');
                 }
@@ -1300,38 +1654,53 @@ async function __repairEmptyExcludePeriodsKeysAfterServerLoad(){
 }
 
 async function __initAbonentCardSafe(){
+    console.log("[abonent_card][init-enter]");
     if (__abonentCardInitStarted) return;
     __logCardReturnFromSpravkaContext("init");
-    if (!hasExplicitAbonentCardContext()) {
-        __abonentCardInitStarted = true;
-        showAbonentCardContextError("missing_abonent");
-        return;
-    }
-    __abonentCardInitStarted = true;
-
-    await __repairEmptyExcludePeriodsKeysAfterServerLoad();
-
-    try { loadCalcPeriodUI(); } catch(e) { try { console.warn('[card-period][load-after-ready-failed]', e); } catch(_){} }
-    try { fillAbonentCard(); } catch(e) { try { console.error('[abonent_card] fill failed', e); } catch(_){} }
-    try { loadAbonentSummaryStatus(); } catch(e) { try { console.warn('[summary][status-load-failed]', e); } catch(_){} }
-
-    setTimeout(() => {
-        // Opening the card is read-only for summary/accrual state: no auto-recalc here.
-        const fromSpravka = __isCardReturnFromSpravkaUrl();
-        if (fromSpravka) {
-            try { console.log("[card-init][ready-after-return]", { reason: "server-first-ready", force: true }); } catch(eReturnReady) {}
+    try {
+        if (!hasExplicitAbonentCardContext()) {
+            __abonentCardInitStarted = true;
+            showAbonentCardContextError("missing_abonent");
+            return;
         }
-        try { console.log("[card-init][force-payment-table-load]", { reason: fromSpravka ? "return-from-spravka" : "DOMContentLoaded", force: !!fromSpravka }); } catch(eForceLog) {}
-        __safeLoadPaymentTableOnce(fromSpravka ? 'return-from-spravka' : 'DOMContentLoaded', { force: fromSpravka });
-    }, 0);
+        const hydrated = await waitForHydratedDatabase({ timeoutMs: 10000 });
+        if (!hydrated || hydrated.ok !== true) {
+            __logBlockedBeforeHydrate("INIT");
+            return;
+        }
+        __abonentCardInitStarted = true;
+
+        await __repairEmptyExcludePeriodsKeysAfterServerLoad();
+
+        try { loadCalcPeriodUI(); } catch(e) { try { console.warn('[card-period][load-after-ready-failed]', e); } catch(_){} }
+        try { fillAbonentCard(); } catch(e) { try { console.error('[abonent_card] fill failed', e); } catch(_){} }
+        try { loadAbonentSummaryStatus(); } catch(e) { try { console.warn('[summary][status-load-failed]', e); } catch(_){} }
+
+        setTimeout(() => {
+            // Opening the card is read-only for summary/accrual state: no auto-recalc here.
+            const fromSpravka = __isCardReturnFromSpravkaUrl();
+            if (fromSpravka) {
+                try { console.log("[card-init][ready-after-return]", { reason: "server-first-ready", force: true }); } catch(eReturnReady) {}
+            }
+            try { console.log("[card-init][force-payment-table-load]", { reason: fromSpravka ? "return-from-spravka" : "DOMContentLoaded", force: !!fromSpravka }); } catch(eForceLog) {}
+            __safeLoadPaymentTableOnce(fromSpravka ? 'return-from-spravka' : 'DOMContentLoaded', {
+                force: fromSpravka,
+                mode: (fromSpravka && window.JKH_CARD_PERIOD_MODE_ACTIVE === true) ? "temporary_court_period" : "readonly_no_recalc"
+            });
+        }, 0);
+    } catch (e) {
+        try { console.error("[abonent_card][init-error]", e); } catch (_) {}
+        throw e;
+    }
 }
 
 function __isAbonentCardDataReady() {
     try {
         if (!hasExplicitAbonentCardContext()) return true;
         const id = String(getAbonentIdFromURL() || "").trim();
-        const db = (window.Data && typeof Data.getDb === "function") ? Data.getDb() : null;
+        const db = window.AbonentsDB && typeof window.AbonentsDB === "object" ? window.AbonentsDB : null;
         const abonents = db && db.abonents ? db.abonents : null;
+        if (!abonents || !Object.keys(abonents).length) return false;
         if (!id || !abonents) return false;
         const a = abonents[id];
         if (!a) return false;
@@ -1358,11 +1727,21 @@ function __waitForAbonentCardDataReady(cb) {
     let done = false;
     let tries = 0;
     let lastStateKey = "";
+    let runtimeHydration = hydrateRuntimeDbFromStore();
 
     function finish(reason) {
         if (done) return;
         done = true;
         try { window.removeEventListener("JKH_UI_STATE_CHANGED", onState); } catch(e) {}
+        try {
+            const db = (window.Data && typeof Data.getDb === "function") ? Data.getDb() : null;
+            console.log("[abonent_card][db-ready]", {
+                reason: reason,
+                dbCount: db && db.abonents && typeof db.abonents === "object" ? Object.keys(db.abonents).length : 0,
+                premiseCount: db && db.premises && typeof db.premises === "object" ? Object.keys(db.premises).length : 0,
+                linkCount: db && Array.isArray(db.links) ? db.links.length : 0
+            });
+        } catch(eDbReady) {}
         console.log("[abonent_card] server data ready init", reason);
         cb();
     }
@@ -1377,6 +1756,14 @@ function __waitForAbonentCardDataReady(cb) {
         const serverReady = __isAbonentCardServerFirstReady();
         const abonentReady = __isAbonentCardDataReady();
         const returnFromSpravka = __isCardReturnFromSpravkaUrl();
+        const runtimeTargetReady = !!(runtimeHydration && runtimeHydration.foundTarget);
+
+        try { console.log("[abonent_card][target]", { requestedAbonentId: String(getAbonentIdFromURL() || "").trim(), found: runtimeTargetReady || abonentReady }); } catch(eTargetLog) {}
+
+        if ((runtimeTargetReady || abonentReady) && hasExplicitAbonentCardContext()) {
+            finish("runtime-hydrated");
+            return;
+        }
 
         if (returnFromSpravka && abonentReady) {
             try { console.log("[card-init][data-already-ready]", { reason: reason, status: status }); } catch(eReadyLog) {}
@@ -1384,13 +1771,15 @@ function __waitForAbonentCardDataReady(cb) {
             return;
         }
 
-        if (serverReady && (status === "empty" || abonentReady)) {
+        if (serverReady && abonentReady) {
             finish(reason);
             return;
         }
 
         tries++;
         if (tries > 80) {
+            __logBlockedBeforeHydrate("INIT_WAIT_TIMEOUT");
+            __showDbStillLoadingMessage();
             console.warn("[abonent_card] server data not ready after wait, init blocked");
             if (__isCardReturnFromSpravkaUrl()) {
                 try { console.warn("[card-init][timeout-after-return]", { tries: tries, timeoutMs: 8000 }); } catch(eTimeoutLog) {}
@@ -1746,6 +2135,13 @@ async function __rollbackAfterFlushError(snapshot, options){
   try{
     if (snapshot && snapshot.db && typeof window.AbonentsDB === 'object'){
       window.AbonentsDB = __deepCloneJSONSafe(snapshot.db) || snapshot.db;
+      console.log("[runtime-db-keys]", Object.keys(window.AbonentsDB || {}));
+      console.log(
+        "[runtime-abonents-count]",
+        window.AbonentsDB && window.AbonentsDB.abonents
+          ? Object.keys(window.AbonentsDB.abonents).length
+          : "missing"
+      );
       if (typeof window.saveAbonentsDB === 'function') window.saveAbonentsDB();
       restored = true;
     }
@@ -1823,7 +2219,7 @@ async function applyChangeResponsible(mode) {
         return;
     }
 
-    const transferred = window.Data.transferResponsibility({
+    const transferred = await window.Data.transferResponsibility({
         oldAbonentId: currentActiveId,
         newAbonentId: String(newId),
         regnum: String(regnum),
@@ -2005,6 +2401,13 @@ function __restoreDeletedRuntimeState(snapshot){
     try{
         if (snapshot && snapshot.db && typeof window.AbonentsDB === 'object'){
             window.AbonentsDB = __deepCloneJSONSafe(snapshot.db) || snapshot.db;
+            console.log("[runtime-db-keys]", Object.keys(window.AbonentsDB || {}));
+            console.log(
+                "[runtime-abonents-count]",
+                window.AbonentsDB && window.AbonentsDB.abonents
+                    ? Object.keys(window.AbonentsDB.abonents).length
+                    : "missing"
+            );
             if (typeof window.saveAbonentsDB === 'function') window.saveAbonentsDB();
         }
         const keys = (snapshot && snapshot.keys) ? Object.keys(snapshot.keys) : [];
@@ -2115,7 +2518,7 @@ async function saveAbonentEdit() {
         if (window.Data && typeof window.Data.ensurePremise === 'function') {
             window.Data.ensurePremise(syncedPremise);
         } else {
-            if (!window.AbonentsDB) window.AbonentsDB = {};
+            if (!window.AbonentsDB || typeof window.AbonentsDB !== 'object') window.AbonentsDB = { abonents: {}, premises: {}, links: [] };
             if (!window.AbonentsDB.premises || typeof window.AbonentsDB.premises !== 'object') window.AbonentsDB.premises = {};
             window.AbonentsDB.premises[activeRegnum] = syncedPremise;
             if (typeof window.saveAbonentsDB === 'function') window.saveAbonentsDB();
@@ -2836,9 +3239,11 @@ function loadCalcPeriodUI(){
                 fromEl.value = urlFrom;
                 toEl.value = urlTo;
                 window.JKH_CARD_PERIOD_MODE_ACTIVE = true;
+                __saveTemporaryPeriodState({ from: urlFrom, to: urlTo }, { abonentId: meta.requestedId, source: "url" });
                 try { console.log("[card-return][from-spravka]", { from: urlFrom, to: urlTo, requestedId: meta.requestedId, uid: meta.resolvedUid, ownerId: meta.ownerId, writes: false }); } catch(eReturnLog) {}
                 try { console.log("[period][restore-source]", { source: "url", key: "location.search", raw: window.location.search || "", from: urlFrom, to: urlTo, requestedId: meta.requestedId, uid: meta.resolvedUid, ownerId: meta.ownerId }); } catch (eRestoreUrlLog) {}
-                __safeLoadPaymentTableOnce("calc-period-bootstrap-url", { force: true });
+                try { console.log("[period-recalc][return-state-restored]", { source: "url", periodFrom: urlFrom, periodTo: urlTo, mode: "temporary_court_period" }); } catch(eReturnStateUrl) {}
+                __safeLoadPaymentTableOnce("calc-period-bootstrap-url", { force: true, mode: "temporary_court_period" });
                 try {
                     console.log("[card-period][bootstrap-inputs-from-url]", {
                         requestedId: meta.requestedId,
@@ -2865,6 +3270,15 @@ function loadCalcPeriodUI(){
         }
 
         if (!hasUrlPeriod) {
+            const sessionPeriod = __readTemporaryPeriodState(meta.requestedId);
+            if (sessionPeriod) {
+                fromEl.value = sessionPeriod.period_from || "";
+                toEl.value = sessionPeriod.period_to || "";
+                window.JKH_CARD_PERIOD_MODE_ACTIVE = true;
+                try { console.log("[period-recalc][return-state-restored]", { source: "session", periodFrom: fromEl.value || "", periodTo: toEl.value || "", mode: "temporary_court_period" }); } catch(eSessionRestoreLog) {}
+                __safeLoadPaymentTableOnce("calc-period-bootstrap-session", { force: true, mode: "temporary_court_period" });
+                return;
+            }
             fromEl.value = "";
             toEl.value = "";
             window.JKH_CARD_PERIOD_MODE_ACTIVE = false;
@@ -3135,7 +3549,7 @@ function isValidPeriod(from, to){
 
 function __normalizeSummaryStatus(status){
     const s = String(status || "missing").trim().toLowerCase();
-    return (s === "fresh" || s === "dirty" || s === "missing" || s === "error" || s === "invalid" || s === "already_running" || s === "calculating") ? s : "error";
+    return (s === "fresh" || s === "dirty" || s === "missing" || s === "error" || s === "invalid" || s === "already_running" || s === "calculating" || s === "cancelled" || s === "timeout") ? s : "error";
 }
 
 let __lastRenderedSummaryStatusLocal = "missing";
@@ -3144,6 +3558,47 @@ let __runtimeCacheFreshBlocked = false;
 let __lastRuntimeCacheValidation = { valid: false, reason: "RUNTIME_CACHE_NOT_VALIDATED" };
 let __cardSnapshotFreshValidated = false;
 let __lastCardSnapshotValidation = { valid: false, reason: "CARD_SNAPSHOT_NOT_VALIDATED" };
+let __fullRecalcRunSeq = 0;
+
+function __nextFullRecalcRunId(){
+    __fullRecalcRunSeq += 1;
+    return "full-" + Date.now() + "-" + __fullRecalcRunSeq;
+}
+
+function __fullRecalcUiYield(){
+    return new Promise(function(resolve){ setTimeout(resolve, 0); });
+}
+
+function __currentFullRecalcRun(){
+    const state = window.__JKH_FULL_RECALC_STATE;
+    return state && state.running === true ? state : null;
+}
+
+function __logFullRecalcEventIgnored(eventName, detail){
+    const run = __currentFullRecalcRun();
+    try {
+        console.log("[full-recalc][event-ignored-during-run]", {
+            runId: run && run.runId || "",
+            event: String(eventName || ""),
+            detail: detail || null
+        });
+    } catch(eLog) {}
+    return !!run;
+}
+
+function __setCalcButtonsDisabled(disabled){
+    ["calcRunBtn", "calcReportsBtn", "calcResetBtn"].forEach(function(id){
+        const btn = document.getElementById(id);
+        if (btn) btn.disabled = !!disabled;
+    });
+}
+
+function __setFullRecalcStopVisible(visible){
+    const btn = document.getElementById("calcStopBtn");
+    if (!btn) return;
+    btn.style.display = visible ? "" : "none";
+    btn.disabled = !visible;
+}
 
 function __summaryTotalsAreFinite(summary){
     const s = summary && typeof summary === "object" ? summary : null;
@@ -3180,6 +3635,8 @@ function __summaryStatusText(status){
     if (status === "fresh") return "🟢 Актуально";
     if (status === "dirty") return "🟡 Требуется пересчёт";
     if (status === "missing") return "⚪ Нет расчёта";
+    if (status === "cancelled") return "Пересчёт остановлен пользователем";
+    if (status === "timeout") return "Пересчёт остановлен по таймауту";
     if (status === "error") return "🔴 Ошибка расчёта";
     return status || "missing";
 }
@@ -3188,6 +3645,8 @@ function __summaryWarningText(status){
     if (status === "calculating") return "Выполняется пересчёт…";
     if (status === "dirty") return "Итог устарел — нажмите «Пересчитать». Старые totals не считаются актуальными.";
     if (status === "missing") return "Итог ещё не создан. Старые totals не подставляются. Нажмите «Пересчитать», чтобы создать summary.";
+    if (status === "cancelled") return "Пересчёт остановлен пользователем. Частичные данные не сохранялись как актуальный итог.";
+    if (status === "timeout") return "Пересчёт остановлен по таймауту. Частичные данные не сохранялись как актуальный итог.";
     if (status === "error") return "Расчёт summary невозможен. Проверьте причину ошибки и выполните «Пересчитать» после исправления данных.";
     return "";
 }
@@ -3240,8 +3699,59 @@ function renderAbonentSummaryStatus(status, reason){
 
 window.JKHSetSummaryStatus = renderAbonentSummaryStatus;
 
+function renderPeriodCalculationStatus(message, options){
+    const opts = options || {};
+    const hint = document.getElementById("calcRunHint");
+    const text = String(message || "");
+    if (hint && text) hint.textContent = text;
+    try {
+        console.log("[period-recalc][status-isolated]", {
+            fullStatusBefore: String(opts.fullStatusBefore || __lastRenderedSummaryStatusLocal || ""),
+            fullStatusAfter: String(__lastRenderedSummaryStatusLocal || ""),
+            periodStatus: text
+        });
+    } catch(ePeriodStatusLog) {}
+}
+
+function captureFullSummaryStatusUi(){
+    const badge = document.getElementById("summaryStatusBadge");
+    const reasonEl = document.getElementById("summaryStatusReason");
+    const warningEl = document.getElementById("summaryStatusWarning");
+    return {
+        status: String(__lastRenderedSummaryStatusLocal || ""),
+        reason: String(__lastRenderedSummaryReasonLocal || ""),
+        badgeClass: badge ? badge.className : "",
+        badgeText: badge ? badge.textContent : "",
+        reasonText: reasonEl ? reasonEl.textContent : "",
+        warningText: warningEl ? warningEl.textContent : "",
+        warningDisplay: warningEl ? warningEl.style.display : "",
+        warningClass: warningEl ? warningEl.className : ""
+    };
+}
+
+function restoreFullSummaryStatusUi(snapshot){
+    const s = snapshot || {};
+    __lastRenderedSummaryStatusLocal = String(s.status || __lastRenderedSummaryStatusLocal || "");
+    __lastRenderedSummaryReasonLocal = String(s.reason || __lastRenderedSummaryReasonLocal || "");
+    const badge = document.getElementById("summaryStatusBadge");
+    const reasonEl = document.getElementById("summaryStatusReason");
+    const warningEl = document.getElementById("summaryStatusWarning");
+    if (badge) {
+        badge.className = String(s.badgeClass || badge.className || "");
+        badge.textContent = String(s.badgeText || badge.textContent || "");
+    }
+    if (reasonEl) reasonEl.textContent = String(s.reasonText || "");
+    if (warningEl) {
+        warningEl.textContent = String(s.warningText || "");
+        warningEl.style.display = String(s.warningDisplay || "");
+        warningEl.className = String(s.warningClass || warningEl.className || "summary-warning");
+    }
+}
+
 window.addEventListener("jkh:runtime-cache-invalid", function(event){
     const detail = event && event.detail ? event.detail : {};
+    if (detail && detail.temporary === true) return;
+    if (__logFullRecalcEventIgnored("jkh:runtime-cache-invalid", detail)) return;
     const reason = String(detail.reason || "RUNTIME_CACHE_INVALID");
     __runtimeCacheFreshBlocked = true;
     __lastRuntimeCacheValidation = { valid: false, reason: reason, detail: detail };
@@ -3258,6 +3768,8 @@ window.addEventListener("jkh:runtime-cache-invalid", function(event){
 
 window.addEventListener("jkh:runtime-cache-valid", function(event){
     const detail = event && event.detail ? event.detail : {};
+    if (detail && detail.temporary === true) return;
+    if (__logFullRecalcEventIgnored("jkh:runtime-cache-valid", detail)) return;
     __runtimeCacheFreshBlocked = false;
     __lastRuntimeCacheValidation = { valid: true, reason: "", detail: detail };
     try { console.log("[summary][runtime-cache-validated]", detail); } catch(eLog) {}
@@ -3269,6 +3781,7 @@ window.addEventListener("jkh:runtime-cache-valid", function(event){
 
 window.addEventListener("jkh:card-snapshot-valid", function(event){
     const detail = event && event.detail ? event.detail : {};
+    if (__logFullRecalcEventIgnored("jkh:card-snapshot-valid", detail)) return;
     __cardSnapshotFreshValidated = true;
     __lastCardSnapshotValidation = { valid: true, reason: "", detail: detail };
     __runtimeCacheFreshBlocked = false;
@@ -3292,6 +3805,7 @@ function __debugCurrentCardSnapshotLifecycle(reason){
 
 window.addEventListener("jkh:card-snapshot-invalid", function(event){
     const detail = event && event.detail ? event.detail : {};
+    if (__logFullRecalcEventIgnored("jkh:card-snapshot-invalid", detail)) return;
     const reason = String(detail.reason || "CARD_ROWS_NOT_RESTORED");
     __cardSnapshotFreshValidated = false;
     __lastCardSnapshotValidation = { valid: false, reason: reason, detail: detail };
@@ -3405,9 +3919,10 @@ async function loadAbonentSummaryStatus(){
             totals: snapshot.totals || {}
         };
         window.__lastCardSummaryForDebug = summary;
-        __cardSnapshotFreshValidated = false;
-        __lastCardSnapshotValidation = { valid: false, reason: "CARD_ROWS_NOT_RESTORED", detail: { uid: uid, ledgerVersion: snapshot.ledgerVersion, rowsByIdCount: Object.keys(snapshot.rowsById).length } };
-        renderAbonentSummaryStatus("dirty", "CARD_ROWS_NOT_RESTORED");
+        __cardSnapshotFreshValidated = true;
+        __lastCardSnapshotValidation = { valid: true, reason: "", detail: { uid: uid, ledgerVersion: snapshot.ledgerVersion, rowsByIdCount: Object.keys(snapshot.rowsById).length } };
+        __runtimeCacheFreshBlocked = false;
+        renderAbonentSummaryStatus("fresh", "OK");
         __renderAbonentTotalsFromFreshSummary(summary);
     } catch (e) {
         renderAbonentSummaryStatus("error", String(e && e.message || e || "CARD_SNAPSHOT_READ_ERROR"));
@@ -3490,11 +4005,27 @@ function __blockReportsCardRecalc(source, details){
 
 function bindCalcButtons(){
     const runBtn = document.getElementById("calcRunBtn");
+    const stopBtn = document.getElementById("calcStopBtn");
     const repBtn = document.getElementById("calcReportsBtn");
     const resetBtn = document.getElementById("calcResetBtn");
     const fromEl = document.getElementById("calcFrom");
     const toEl   = document.getElementById("calcTo");
     if (!runBtn || !repBtn || !resetBtn || !fromEl || !toEl) return;
+    if (stopBtn && !stopBtn.__jkhFullRecalcStopBound) {
+        stopBtn.__jkhFullRecalcStopBound = true;
+        stopBtn.addEventListener("click", function(){
+            const state = __currentFullRecalcRun();
+            if (!state) return;
+            state.cancelled = true;
+            state.abortRequested = true;
+            state.abortReason = "FULL_RECALC_CANCELLED";
+            state.abortMessage = "Пересчёт остановлен пользователем";
+            state.cancelledAt = Date.now();
+            state.currentStage = String(state.currentStage || "cancel-requested");
+            renderAbonentSummaryStatus((window.JKH_SUMMARY_STATUS && window.JKH_SUMMARY_STATUS.CALCULATING) || "calculating", "Останавливаем пересчёт…");
+            __setFullRecalcStopVisible(false);
+        });
+    }
 
     function clearPeriodResetFlagAfterManualInput(eventName){
         if (window.__periodResetInProgress === true) {
@@ -3533,22 +4064,58 @@ function bindCalcButtons(){
         if (String(reason || "") === "RECALC_ALREADY_RUNNING" || recalcResult && (recalcResult.status === "already_running" || recalcResult.summary_status === "already_running")) {
             return "Пересчёт уже выполняется в другой вкладке. Дождитесь завершения и обновите карточку.";
         }
+        if (String(reason || "") === "DB_NOT_HYDRATED") {
+            return "База данных ещё загружается. Повторите через несколько секунд.";
+        }
+        if (String(reason || "") === "ZERO_ACCRUAL_OVERWRITE_BLOCKED" ||
+            (String(reason || "") === "PAYMENT_LEDGER_WRITE_BLOCKED" && window.__JKH_LAST_AUTOACCRUAL_BLOCK && window.__JKH_LAST_AUTOACCRUAL_BLOCK.reason === "ZERO_ACCRUAL_OVERWRITE_BLOCKED")) {
+            return "Пересчёт заблокирован: результат содержит нулевые начисления вместо существующих.";
+        }
+        if (String(reason || "") === "TARIFFS_NOT_FOUND") {
+            return "Пересчёт не выполнен: не найдены активные тарифы для текущего владельца.";
+        }
+        if (String(reason || "") === "SQUARE_NOT_FOUND") {
+            return "Пересчёт не выполнен: не найдена площадь квартиры для расчёта начислений.";
+        }
         return "Пересчёт не выполнен: " + String(reason || "CALC_FAILED");
     }
 
     runBtn.addEventListener("click", async () => {
+        const existingRun = __currentFullRecalcRun();
+        if (existingRun) {
+            try {
+                console.log("[full-recalc][duplicate-call-ignored]", {
+                    runId: existingRun.runId || "",
+                    abonentId: String(existingRun.abonentId || getAbonentIdFromURL() || ""),
+                    source: "abonent_card.click"
+                });
+            } catch(eDupLog) {}
+            return;
+        }
         if (runBtn.disabled) return;
         if (!canWriteOrExplainLocal()) return;
         const currentAbonentId = getAbonentIdFromURL();
+        const recalcRunId = __nextFullRecalcRunId();
         let from = String(fromEl.value || "").trim();
         let to   = String(toEl.value || "").trim();
         let hasAnyPeriodInput = !!(from || to);
         let hasValidPeriodInput = isValidPeriod(from, to);
         const recalcForReportPeriod = hasAnyPeriodInput;
         const prevText = runBtn.textContent;
+        const fullSummaryUiBeforeRecalc = captureFullSummaryStatusUi();
         const clickMeta = getCalcPeriodStorageMeta();
         try {
+            console.log("[full-recalc][click]", {
+                runId: recalcRunId,
+                abonentId: String(currentAbonentId || ""),
+                uid: clickMeta.resolvedUid,
+                fromInput: from || "",
+                toInput: to || "",
+                periodBefore: __readPeriodKey(clickMeta.storageKey, clickMeta.ownerId),
+                activeBefore: __readActiveKey(clickMeta.activeStorageKey, clickMeta.ownerId)
+            });
             console.log("[card-recalc][click]", {
+                runId: recalcRunId,
                 abonentId: String(currentAbonentId || ""),
                 uid: clickMeta.resolvedUid,
                 fromInput: from || "",
@@ -3580,23 +4147,387 @@ function bindCalcButtons(){
             return;
         }
 
-        runBtn.disabled = true;
+        const run = {
+            running: true,
+            runId: recalcRunId,
+            abonentId: String(currentAbonentId || ""),
+            uid: String(clickMeta.resolvedUid || ""),
+            startedAt: Date.now(),
+            timedOut: false,
+            completed: false,
+            cancelled: false,
+            finalRendered: false,
+            resultReceived: false,
+            resultOk: false,
+            watchdogId: null,
+            slowWarningId: null,
+            hardTimeoutId: null,
+            slowWarningShown: false,
+            timeoutWarningShown: false,
+            lastProgressAt: Date.now(),
+            currentStage: "start",
+            abortRequested: false,
+            abortReason: "",
+            abortMessage: "",
+            hardStopMs: 180000,
+            source: "abonent_card.click"
+        };
+        const fullRecalcState = run;
+        window.__JKH_FULL_RECALC_STATE = fullRecalcState;
+        __setCalcButtonsDisabled(true);
+        __setFullRecalcStopVisible(true);
         renderAbonentSummaryStatus((window.JKH_SUMMARY_STATUS && window.JKH_SUMMARY_STATUS.CALCULATING) || "calculating", "EXPLICIT_RECALC");
+        try {
+            console.log("[full-recalc][run-start]", { runId: recalcRunId, abonentId: String(currentAbonentId || ""), uid: String(clickMeta.resolvedUid || "") });
+            console.log("[summary-ui][explicit-recalc-set]", { runId: recalcRunId, abonentId: String(currentAbonentId || ""), reason: "EXPLICIT_RECALC" });
+        } catch(eSummaryUiSetLog) {}
         runBtn.textContent = "Пересчёт…";
+        let watchdogFired = false;
+        function initRecalcCallCountReport(){
+            window.__JKH_RECALC_CALL_COUNTS = {
+                runId: recalcRunId,
+                abonentId: String(currentAbonentId || ""),
+                uid: String(clickMeta.resolvedUid || ""),
+                startedAt: fullRecalcState.startedAt,
+                printed: false,
+                stages: {
+                    autoaccrualMs: 0,
+                    buildRuntimeRowsBeforeSummaryMs: 0,
+                    summarySaveMs: 0,
+                    buildRuntimeRowsAfterSummaryMs: 0,
+                    snapshotSaveMs: 0,
+                    finalRenderMs: 0
+                },
+                calls: {
+                    calcTotalsAsOfMemoized: 0,
+                    calculatePenaltyForObligation: 0,
+                    buildDebtPeriods: 0,
+                    buildPaymentEvents: 0,
+                    buildObligations: 0,
+                    buildRuntimeRows: 0
+                },
+                loops: {
+                    monthsCount: 0,
+                    rowsCount: 0,
+                    obligationsCount: 0,
+                    paymentsCount: 0,
+                    dailyLoopIterationsTotal: 0,
+                    maxDailyLoopDays: 0,
+                    maxDailyLoopRowId: ""
+                }
+            };
+        }
+        function printRecalcCallCountReport(reason, options){
+            const opts = options && typeof options === "object" ? options : {};
+            const report = window.__JKH_RECALC_CALL_COUNTS;
+            if (!report || report.printed === true) return;
+            if (!opts.force && fullRecalcState.snapshotSavePending === true) return;
+            report.printed = true;
+            try {
+                console.log("[recalc-call-counts]", {
+                    abonentId: String(report.abonentId || currentAbonentId || ""),
+                    uid: String(report.uid || fullRecalcState.uid || clickMeta.resolvedUid || ""),
+                    totalElapsedMs: Math.max(0, Date.now() - Number(report.startedAt || fullRecalcState.startedAt || Date.now())),
+                    stages: Object.assign({}, report.stages || {}),
+                    calls: Object.assign({}, report.calls || {}),
+                    loops: Object.assign({}, report.loops || {})
+                });
+            } catch(eCallCountsLog) {}
+            if (window.__JKH_RECALC_CALL_COUNTS === report) window.__JKH_RECALC_CALL_COUNTS = null;
+        }
+        function setRecalcReportStage(stage, elapsedMs){
+            const report = window.__JKH_RECALC_CALL_COUNTS;
+            if (!report || !report.stages) return;
+            report.stages[String(stage || "")] = Math.max(0, Math.round(Number(elapsedMs) || 0));
+        }
+        initRecalcCallCountReport();
+        function fullRecalcStageText(stage){
+            const s = String(stage || "").trim();
+            const map = {
+                "ensure-uid": "подготовка UID",
+                "fullRecalcForCurrentAbonent": "полный пересчёт",
+                "begin-lock": "захват lock",
+                "autoaccrual": "автоначисления",
+                "build-runtime-rows-before-summary": "построение таблицы",
+                "save-runtime-cache-before-summary": "сохранение runtime cache",
+                "save-runtime-cache": "сохранение runtime cache",
+                "table-render": "отрисовка таблицы",
+                "summary-save": "сохранение summary",
+                "save-summary": "сохранение summary",
+                "build-fresh-runtime-rows-after-summary": "обновление строк после summary",
+                "save-runtime-cache-after-summary": "сохранение свежего runtime cache",
+                "build-card-snapshot": "построение snapshot",
+                "save-card-snapshot": "сохранение snapshot",
+                "save-card-snapshot-async": "сохранение snapshot",
+                "final-render": "финальная отрисовка",
+                "unlock": "разблокировка UI"
+            };
+            return map[s] || s || "обработка результата";
+        }
+        function heartbeatFullRecalc(stage){
+            fullRecalcState.lastProgressAt = Date.now();
+            fullRecalcState.currentStage = String(stage || fullRecalcState.currentStage || "");
+        }
+        window.__JKH_FULL_RECALC_HEARTBEAT = function(runId, stage){
+            const activeRun = window.__JKH_FULL_RECALC_STATE;
+            if (!activeRun || String(activeRun.runId || "") !== String(runId || recalcRunId || "")) return;
+            heartbeatFullRecalc(stage);
+        };
+        window.__fullRecalcHeartbeat = function(detail){
+            const d = detail && typeof detail === "object" ? detail : {};
+            heartbeatFullRecalc(d.stage || "progress");
+        };
+        function releaseFullRecalcLockOnUnload(){
+            try {
+                const state = window.__JKH_FULL_RECALC_STATE;
+                if (!state || state.runId !== recalcRunId) return;
+                if (state.completed || state.finalRendered || state.cancelled) return;
+                if (window.Data && typeof Data.releaseRecalcUidLockOnUnload === "function") {
+                    Data.releaseRecalcUidLockOnUnload(state.uid || currentAbonentId, state.recalcLockToken || "", { runId: recalcRunId, reason: "beforeunload" });
+                }
+            } catch(eUnloadRelease) {}
+        }
+        window.addEventListener("beforeunload", releaseFullRecalcLockOnUnload);
+        heartbeatFullRecalc("start");
+        function hasCalculatedRowsForFullRecalc(){
+            try {
+                const snapshot = typeof window.__getPaymentTableComputedRowsSnapshot === "function" ? window.__getPaymentTableComputedRowsSnapshot() : null;
+                const rowsById = snapshot && snapshot.rowsById && typeof snapshot.rowsById === "object" && !Array.isArray(snapshot.rowsById) ? snapshot.rowsById : {};
+                if (Object.keys(rowsById).length > 0) return true;
+                const rows = snapshot && Array.isArray(snapshot.rows) ? snapshot.rows : [];
+                return rows.some(function(row){
+                    return Number.isFinite(Number(row && row.pay_main))
+                        || Number.isFinite(Number(row && row.pay_penalty))
+                        || Number.isFinite(Number(row && row.total));
+                });
+            } catch(eRowsCheck) {
+                return false;
+            }
+        }
+        function clearFullRecalcWatchdog(source){
+            heartbeatFullRecalc(source || "watchdog-clear");
+            const hadTimer = !!(fullRecalcState.watchdogId || fullRecalcState.slowWarningId || fullRecalcState.hardTimeoutId);
+            if (fullRecalcState.slowWarningId) {
+                clearTimeout(fullRecalcState.slowWarningId);
+                fullRecalcState.slowWarningId = null;
+            }
+            if (fullRecalcState.hardTimeoutId) {
+                clearTimeout(fullRecalcState.hardTimeoutId);
+                fullRecalcState.hardTimeoutId = null;
+            }
+            if (fullRecalcState.watchdogId) {
+                try { clearTimeout(fullRecalcState.watchdogId); } catch(eLegacyClear) {}
+                fullRecalcState.watchdogId = null;
+            }
+            try {
+                console.log("[full-recalc][watchdog-clear]", {
+                    runId: recalcRunId,
+                    abonentId: String(currentAbonentId || ""),
+                    source: String(source || ""),
+                    hadTimer: hadTimer,
+                    elapsedMs: Date.now() - fullRecalcState.startedAt
+                });
+            } catch(eWatchdogClearLog) {}
+        }
+        function markFullRecalcFinalRendered(status, source){
+            fullRecalcState.finalRendered = true;
+            fullRecalcState.completed = true;
+            fullRecalcState.resultOk = __normalizeSummaryStatus(status) === "fresh";
+            if (fullRecalcState.resultOk) fullRecalcState.timedOut = false;
+            try {
+                if (fullRecalcState.resultOk) {
+                    console.log("[full-recalc][final-success-before-watchdog]", {
+                        runId: recalcRunId,
+                        abonentId: String(currentAbonentId || ""),
+                        source: String(source || ""),
+                        rowsPresent: hasCalculatedRowsForFullRecalc(),
+                        elapsedMs: Date.now() - fullRecalcState.startedAt
+                    });
+                }
+            } catch(eFinalBeforeWatchdogLog) {}
+            clearFullRecalcWatchdog(source || "final-render");
+        }
+        function unlockFullRecalcUi(source){
+            heartbeatFullRecalc("unlock");
+            clearFullRecalcWatchdog(source || "unlock");
+            try { window.removeEventListener("beforeunload", releaseFullRecalcLockOnUnload); } catch(eRemoveUnload) {}
+            __setCalcButtonsDisabled(false);
+            __setFullRecalcStopVisible(false);
+            runBtn.textContent = prevText || "Пересчитать";
+            if (window.__JKH_FULL_RECALC_STATE && window.__JKH_FULL_RECALC_STATE.runId === recalcRunId) {
+                window.__JKH_FULL_RECALC_STATE.running = false;
+                window.__JKH_FULL_RECALC_STATE.finishedAt = Date.now();
+                window.__JKH_FULL_RECALC_STATE.finishSource = String(source || "");
+                window.__JKH_FULL_RECALC_STATE = null;
+            }
+            try { console.log("[full-recalc][ui-unlocked]", { runId: recalcRunId, abonentId: String(currentAbonentId || ""), source: String(source || "") }); } catch(eUnlockLog) {}
+        }
+        function shouldIgnoreTimeout(){
+            return fullRecalcState.completed || fullRecalcState.cancelled || fullRecalcState.finalRendered || fullRecalcState.resultReceived || fullRecalcState.resultOk;
+        }
+        function scheduleHardTimeoutCheck(delayMs){
+            fullRecalcState.hardTimeoutId = setTimeout(async function(){
+                fullRecalcState.hardTimeoutId = null;
+                if (shouldIgnoreTimeout()) {
+                    try {
+                        console.warn("[full-recalc][watchdog-ignored-after-complete]", {
+                            runId: recalcRunId,
+                            abonentId: String(currentAbonentId || ""),
+                            reason: "hard-timeout-ignored",
+                            completed: !!fullRecalcState.completed,
+                            cancelled: !!fullRecalcState.cancelled,
+                            finalRendered: !!fullRecalcState.finalRendered,
+                            resultReceived: !!fullRecalcState.resultReceived,
+                            resultOk: !!fullRecalcState.resultOk,
+                            rowsPresent: hasCalculatedRowsForFullRecalc(),
+                            elapsedMs: Date.now() - fullRecalcState.startedAt
+                        });
+                    } catch(eWatchdogIgnoredLog) {}
+                    return;
+                }
+                fullRecalcState.timedOut = true;
+                fullRecalcState.cancelled = true;
+                fullRecalcState.abortRequested = true;
+                fullRecalcState.abortReason = "FULL_RECALC_TIMEOUT";
+                fullRecalcState.abortMessage = "Пересчёт остановлен по таймауту";
+                renderAbonentSummaryStatus((window.JKH_SUMMARY_STATUS && window.JKH_SUMMARY_STATUS.CALCULATING) || "calculating", "Останавливаем пересчёт по таймауту…");
+                __setFullRecalcStopVisible(false);
+            }, delayMs);
+            fullRecalcState.watchdogId = fullRecalcState.hardTimeoutId;
+        }
+        fullRecalcState.slowWarningId = setTimeout(function(){
+            fullRecalcState.slowWarningId = null;
+            if (shouldIgnoreTimeout()) {
+                try {
+                    console.warn("[full-recalc][watchdog-ignored-after-complete]", {
+                        runId: recalcRunId,
+                        abonentId: String(currentAbonentId || ""),
+                        reason: "slow-warning-ignored",
+                        completed: !!fullRecalcState.completed,
+                        cancelled: !!fullRecalcState.cancelled,
+                        finalRendered: !!fullRecalcState.finalRendered,
+                        resultReceived: !!fullRecalcState.resultReceived,
+                        resultOk: !!fullRecalcState.resultOk,
+                        rowsPresent: hasCalculatedRowsForFullRecalc(),
+                        elapsedMs: Date.now() - fullRecalcState.startedAt
+                    });
+                } catch(eWatchdogClearedLog) {}
+                return;
+            }
+            fullRecalcState.slowWarningShown = true;
+            renderAbonentSummaryStatus((window.JKH_SUMMARY_STATUS && window.JKH_SUMMARY_STATUS.CALCULATING) || "calculating", "Расчёт выполняется дольше обычного…");
+        }, 20000);
+        scheduleHardTimeoutCheck(fullRecalcState.hardStopMs);
+        try { console.log("[full-recalc][watchdog-start]", { runId: recalcRunId, abonentId: String(currentAbonentId || ""), slowWarningMs: 20000, hardTimeoutMs: fullRecalcState.hardStopMs }); } catch(eWatchdogStartLog) {}
+        let explicitFullRecalcStarted = false;
+        let explicitFullRecalcFinal = null;
+        function rememberExplicitFullRecalcFinal(status, reason, result){
+            explicitFullRecalcFinal = {
+                status: __normalizeSummaryStatus(status || "error"),
+                reason: String(reason || ""),
+                result: result || null
+            };
+        }
+        function renderExplicitFullRecalcFinal(source){
+            if (!explicitFullRecalcStarted) return;
+            const finalState = explicitFullRecalcFinal || { status: "error", reason: "FINAL_RECALC_STATUS_MISSING", result: null };
+            const status = __normalizeSummaryStatus(finalState.status || "error");
+            const reason = status === "fresh" ? "OK" : String(finalState.reason || "CALC_FAILED");
+            const wasRunning = __lastRenderedSummaryStatusLocal === "calculating";
+            const finalRenderStartedAt = Date.now();
+            renderAbonentSummaryStatus(status, reason);
+            setRecalcReportStage("finalRenderMs", Date.now() - finalRenderStartedAt);
+            markFullRecalcFinalRendered(status, source || "final-render");
+            if (status !== "fresh") printRecalcCallCountReport(source || "final-render-error", { force: true });
+            try {
+                console.log("[summary-ui][final-render]", {
+                    runId: recalcRunId,
+                    abonentId: String(currentAbonentId || ""),
+                    status: status,
+                    reason: reason,
+                    source: String(source || "")
+                });
+                if (wasRunning && __lastRenderedSummaryStatusLocal !== "calculating") {
+                    console.log("[summary-ui][running-cleared]", {
+                        runId: recalcRunId,
+                        abonentId: String(currentAbonentId || ""),
+                        status: __lastRenderedSummaryStatusLocal,
+                        reason: __lastRenderedSummaryReasonLocal
+                    });
+                }
+            } catch(eSummaryUiFinalLog) {}
+        }
+        function finishFullRecalcAbortFromUi(source){
+            if (fullRecalcState.abortRequested !== true) return false;
+            const reason = String(fullRecalcState.abortReason || (fullRecalcState.timedOut ? "FULL_RECALC_TIMEOUT" : "FULL_RECALC_CANCELLED"));
+            const finalStatus = reason === "FULL_RECALC_TIMEOUT" ? "timeout" : "cancelled";
+            const finalReason = finalStatus === "timeout" ? "Пересчёт остановлен по таймауту" : "Пересчёт остановлен пользователем";
+            fullRecalcState.cancelled = true;
+            rememberExplicitFullRecalcFinal(finalStatus, finalReason, null);
+            renderExplicitFullRecalcFinal(source || finalStatus);
+            printRecalcCallCountReport(source || finalStatus, { force: true });
+            return true;
+        }
+        function heartbeatPostRecalcStage(stage){
+            heartbeatFullRecalc(stage || "snapshot-save");
+        }
+        function schedulePostRecalcSnapshotSave(snapshot){
+            setTimeout(async function(){
+                let snapshotSaveResult = null;
+                try {
+                    heartbeatFullRecalc("save-card-snapshot-async");
+                    heartbeatPostRecalcStage("snapshot-save-start");
+                    if (fullRecalcState.abortRequested === true) return;
+                    try { console.log("[full-recalc][step]", { runId: recalcRunId, step: "save-card-snapshot-async" }); } catch(eStepLog) {}
+                    const snapshotSaveStartedAt = Date.now();
+                    snapshotSaveResult = await Data.saveCardSnapshotAndWait(currentAbonentId, snapshot, { runId: recalcRunId, skipReadback: true });
+                    setRecalcReportStage("snapshotSaveMs", Date.now() - snapshotSaveStartedAt);
+                    const saveOk = !!(snapshotSaveResult && snapshotSaveResult.localOk === true && snapshotSaveResult.serverOk === true);
+                    if (typeof window.__setPostRecalcSnapshotSaveResult === "function") window.__setPostRecalcSnapshotSaveResult(recalcRunId, saveOk);
+                    try {
+                        console.log("[full-recalc][step-done]", { runId: recalcRunId, step: "save-card-snapshot-async", ok: saveOk });
+                        console.log("[full-recalc][save-snapshot]", {
+                            runId: recalcRunId,
+                            abonentId: String(currentAbonentId || ""),
+                            uid: String(snapshot && snapshot.uid || ""),
+                            key: String(snapshotSaveResult && snapshotSaveResult.key || ""),
+                            localOk: !!(snapshotSaveResult && snapshotSaveResult.localOk === true),
+                            serverOk: !!(snapshotSaveResult && snapshotSaveResult.serverOk === true),
+                            serverReadbackOk: !!(snapshotSaveResult && snapshotSaveResult.serverReadbackOk === true),
+                            ledgerVersion: String(snapshot && snapshot.ledgerVersion || ""),
+                            snapshotLedgerVersion: String(snapshotSaveResult && snapshotSaveResult.ledgerVersion || "")
+                        });
+                    } catch(eSnapshotSaveLog) {}
+                    heartbeatPostRecalcStage("snapshot-save-done");
+                } catch(eSnapshotAsync) {
+                    if (typeof window.__setPostRecalcSnapshotSaveResult === "function") window.__setPostRecalcSnapshotSaveResult(recalcRunId, false);
+                    heartbeatPostRecalcStage("snapshot-save-failed");
+                } finally {
+                    fullRecalcState.snapshotSavePending = false;
+                    printRecalcCallCountReport("snapshot-save-done", { force: true });
+                }
+            }, 0);
+        }
 
         try {
             let uidResult = null;
+            heartbeatFullRecalc("ensure-uid");
+            try { console.log("[full-recalc][step]", { runId: recalcRunId, step: "ensure-uid" }); } catch(eStepLog) {}
             try {
                 uidResult = await Data.ensureAbonentUid(currentAbonentId, { source: "abonent_card.calc" });
             } catch (e) {
                 uidResult = { ok: false, reason: String(e && e.message || e) };
             }
+            try { console.log("[full-recalc][step-done]", { runId: recalcRunId, step: "ensure-uid", ok: !!(uidResult && uidResult.ok === true) }); } catch(eStepDoneLog) {}
+            await __fullRecalcUiYield();
 
             if (!uidResult || uidResult.ok !== true || !uidResult.uid) {
                 renderAbonentSummaryStatus("error", "UID_NOT_SAVED");
                 alert("Период расчёта не сохранён: UID абонента не сохранён.");
                 return;
             }
+            fullRecalcState.uid = String(uidResult.uid || fullRecalcState.uid || "");
+            if (window.__JKH_RECALC_CALL_COUNTS) window.__JKH_RECALC_CALL_COUNTS.uid = fullRecalcState.uid;
 
             if (!hasAnyPeriodInput) {
                 const fullPeriod = autofillFullCardPeriodUI("full-summary-recalc-before-run");
@@ -3627,59 +4558,165 @@ function bindCalcButtons(){
                     return;
                 }
                 if (!confirmCalcPeriodSaved()) return;
+                if (typeof window.runTemporaryPeriodCalculation !== "function") {
+                    console.warn("[period-recalc][blocked-full-write]", {
+                        abonentId: String(currentAbonentId || ""),
+                        reason: "TEMPORARY_PERIOD_API_UNAVAILABLE"
+                    });
+                    renderAbonentSummaryStatus("error", "TEMPORARY_PERIOD_API_UNAVAILABLE");
+                    alert("Временный расчёт периода недоступен.");
+                    return;
+                }
+                const fullStatusBeforePeriod = String(fullSummaryUiBeforeRecalc.status || __lastRenderedSummaryStatusLocal || "");
+                __saveTemporaryPeriodState({ from: from, to: to }, { abonentId: currentAbonentId, source: "temporary-recalc" });
+                const periodResult = await window.runTemporaryPeriodCalculation({
+                    abonentId: currentAbonentId,
+                    period: { from: from, to: to },
+                    mode: "temporary_court_period"
+                });
+                if (!periodResult || periodResult.ok !== true) {
+                    const reason = String(periodResult && periodResult.reason || "TEMPORARY_PERIOD_CALC_FAILED");
+                    renderAbonentSummaryStatus("error", reason);
+                    alert("Расчёт периода не выполнен: " + reason);
+                    return;
+                }
+                __saveTemporaryPeriodState({ from: from, to: to }, { abonentId: currentAbonentId, source: "temporary-recalc-done", renderedPeriodRows: periodResult.renderedPeriodRows || 0 });
+                restoreFullSummaryStatusUi(fullSummaryUiBeforeRecalc);
+                const fullStatusAfterPeriod = String(__lastRenderedSummaryStatusLocal || "");
+                const periodStatusMessage = __normalizeSummaryStatus(fullStatusBeforePeriod) === "fresh"
+                    ? "Период рассчитан временно. Основной итог карточки не изменялся."
+                    : "Основной итог карточки требует пересчёта. Период рассчитан отдельно.";
+                renderPeriodCalculationStatus(periodStatusMessage, {
+                    fullStatusBefore: fullStatusBeforePeriod,
+                    fullStatusAfter: fullStatusAfterPeriod
+                });
+                try { console.log("[period-recalc][loading-cleared]", { fullStatusBefore: fullStatusBeforePeriod, fullStatusAfter: fullStatusAfterPeriod, periodStatus: periodStatusMessage }); } catch(eLoadingCleared) {}
+                return;
             }
 
             let recalcHandled = false;
             if (typeof window.fullRecalcForCurrentAbonent === "function") {
-                const recalcResult = await window.fullRecalcForCurrentAbonent(recalcForReportPeriod
-                    ? { period: { from: from, to: to }, runtimePeriod: { from: from, to: to }, applyAutoAccrual: true, recalcMode: "REPORT_PERIOD_CALCULATION", summaryScope: "period" }
-                    : { applyAutoAccrual: true, recalcMode: "FULL_SUMMARY_REBUILD", summaryScope: "full" });
+                explicitFullRecalcStarted = true;
+                heartbeatFullRecalc("fullRecalcForCurrentAbonent");
+                try { console.log("[full-recalc][step]", { runId: recalcRunId, step: "fullRecalcForCurrentAbonent" }); } catch(eStepLog) {}
+                const recalcResult = await window.fullRecalcForCurrentAbonent({ applyAutoAccrual: true, recalcMode: "FULL_SUMMARY_REBUILD", summaryScope: "full", recalcRunId: recalcRunId });
+                fullRecalcState.resultReceived = true;
+                fullRecalcState.resultOk = !!(recalcResult && recalcResult.ok === true);
+                if (fullRecalcState.resultOk) {
+                    fullRecalcState.timedOut = false;
+                    watchdogFired = false;
+                    if (fullRecalcState.slowWarningShown) {
+                        try {
+                            console.log("[full-recalc][late-success-after-warning]", {
+                                runId: recalcRunId,
+                                abonentId: String(currentAbonentId || ""),
+                                elapsedMs: Date.now() - fullRecalcState.startedAt,
+                                rowsPresent: hasCalculatedRowsForFullRecalc()
+                            });
+                        } catch(eLateSuccessLog) {}
+                    }
+                    if (fullRecalcState.timeoutWarningShown) {
+                        try {
+                            console.log("[full-recalc][late-success-after-timeout-warning]", {
+                                runId: recalcRunId,
+                                abonentId: String(currentAbonentId || ""),
+                                currentStage: String(fullRecalcState.currentStage || ""),
+                                elapsedMs: Date.now() - fullRecalcState.startedAt,
+                                rowsPresent: hasCalculatedRowsForFullRecalc()
+                            });
+                        } catch(eLateTimeoutSuccessLog) {}
+                    }
+                }
+                clearFullRecalcWatchdog("result-received");
+                heartbeatPostRecalcStage("recalc-result-received");
+                try { console.log("[full-recalc][step-done]", { runId: recalcRunId, step: "fullRecalcForCurrentAbonent", ok: !!(recalcResult && recalcResult.ok === true) }); } catch(eStepDoneLog) {}
+                await __fullRecalcUiYield();
+                try {
+                    console.log("[summary-ui][final-result-received]", {
+                        runId: recalcRunId,
+                        abonentId: String(currentAbonentId || ""),
+                        ok: !!(recalcResult && recalcResult.ok === true),
+                        status: String(recalcResult && (recalcResult.summary_status || recalcResult.status) || ""),
+                        reason: String(recalcResult && (recalcResult.summary_reason || recalcResult.reason) || "")
+                    });
+                } catch(eSummaryUiResultLog) {}
                 __logCardRecalcResult(recalcResult, currentAbonentId);
                 if (!recalcResult || recalcResult.ok !== true) {
+                    clearFullRecalcWatchdog("error-result-received");
                     const reason = String(recalcResult && (recalcResult.reason || recalcResult.summary_reason) || "CALC_FAILED");
-                    const lockStatus = recalcResult && (recalcResult.status === "already_running" || recalcResult.summary_status === "already_running");
-                    renderAbonentSummaryStatus(lockStatus ? "already_running" : "error", reason);
+                    if (recalcResult && (recalcResult.cancelled === true || reason === "FULL_RECALC_CANCELLED" || recalcResult.timedOut === true || reason === "FULL_RECALC_TIMEOUT")) {
+                        const finalStatus = recalcResult.timedOut === true || reason === "FULL_RECALC_TIMEOUT" ? "timeout" : "cancelled";
+                        const finalReason = finalStatus === "timeout" ? "Пересчёт остановлен по таймауту" : "Пересчёт остановлен пользователем";
+                        fullRecalcState.cancelled = true;
+                        rememberExplicitFullRecalcFinal(finalStatus, finalReason, recalcResult);
+                        renderExplicitFullRecalcFinal(finalStatus === "timeout" ? "recalc-timeout" : "recalc-cancelled");
+                        printRecalcCallCountReport(finalStatus === "timeout" ? "recalc-timeout" : "recalc-cancelled", { force: true });
+                        return;
+                    }
+                    rememberExplicitFullRecalcFinal("error", reason, recalcResult);
+                    renderExplicitFullRecalcFinal("recalc-result-error");
+                    printRecalcCallCountReport("recalc-result-error", { force: true });
+                    try { console.log("[full-recalc][ui-status-final]", { abonentId: String(currentAbonentId || ""), status: "error", reason: reason }); } catch(eUiFinalFailLog) {}
                     alert(manualRecalcErrorMessage(recalcResult, reason));
                     return;
                 }
+                heartbeatPostRecalcStage("recalc-result-ok");
+                if (finishFullRecalcAbortFromUi("abort-after-result-ok")) return;
                 const summary = recalcResult && recalcResult.summary && typeof recalcResult.summary === "object" ? recalcResult.summary : null;
                 window.__lastCardSummaryForDebug = summary || null;
                 const summaryStatus = recalcResult && (recalcResult.summary_status || recalcResult.status) || summary && (summary.summary_status || summary.status) || "";
                 const summaryReason = recalcResult && (recalcResult.summary_reason || recalcResult.reason) || summary && (summary.summary_reason || summary.reason) || "";
                 if (__normalizeSummaryStatus(summaryStatus) === "fresh") {
+                    if (finishFullRecalcAbortFromUi("abort-before-snapshot")) return;
                     if (!window.Data || typeof Data.buildCardSnapshotFromCurrentResult !== "function" || typeof Data.saveCardSnapshotAndWait !== "function") {
-                        renderAbonentSummaryStatus("error", "CARD_SNAPSHOT_API_UNAVAILABLE");
+                        rememberExplicitFullRecalcFinal("error", "CARD_SNAPSHOT_API_UNAVAILABLE", recalcResult);
+                        renderExplicitFullRecalcFinal("snapshot-api-unavailable");
+                        try { console.log("[full-recalc][ui-status-final]", { abonentId: String(currentAbonentId || ""), status: "error", reason: "CARD_SNAPSHOT_API_UNAVAILABLE" }); } catch(eUiFinalApiLog) {}
                         alert("Snapshot карточки не сохранён: API snapshot недоступен.");
                         return;
                     }
+                    heartbeatFullRecalc("build-card-snapshot");
+                    try { console.log("[full-recalc][step]", { runId: recalcRunId, step: "build-card-snapshot" }); } catch(eStepLog) {}
                     const snapshot = Data.buildCardSnapshotFromCurrentResult(currentAbonentId, recalcResult);
+                    try { console.log("[full-recalc][step-done]", { runId: recalcRunId, step: "build-card-snapshot" }); } catch(eStepDoneLog) {}
+                    await __fullRecalcUiYield();
+                    if (finishFullRecalcAbortFromUi("abort-after-snapshot-build")) return;
                     const snapshotRowsById = snapshot && snapshot.rowsById && typeof snapshot.rowsById === "object" && !Array.isArray(snapshot.rowsById) ? snapshot.rowsById : null;
                     if (!snapshot || !snapshotRowsById || !Object.keys(snapshotRowsById).length) {
-                        renderAbonentSummaryStatus("error", "EMPTY_ROWS_BY_ID");
+                        rememberExplicitFullRecalcFinal("error", "EMPTY_ROWS_BY_ID", recalcResult);
+                        renderExplicitFullRecalcFinal("snapshot-empty-rows");
+                        try { console.log("[full-recalc][ui-status-final]", { abonentId: String(currentAbonentId || ""), status: "error", reason: "EMPTY_ROWS_BY_ID" }); } catch(eUiFinalEmptyRowsLog) {}
                         alert("Snapshot карточки пуст — пересчёт не дал строк с computed totals");
                         return;
                     }
-                    const snapshotSaveResult = await Data.saveCardSnapshotAndWait(currentAbonentId, snapshot);
-                    if (!snapshotSaveResult || snapshotSaveResult.localOk !== true) {
-                        renderAbonentSummaryStatus("error", "CARD_SNAPSHOT_SAVE_FAILED");
-                        alert("Snapshot карточки не сохранён. Итог не будет отмечен fresh.");
-                        return;
-                    }
-                    if (snapshotSaveResult.serverOk !== true) {
-                        renderAbonentSummaryStatus("error", "CARD_SNAPSHOT_SERVER_SAVE_FAILED");
-                        alert("Snapshot карточки не сохранён на сервер. Итог не будет отмечен fresh.");
-                        return;
-                    }
-                    if (snapshotSaveResult.serverReadbackOk !== true) {
-                        renderAbonentSummaryStatus("error", "CARD_SNAPSHOT_SERVER_READBACK_FAILED");
-                        alert("Snapshot карточки не подтверждён сервером. Итог не будет отмечен fresh.");
-                        return;
-                    }
                     __cardSnapshotFreshValidated = true;
-                    __lastCardSnapshotValidation = { valid: true, reason: "", detail: { key: snapshotSaveResult.key, ownerId: snapshotSaveResult.ownerId, status: snapshotSaveResult.status } };
+                    __lastCardSnapshotValidation = { valid: true, reason: "", detail: { runId: recalcRunId, source: "post-recalc-memory" } };
                     __runtimeCacheFreshBlocked = false;
+                    if (typeof window.__markPostRecalcSnapshotFresh === "function") window.__markPostRecalcSnapshotFresh(recalcRunId, snapshot);
+                    fullRecalcState.snapshotSavePending = true;
+                    schedulePostRecalcSnapshotSave(snapshot);
                 }
-                if (summaryStatus) renderAbonentSummaryStatus(summaryStatus, __normalizeSummaryStatus(summaryStatus) === "fresh" ? "OK" : summaryReason);
+                if (finishFullRecalcAbortFromUi("abort-before-final-render")) return;
+                rememberExplicitFullRecalcFinal("fresh", "OK", recalcResult);
+                heartbeatFullRecalc("final-render");
+                heartbeatPostRecalcStage("final-render-start");
+                renderExplicitFullRecalcFinal("recalc-success");
+                heartbeatPostRecalcStage("final-render-done");
+                if (!watchdogFired) unlockFullRecalcUi("recalc-success");
+                printRecalcCallCountReport("final-render");
+                try {
+                    console.log("[full-recalc][final-ok]", {
+                        runId: recalcRunId,
+                        abonentId: String(currentAbonentId || ""),
+                        elapsedMs: Date.now() - fullRecalcState.startedAt,
+                        slowWarningShown: !!fullRecalcState.slowWarningShown
+                    });
+                    console.log("[full-recalc][ui-status-final]", {
+                        abonentId: String(currentAbonentId || ""),
+                        status: "fresh",
+                        reason: "OK"
+                    });
+                } catch(eUiStatusFinalLog) {}
                 if (__normalizeSummaryStatus(summaryStatus) === "fresh" && summary) {
                     __renderAbonentTotalsFromFreshSummary(summary);
                 }
@@ -3692,9 +4729,50 @@ function bindCalcButtons(){
             if (!recalcHandled) {
                 __safeLoadPaymentTableOnce("manual-full-recalc");
             }
+        } catch (eRecalcHandler) {
+            const reason = String(eRecalcHandler && (eRecalcHandler.message || eRecalcHandler.reason) || eRecalcHandler || "RECALC_EXCEPTION");
+            if (reason === "FULL_RECALC_CANCELLED" || reason === "FULL_RECALC_TIMEOUT") {
+                const finalStatus = reason === "FULL_RECALC_TIMEOUT" ? "timeout" : "cancelled";
+                const finalReason = finalStatus === "timeout" ? "Пересчёт остановлен по таймауту" : "Пересчёт остановлен пользователем";
+                fullRecalcState.cancelled = true;
+                rememberExplicitFullRecalcFinal(finalStatus, finalReason, null);
+                if (explicitFullRecalcStarted) renderExplicitFullRecalcFinal(finalStatus === "timeout" ? "exception-timeout" : "exception-cancelled");
+                else renderAbonentSummaryStatus(finalStatus, finalReason);
+                printRecalcCallCountReport(finalStatus === "timeout" ? "exception-timeout" : "exception-cancelled", { force: true });
+                return;
+            }
+            if (watchdogFired || fullRecalcState.timedOut) return;
+            rememberExplicitFullRecalcFinal("error", reason, null);
+            if (explicitFullRecalcStarted) renderExplicitFullRecalcFinal("exception");
+            else renderAbonentSummaryStatus("error", reason);
+            printRecalcCallCountReport("exception", { force: true });
+            try {
+                console.error("[full-recalc][result]", {
+                    runId: recalcRunId,
+                    abonentId: String(currentAbonentId || ""),
+                    ok: false,
+                    reason: reason,
+                    exception: true
+                });
+                console.log("[full-recalc][ui-status-final]", {
+                    runId: recalcRunId,
+                    abonentId: String(currentAbonentId || ""),
+                    status: "error",
+                    reason: reason
+                });
+            } catch(eRecalcCatchLog) {}
+            alert("Пересчёт не завершён: " + reason);
         } finally {
-            runBtn.disabled = false;
-            runBtn.textContent = prevText || "Пересчитать";
+            try { console.log("[full-recalc][finally]", { runId: recalcRunId, abonentId: String(currentAbonentId || ""), timedOut: !!(watchdogFired || fullRecalcState.timedOut) }); } catch(eFinallyLog) {}
+            if (!watchdogFired && explicitFullRecalcStarted && __lastRenderedSummaryStatusLocal === "calculating") {
+                renderExplicitFullRecalcFinal("finally-running-safety");
+            }
+            if (!watchdogFired) unlockFullRecalcUi("finally");
+            if (explicitFullRecalcStarted || fullRecalcState.timedOut) {
+                printRecalcCallCountReport("finally");
+            } else if (window.__JKH_RECALC_CALL_COUNTS && window.__JKH_RECALC_CALL_COUNTS.runId === recalcRunId) {
+                window.__JKH_RECALC_CALL_COUNTS = null;
+            }
         }
     });
 
@@ -3707,6 +4785,7 @@ function bindCalcButtons(){
         fromEl.value = "";
         toEl.value = "";
         window.JKH_CARD_PERIOD_MODE_ACTIVE = false;
+        try { sessionStorage.removeItem(__periodSessionKey(id)); } catch(eSessionClear) {}
         let urlAfter = urlBefore;
         try {
             const u = new URL(window.location.href);
@@ -3760,6 +4839,7 @@ function bindCalcButtons(){
         }
         if (from || to) {
             if (isValidPeriod(from, to)) {
+                __saveTemporaryPeriodState({ from: from, to: to }, { abonentId: id, source: "open-reports" });
                 const readonlyMeta = getCalcPeriodStorageMeta();
                 if (!readonlyMeta || !readonlyMeta.resolvedUid) {
                     alert("Период расчёта не сохранён: не найден canonical UID key.");

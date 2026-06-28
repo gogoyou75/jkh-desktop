@@ -59,6 +59,50 @@
     return true;
   }
 
+  var tariffReadDiagSeen = {};
+
+  function diagnoseTariffServerRead(ownerId, key, localRaw) {
+    try {
+      var k = String(key || "");
+      if (k.indexOf("tariffs_") !== 0) return;
+      var owner = normalizeOwnerId(ownerId);
+      if (!owner || typeof fetch !== "function") return;
+      var sig = owner + "|" + k;
+      var now = Date.now ? Date.now() : (new Date()).getTime();
+      if (tariffReadDiagSeen[sig] && now - tariffReadDiagSeen[sig] < 2000) return;
+      tariffReadDiagSeen[sig] = now;
+      var localValue = (localRaw === null || localRaw === undefined) ? "" : String(localRaw);
+      fetch('/api/store?key=' + encodeURIComponent(k) + '&client_owner_hint=' + encodeURIComponent(owner), { credentials: 'include' })
+        .then(function (r) { return r.json().catch(function () { return null; }); })
+        .then(function (data) {
+          var serverValue = data && Object.prototype.hasOwnProperty.call(data, 'value') && data.value !== null && data.value !== undefined
+            ? String(data.value)
+            : "";
+          console.log('[diagnose][tariff-server-read]', {
+            source: 'JKHPersist.get',
+            ownerId: owner,
+            key: k,
+            localExists: localValue !== "",
+            serverExists: !!(data && data.ok === true && serverValue !== ""),
+            serverLength: serverValue.length,
+            localLength: localValue.length
+          });
+        })
+        .catch(function (e) {
+          console.warn('[diagnose][tariff-server-read]', {
+            source: 'JKHPersist.get',
+            ownerId: owner,
+            key: k,
+            localExists: localValue !== "",
+            serverExists: null,
+            serverLength: 0,
+            localLength: localValue.length,
+            error: String(e && e.message || e)
+          });
+        });
+    } catch (eDiagTariffServerRead) {}
+  }
+
   window.JKHPersist = {
     set: async function (key, value, ownerId, options) {
       var owner = ensureOwner(ownerId);
@@ -77,7 +121,9 @@
     get: function (key, ownerId) {
       var owner = ensureOwner(ownerId);
       ensureStore();
-      return JKHStore.getRaw(key, owner);
+      var raw = JKHStore.getRaw(key, owner);
+      diagnoseTariffServerRead(owner, key, raw);
+      return raw;
     },
 
     remove: async function (key, ownerId) {
