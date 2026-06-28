@@ -680,16 +680,24 @@ infra_check_after_git() {
   fi
 
   if ! cmp -s <(tail -n +2 "$snapshot_file") "$current_file"; then
-    echo "BLOCKED: git-операция изменила infra-файлы выбранной среды."
-    echo
-    echo "Было до git:"
-    tail -n +2 "$snapshot_file" || true
-    echo
-    echo "Стало после git:"
-    cat "$current_file" || true
     backup_dir="$(grep '^BACKUP_DIR=' "$snapshot_file" | tail -n 1 | cut -d= -f2-)"
 
     if [ -n "$backup_dir" ] && [ -d "$backup_dir" ]; then
+      echo "BLOCKED: git-операция изменила infra-файлы выбранной среды."
+      echo
+      echo "Было до git:"
+      tail -n +2 "$snapshot_file" || true
+      echo
+      echo "Стало после git:"
+      cat "$current_file" || true
+      echo
+      echo "ENVIRONMENT=$ENVIRONMENT"
+      echo "PROJECT_DIR=$PROJECT_DIR"
+      echo "Восстанавливаю server-local infra выбранной среды из локального backup:"
+      echo ".env"
+      echo "docker-compose.yml"
+      echo "nginx/default.conf"
+
       cp -p "$backup_dir/.env" .env || {
         rm -f "$current_file"
         rm -rf "$backup_dir"
@@ -713,18 +721,27 @@ infra_check_after_git() {
       }
 
       if infra_sha256sum > "$current_file" && cmp -s <(tail -n +2 "$snapshot_file") "$current_file"; then
-        echo "OK: infra-файлы восстановлены в состояние до git-операции"
+        if infra_files_guard; then
+          echo "OK: infra-файлы выбранной среды восстановлены; сценарий продолжается"
+          rm -f "$current_file"
+          rm -rf "$backup_dir"
+          return 0
+        fi
+
+        echo "BLOCKED: восстановленные infra-файлы не прошли guard выбранной среды."
         rm -f "$current_file"
         rm -rf "$backup_dir"
-        block_operation "BLOCKED: infra-файлы были изменены и восстановлены из локального backup"
+        block_operation "BLOCKED: restored infra guard failed"
+        infra_lock_hint
         return 1
       fi
     fi
 
+    echo "BLOCKED: infra-файлы не удалось восстановить в состояние выбранной среды."
     rm -f "$current_file"
     [ -n "$backup_dir" ] && rm -rf "$backup_dir"
-    block_operation "BLOCKED: infra-файлы изменились после git-операции"
     infra_lock_hint
+    LAST_ERROR=1
     return 1
   fi
 
@@ -732,6 +749,7 @@ infra_check_after_git() {
   backup_dir="$(grep '^BACKUP_DIR=' "$snapshot_file" | tail -n 1 | cut -d= -f2-)"
   [ -n "$backup_dir" ] && rm -rf "$backup_dir"
   echo "OK: infra-файлы не изменились после git-операции."
+  return 0
 }
 
 run_git_preserving_infra() {
