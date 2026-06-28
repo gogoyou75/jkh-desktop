@@ -580,6 +580,60 @@ infra_backup_before_git() {
   cp -p nginx/default.conf "$backup_dir/default.conf" || return 1
 }
 
+infra_skip_worktree_block() {
+  echo "BLOCKED: server-local infra не защищена skip-worktree."
+  echo "Команды исправления:"
+  echo "git update-index --skip-worktree docker-compose.yml nginx/default.conf"
+  echo "После этого:"
+  echo "git ls-files -v docker-compose.yml nginx/default.conf"
+}
+
+check_skip_worktree_infra() {
+  local compose_line nginx_line env_line
+
+  compose_line="$(git ls-files -v -- docker-compose.yml 2>/dev/null || true)"
+  nginx_line="$(git ls-files -v -- nginx/default.conf 2>/dev/null || true)"
+  env_line="$(git ls-files -v -- .env 2>/dev/null || true)"
+
+  case "$compose_line" in
+    S[[:space:]]*docker-compose.yml) ;;
+    *)
+      infra_skip_worktree_block
+      LAST_ERROR=1
+      return 1
+      ;;
+  esac
+
+  case "$nginx_line" in
+    S[[:space:]]*nginx/default.conf) ;;
+    *)
+      infra_skip_worktree_block
+      LAST_ERROR=1
+      return 1
+      ;;
+  esac
+
+  if [ -z "$env_line" ]; then
+    echo "OK: .env not tracked, Git его не трогает"
+    return 0
+  fi
+
+  case "$env_line" in
+    S[[:space:]]*.env)
+      echo "OK: .env tracked и защищён skip-worktree"
+      ;;
+    *)
+      echo "BLOCKED: .env tracked, но не защищён skip-worktree."
+      echo "Команды исправления:"
+      echo "git update-index --skip-worktree .env"
+      echo "После этого:"
+      echo "git ls-files -v .env"
+      LAST_ERROR=1
+      return 1
+      ;;
+  esac
+}
+
 infra_snapshot_before_git() {
   local snapshot_file="$1"
   local backup_dir
@@ -986,7 +1040,7 @@ explain() {
         "Переключается на main, забирает свежие изменения с GitHub и перезапускает контейнеры без пересборки образов." \
         "Когда в main были обычные изменения кода, HTML, JS или настроек, но не менялись Dockerfile, requirements.txt и системные зависимости." \
         "Git-ветку в выбранной среде и запущенные контейнеры через docker compose restart." \
-        "Базу данных, Docker-образы и локальные untracked-файлы. Очистка untracked-файлов не выполняется." \
+        "Базу данных, Docker-образы и локальные untracked-файлы. server-local infra: .env, docker-compose.yml, nginx/default.conf, container_name, ports, volumes, DB_NAME, ENV_TYPE." \
         "Средний. В PROD перед запуском нужен YES_PROD и backup MySQL." \
         "Это быстрый способ обновить сервер до свежего main без долгой пересборки." \
         "[GitHub main]\n|\nv\n[$ENVIRONMENT $PROJECT_DIR]\n\nЗатрагивается только выбранная среда."
@@ -997,7 +1051,7 @@ explain() {
         "Забирает origin/main и делает текущую папку точной копией main по отслеживаемым Git-файлам." \
         "Только когда сервер запутался, локальные изменения мешают работе, и нужно вернуться к чистому main." \
         "Tracked-файлы Git в выбранной среде, затем перезапускает контейнеры." \
-        "Untracked-файлы и папки. Очистка untracked-файлов не выполняется. В PROD docker compose down не выполняется." \
+        "Untracked-файлы и папки. server-local infra: .env, docker-compose.yml, nginx/default.conf, container_name, ports, volumes, DB_NAME, ENV_TYPE. В PROD docker compose down не выполняется." \
         "Опасный. Может удалить незакоммиченные tracked-изменения." \
         "Это аварийная кнопка: вернуть код сервера к main. Используй только если понимаешь, что локальные правки в tracked-файлах пропадут." \
         "[GitHub main]\n|\nv\n[Чистый $ENVIRONMENT $PROJECT_DIR]\n\nЛокальные tracked-правки будут потеряны."
@@ -1008,7 +1062,7 @@ explain() {
         "Только в PROD: переключается на main, забирает свежие изменения и запускает docker compose up -d --build." \
         "Когда в PROD менялись Dockerfile, requirements.txt, backend-зависимости или нужно гарантированно пересобрать контейнеры. В LAB main-сценарии запрещены." \
         "Git-ветку, Docker-образы и контейнеры выбранной среды." \
-        "Базу данных и локальные untracked-файлы. Очистка untracked-файлов и docker compose down в PROD не выполняются." \
+        "Базу данных и локальные untracked-файлы. server-local infra: .env, docker-compose.yml, nginx/default.conf, container_name, ports, volumes, DB_NAME, ENV_TYPE. Очистка untracked-файлов и docker compose down в PROD не выполняются." \
         "Опасный. Разрешён только в PROD после YES_PROD, backup MySQL, environment guard и branch guard." \
         "Это полное PROD-обновление main с пересборкой приложения. В LAB используй пункт 4/5 для тестовой ветки." \
         "[GitHub main]\n|\nv\n[$ENVIRONMENT $PROJECT_DIR]\n|\nv\n[Docker build + запуск]"
@@ -1019,7 +1073,7 @@ explain() {
         "Показывает remote-ветки origin/*, создаёт локальную ветку test-pr из выбранной ветки и запускает build." \
         "Разрешено только в LAB. Для проверки PR/Codex ветки, особенно если менялись backend, зависимости или Docker-настройки. PROD не запускает тестовые ветки." \
         "Текущую Git-ветку выбранной среды, локальную ветку test-pr, Docker-образы и контейнеры." \
-        "GitHub-ветки, базу данных и локальные untracked-файлы. PROD не трогается, если выбрана LAB." \
+        "GitHub-ветки, базу данных и локальные untracked-файлы. server-local infra: .env, docker-compose.yml, nginx/default.conf, container_name, ports, volumes, DB_NAME, ENV_TYPE. PROD не трогается, если выбрана LAB." \
         "Средний для LAB, опасный для PROD." \
         "Берём выбранную ветку с GitHub и запускаем её в выбранной среде с пересборкой." \
         "[GitHub ветка]\n|\nv\n[$ENVIRONMENT $PROJECT_DIR]\n\nЕсли выбрана LAB, PROD НЕ ТРОГАЕМ."
@@ -1030,7 +1084,7 @@ explain() {
         "Показывает remote-ветки origin/*, создаёт локальную ветку test-pr и делает docker compose restart без build." \
         "Разрешено только в LAB. Для быстрой проверки UI/HTML/JS или мелких изменений, когда пересборка Docker не нужна. PROD не запускает тестовые ветки." \
         "Текущую Git-ветку выбранной среды и состояние контейнеров через restart." \
-        "Docker-образы, базу данных, GitHub-ветки и локальные untracked-файлы." \
+        "Docker-образы, базу данных, GitHub-ветки и локальные untracked-файлы. server-local infra: .env, docker-compose.yml, nginx/default.conf, container_name, ports, volumes, DB_NAME, ENV_TYPE." \
         "Средний для LAB, опасный для PROD." \
         "Быстро подставляем тестовую ветку в выбранную среду и перезапускаем приложение." \
         "[GitHub ветка]\n|\nv\n[$ENVIRONMENT $PROJECT_DIR]\n\nDocker build не выполняется."
@@ -1074,7 +1128,7 @@ explain() {
         "Делает preflight-проверки, backup MySQL в PROD, обновляет main с build и проверяет результат." \
         "Для важного обновления main, особенно в PROD, когда нельзя рисковать базой и нужно пройти все проверки." \
         "Git-ветку, Docker-образы и контейнеры выбранной среды. В PROD создаёт backup MySQL." \
-        "Локальные untracked-файлы, ветки на GitHub и базу данных напрямую. docker compose down в PROD не выполняется." \
+        "Локальные untracked-файлы, ветки на GitHub и базу данных напрямую. server-local infra: .env, docker-compose.yml, nginx/default.conf, container_name, ports, volumes, DB_NAME, ENV_TYPE. docker compose down в PROD не выполняется." \
         "Средний для LAB, опасный для PROD." \
         "Самый аккуратный путь: сначала проверяем, сохраняем базу, потом обновляем и снова проверяем." \
         "[GitHub main]\n|\nv\n[$ENVIRONMENT $PROJECT_DIR]\n|\nv\n[Backup в PROD + build + проверки]"
@@ -1096,7 +1150,7 @@ explain() {
         "Забирает данные с GitHub, показывает выбранный коммит, применяет его в текущую ветку и отдельно спрашивает, запускать ли build." \
         "Когда нужен ровно один конкретный коммит без полного переключения ветки." \
         "Текущую Git-ветку выбранной среды, Docker-образы и контейнеры." \
-        "Другие коммиты, GitHub-ветки, untracked-файлы. В PROD docker compose down не выполняется." \
+        "Другие коммиты, GitHub-ветки, untracked-файлы. server-local infra: .env, docker-compose.yml, nginx/default.conf, container_name, ports, volumes, DB_NAME, ENV_TYPE. В PROD docker compose down не выполняется." \
         "Опасный в PROD, средний в LAB." \
         "Это перенос одной точечной правки в текущую среду." \
         "[Выбранный commit]\n|\nv\n[$ENVIRONMENT $PROJECT_DIR]\n|\nv\n[Build + запуск]"
@@ -1129,7 +1183,7 @@ explain() {
         "Возвращает текущую среду на указанный коммит или на предыдущий коммит HEAD~1 и запускает контейнеры без docker compose down." \
         "Когда после обновления стало хуже и нужно аккуратно вернуться к предыдущему состоянию кода." \
         "Git-состояние выбранной среды и контейнеры через restart или build." \
-        "Untracked-файлы, базу данных и GitHub-ветки. docker compose down в PROD не выполняется." \
+        "Untracked-файлы, базу данных и GitHub-ветки. server-local infra: .env, docker-compose.yml, nginx/default.conf, container_name, ports, volumes, DB_NAME, ENV_TYPE. docker compose down в PROD не выполняется." \
         "Опасный в PROD, средний в LAB." \
         "Это управляемый возврат к прошлому коду без удаления базы и без остановки compose через down." \
         "[Предыдущее состояние]\n|\nv\n[$ENVIRONMENT $PROJECT_DIR]\n\nВ PROD требуется отдельное YES_PROD."
@@ -1946,6 +2000,13 @@ check_lab_prod_isolation() {
   print_line
   echo "valvera.ru     -> 127.0.0.1:8081 -> PROD nginx/api/mysql"
   echo "lab.valvera.ru -> 127.0.0.1:8080 -> LAB nginx/api/mysql"
+  echo "S = Git не трогает server-local infra при обновлениях."
+
+  echo
+  print_line
+  echo "git ls-files -v docker-compose.yml nginx/default.conf .env 2>/dev/null || true"
+  print_line
+  git ls-files -v docker-compose.yml nginx/default.conf .env 2>/dev/null || true
 
   echo
   echo "Проверка nginx/default.conf в PROD:"
@@ -2012,6 +2073,7 @@ deploy_main_no_build() {
   local infra_snapshot
 
   require_main_scenario_prod || return 1
+  check_skip_worktree_infra || return 1
   prepare_deploy "Обновление main без build" "yes" || return 1
   infra_snapshot="$(mktemp)" || return 1
   infra_snapshot_before_git "$infra_snapshot" || return 1
@@ -2044,6 +2106,7 @@ hard_reset_main() {
     create_mysql_backup || return 1
   fi
 
+  check_skip_worktree_infra || return 1
   run git fetch origin || return 1
   infra_snapshot="$(mktemp)" || return 1
   infra_snapshot_before_git "$infra_snapshot" || return 1
@@ -2060,6 +2123,7 @@ deploy_main_with_build() {
   local infra_snapshot
 
   require_main_scenario_prod || return 1
+  check_skip_worktree_infra || return 1
   prepare_deploy "Обновление main с docker build" "yes" || return 1
   infra_snapshot="$(mktemp)" || return 1
   infra_snapshot_before_git "$infra_snapshot" || return 1
@@ -2083,6 +2147,7 @@ deploy_test_branch() {
     return 1
   fi
 
+  check_skip_worktree_infra || return 1
   prepare_deploy "$description" "yes" || return 1
   select_branch || return 1
   infra_snapshot="$(mktemp)" || return 1
@@ -2106,6 +2171,7 @@ safe_main_deploy() {
   local infra_snapshot
 
   require_main_scenario_prod || return 1
+  check_skip_worktree_infra || return 1
   prepare_deploy "Безопасное обновление main: backup + build + проверки" "yes" || return 1
   if [ "$ENVIRONMENT" = "LAB" ]; then
     load_env || return 1
@@ -2130,6 +2196,7 @@ cherry_pick_commit() {
   local answer build_answer infra_snapshot
 
   require_prod_confirmation "Cherry-pick одного коммита" || return 1
+  check_skip_worktree_infra || return 1
   show_cherry_pick_context
   require_clean_git_status || return 1
   environment_compose_guard || return 1
@@ -2232,6 +2299,7 @@ safe_rollback() {
     fi
   fi
 
+  check_skip_worktree_infra || return 1
   run git rev-parse --verify "$target" || return 1
   infra_snapshot="$(mktemp)" || return 1
   infra_snapshot_before_git "$infra_snapshot" || return 1
