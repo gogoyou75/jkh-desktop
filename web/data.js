@@ -1015,15 +1015,6 @@
       var currentLedgerVersion = String(currentVersions.ledger_version || computeLedgerRuntimeVersion(abonentOrId) || "");
       var snapshotLedgerVersion = String(snapshot.ledgerVersion || "");
       var rowsByIdCount = _cardSnapshotRowsByIdCount(snapshot.rowsById);
-      try {
-        console.log("[summary-status][version-check]", {
-          uid: String(snapshot.uid || ""),
-          ledgerVersion: currentLedgerVersion,
-          snapshotLedgerVersion: snapshotLedgerVersion,
-          summaryStatus: String(snapshot.summary_status || snapshot.status || ""),
-          reason: String(snapshot.dirtyReason || snapshot.summary_reason || "")
-        });
-      } catch (eVersionLog) {}
       if (snapshot.input_hash && currentVersions.input_hash && snapshot.input_hash !== currentVersions.input_hash) {
         snapshot.dirty = true;
         snapshot.dirtyReason = "INPUT_HASH_CHANGED";
@@ -5128,22 +5119,6 @@
     };
   }
 
-  function _recalcLockDebug(action, detail) {
-    var d = detail && typeof detail === "object" ? detail : {};
-    try {
-      console.log("[recalc-lock-debug]", {
-        action: String(action || ""),
-        abonentId: String(d.abonentId || ""),
-        uid: String(d.uid || ""),
-        lockKey: String(d.lockKey || ""),
-        lockAgeMs: Number(d.lockAgeMs || 0),
-        runId: String(d.runId || ""),
-        ownerId: String(d.ownerId || (typeof _ownerId === "function" ? _ownerId() : "") || ""),
-        reason: String(d.reason || "")
-      });
-    } catch (eLockDebug) {}
-  }
-
   function _recalcLockAgeFromServer(data) {
     var d = data && typeof data === "object" ? data : {};
     var direct = Number(d.lockAgeMs || d.lock_age_ms || d.ageMs || d.age_ms || 0);
@@ -5163,7 +5138,6 @@
     if (!isValidUid(uid)) return false;
     var lockKey = "stage16_recalc_lock_" + uid;
     try { sessionStorage.removeItem(lockKey); } catch (eLocal) {}
-    _recalcLockDebug("release-unload", { abonentId: found && found.id || "", uid: uid, lockKey: lockKey, runId: opts.runId || "", reason: opts.reason || "unload" });
     try {
       var body = JSON.stringify({ lock_token: token || "" });
       var url = "/api/recalc_lock/" + encodeURIComponent(uid) + "/finish";
@@ -5189,23 +5163,19 @@
     var localKey = "stage16_recalc_lock_" + uid;
     var now = Date.now();
     var lockTtlMs = 60 * 1000;
-    _recalcLockDebug("check", { abonentId: found && found.id || "", uid: uid, lockKey: localKey, runId: opts.runId || "", reason: "begin" });
     try {
       var raw = sessionStorage.getItem(localKey);
       var local = raw ? JSON.parse(raw) : null;
       var localAgeMs = local && local.running ? now - Number(local.startedAt || 0) : 0;
       if (local && local.running && localAgeMs < lockTtlMs) {
-        _recalcLockDebug("already-running", { abonentId: found && found.id || "", uid: uid, lockKey: localKey, lockAgeMs: localAgeMs, runId: opts.runId || "", reason: "local-active" });
         try { console.log("[recalc-lock][begin]", { uid: uid, status: "already_running", local: true, ageMs: localAgeMs, ttlMs: lockTtlMs }); } catch (eBeginAlreadyLog) {}
         return { ok: true, status: "already_running", account_uid: uid, local: true };
       }
       if (local && local.running) {
         try { sessionStorage.removeItem(localKey); } catch (eExpiredRemove) {}
-        _recalcLockDebug("expired-cleared", { abonentId: found && found.id || "", uid: uid, lockKey: localKey, lockAgeMs: localAgeMs, runId: opts.runId || "", reason: "local-ttl" });
         try { console.warn("[recalc-lock][expired-cleared]", { uid: uid, ageMs: localAgeMs, ttlMs: lockTtlMs }); } catch (eExpiredLog) {}
       }
       sessionStorage.setItem(localKey, JSON.stringify({ running: true, startedAt: now, runId: String(opts.runId || "") }));
-      _recalcLockDebug("set-local", { abonentId: found && found.id || "", uid: uid, lockKey: localKey, lockAgeMs: 0, runId: opts.runId || "", reason: "started" });
       try { console.log("[recalc-lock][begin]", { uid: uid, status: "started", local: true, startedAt: now, ttlMs: lockTtlMs }); } catch (eBeginLog) {}
     } catch (eLocal) {}
     try {
@@ -5216,9 +5186,7 @@
       if (res.ok && data && data.ok !== false) {
         var serverAgeMs = _recalcLockAgeFromServer(data);
         if (String(data.status || "") === "already_running") {
-          _recalcLockDebug("already-running", { abonentId: found && found.id || "", uid: uid, lockKey: localKey, lockAgeMs: serverAgeMs, runId: opts.runId || "", reason: "server-active" });
           if (serverAgeMs > lockTtlMs) {
-            _recalcLockDebug("expired-cleared", { abonentId: found && found.id || "", uid: uid, lockKey: localKey, lockAgeMs: serverAgeMs, runId: opts.runId || "", reason: "server-ttl" });
             try { await finishRecalcUidLock(uid, data.lock_token || "", { runId: opts.runId || "", reason: "server-expired-cleared" }); } catch (eFinishExpired) {}
             try {
               var retryRes = await fetch("/api/recalc_lock/" + encodeURIComponent(uid) + "/begin", { method: "POST", credentials: "include" });
@@ -5226,19 +5194,16 @@
               var retryData = null;
               try { retryData = retryText ? JSON.parse(retryText) : null; } catch (eRetryParse) { retryData = null; }
               if (retryRes.ok && retryData && retryData.ok !== false) {
-                _recalcLockDebug("set-server", { abonentId: found && found.id || "", uid: uid, lockKey: localKey, lockAgeMs: 0, runId: opts.runId || "", reason: String(retryData.status || "") });
                 return retryData;
               }
             } catch (eRetry) {}
           }
           try { sessionStorage.removeItem(localKey); } catch (eServerAlreadyLocalRemove) {}
         }
-        _recalcLockDebug(String(data.status || "") === "started" ? "set-server" : "check-server", { abonentId: found && found.id || "", uid: uid, lockKey: localKey, lockAgeMs: serverAgeMs, runId: opts.runId || "", reason: String(data.status || "") });
         try { console.log("[recalc-lock][begin]", { uid: uid, status: data.status || "", server: true, local: false }); } catch (eBeginServerLog) {}
         return data;
       }
     } catch (e) {
-      _recalcLockDebug("begin-failed", { abonentId: found && found.id || "", uid: uid, lockKey: localKey, runId: opts.runId || "", reason: String(e && e.message || e) });
       try { console.warn("[recalc-lock][begin-failed-local-only]", { uid: uid, reason: String(e && e.message || e) }); } catch (eLog) {}
     }
     return { ok: true, status: "started", account_uid: uid, local: true };
@@ -5254,7 +5219,6 @@
     var serverOk = false;
     var serverStatus = "";
     var lockKey = "stage16_recalc_lock_" + uid;
-    _recalcLockDebug("release-start", { abonentId: found && found.id || "", uid: uid, lockKey: lockKey, runId: opts.runId || "", reason: opts.reason || "" });
     try { sessionStorage.removeItem(lockKey); releasedLocal = true; } catch (eLocal) {}
     try {
       var res = await fetch("/api/recalc_lock/" + encodeURIComponent(uid) + "/finish", {
@@ -5268,7 +5232,6 @@
     } catch (e) {
       serverStatus = String(e && e.message || e || "FETCH_FAILED");
     } finally {
-      _recalcLockDebug("release-finish", { abonentId: found && found.id || "", uid: uid, lockKey: lockKey, runId: opts.runId || "", reason: "serverStatus=" + serverStatus });
       try { console.log("[recalc-lock][release]", { uid: uid, releasedLocal: releasedLocal, serverOk: serverOk, serverStatus: serverStatus }); } catch (eReleaseLog) {}
     }
   }
