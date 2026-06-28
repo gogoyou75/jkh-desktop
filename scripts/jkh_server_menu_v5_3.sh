@@ -2016,6 +2016,8 @@ deploy_main_no_build() {
   infra_snapshot="$(mktemp)" || return 1
   infra_snapshot_before_git "$infra_snapshot" || return 1
   run_git_preserving_infra "$infra_snapshot" git checkout main || return 1
+  infra_snapshot="$(mktemp)" || return 1
+  infra_snapshot_before_git "$infra_snapshot" || return 1
   run_git_preserving_infra "$infra_snapshot" git pull --ff-only origin main || return 1
   prod_main_branch_guard || return 1
   environment_compose_guard_only || return 1
@@ -2046,6 +2048,8 @@ hard_reset_main() {
   infra_snapshot="$(mktemp)" || return 1
   infra_snapshot_before_git "$infra_snapshot" || return 1
   run_git_preserving_infra "$infra_snapshot" git checkout main || return 1
+  infra_snapshot="$(mktemp)" || return 1
+  infra_snapshot_before_git "$infra_snapshot" || return 1
   run_git_preserving_infra "$infra_snapshot" git reset --hard origin/main || return 1
   prod_main_branch_guard || return 1
   environment_compose_guard_only || return 1
@@ -2060,6 +2064,8 @@ deploy_main_with_build() {
   infra_snapshot="$(mktemp)" || return 1
   infra_snapshot_before_git "$infra_snapshot" || return 1
   run_git_preserving_infra "$infra_snapshot" git checkout main || return 1
+  infra_snapshot="$(mktemp)" || return 1
+  infra_snapshot_before_git "$infra_snapshot" || return 1
   run_git_preserving_infra "$infra_snapshot" git pull --ff-only origin main || return 1
   prod_main_branch_guard || return 1
   environment_compose_guard_only || return 1
@@ -2104,6 +2110,8 @@ safe_main_deploy() {
   infra_snapshot="$(mktemp)" || return 1
   infra_snapshot_before_git "$infra_snapshot" || return 1
   run_git_preserving_infra "$infra_snapshot" git checkout main || return 1
+  infra_snapshot="$(mktemp)" || return 1
+  infra_snapshot_before_git "$infra_snapshot" || return 1
   run_git_preserving_infra "$infra_snapshot" git pull --ff-only origin main || return 1
   prod_main_branch_guard || return 1
   environment_compose_guard_only || return 1
