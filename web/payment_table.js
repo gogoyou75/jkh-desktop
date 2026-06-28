@@ -2919,6 +2919,220 @@ async function maybeYieldFullRecalcProgress(progress, runId, stage, index){
   await nextUiTick();
 }
 
+async function buildRowsByIdLegacyLoop(runtimeRows, baseRows, sig, runId, stage, caller){
+  const rowsById = {};
+  let rowsCount = 0;
+  const progress = { lastYieldAt: perfNow() };
+  const rows = Array.isArray(runtimeRows) ? runtimeRows : [];
+  const startedAt = perfNow();
+  for (let idx = 0; idx < rows.length; idx += 1) {
+    await maybeYieldFullRecalcProgress(progress, runId, stage, idx);
+    const r = rows[idx];
+    rowsCount += 1;
+    if (idx > 0 && idx % 25 === 0) emitFullRecalcHeartbeat(runId, stage);
+    const asOf = asOfForRow(r);
+    const t = calcTotalsAsOfMemoized(baseRows, asOf, sig, caller || stage || "buildRowsByIdLegacyLoop");
+    rowsById[String(r.id)] = { pay_main: t.principal, pay_penalty: t.penalty, total: t.total };
+    await maybeYieldFullRecalcProgress(progress, runId, stage, idx + 1);
+  }
+  return { rowsById, rowsCount, elapsedMs: Math.round(Math.max(0, perfNow() - startedAt)) };
+}
+
+function hasAmbiguousZeroPaidDates(rows){
+  return (Array.isArray(rows) ? rows : []).some(function(row){
+    return toNum(row && row.paid) <= 0 && !!parseDateAnyToDate(row && row.paid_date);
+  });
+}
+
+function currentAbonentRecordForRecalc(abonentId){
+  try {
+    const db = window.AbonentsDB && window.AbonentsDB.abonents || {};
+    return db[String(abonentId || "")] || null;
+  } catch(e) {
+    return null;
+  }
+}
+
+function transferBalanceForIncrementalRecalc(abonentId){
+  try {
+    const abonent = currentAbonentRecordForRecalc(abonentId) || {};
+    const regnum = String(abonent.premiseRegnum || abonent.regnum || "").trim();
+    if (!regnum) {
+      if (storeGetRaw("jkh_transfer_to_v1:" + String(abonentId || ""))) return { unsupported: true };
+      return null;
+    }
+    const raw = storeGetRaw("jkh_transfer_balance_v1:" + String(abonentId || "") + ":" + regnum);
+    if (!raw) {
+      if (storeGetRaw("jkh_transfer_to_v1:" + String(abonentId || ""))) return { unsupported: true };
+      return null;
+    }
+    const obj = JSON.parse(String(raw));
+    if (!obj || typeof obj !== "object" || Array.isArray(obj)) return { unsupported: true };
+    const startDate = String(obj.startDate || "").trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(startDate)) return { unsupported: true };
+    return {
+      startDate: startDate,
+      principal: Number(obj.principal || 0),
+      penalty: Number(obj.penalty || 0),
+      regnum: String(obj.regnum || regnum),
+      fromAbonentId: String(obj.fromAbonentId || ""),
+      mode: String(obj.mode || "")
+    };
+  } catch(e) {
+    return { unsupported: true };
+  }
+}
+
+function freezeToForIncrementalRecalc(abonentId){
+  try {
+    const v = String(storeGetRaw("jkh_freeze_to_v1:" + String(abonentId || "")) || "").trim();
+    return /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : "";
+  } catch(e) {
+    return "";
+  }
+}
+
+function globalCalcPeriodForIncrementalRecalc(){
+  try {
+    if (!isCalcPeriodActive()) return null;
+    const p = getCalcPeriod();
+    return p && p.from && p.to ? { from: String(p.from || ""), to: String(p.to || "") } : null;
+  } catch(e) {
+    return null;
+  }
+}
+
+function suppressIncrementalEngineDiagnostics(fn){
+  const originalLog = console.log;
+  const originalTable = console.table;
+  try {
+    console.log = function(){
+      const first = arguments.length ? String(arguments[0] || "") : "";
+      if (first === "[snapshot][incremental-deep-profile]") return;
+      return originalLog.apply(console, arguments);
+    };
+    console.table = function(){};
+    return fn();
+  } finally {
+    console.log = originalLog;
+    console.table = originalTable;
+  }
+}
+
+function compareRowsByIdMaps(oldMap, newMap, runtimeRows){
+  const rows = Array.isArray(runtimeRows) ? runtimeRows : [];
+  for (let i = 0; i < rows.length; i += 1) {
+    const rowId = String(rows[i] && rows[i].id || "");
+    const oldItem = oldMap && oldMap[rowId] || null;
+    const newItem = newMap && newMap[rowId] || null;
+    if (!oldItem || !newItem) return { rowId, field: "missing", oldValue: oldItem, newValue: newItem };
+    const fields = ["pay_main", "pay_penalty", "total"];
+    for (let f = 0; f < fields.length; f += 1) {
+      const key = fields[f];
+      const oldValue = r2(toNum(oldItem[key]));
+      const newValue = r2(toNum(newItem[key]));
+      if (oldValue !== newValue) return { rowId, field: key, oldValue, newValue };
+    }
+  }
+  return null;
+}
+
+function validateIncrementalSample(runtimeRows, baseRows, sig, incrementalRowsById, caller){
+  const rows = Array.isArray(runtimeRows) ? runtimeRows : [];
+  if (!rows.length) return null;
+  const indexes = [0, Math.floor((rows.length - 1) / 2), rows.length - 1].filter(function(value, index, arr){
+    return value >= 0 && arr.indexOf(value) === index;
+  });
+  for (let i = 0; i < indexes.length; i += 1) {
+    const row = rows[indexes[i]];
+    const rowId = String(row && row.id || "");
+    const asOf = asOfForRow(row);
+    const oldTotals = calcTotalsAsOfMemoized(baseRows, asOf, sig, caller || "incremental-sample-verify");
+    const oldItem = { pay_main: oldTotals.principal, pay_penalty: oldTotals.penalty, total: oldTotals.total };
+    const newItem = incrementalRowsById && incrementalRowsById[rowId] || null;
+    const mismatch = compareRowsByIdMaps({ [rowId]: oldItem }, { [rowId]: newItem }, [row]);
+    if (mismatch) return mismatch;
+  }
+  return null;
+}
+
+function logIncrementalRecalcVerify(monthsChecked, mismatches, firstMismatch, oldElapsedMs, newElapsedMs){
+  if (window.JKH_VERIFY_INCREMENTAL_RECALC !== true) return;
+  const state = window.__JKH_INCREMENTAL_RECALC_VERIFY || {
+    monthsChecked: 0,
+    mismatches: 0,
+    firstMismatch: null,
+    oldElapsedMs: 0,
+    newElapsedMs: 0,
+    printed: false
+  };
+  state.monthsChecked += Number(monthsChecked || 0);
+  state.mismatches += Number(mismatches || 0);
+  if (!state.firstMismatch && firstMismatch) state.firstMismatch = firstMismatch;
+  state.oldElapsedMs += Number(oldElapsedMs || 0);
+  state.newElapsedMs += Number(newElapsedMs || 0);
+  window.__JKH_INCREMENTAL_RECALC_VERIFY = state;
+}
+
+function printIncrementalRecalcVerifyReport(){
+  const state = window.__JKH_INCREMENTAL_RECALC_VERIFY;
+  if (!state || state.printed === true || window.JKH_VERIFY_INCREMENTAL_RECALC !== true) return;
+  state.printed = true;
+  try {
+    console.log("[incremental-recalc-verify]", {
+      monthsChecked: Number(state.monthsChecked || 0),
+      mismatches: Number(state.mismatches || 0),
+      firstMismatch: state.firstMismatch || null,
+      oldElapsedMs: Math.round(Number(state.oldElapsedMs || 0)),
+      newElapsedMs: Math.round(Number(state.newElapsedMs || 0))
+    });
+  } catch(eVerifyLog) {}
+  if (window.__JKH_INCREMENTAL_RECALC_VERIFY === state) window.__JKH_INCREMENTAL_RECALC_VERIFY = null;
+}
+
+function tryBuildRowsByIdIncremental(runtimeRows, baseRows, context){
+  const ctx = context || {};
+  const startedAt = perfNow();
+  if (!window.JKHCalcEngine || typeof window.JKHCalcEngine.computeRowsStateIncremental !== "function") {
+    return { ok: false, reason: "INCREMENTAL_ENGINE_UNAVAILABLE", rowsById: {}, elapsedMs: 0 };
+  }
+  if (hasAmbiguousZeroPaidDates(runtimeRows) || hasAmbiguousZeroPaidDates(baseRows)) {
+    return { ok: false, reason: "AMBIGUOUS_ZERO_PAID_DATE", rowsById: {}, elapsedMs: 0 };
+  }
+  const transferBalance = transferBalanceForIncrementalRecalc(ctx.abonentId);
+  if (transferBalance && transferBalance.unsupported === true) {
+    return { ok: false, reason: "TRANSFER_BALANCE_UNSUPPORTED", rowsById: {}, elapsedMs: 0 };
+  }
+  let result = null;
+  try {
+    const options = {
+      uid: String(ctx.uid || ""),
+      abonentId: String(ctx.abonentId || ""),
+      period: ctx.period || null,
+      responsibilityRange: ctx.period || (typeof getActiveResponsibilityRangeISO === "function" ? getActiveResponsibilityRangeISO() : null),
+      excludes: typeof window.JKHCalcEngine.loadExcludes === "function" ? window.JKHCalcEngine.loadExcludes(ctx.abonentId) : [],
+      rates: typeof window.JKHCalcEngine.loadRates === "function" ? window.JKHCalcEngine.loadRates(ctx.abonentId) : [],
+      globalPeriod: globalCalcPeriodForIncrementalRecalc(),
+      freezeTo: freezeToForIncrementalRecalc(ctx.abonentId),
+      transferBalance: transferBalance || null,
+      applyAdvanceOffset: true,
+      allowNegativePrincipal: true
+    };
+    result = suppressIncrementalEngineDiagnostics(function(){
+      return window.JKHCalcEngine.computeRowsStateIncremental(baseRows, options);
+    });
+  } catch(e) {
+    return { ok: false, reason: String(e && (e.code || e.message) || e || "INCREMENTAL_ROWS_FAILED"), rowsById: {}, elapsedMs: Math.round(perfNow() - startedAt) };
+  }
+  const rowsById = result && result.rowsById && typeof result.rowsById === "object" && !Array.isArray(result.rowsById) ? result.rowsById : {};
+  const rows = Array.isArray(runtimeRows) ? runtimeRows : [];
+  const missing = rows.some(function(row){ return !rowsById[String(row && row.id || "")]; });
+  if (!result || result.ok !== true || missing) {
+    return { ok: false, reason: missing ? "INCREMENTAL_ROWS_MISSING" : String(result && result.reason || "INCREMENTAL_ROWS_FAILED"), rowsById: {}, elapsedMs: Math.round(perfNow() - startedAt) };
+  }
+  return { ok: true, rowsById, rowsCount: rows.length, elapsedMs: Math.round(perfNow() - startedAt), profile: result.profile || null };
+}
+
 // Нарастающий итог: теперь это "состояние долга и пени на дату строки"
 
 // --- AS-OF дата для строки (важно для корректной помесячной истории пени)
@@ -4587,6 +4801,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
         return { ok:false, reason:(recalcLock && (recalcLock.reason || recalcLock.error)) || "RECALC_LOCK_FAILED", summary_status:"error", summary_reason:"RECALC_LOCK_FAILED", recalc_lock:recalcLock };
       }
       resetCalcTotalsHotspotReport(runId, id);
+      window.__JKH_INCREMENTAL_RECALC_VERIFY = null;
       logFullRecalcStep(runId, "autoaccrual", { abonentId: id });
       console.time("[recalc-step] autoaccrual");
       const autoResult = await measureRecalcStage("autoaccrualMs", async function(){
@@ -4610,7 +4825,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
       let baseRows = [];
       let ledgerVersion = "";
       let sig = "";
-      const rowsById = {};
+      let rowsById = {};
       let rowsCount = 0;
       await measureRecalcStage("buildRuntimeRowsBeforeSummaryMs", async function(){
         incRecalcCallCount("buildRuntimeRows", 1);
@@ -4653,16 +4868,34 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
         console.timeEnd("[recalc-detail] build maps/indexes");
         console.time("[recalc-detail] build rowsById row loop");
         console.time("[recalc-detail] rowsById row loop");
-        const runtimeRowsProgress = { lastYieldAt: perfNow() };
-        for (let runtimeIdx = 0; runtimeIdx < runtimeRows.length; runtimeIdx += 1) {
-          await maybeYieldFullRecalcProgress(runtimeRowsProgress, runId, "build-runtime-rows-before-summary", runtimeIdx);
-          const r = runtimeRows[runtimeIdx];
-          rowsCount += 1;
-          if (runtimeIdx > 0 && runtimeIdx % 25 === 0) emitFullRecalcHeartbeat(runId, "build-runtime-rows-before-summary");
-          const asOf = asOfForRow(r);
-          const t = calcTotalsAsOfMemoized(baseRows, asOf, sig, "fullRecalc.buildRuntimeRowsBeforeSummary");
-          rowsById[String(r.id)] = { pay_main: t.principal, pay_penalty: t.penalty, total: t.total };
-          await maybeYieldFullRecalcProgress(runtimeRowsProgress, runId, "build-runtime-rows-before-summary", runtimeIdx + 1);
+        const verifyIncremental = window.JKH_VERIFY_INCREMENTAL_RECALC === true;
+        const incremental = tryBuildRowsByIdIncremental(runtimeRows, baseRows, {
+          runId: runId,
+          abonentId: id,
+          uid: recalcLock && recalcLock.account_uid || "",
+          period: periodActive && selectedPeriod ? selectedPeriod : null
+        });
+        const sampleMismatch = incremental.ok === true && !verifyIncremental
+          ? validateIncrementalSample(runtimeRows, baseRows, sig, incremental.rowsById, "fullRecalc.incrementalSampleBeforeSummary")
+          : null;
+        if (incremental.ok === true && !verifyIncremental && !sampleMismatch) {
+          rowsById = incremental.rowsById;
+          rowsCount = incremental.rowsCount || Object.keys(rowsById).length;
+        } else {
+          const legacy = await buildRowsByIdLegacyLoop(runtimeRows, baseRows, sig, runId, "build-runtime-rows-before-summary", "fullRecalc.buildRuntimeRowsBeforeSummary");
+          rowsById = legacy.rowsById;
+          rowsCount = legacy.rowsCount;
+          if (verifyIncremental) {
+            const mismatch = incremental.ok === true ? compareRowsByIdMaps(legacy.rowsById, incremental.rowsById, runtimeRows) : { reason: incremental.reason || "INCREMENTAL_FAILED" };
+            logIncrementalRecalcVerify(
+              Array.isArray(runtimeRows) ? runtimeRows.length : 0,
+              mismatch ? 1 : 0,
+              mismatch,
+              legacy.elapsedMs,
+              incremental.elapsedMs || 0
+            );
+            if (incremental.ok === true && !mismatch) rowsById = incremental.rowsById;
+          }
         }
         console.timeEnd("[recalc-detail] rowsById row loop");
         console.timeEnd("[recalc-detail] build rowsById row loop");
@@ -4730,8 +4963,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
       let freshBaseRows = [];
       let freshLedgerVersion = "";
       let freshSig = "";
-      const freshRowsById = {};
-      const freshRowsProgress = { lastYieldAt: perfNow() };
+      let freshRowsById = {};
       await measureRecalcStage("buildRuntimeRowsAfterSummaryMs", async function(){
         incRecalcCallCount("buildRuntimeRows", 1);
         emitFullRecalcHeartbeat(runId, "build-fresh-runtime-rows-after-summary");
@@ -4741,14 +4973,32 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
         emitFullRecalcHeartbeat(runId, "build-fresh-runtime-rows-after-summary");
         freshLedgerVersion = (window.Data && Data.computeLedgerRuntimeVersion) ? String(Data.computeLedgerRuntimeVersion(id) || "") : "";
         freshSig = ledgerSignatureForRows(freshArr) + "::" + runtimeCacheSignature(freshLedgerVersion, freshPeriodActive, freshSelectedPeriod);
-        for (let freshIdx = 0; freshIdx < freshRuntimeRows.length; freshIdx += 1) {
-          await maybeYieldFullRecalcProgress(freshRowsProgress, runId, "build-fresh-runtime-rows-after-summary", freshIdx);
-          const r = freshRuntimeRows[freshIdx];
-          if (freshIdx > 0 && freshIdx % 25 === 0) emitFullRecalcHeartbeat(runId, "build-fresh-runtime-rows-after-summary");
-          const asOf = asOfForRow(r);
-          const t = calcTotalsAsOfMemoized(freshBaseRows, asOf, freshSig, "fullRecalc.buildRuntimeRowsAfterSummary");
-          freshRowsById[String(r.id)] = { pay_main: t.principal, pay_penalty: t.penalty, total: t.total };
-          await maybeYieldFullRecalcProgress(freshRowsProgress, runId, "build-fresh-runtime-rows-after-summary", freshIdx + 1);
+        const verifyIncremental = window.JKH_VERIFY_INCREMENTAL_RECALC === true;
+        const incremental = tryBuildRowsByIdIncremental(freshRuntimeRows, freshBaseRows, {
+          runId: runId,
+          abonentId: id,
+          uid: recalcLock && recalcLock.account_uid || "",
+          period: freshPeriodActive && freshSelectedPeriod ? freshSelectedPeriod : null
+        });
+        const sampleMismatch = incremental.ok === true && !verifyIncremental
+          ? validateIncrementalSample(freshRuntimeRows, freshBaseRows, freshSig, incremental.rowsById, "fullRecalc.incrementalSampleAfterSummary")
+          : null;
+        if (incremental.ok === true && !verifyIncremental && !sampleMismatch) {
+          freshRowsById = incremental.rowsById;
+        } else {
+          const legacy = await buildRowsByIdLegacyLoop(freshRuntimeRows, freshBaseRows, freshSig, runId, "build-fresh-runtime-rows-after-summary", "fullRecalc.buildRuntimeRowsAfterSummary");
+          freshRowsById = legacy.rowsById;
+          if (verifyIncremental) {
+            const mismatch = incremental.ok === true ? compareRowsByIdMaps(legacy.rowsById, incremental.rowsById, freshRuntimeRows) : { reason: incremental.reason || "INCREMENTAL_FAILED" };
+            logIncrementalRecalcVerify(
+              Array.isArray(freshRuntimeRows) ? freshRuntimeRows.length : 0,
+              mismatch ? 1 : 0,
+              mismatch,
+              legacy.elapsedMs,
+              incremental.elapsedMs || 0
+            );
+            if (incremental.ok === true && !mismatch) freshRowsById = incremental.rowsById;
+          }
         }
       });
       console.timeEnd("[recalc-step] build fresh runtime rows after summary");
@@ -4823,6 +5073,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
       };
     } finally {
       if (runningFullRecalc && runningFullRecalc.runId === runId) runningFullRecalc.paymentTableFullActive = false;
+      printIncrementalRecalcVerifyReport();
       printCalcTotalsHotspotReport();
       if (recalcLock && recalcLock.status === "started" && window.Data && typeof Data.finishRecalcUidLock === "function") {
         logFullRecalcStep(runId, "finish-lock", { abonentId: id });
