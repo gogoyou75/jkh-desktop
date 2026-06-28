@@ -2717,6 +2717,48 @@ function currentFullRecalcRunState(){
   return state && state.running === true ? state : null;
 }
 
+function fullRecalcAbortError(reason, message){
+  const err = new Error(String(reason || "FULL_RECALC_ABORTED"));
+  err.code = String(reason || "FULL_RECALC_ABORTED");
+  err.reason = String(reason || "FULL_RECALC_ABORTED");
+  err.summary_reason = err.reason;
+  err.abortMessage = String(message || "");
+  err.fullRecalcAbort = true;
+  err.cancelled = err.reason === "FULL_RECALC_CANCELLED";
+  err.timedOut = err.reason === "FULL_RECALC_TIMEOUT";
+  return err;
+}
+
+function getFullRecalcAbortReason(){
+  const state = currentFullRecalcRunState();
+  if (!state || state.abortRequested !== true) return "";
+  return String(state.abortReason || (state.timedOut ? "FULL_RECALC_TIMEOUT" : "FULL_RECALC_CANCELLED"));
+}
+
+function throwIfFullRecalcAborted(stage){
+  const state = currentFullRecalcRunState();
+  if (!state || state.abortRequested !== true) return;
+  const reason = getFullRecalcAbortReason() || "FULL_RECALC_CANCELLED";
+  state.currentStage = String(stage || state.currentStage || "abort-check");
+  state.cancelled = true;
+  throw fullRecalcAbortError(reason, state.abortMessage || "");
+}
+
+function fullRecalcAbortResult(error, runId, abonentId){
+  const reason = String(error && (error.reason || error.code || error.message) || "FULL_RECALC_ABORTED");
+  return {
+    ok: false,
+    cancelled: reason === "FULL_RECALC_CANCELLED",
+    timedOut: reason === "FULL_RECALC_TIMEOUT",
+    reason: reason,
+    summary_status: "error",
+    summary_reason: reason,
+    status: "error",
+    runId: runId,
+    abonentId: abonentId
+  };
+}
+
 function currentRecalcCallCounts(){
   const state = window.__JKH_RECALC_CALL_COUNTS;
   return state && typeof state === "object" ? state : null;
@@ -2914,9 +2956,11 @@ async function maybeYieldFullRecalcProgress(progress, runId, stage, index){
   const rowDue = Number.isFinite(Number(index)) && Number(index) > 0 && Number(index) % 100 === 0;
   const timeDue = !p.lastYieldAt || (now - p.lastYieldAt) >= 500;
   if (!rowDue && !timeDue) return;
+  throwIfFullRecalcAborted(stage);
   p.lastYieldAt = now;
   emitFullRecalcHeartbeat(runId, stage);
   await nextUiTick();
+  throwIfFullRecalcAborted(stage);
 }
 
 // Нарастающий итог: теперь это "состояние долга и пени на дату строки"
@@ -4587,6 +4631,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
         return { ok:false, reason:(recalcLock && (recalcLock.reason || recalcLock.error)) || "RECALC_LOCK_FAILED", summary_status:"error", summary_reason:"RECALC_LOCK_FAILED", recalc_lock:recalcLock };
       }
       resetCalcTotalsHotspotReport(runId, id);
+      throwIfFullRecalcAborted("autoaccrual");
       logFullRecalcStep(runId, "autoaccrual", { abonentId: id });
       console.time("[recalc-step] autoaccrual");
       const autoResult = await measureRecalcStage("autoaccrualMs", async function(){
@@ -4595,6 +4640,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
       console.timeEnd("[recalc-step] autoaccrual");
       logFullRecalcStepDone(runId, "autoaccrual", { abonentId: id, ok: !!(autoResult && autoResult.ok === true), changed: !!(autoResult && autoResult.changed), reason: autoResult && autoResult.reason || "" });
       await nextUiTick();
+      throwIfFullRecalcAborted("build-runtime-rows-before-summary");
       if (!autoResult || autoResult.ok !== true) {
         try { console.log("[payment-table][recalc-explicit]", { abonentId: id, stage: "autoaccrual_failed", reason: normalizeManualRecalcReason(autoResult && autoResult.reason) }); } catch(eLogAuto) {}
         try { console.log("[full-recalc][result]", { abonentId: id, ok: false, summaryStatus: "error", summaryReason: normalizeManualRecalcReason(autoResult && autoResult.reason), autoaccrualChanged: !!(autoResult && autoResult.changed) }); } catch(eFullAutoFailLog) {}
@@ -4668,6 +4714,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
         console.timeEnd("[recalc-detail] build rowsById row loop");
       });
       console.timeEnd("[recalc-step] build runtime rows before summary");
+      throwIfFullRecalcAborted("save-runtime-cache-before-summary");
       addRecalcLoopCount("rowsCount", rowsCount);
       addRecalcLoopCount("monthsCount", countRuntimeMonths(runtimeRows));
       addRecalcLoopCount("obligationsCount", countRuntimeObligations(baseRows));
@@ -4675,6 +4722,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
       logFullRecalcStepDone(runId, "build-runtime-rows-before-summary", { abonentId: id, rowsCount: rowsCount, rowsByIdCount: Object.keys(rowsById).length });
       await nextUiTick();
       const payload = { ledgerVersion: ledgerVersion, runtimeSignature: runtimeCacheSignature(ledgerVersion, periodActive, selectedPeriod), periodActive: !!periodActive, period: periodActive && selectedPeriod ? { from: selectedPeriod.from || "", to: selectedPeriod.to || "" } : null, rowsById: rowsById, updatedAt: (new Date()).toISOString() };
+      throwIfFullRecalcAborted("save-runtime-cache-before-summary");
       logFullRecalcStep(runId, "save-runtime-cache-before-summary", { abonentId: id });
       console.time("[recalc] save runtime cache");
       if (window.Data && typeof Data.writeLedgerRuntimeCache === "function") Data.writeLedgerRuntimeCache(id, payload);
@@ -4690,6 +4738,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
       console.timeEnd("[recalc] save runtime cache");
       logFullRecalcStepDone(runId, "save-runtime-cache-before-summary", { abonentId: id, rowsByIdCount: Object.keys(rowsById).length });
       await nextUiTick();
+      throwIfFullRecalcAborted("table-render");
       __paymentTableRenderedSignature = "";
       __paymentTableMode = "readonly_no_recalc";
       logFullRecalcStep(runId, "table-render", { abonentId: id, reason: "full_recalc_completed" });
@@ -4700,6 +4749,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
       console.timeEnd("[recalc] loadPaymentTable");
       logFullRecalcStepDone(runId, "table-render", { abonentId: id });
       await nextUiTick();
+      throwIfFullRecalcAborted("summary-save");
       if (!window.Data || typeof Data.recalculateAbonentCard !== "function") {
         endRecalcTotalTimer();
         return { ok:false, reason:"SUMMARY_RECALC_UNAVAILABLE", autoaccrual_changed:!!autoResult.changed, summary_status:"error", summary_reason:"SUMMARY_RECALC_UNAVAILABLE", summary:null, summary_save:{ ok:false, reason:"SUMMARY_RECALC_UNAVAILABLE" } };
@@ -4707,6 +4757,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
       logFullRecalcStep(runId, "summary-save", { abonentId: id });
       console.time("[recalc] Data.recalculateAbonentCard");
       const summaryResult = await measureRecalcStage("summarySaveMs", async function(){
+        throwIfFullRecalcAborted("summary-save");
         return await Data.recalculateAbonentCard(id, {
           period: periodActive && selectedPeriod ? selectedPeriod : undefined,
           saveSummary: !explicitReportPeriod,
@@ -4721,6 +4772,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
       console.timeEnd("[recalc] Data.recalculateAbonentCard");
       logFullRecalcStepDone(runId, "summary-save", { abonentId: id, ok: !!(summaryResult && summaryResult.ok === true), status: summaryResult && (summaryResult.summary_status || summaryResult.status) || "", reason: summaryResult && (summaryResult.summary_reason || summaryResult.reason) || "" });
       await nextUiTick();
+      throwIfFullRecalcAborted("build-fresh-runtime-rows-after-summary");
       logFullRecalcStep(runId, "build-fresh-runtime-rows-after-summary", { abonentId: id });
       console.time("[recalc-step] build fresh runtime rows after summary");
       const freshArr = getPayments();
@@ -4752,6 +4804,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
         }
       });
       console.timeEnd("[recalc-step] build fresh runtime rows after summary");
+      throwIfFullRecalcAborted("save-runtime-cache-after-summary");
       addRecalcLoopCount("rowsCount", Array.isArray(freshRuntimeRows) ? freshRuntimeRows.length : 0);
       addRecalcLoopCount("monthsCount", countRuntimeMonths(freshRuntimeRows));
       addRecalcLoopCount("obligationsCount", countRuntimeObligations(freshBaseRows));
@@ -4759,6 +4812,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
       logFullRecalcStepDone(runId, "build-fresh-runtime-rows-after-summary", { abonentId: id, rowsByIdCount: Object.keys(freshRowsById).length });
       await nextUiTick();
       const freshPayload = { ledgerVersion: freshLedgerVersion, runtimeSignature: runtimeCacheSignature(freshLedgerVersion, freshPeriodActive, freshSelectedPeriod), periodActive: !!freshPeriodActive, period: freshPeriodActive && freshSelectedPeriod ? { from: freshSelectedPeriod.from || "", to: freshSelectedPeriod.to || "" } : null, rowsById: freshRowsById, updatedAt: (new Date()).toISOString() };
+      throwIfFullRecalcAborted("snapshot-save");
       capturePaymentTableComputedRowsSnapshot(freshRuntimeRows, freshRowsById, freshPeriodActive, freshSelectedPeriod, freshPayload.runtimeSignature, freshLedgerVersion);
       logFullRecalcStep(runId, "save-runtime-cache-after-summary", { abonentId: id });
       console.time("[recalc] save runtime cache");
@@ -4821,6 +4875,12 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
         summary_save: summaryResult,
         runId: runId
       };
+    } catch(eFullRecalcAbort) {
+      if (eFullRecalcAbort && eFullRecalcAbort.fullRecalcAbort === true) {
+        endRecalcTotalTimer();
+        return fullRecalcAbortResult(eFullRecalcAbort, runId, id);
+      }
+      throw eFullRecalcAbort;
     } finally {
       if (runningFullRecalc && runningFullRecalc.runId === runId) runningFullRecalc.paymentTableFullActive = false;
       printCalcTotalsHotspotReport();
