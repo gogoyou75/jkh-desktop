@@ -344,7 +344,7 @@ confirm_worktree_changes() {
   echo "ВНИМАНИЕ: найдены modified/untracked файлы:"
   echo "$changes"
   echo
-  echo "Меню НЕ выполняет git clean и НЕ удаляет локальные файлы."
+  echo "Меню НЕ выполняет очистку untracked-файлов и НЕ удаляет локальные файлы."
   echo "Если продолжить, Git может отказаться переключать ветку или pull."
   read -rp "Продолжить без удаления локальных файлов? Напиши y: " answer
   if [ "$answer" != "y" ]; then
@@ -514,124 +514,129 @@ prepare_deploy() {
   fi
 }
 
-lab_compose_self_heal() {
-  local tmp_file
+infra_lock_hint() {
+  echo
+  echo "Infra-файлы ЦУП не восстанавливает автоматически."
+  echo "Восстанови вручную из lock-копий выбранной среды:"
+  echo "  ls -la /root/INFRA_LOCK_*"
+  echo "  cp /root/INFRA_LOCK_${ENVIRONMENT}_env $PROJECT_DIR/.env"
+  echo "  cp /root/INFRA_LOCK_${ENVIRONMENT}_docker-compose.yml $PROJECT_DIR/docker-compose.yml"
+  echo "  cp /root/INFRA_LOCK_${ENVIRONMENT}_nginx_default.conf $PROJECT_DIR/nginx/default.conf"
+  echo "После восстановления снова запусти проверку."
+}
 
-  [ "$ENVIRONMENT" = "LAB" ] || return 0
+read_env_key() {
+  local key="$1"
+  local value
 
-  tmp_file="$(mktemp)" || {
-    echo "ОШИБКА: не удалось создать временный файл для LAB docker-compose.yml."
+  value="$(grep -E "^[[:space:]]*${key}=" "$ENV_FILE" | tail -n 1 | cut -d= -f2- || true)"
+  value="${value%%#*}"
+  value="${value%\"}"
+  value="${value#\"}"
+  value="${value%\'}"
+  value="${value#\'}"
+  printf '%s' "$value"
+}
+
+infra_sha256sum() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum .env docker-compose.yml nginx/default.conf
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 .env docker-compose.yml nginx/default.conf
+  else
+    echo "ОШИБКА: sha256sum/shasum не найден."
+    LAST_ERROR=1
+    return 1
+  fi
+}
+
+infra_snapshot_before_git() {
+  local snapshot_file="$1"
+
+  infra_files_guard || return 1
+  if ! infra_sha256sum > "$snapshot_file"; then
+    echo "ОШИБКА: не удалось сохранить sha256sum infra-файлов перед git-операцией."
+    LAST_ERROR=1
+    return 1
+  fi
+}
+
+infra_check_after_git() {
+  local snapshot_file="$1"
+  local current_file
+
+  current_file="$(mktemp)" || {
+    echo "ОШИБКА: не удалось создать временный файл для проверки infra sha256sum."
     LAST_ERROR=1
     return 1
   }
 
-  if ! cat > "$tmp_file" <<'EOF'
-version: "3.8"
-
-services:
-  nginx:
-    image: nginx:stable
-    container_name: jkh_lab_nginx
-    ports:
-      - "8080:80"
-    volumes:
-      - ./web:/usr/share/nginx/html:ro
-      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
-    depends_on:
-      - api
-    restart: unless-stopped
-
-  mysql:
-    image: mysql:8.0
-    container_name: jkh_lab_mysql
-    command: >
-      --default-authentication-plugin=mysql_native_password
-      --character-set-server=utf8mb4
-      --collation-server=utf8mb4_unicode_ci
-    env_file:
-      - .env
-    environment:
-      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
-      MYSQL_DATABASE: ${DB_NAME}
-      MYSQL_USER: ${MYSQL_USER}
-      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
-    volumes:
-      - mysql_data:/var/lib/mysql
-    ports:
-      - "3307:3306"
-    restart: unless-stopped
-
-  api:
-    build: ./backend
-    image: jkh-lab-api
-    container_name: jkh_lab_api
-    volumes:
-      - ./backend:/app
-      - ./web:/app/web:ro
-    env_file:
-      - .env
-    environment:
-      DB_HOST: ${DB_HOST}
-      DB_PORT: ${DB_PORT}
-      DB_USER: ${DB_USER}
-      DB_PASSWORD: ${DB_PASSWORD}
-      DB_NAME: ${DB_NAME}
-      ENV_TYPE: ${ENV_TYPE}
-      ALLOWED_DB_HOST: ${ALLOWED_DB_HOST}
-    ports:
-      - "5001:5000"
-    depends_on:
-      - mysql
-    restart: unless-stopped
-
-volumes:
-  mysql_data:
-EOF
-  then
-    echo "ОШИБКА: не удалось подготовить LAB docker-compose.yml."
-    rm -f "$tmp_file"
-    LAST_ERROR=1
+  if ! infra_sha256sum > "$current_file"; then
+    rm -f "$current_file"
+    block_operation "BLOCKED: после git-операции невозможно проверить infra-файлы"
+    infra_lock_hint
     return 1
   fi
 
-  if [ -f docker-compose.yml ] && cmp -s "$tmp_file" docker-compose.yml; then
-    rm -f "$tmp_file"
-    echo "OK: LAB docker-compose.yml уже корректный."
-    return 0
-  fi
-
-  if ! mv "$tmp_file" docker-compose.yml; then
-    echo "ОШИБКА: не удалось восстановить LAB docker-compose.yml."
-    rm -f "$tmp_file"
-    LAST_ERROR=1
+  if ! cmp -s "$snapshot_file" "$current_file"; then
+    echo "BLOCKED: git-операция изменила infra-файлы выбранной среды."
+    echo
+    echo "Было до git:"
+    cat "$snapshot_file" || true
+    echo
+    echo "Стало после git:"
+    cat "$current_file" || true
+    rm -f "$current_file"
+    block_operation "BLOCKED: infra-файлы изменились после git-операции"
+    infra_lock_hint
     return 1
   fi
 
-  echo "OK: LAB docker-compose.yml восстановлен."
+  rm -f "$current_file"
+  echo "OK: infra-файлы не изменились после git-операции."
 }
 
-lab_compose_guard() {
-  local config_file pattern
+run_git_preserving_infra() {
+  local snapshot_file="$1"
+  local code
+  shift
 
-  [ "$ENVIRONMENT" = "LAB" ] || return 0
-
-  if [ ! -f docker-compose.yml ]; then
-    echo "ОШИБКА: docker-compose.yml не найден."
-    LAST_ERROR=1
-    return 1
+  echo
+  echo ">>> $*"
+  "$@"
+  code=$?
+  if [ "$code" -ne 0 ]; then
+    echo "ОШИБКА команды: $*"
+    echo "Код ошибки: $code"
   fi
 
-  if grep -Eq 'container_name:[[:space:]]*jkh_(nginx|mysql|api)([[:space:]]*)$' docker-compose.yml; then
-    echo "LAB compose содержит PROD container_name. Deploy запрещён."
-    LAST_ERROR=1
-    return 1
+  infra_check_after_git "$snapshot_file" || return 1
+
+  if [ "$code" -ne 0 ]; then
+    LAST_ERROR=$code
+    return "$code"
   fi
 
-  if grep -Eq 'jkh_lab_mysql_data|jkh_mysql_data' docker-compose.yml; then
-    echo "ОШИБКА: LAB compose должен использовать существующий volume mysql_data."
-    LAST_ERROR=1
-    return 1
-  fi
+  return 0
+}
+
+infra_files_guard() {
+  local config_file env_type db_name pattern
+  local required_config_patterns=()
+  local forbidden_config_patterns=()
+
+  for pattern in ".env" "docker-compose.yml" "nginx/default.conf"; do
+    if [ ! -f "$pattern" ]; then
+      echo "BLOCKED: infra-файл не найден: $PROJECT_DIR/$pattern"
+      infra_lock_hint
+      LAST_ERROR=1
+      return 1
+    fi
+  done
+
+  env_type="$(read_env_key ENV_TYPE)"
+  db_name="$(read_env_key DB_NAME)"
+  [ -n "$db_name" ] || db_name="$(read_env_key MYSQL_DATABASE)"
 
   config_file="$(mktemp)" || {
     echo "ОШИБКА: не удалось создать временный файл для docker compose config."
@@ -640,93 +645,116 @@ lab_compose_guard() {
   }
 
   if ! docker compose config > "$config_file"; then
-    echo "ОШИБКА: docker compose config не прошёл для LAB."
+    echo "BLOCKED: docker compose config не прошёл для $ENVIRONMENT."
     rm -f "$config_file"
+    infra_lock_hint
     LAST_ERROR=1
     return 1
   fi
 
-  if grep -Eq 'jkh_lab_mysql_data|jkh_mysql_data' "$config_file"; then
-    echo "ОШИБКА: LAB docker compose config содержит запрещённый volume."
-    rm -f "$config_file"
-    LAST_ERROR=1
-    return 1
-  fi
+  case "$ENVIRONMENT" in
+    PROD)
+      if [ "$env_type" != "PROD" ]; then
+        echo "BLOCKED: PROD требует ENV_TYPE=PROD, сейчас ENV_TYPE=${env_type:-empty}"
+        rm -f "$config_file"
+        infra_lock_hint
+        LAST_ERROR=1
+        return 1
+      fi
+      if [ "$db_name" != "jkh" ]; then
+        echo "BLOCKED: PROD требует DB_NAME=jkh, сейчас DB_NAME=${db_name:-empty}"
+        rm -f "$config_file"
+        infra_lock_hint
+        LAST_ERROR=1
+        return 1
+      fi
+      required_config_patterns=(
+        'container_name:[[:space:]]*jkh_nginx'
+        'container_name:[[:space:]]*jkh_api'
+        'container_name:[[:space:]]*jkh_mysql'
+        'published:[[:space:]]*"*8081"*'
+        'published:[[:space:]]*"*5000"*'
+        'published:[[:space:]]*"*3306"*'
+        'jkh_mysql_data'
+      )
+      forbidden_config_patterns=(
+        'container_name:[[:space:]]*jkh_lab_'
+        'published:[[:space:]]*"*8080"*'
+        'published:[[:space:]]*"*5001"*'
+        'published:[[:space:]]*"*3307"*'
+        'DB_NAME([:=][[:space:]]*|=)jkh_lab'
+        'ENV_TYPE([:=][[:space:]]*|=)LAB'
+        'jkh_lab_mysql_data'
+        'jkh-lab_mysql_data'
+        'jkh_lab'
+      )
+      ;;
+    LAB)
+      if [ "$env_type" != "LAB" ]; then
+        echo "BLOCKED: LAB требует ENV_TYPE=LAB, сейчас ENV_TYPE=${env_type:-empty}"
+        rm -f "$config_file"
+        infra_lock_hint
+        LAST_ERROR=1
+        return 1
+      fi
+      if [ "$db_name" != "jkh_lab" ]; then
+        echo "BLOCKED: LAB требует DB_NAME=jkh_lab, сейчас DB_NAME=${db_name:-empty}"
+        rm -f "$config_file"
+        infra_lock_hint
+        LAST_ERROR=1
+        return 1
+      fi
+      required_config_patterns=(
+        'container_name:[[:space:]]*jkh_lab_nginx'
+        'container_name:[[:space:]]*jkh_lab_api'
+        'container_name:[[:space:]]*jkh_lab_mysql'
+        'published:[[:space:]]*"*8080"*'
+        'published:[[:space:]]*"*5001"*'
+        'published:[[:space:]]*"*3307"*'
+        'jkh-lab_mysql_data'
+      )
+      forbidden_config_patterns=(
+        'container_name:[[:space:]]*jkh_nginx'
+        'container_name:[[:space:]]*jkh_api'
+        'container_name:[[:space:]]*jkh_mysql'
+        'published:[[:space:]]*"*8081"*'
+        'published:[[:space:]]*"*5000"*'
+        'published:[[:space:]]*"*3306"*'
+        'DB_NAME([:=][[:space:]]*|=)jkh([^_[:alnum:]-]|$)'
+        'ENV_TYPE([:=][[:space:]]*|=)PROD'
+        'jkh_mysql_data'
+      )
+      ;;
+    *)
+      echo "ОШИБКА: неизвестная среда для infra guard: $ENVIRONMENT"
+      rm -f "$config_file"
+      LAST_ERROR=1
+      return 1
+      ;;
+  esac
 
-  local required_config_patterns=(
-    'container_name:[[:space:]]*jkh_lab_nginx'
-    'container_name:[[:space:]]*jkh_lab_mysql'
-    'container_name:[[:space:]]*jkh_lab_api'
-    'published:[[:space:]]*"*8080"*'
-    'published:[[:space:]]*"*5001"*'
-    'published:[[:space:]]*"*3307"*'
-    'DB_HOST([:=][[:space:]]*|=)mysql'
-    'DB_NAME([:=][[:space:]]*|=)jkh_lab'
-    'ENV_TYPE([:=][[:space:]]*|=)LAB'
-    'ALLOWED_DB_HOST([:=][[:space:]]*|=)mysql'
-    'mysql_data'
-  )
   for pattern in "${required_config_patterns[@]}"; do
     if ! grep -Eq "$pattern" "$config_file"; then
-      echo "ОШИБКА: LAB docker compose config не содержит обязательный шаблон: $pattern"
+      echo "BLOCKED: $ENVIRONMENT docker compose config не содержит обязательный шаблон: $pattern"
       rm -f "$config_file"
+      infra_lock_hint
       LAST_ERROR=1
       return 1
     fi
   done
 
-  rm -f "$config_file"
-}
-
-prod_compose_guard() {
-  local config_file pattern
-
-  [ "$ENVIRONMENT" = "PROD" ] || return 0
-
-  if [ ! -f docker-compose.yml ]; then
-    echo "ОШИБКА: docker-compose.yml не найден."
-    LAST_ERROR=1
-    return 1
-  fi
-
-  if grep -Eq 'container_name:[[:space:]]*jkh_lab_(nginx|mysql|api)([[:space:]]*)$' docker-compose.yml; then
-    echo "PROD compose содержит LAB container_name. Deploy запрещён."
-    LAST_ERROR=1
-    return 1
-  fi
-
-  config_file="$(mktemp)" || {
-    echo "ОШИБКА: не удалось создать временный файл для docker compose config."
-    LAST_ERROR=1
-    return 1
-  }
-
-  if ! docker compose config > "$config_file"; then
-    echo "ОШИБКА: docker compose config не прошёл для PROD."
-    rm -f "$config_file"
-    LAST_ERROR=1
-    return 1
-  fi
-
-  local forbidden_config_patterns=(
-    'container_name:[[:space:]]*jkh_lab_'
-    'published:[[:space:]]*"*8080"*'
-    'published:[[:space:]]*"*5001"*'
-    'published:[[:space:]]*"*3307"*'
-    'DB_NAME([:=][[:space:]]*|=)jkh_lab'
-    'ENV_TYPE([:=][[:space:]]*|=)LAB'
-    'jkh_lab_mysql_data'
-  )
   for pattern in "${forbidden_config_patterns[@]}"; do
     if grep -Eq "$pattern" "$config_file"; then
-      echo "ОШИБКА: PROD docker compose config содержит LAB-шаблон: $pattern"
+      echo "BLOCKED: $ENVIRONMENT docker compose config содержит запрещённый шаблон: $pattern"
       rm -f "$config_file"
+      infra_lock_hint
       LAST_ERROR=1
       return 1
     fi
   done
 
   rm -f "$config_file"
+  echo "OK: infra guard пройден для $ENVIRONMENT."
 }
 
 environment_guard() {
@@ -757,12 +785,10 @@ environment_guard() {
 
 environment_compose_guard() {
   environment_guard || return 1
-  lab_compose_guard || return 1
-  prod_compose_guard || return 1
+  infra_files_guard || return 1
 }
 
-lab_compose_self_heal_and_guard() {
-  lab_compose_self_heal || return 1
+environment_compose_guard_only() {
   environment_compose_guard || return 1
 }
 
@@ -876,7 +902,7 @@ explain() {
         "Переключается на main, забирает свежие изменения с GitHub и перезапускает контейнеры без пересборки образов." \
         "Когда в main были обычные изменения кода, HTML, JS или настроек, но не менялись Dockerfile, requirements.txt и системные зависимости." \
         "Git-ветку в выбранной среде и запущенные контейнеры через docker compose restart." \
-        "Базу данных, Docker-образы и локальные untracked-файлы. git clean не выполняется." \
+        "Базу данных, Docker-образы и локальные untracked-файлы. Очистка untracked-файлов не выполняется." \
         "Средний. В PROD перед запуском нужен YES_PROD и backup MySQL." \
         "Это быстрый способ обновить сервер до свежего main без долгой пересборки." \
         "[GitHub main]\n|\nv\n[$ENVIRONMENT $PROJECT_DIR]\n\nЗатрагивается только выбранная среда."
@@ -887,7 +913,7 @@ explain() {
         "Забирает origin/main и делает текущую папку точной копией main по отслеживаемым Git-файлам." \
         "Только когда сервер запутался, локальные изменения мешают работе, и нужно вернуться к чистому main." \
         "Tracked-файлы Git в выбранной среде, затем перезапускает контейнеры." \
-        "Untracked-файлы и папки. git clean не выполняется. В PROD docker compose down не выполняется." \
+        "Untracked-файлы и папки. Очистка untracked-файлов не выполняется. В PROD docker compose down не выполняется." \
         "Опасный. Может удалить незакоммиченные tracked-изменения." \
         "Это аварийная кнопка: вернуть код сервера к main. Используй только если понимаешь, что локальные правки в tracked-файлах пропадут." \
         "[GitHub main]\n|\nv\n[Чистый $ENVIRONMENT $PROJECT_DIR]\n\nЛокальные tracked-правки будут потеряны."
@@ -898,7 +924,7 @@ explain() {
         "Только в PROD: переключается на main, забирает свежие изменения и запускает docker compose up -d --build." \
         "Когда в PROD менялись Dockerfile, requirements.txt, backend-зависимости или нужно гарантированно пересобрать контейнеры. В LAB main-сценарии запрещены." \
         "Git-ветку, Docker-образы и контейнеры выбранной среды." \
-        "Базу данных и локальные untracked-файлы. git clean и docker compose down в PROD не выполняются." \
+        "Базу данных и локальные untracked-файлы. Очистка untracked-файлов и docker compose down в PROD не выполняются." \
         "Опасный. Разрешён только в PROD после YES_PROD, backup MySQL, environment guard и branch guard." \
         "Это полное PROD-обновление main с пересборкой приложения. В LAB используй пункт 4/5 для тестовой ветки." \
         "[GitHub main]\n|\nv\n[$ENVIRONMENT $PROJECT_DIR]\n|\nv\n[Docker build + запуск]"
@@ -1056,6 +1082,17 @@ explain() {
         "Безопасный." \
         "Мастер объясняет правильный путь: LAB branch -> GitHub merge в main -> PROD backup -> deploy main -> health-check." \
         "[LAB test-pr]\n|\nv\n[GitHub source branch]\n|\nv\n[main]\n|\nv\n[PROD deploy from main]"
+      ;;
+    18)
+      scenario_header 18 "Проверить LAB/PROD изоляцию"
+      scenario_block \
+        "Показывает Docker-контейнеры, volumes, mounts MySQL, ответы api/env и ожидаемый nginx routing для LAB и PROD." \
+        "Когда нужно убедиться, что LAB и PROD не смешали контейнеры, порты, volumes и env." \
+        "Ничего. Это режим только чтения." \
+        "Git, Docker-контейнеры, volumes, базу данных и файлы." \
+        "Безопасный." \
+        "Проверка изоляции без изменений: только смотрим состояние двух сред." \
+        "[PROD valvera.ru -> 8081]\n[LAB lab.valvera.ru -> 8080]\n\nТолько чтение."
       ;;
     *)
       echo "Нет такого пункта."
@@ -1776,6 +1813,73 @@ run_basic_checks() {
   health_check || return 1
 }
 
+check_lab_prod_isolation() {
+  echo
+  print_line
+  echo "ПРОВЕРКА LAB/PROD ИЗОЛЯЦИИ"
+  print_line
+  echo "Read-only. Команды изменения Docker, Git, файлов, volumes и БД НЕ выполняются."
+
+  echo
+  print_line
+  echo "docker ps"
+  print_line
+  docker ps --format 'table {{.Names}}\t{{.Image}}\t{{.Ports}}\t{{.Status}}' || true
+
+  echo
+  print_line
+  echo "docker volume ls"
+  print_line
+  docker volume ls || true
+
+  echo
+  print_line
+  echo "docker inspect mounts | PROD jkh_mysql"
+  print_line
+  docker inspect jkh_mysql --format '{{range .Mounts}}{{println .Name "->" .Destination}}{{end}}' 2>/dev/null || echo "jkh_mysql не найден"
+
+  echo
+  print_line
+  echo "docker inspect mounts | LAB jkh_lab_mysql"
+  print_line
+  docker inspect jkh_lab_mysql --format '{{range .Mounts}}{{println .Name "->" .Destination}}{{end}}' 2>/dev/null || echo "jkh_lab_mysql не найден"
+
+  echo
+  print_line
+  echo "curl valvera.ru/api/env"
+  print_line
+  curl -sS -i --max-time 10 http://valvera.ru/api/env || true
+
+  echo
+  print_line
+  echo "curl lab.valvera.ru/api/env"
+  print_line
+  curl -sS -i --max-time 10 http://lab.valvera.ru/api/env || true
+
+  echo
+  print_line
+  echo "Ожидаемый nginx routing"
+  print_line
+  echo "valvera.ru     -> 127.0.0.1:8081 -> PROD nginx/api/mysql"
+  echo "lab.valvera.ru -> 127.0.0.1:8080 -> LAB nginx/api/mysql"
+
+  echo
+  echo "Проверка nginx/default.conf в PROD:"
+  if [ -f /root/jkh/nginx/default.conf ]; then
+    grep -nE 'server_name|proxy_pass|8081|8080' /root/jkh/nginx/default.conf || true
+  else
+    echo "/root/jkh/nginx/default.conf не найден"
+  fi
+
+  echo
+  echo "Проверка nginx/default.conf в LAB:"
+  if [ -f /root/jkh-lab/nginx/default.conf ]; then
+    grep -nE 'server_name|proxy_pass|8081|8080' /root/jkh-lab/nginx/default.conf || true
+  else
+    echo "/root/jkh-lab/nginx/default.conf не найден"
+  fi
+}
+
 dashboard() {
   echo
   print_line
@@ -1821,24 +1925,28 @@ dashboard() {
 }
 
 deploy_main_no_build() {
+  local infra_snapshot
+
   require_main_scenario_prod || return 1
   prepare_deploy "Обновление main без build" "yes" || return 1
-  run git checkout main || return 1
-  run git pull --ff-only origin main || return 1
+  infra_snapshot="$(mktemp)" || return 1
+  infra_snapshot_before_git "$infra_snapshot" || return 1
+  run_git_preserving_infra "$infra_snapshot" git checkout main || return 1
+  run_git_preserving_infra "$infra_snapshot" git pull --ff-only origin main || return 1
   prod_main_branch_guard || return 1
-  lab_compose_self_heal_and_guard || return 1
+  environment_compose_guard_only || return 1
   compose_restart || return 1
 }
 
 hard_reset_main() {
-  local answer
+  local answer infra_snapshot
 
   require_main_scenario_prod || return 1
   require_prod_confirmation "Жёсткий возврат на чистый main" || return 1
   echo
   echo "Это действие выполнит git reset --hard origin/main."
   echo "Tracked-изменения в Git будут потеряны."
-  echo "git clean не будет выполнен, untracked-файлы не удаляются."
+  echo "Очистка untracked-файлов не будет выполнена, untracked-файлы не удаляются."
   read -rp "Для подтверждения введи RESET_MAIN: " answer
   if [ "$answer" != "RESET_MAIN" ]; then
     echo "Операция отменена до изменений Git и Docker."
@@ -1851,32 +1959,41 @@ hard_reset_main() {
   fi
 
   run git fetch origin || return 1
-  run git checkout main || return 1
-  run git reset --hard origin/main || return 1
+  infra_snapshot="$(mktemp)" || return 1
+  infra_snapshot_before_git "$infra_snapshot" || return 1
+  run_git_preserving_infra "$infra_snapshot" git checkout main || return 1
+  run_git_preserving_infra "$infra_snapshot" git reset --hard origin/main || return 1
   prod_main_branch_guard || return 1
-  lab_compose_self_heal_and_guard || return 1
+  environment_compose_guard_only || return 1
   compose_restart || return 1
 }
 
 deploy_main_with_build() {
+  local infra_snapshot
+
   require_main_scenario_prod || return 1
   prepare_deploy "Обновление main с docker build" "yes" || return 1
-  run git checkout main || return 1
-  run git pull --ff-only origin main || return 1
+  infra_snapshot="$(mktemp)" || return 1
+  infra_snapshot_before_git "$infra_snapshot" || return 1
+  run_git_preserving_infra "$infra_snapshot" git checkout main || return 1
+  run_git_preserving_infra "$infra_snapshot" git pull --ff-only origin main || return 1
   prod_main_branch_guard || return 1
-  lab_compose_self_heal_and_guard || return 1
+  environment_compose_guard_only || return 1
   compose_up_build || return 1
 }
 
 deploy_test_branch() {
   local with_build="$1"
   local description="Тестовая ветка без build"
+  local infra_snapshot
   [ "$with_build" = "yes" ] && description="Тестовая ветка с build"
 
   prepare_deploy "$description" "yes" || return 1
   select_branch || return 1
-  run git checkout -B test-pr "origin/$SELECTED_BRANCH" || return 1
-  lab_compose_self_heal_and_guard || return 1
+  infra_snapshot="$(mktemp)" || return 1
+  infra_snapshot_before_git "$infra_snapshot" || return 1
+  run_git_preserving_infra "$infra_snapshot" git checkout -B test-pr "origin/$SELECTED_BRANCH" || return 1
+  environment_compose_guard_only || return 1
 
   if [ "$with_build" = "yes" ]; then
     compose_up_build || return 1
@@ -1891,6 +2008,8 @@ restart_services() {
 }
 
 safe_main_deploy() {
+  local infra_snapshot
+
   require_main_scenario_prod || return 1
   prepare_deploy "Безопасное обновление main: backup + build + проверки" "yes" || return 1
   if [ "$ENVIRONMENT" = "LAB" ]; then
@@ -1898,10 +2017,12 @@ safe_main_deploy() {
     run mysql_app_check || return 1
     check_api || return 1
   fi
-  run git checkout main || return 1
-  run git pull --ff-only origin main || return 1
+  infra_snapshot="$(mktemp)" || return 1
+  infra_snapshot_before_git "$infra_snapshot" || return 1
+  run_git_preserving_infra "$infra_snapshot" git checkout main || return 1
+  run_git_preserving_infra "$infra_snapshot" git pull --ff-only origin main || return 1
   prod_main_branch_guard || return 1
-  lab_compose_self_heal_and_guard || return 1
+  environment_compose_guard_only || return 1
   compose_up_build || return 1
   wait_for_containers
   run mysql_app_check || return 1
@@ -1909,7 +2030,7 @@ safe_main_deploy() {
 }
 
 cherry_pick_commit() {
-  local answer build_answer
+  local answer build_answer infra_snapshot
 
   require_prod_confirmation "Cherry-pick одного коммита" || return 1
   show_cherry_pick_context
@@ -1931,6 +2052,8 @@ cherry_pick_commit() {
   fi
 
   run git show --stat "$SELECTED_COMMIT" || return 1
+  infra_snapshot="$(mktemp)" || return 1
+  infra_snapshot_before_git "$infra_snapshot" || return 1
   read -rp "Применить этот коммит? Напиши y: " answer
   if [ "$answer" != "y" ]; then
     echo "Операция отменена до cherry-pick и Docker build."
@@ -1942,6 +2065,7 @@ cherry_pick_commit() {
   echo ">>> git cherry-pick $SELECTED_COMMIT"
   git cherry-pick "$SELECTED_COMMIT"
   local code=$?
+  infra_check_after_git "$infra_snapshot" || return 1
   if [ "$code" -ne 0 ]; then
     if [ -f .git/CHERRY_PICK_HEAD ] || [ -n "$(git diff --name-only --diff-filter=U)" ]; then
       echo "git cherry-pick --abort"
@@ -1971,7 +2095,7 @@ cherry_pick_commit() {
 }
 
 safe_rollback() {
-  local target build_answer confirm_answer
+  local target build_answer confirm_answer infra_snapshot
 
   require_prod_confirmation "Rollback выбранной среды" || return 1
 
@@ -1989,7 +2113,7 @@ safe_rollback() {
   echo "git reset --hard $target"
   echo "затем docker compose restart или docker compose up -d --build по выбору"
   echo
-  echo "git clean НЕ выполняется."
+  echo "Очистка untracked-файлов НЕ выполняется."
   echo "docker compose down НЕ выполняется."
   echo "База данных НЕ откатывается."
   echo
@@ -2012,8 +2136,10 @@ safe_rollback() {
   fi
 
   run git rev-parse --verify "$target" || return 1
-  run git reset --hard "$target" || return 1
-  lab_compose_self_heal_and_guard || return 1
+  infra_snapshot="$(mktemp)" || return 1
+  infra_snapshot_before_git "$infra_snapshot" || return 1
+  run_git_preserving_infra "$infra_snapshot" git reset --hard "$target" || return 1
+  environment_compose_guard_only || return 1
 
   read -rp "Нужен build после rollback? Напиши y для build, Enter для restart: " build_answer
   if [ "$build_answer" = "y" ]; then
@@ -2058,6 +2184,7 @@ run_case() {
     15) lab_prod_readiness_preflight || true ;;
     16) backup_current_environment || true ;;
     17) lab_prod_deploy_wizard || true ;;
+    18) check_lab_prod_isolation || true ;;
     *)
       echo "Нет такого пункта."
       LAST_ERROR=1
@@ -2092,6 +2219,7 @@ menu() {
   echo "15) Проверка готовности LAB -> PROD"
   echo "16) Backup текущей среды"
   echo "17) LAB -> PROD Deploy Wizard"
+  echo "18) Проверить LAB/PROD изоляцию"
   echo "0) Выход"
   echo
 }
