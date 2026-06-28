@@ -157,7 +157,7 @@
     const sig = ledgerSignature || ledgerSignatureForRows(calcRows);
     (Array.isArray(rows) ? rows : []).forEach(function(r){
       const asOf = asOfForRow(r);
-      const t = calcTotalsAsOfMemoized(calcRows, asOf, sig);
+      const t = calcTotalsAsOfMemoized(calcRows, asOf, sig, "runtimeRowsByIdFromRows");
       out[String(r.id)] = { pay_main: t.principal, pay_penalty: t.penalty, total: t.total };
     });
     return out;
@@ -2633,31 +2633,39 @@ function memoKeyForTotals(ledgerSignature, asOfDate){
   return String(getAbonentId() || "") + "::" + String(ledgerSignature || "") + "::" + toISODateString(d);
 }
 
-function calcTotalsAsOfMemoized(rows, asOfDate, ledgerSignature){
+function calcTotalsAsOfMemoized(rows, asOfDate, ledgerSignature, caller){
+  const hotspotStartedAt = perfNow();
+  const hotspotCaller = String(caller || "unknown");
+  const hotspotRowsLength = Array.isArray(rows) ? rows.length : 0;
+  const hotspotMonthsLength = countRuntimeMonths(rows);
   incRecalcCallCount("calcTotalsAsOfMemoized", 1);
   const stats = window.__calcTotalsMemoStats;
-  if (stats) stats.totalCalls += 1;
-  const key = memoKeyForTotals(ledgerSignature, asOfDate);
-  const cached = __paymentTotalsMemo.get(key);
-  if (cached) {
-    if (stats) stats.memoHits += 1;
-    return cached;
+  try {
+    if (stats) stats.totalCalls += 1;
+    const key = memoKeyForTotals(ledgerSignature, asOfDate);
+    const cached = __paymentTotalsMemo.get(key);
+    if (cached) {
+      if (stats) stats.memoHits += 1;
+      return cached;
+    }
+    if (stats) stats.memoMisses += 1;
+    const calcStartedAt = perfNow();
+    const t = calcTotalsAsOf(rows, asOfDate);
+    const calcMs = Math.max(0, perfNow() - calcStartedAt);
+    if (stats) {
+      stats.calcCalls += 1;
+      stats.calcTotalMs += calcMs;
+      if (calcMs > stats.calcMaxMs) stats.calcMaxMs = calcMs;
+    }
+    const out = { principal: t.principal, penalty: t.penalty, total: t.total };
+    __paymentTotalsMemo.set(key, out);
+    if (__paymentTotalsMemo.size > 2000) {
+      try { __paymentTotalsMemo.clear(); } catch(e) {}
+    }
+    return out;
+  } finally {
+    recordCalcTotalsHotspot(hotspotCaller, Math.max(0, perfNow() - hotspotStartedAt), hotspotRowsLength, hotspotMonthsLength);
   }
-  if (stats) stats.memoMisses += 1;
-  const calcStartedAt = perfNow();
-  const t = calcTotalsAsOf(rows, asOfDate);
-  const calcMs = Math.max(0, perfNow() - calcStartedAt);
-  if (stats) {
-    stats.calcCalls += 1;
-    stats.calcTotalMs += calcMs;
-    if (calcMs > stats.calcMaxMs) stats.calcMaxMs = calcMs;
-  }
-  const out = { principal: t.principal, penalty: t.penalty, total: t.total };
-  __paymentTotalsMemo.set(key, out);
-  if (__paymentTotalsMemo.size > 2000) {
-    try { __paymentTotalsMemo.clear(); } catch(e) {}
-  }
-  return out;
 }
 
 function runningTotalsBaseRows(allRows){
@@ -2763,6 +2771,85 @@ function countRuntimeObligations(rows){
 
 function countRuntimePayments(rows){
   return (Array.isArray(rows) ? rows : []).filter(function(row){ return Math.abs(toNum(row && row.paid || 0)) > 0.0000001; }).length;
+}
+
+function resetCalcTotalsHotspotReport(runId, abonentId){
+  window.__JKH_CALC_TOTALS_HOTSPOT = {
+    runId: String(runId || ""),
+    abonentId: String(abonentId || ""),
+    printed: false,
+    totalCallCount: 0,
+    totalElapsedMs: 0,
+    maxElapsedMs: 0,
+    maxRowsLength: 0,
+    maxMonthsLength: 0,
+    byCaller: {}
+  };
+}
+
+function recordCalcTotalsHotspot(caller, elapsedMs, rowsLength, monthsLength){
+  const state = window.__JKH_CALC_TOTALS_HOTSPOT;
+  if (!state || typeof state !== "object" || state.printed === true) return;
+  const name = String(caller || "unknown");
+  const ms = Math.max(0, Number(elapsedMs) || 0);
+  const rows = Math.max(0, Number(rowsLength) || 0);
+  const months = Math.max(0, Number(monthsLength) || 0);
+  const item = state.byCaller[name] || {
+    caller: name,
+    callCount: 0,
+    totalElapsedMs: 0,
+    avgElapsedMs: 0,
+    maxElapsedMs: 0,
+    rowsLength: 0,
+    monthsLength: 0
+  };
+  item.callCount += 1;
+  item.totalElapsedMs += ms;
+  item.maxElapsedMs = Math.max(item.maxElapsedMs, ms);
+  item.rowsLength = Math.max(item.rowsLength, rows);
+  item.monthsLength = Math.max(item.monthsLength, months);
+  item.avgElapsedMs = item.callCount ? item.totalElapsedMs / item.callCount : 0;
+  state.byCaller[name] = item;
+  state.totalCallCount += 1;
+  state.totalElapsedMs += ms;
+  state.maxElapsedMs = Math.max(state.maxElapsedMs, ms);
+  state.maxRowsLength = Math.max(state.maxRowsLength, rows);
+  state.maxMonthsLength = Math.max(state.maxMonthsLength, months);
+}
+
+function printCalcTotalsHotspotReport(){
+  const state = window.__JKH_CALC_TOTALS_HOTSPOT;
+  if (!state || typeof state !== "object" || state.printed === true) return;
+  if (!state.totalCallCount) {
+    if (window.__JKH_CALC_TOTALS_HOTSPOT === state) window.__JKH_CALC_TOTALS_HOTSPOT = null;
+    return;
+  }
+  state.printed = true;
+  const callers = Object.keys(state.byCaller || {}).map(function(key){
+    const item = state.byCaller[key] || {};
+    return {
+      caller: String(item.caller || key),
+      callCount: Number(item.callCount || 0),
+      totalElapsedMs: Math.round(Number(item.totalElapsedMs || 0)),
+      avgElapsedMs: item.callCount ? Math.round((Number(item.totalElapsedMs || 0) / Number(item.callCount || 1)) * 100) / 100 : 0,
+      maxElapsedMs: Math.round(Number(item.maxElapsedMs || 0)),
+      rowsLength: Number(item.rowsLength || 0),
+      monthsLength: Number(item.monthsLength || 0)
+    };
+  }).sort(function(a, b){ return b.totalElapsedMs - a.totalElapsedMs; });
+  try {
+    console.log("[calc-totals-hotspot]", {
+      caller: "all",
+      callCount: Number(state.totalCallCount || 0),
+      totalElapsedMs: Math.round(Number(state.totalElapsedMs || 0)),
+      avgElapsedMs: state.totalCallCount ? Math.round((Number(state.totalElapsedMs || 0) / Number(state.totalCallCount || 1)) * 100) / 100 : 0,
+      maxElapsedMs: Math.round(Number(state.maxElapsedMs || 0)),
+      rowsLength: Number(state.maxRowsLength || 0),
+      monthsLength: Number(state.maxMonthsLength || 0),
+      callers: callers
+    });
+  } catch(eHotspotLog) {}
+  if (window.__JKH_CALC_TOTALS_HOTSPOT === state) window.__JKH_CALC_TOTALS_HOTSPOT = null;
 }
 
 async function measureRecalcStage(name, fn){
@@ -2874,7 +2961,7 @@ function applyRunningTotals(viewRows, ledgerSignature) {
   const sig = ledgerSignature || ledgerSignatureForRows(baseRows);
   for (const r of sortedAsc){
     const asOf = asOfForRow(r);
-    const t = calcTotalsAsOfMemoized(baseRows, asOf, sig);
+        const t = calcTotalsAsOfMemoized(baseRows, asOf, sig, "scheduleRunningTotalsUpdate");
     r.pay_main = t.principal;
     r.pay_penalty = t.penalty;
     r.total = t.total;
@@ -2912,7 +2999,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
       while (idx < rows.length && (perfNow() - sliceStarted) < 24) {
         const r = rows[idx++];
         const asOf = asOfForRow(r);
-        const t = calcTotalsAsOfMemoized(calcRows, asOf, ledgerSignature);
+        const t = calcTotalsAsOfMemoized(calcRows, asOf, ledgerSignature, "scheduleRunningTotalsUpdate.step");
         r.pay_main = t.principal;
         r.pay_penalty = t.penalty;
         r.total = t.total;
@@ -4499,6 +4586,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
         endRecalcTotalTimer();
         return { ok:false, reason:(recalcLock && (recalcLock.reason || recalcLock.error)) || "RECALC_LOCK_FAILED", summary_status:"error", summary_reason:"RECALC_LOCK_FAILED", recalc_lock:recalcLock };
       }
+      resetCalcTotalsHotspotReport(runId, id);
       logFullRecalcStep(runId, "autoaccrual", { abonentId: id });
       console.time("[recalc-step] autoaccrual");
       const autoResult = await measureRecalcStage("autoaccrualMs", async function(){
@@ -4572,7 +4660,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
           rowsCount += 1;
           if (runtimeIdx > 0 && runtimeIdx % 25 === 0) emitFullRecalcHeartbeat(runId, "build-runtime-rows-before-summary");
           const asOf = asOfForRow(r);
-          const t = calcTotalsAsOfMemoized(baseRows, asOf, sig);
+          const t = calcTotalsAsOfMemoized(baseRows, asOf, sig, "fullRecalc.buildRuntimeRowsBeforeSummary");
           rowsById[String(r.id)] = { pay_main: t.principal, pay_penalty: t.penalty, total: t.total };
           await maybeYieldFullRecalcProgress(runtimeRowsProgress, runId, "build-runtime-rows-before-summary", runtimeIdx + 1);
         }
@@ -4658,7 +4746,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
           const r = freshRuntimeRows[freshIdx];
           if (freshIdx > 0 && freshIdx % 25 === 0) emitFullRecalcHeartbeat(runId, "build-fresh-runtime-rows-after-summary");
           const asOf = asOfForRow(r);
-          const t = calcTotalsAsOfMemoized(freshBaseRows, asOf, freshSig);
+          const t = calcTotalsAsOfMemoized(freshBaseRows, asOf, freshSig, "fullRecalc.buildRuntimeRowsAfterSummary");
           freshRowsById[String(r.id)] = { pay_main: t.principal, pay_penalty: t.penalty, total: t.total };
           await maybeYieldFullRecalcProgress(freshRowsProgress, runId, "build-fresh-runtime-rows-after-summary", freshIdx + 1);
         }
@@ -4735,6 +4823,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
       };
     } finally {
       if (runningFullRecalc && runningFullRecalc.runId === runId) runningFullRecalc.paymentTableFullActive = false;
+      printCalcTotalsHotspotReport();
       if (recalcLock && recalcLock.status === "started" && window.Data && typeof Data.finishRecalcUidLock === "function") {
         logFullRecalcStep(runId, "finish-lock", { abonentId: id });
         console.time("[recalc-step] finish lock");
