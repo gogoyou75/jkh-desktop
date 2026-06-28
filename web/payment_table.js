@@ -2963,6 +2963,359 @@ async function maybeYieldFullRecalcProgress(progress, runId, stage, index){
   throwIfFullRecalcAborted(stage);
 }
 
+async function buildRowsByIdSlowLegacy(rows, baseRows, sig, options){
+  const opts = options && typeof options === "object" ? options : {};
+  const rowsById = {};
+  const runtimeRows = Array.isArray(rows) ? rows : [];
+  const progress = { lastYieldAt: perfNow() };
+  const startedAt = perfNow();
+  for (let idx = 0; idx < runtimeRows.length; idx += 1) {
+    await maybeYieldFullRecalcProgress(progress, opts.runId || "", opts.stage || "build-runtime-rows", idx);
+    const r = runtimeRows[idx];
+    if (idx > 0 && idx % 25 === 0) emitFullRecalcHeartbeat(opts.runId || "", opts.stage || "build-runtime-rows");
+    const asOf = asOfForRow(r);
+    const t = calcTotalsAsOfMemoized(baseRows, asOf, sig, opts.caller || "fullRecalc.buildRowsByIdSlowLegacy");
+    rowsById[String(r.id)] = { pay_main: t.principal, pay_penalty: t.penalty, total: t.total };
+    await maybeYieldFullRecalcProgress(progress, opts.runId || "", opts.stage || "build-runtime-rows", idx + 1);
+  }
+  return { ok: true, usedPath: "slow", rowsById, rowsCount: runtimeRows.length, elapsedMs: Math.round(Math.max(0, perfNow() - startedAt)), calcCalls: runtimeRows.length };
+}
+
+function hasStoredTransferOrFreezeForFastRecalc(abonentId){
+  try {
+    const id = String(abonentId || "");
+    if (!id) return false;
+    if (String(storeGetRaw("jkh_freeze_to_v1:" + id) || "").trim()) return true;
+    if (String(storeGetRaw("jkh_transfer_to_v1:" + id) || "").trim()) return true;
+    const abonent = window.AbonentsDB && window.AbonentsDB.abonents && window.AbonentsDB.abonents[id] || null;
+    const regnum = String(abonent && (abonent.premiseRegnum || abonent.regnum) || "").trim();
+    if (regnum && String(storeGetRaw("jkh_transfer_balance_v1:" + id + ":" + regnum) || "").trim()) return true;
+  } catch(e) {}
+  return false;
+}
+
+function fastFullRecalcPreconditionFailure(rows, selectedPeriod, abonentId, options){
+  const opts = options && typeof options === "object" ? options : {};
+  if (String(opts.recalcMode || "").toUpperCase() !== "FULL_SUMMARY_REBUILD") return "NOT_FULL_RECALC";
+  if (opts.periodActive === true || selectedPeriod) return "PERIOD_ACTIVE";
+  if (window.JKH_CARD_PERIOD_MODE_ACTIVE === true) return "TEMPORARY_PERIOD_MODE_ACTIVE";
+  try { if (typeof isCalcPeriodActive === "function" && isCalcPeriodActive()) return "GLOBAL_PERIOD_ACTIVE"; } catch(ePeriodActive) {}
+  if (!Array.isArray(rows)) return "ROWS_NOT_ARRAY";
+  if (hasStoredTransferOrFreezeForFastRecalc(abonentId)) return "TRANSFER_OR_FREEZE_ACTIVE";
+  const required = [buildObligationsFromRows, buildPaymentEventsFromRows, allocatePaymentsFIFO, calcPenaltyForObligation, loadExcludes, loadRates, runningTotalsBaseRows];
+  if (required.some(function(fn){ return typeof fn !== "function"; })) return "HELPER_UNAVAILABLE";
+  for (let i = 0; i < rows.length; i += 1) {
+    const r = rows[i] || {};
+    if (String(r.id || "").trim() === "") return "ROW_ID_MISSING";
+    const asOf = asOfForRow(r);
+    if (!asOf || asOf.toString() === "Invalid Date") return "ROW_ASOF_INVALID";
+    const y = parseInt(r.year, 10);
+    const m = parseInt(r.month, 10);
+    if (!(Number.isFinite(y) && y > 0 && Number.isFinite(m) && m >= 1 && m <= 12)) return "ROW_MONTH_INVALID";
+  }
+  return "";
+}
+
+function cloneFastObligation(ob){
+  return {
+    key: ob.key,
+    serviceYear: ob.serviceYear,
+    serviceMonth: ob.serviceMonth,
+    amount: ob.amount,
+    dueDate: ob.dueDate,
+    applications: []
+  };
+}
+
+function fastResponsibilityAllowedYm(){
+  try {
+    const range = getActiveResponsibilityRangeISO();
+    if (range && range.from) {
+      const ms = monthIter(range.from, range.to);
+      return new Set(ms.map(function(m){ return `${m.year}-${m.month}`; }));
+    }
+  } catch(e) {
+    throw e;
+  }
+  return null;
+}
+
+function fastMonthKeyFromISO(iso){
+  if (!iso || typeof iso !== "string") return null;
+  const m = iso.match(/^(\d{4})-(\d{2})/);
+  return m ? (m[1] + "-" + m[2]) : null;
+}
+
+function fastPaymentRowPeriod(row){
+  const r = row || {};
+  const pf = r.period_from || r.pay_period_from || r.for_period_from || r.periodFrom || r.from_period || r.from || "";
+  const pt = r.period_to || r.pay_period_to || r.for_period_to || r.periodTo || r.to_period || r.to || "";
+  const mkFrom = fastMonthKeyFromISO(pf);
+  const mkTo = fastMonthKeyFromISO(pt);
+  if (mkFrom || mkTo) return { mkFrom: mkFrom || mkTo, mkTo: mkTo || mkFrom };
+  return null;
+}
+
+function buildFastPaymentEventsFromRows(rows){
+  const pays = [];
+  const list = Array.isArray(rows) ? rows : [];
+  for (let i = 0; i < list.length; i += 1) {
+    const row = list[i] || {};
+    const paid = toNum(row.paid);
+    if (paid <= 0) continue;
+    const d = parseDateAnyToDate(row.paid_date);
+    if (!d) continue;
+    const payMonthKey = d.getFullYear() + "-" + pad2(d.getMonth() + 1);
+    let minKey = "0000-00";
+    let maxKey = payMonthKey;
+    const rp = fastPaymentRowPeriod(row);
+    if (rp) {
+      minKey = rp.mkFrom || minKey;
+      maxKey = rp.mkTo || maxKey;
+    }
+    pays.push({ date: startOfDay(d), amount: r2(paid), rowId: row.id, minKey, maxKey, payMonthKey });
+  }
+  pays.sort(function(a,b){ return a.date - b.date || (Number(a.rowId) || 0) - (Number(b.rowId) || 0); });
+  return pays;
+}
+
+function allocateFastPaymentsFIFO(obligations, payments){
+  const advances = [];
+  function remaining(ob){
+    const applied = ob.applications.reduce(function(sum, x){ return sum + x.amount; }, 0);
+    return Math.max(ob.amount - applied, 0);
+  }
+  for (let pIdx = 0; pIdx < payments.length; pIdx += 1) {
+    const p = payments[pIdx];
+    let left = p.amount;
+    const minKey = String(p.minKey || "0000-00");
+    const maxKey = String(p.maxKey || "9999-99");
+    for (let i = 0; i < obligations.length && left > 0.0000001; i += 1) {
+      const ob = obligations[i];
+      const key = String(ob.key || "");
+      if (key < minKey || key > maxKey) continue;
+      const rem = remaining(ob);
+      if (rem <= 0.0000001) continue;
+      const take = Math.min(rem, left);
+      ob.applications.push({ date: p.date, amount: r2(take) });
+      left = r2(left - take);
+    }
+    if (left > 0.0000001) advances.push({ date: p.date, amount: r2(left) });
+  }
+  return advances;
+}
+
+function compareRowsByIdWithTolerance(expected, actual, rows, tolerance){
+  const tol = Number.isFinite(Number(tolerance)) ? Number(tolerance) : 0.01;
+  const mismatches = [];
+  const list = Array.isArray(rows) ? rows : [];
+  const fields = [
+    { oldKey: "pay_main", newKey: "pay_main", label: "principal" },
+    { oldKey: "pay_penalty", newKey: "pay_penalty", label: "penalty" },
+    { oldKey: "total", newKey: "total", label: "total" }
+  ];
+  for (let i = 0; i < list.length; i += 1) {
+    const rowId = String(list[i] && list[i].id || "");
+    const oldItem = expected && expected[rowId] || null;
+    const newItem = actual && actual[rowId] || null;
+    if (!oldItem || !newItem) {
+      mismatches.push({ rowId, field: "missing", expected: oldItem || null, actual: newItem || null });
+      continue;
+    }
+    for (let f = 0; f < fields.length; f += 1) {
+      const field = fields[f];
+      const oldValue = r2(toNum(oldItem[field.oldKey]));
+      const newValue = r2(toNum(newItem[field.newKey]));
+      if (Math.abs(oldValue - newValue) > tol) {
+        mismatches.push({ rowId, field: field.label, expected: oldValue, actual: newValue });
+        break;
+      }
+    }
+  }
+  return mismatches;
+}
+
+function sampleRowsForFastVerify(rows){
+  const list = Array.isArray(rows) ? rows : [];
+  if (!list.length) return [];
+  const indexes = [0, Math.floor((list.length - 1) / 2), list.length - 1].filter(function(value, index, arr){
+    return value >= 0 && arr.indexOf(value) === index;
+  });
+  return indexes.map(function(idx){ return list[idx]; });
+}
+
+function buildRowsByIdFastCore(rows, selectedPeriod, abonentId, options){
+  const opts = options && typeof options === "object" ? options : {};
+  const runtimeRows = Array.isArray(rows) ? rows : [];
+  const startedAt = perfNow();
+  const baseRows = Array.isArray(opts.baseRows) ? opts.baseRows : runningTotalsBaseRows(runtimeRows);
+  const excludes = loadExcludes();
+  const rates = loadRates();
+  const allObligations = buildObligationsFromRows(baseRows, fastResponsibilityAllowedYm());
+  const paymentsAll = buildFastPaymentEventsFromRows(baseRows);
+  const rowsById = {};
+  const byAsOf = new Map();
+  for (let i = 0; i < runtimeRows.length; i += 1) {
+    const row = runtimeRows[i];
+    const asOf = asOfForRow(row);
+    const key = `${asOf.getFullYear()}-${pad2(asOf.getMonth() + 1)}-${pad2(asOf.getDate())}`;
+    if (!byAsOf.has(key)) byAsOf.set(key, { asOf, rows: [] });
+    byAsOf.get(key).rows.push(row);
+  }
+  const dates = Array.from(byAsOf.keys()).sort();
+  for (let i = 0; i < dates.length; i += 1) {
+    throwIfFullRecalcAborted(opts.stage || "build-runtime-rows-fast");
+    const item = byAsOf.get(dates[i]);
+    const asOfDate = item.asOf;
+    const asOfDay = startOfDay(asOfDate);
+    const asOfYm = `${asOfDate.getFullYear()}-${pad2(asOfDate.getMonth() + 1)}`;
+    const obligations = allObligations
+      .filter(function(ob){ return String(ob.key || "") <= asOfYm; })
+      .map(cloneFastObligation);
+    const payments = paymentsAll.filter(function(p){ return p && p.date && p.date.getTime() <= asOfDay.getTime(); });
+    const advances = allocateFastPaymentsFIFO(obligations, payments);
+    const advanceUpTo = r2((advances || []).reduce(function(sum, a){
+      if (a && a.date && a.date.getTime() <= asOfDay.getTime()) return sum + toNum(a.amount);
+      return sum;
+    }, 0));
+    let principalTotal = 0;
+    let penaltyTotal = 0;
+    for (let obIdx = 0; obIdx < obligations.length; obIdx += 1) {
+      const ob = obligations[obIdx];
+      sortApplications(ob);
+      const applied = sumAppliedUpTo(ob, asOfDay);
+      principalTotal += Math.max(ob.amount - applied, 0);
+      penaltyTotal += calcPenaltyForObligation(ob, asOfDate, excludes, rates);
+    }
+    let principal = r2(principalTotal - advanceUpTo);
+    let penaltyDebt = r2(penaltyTotal);
+    if (principal < 0) {
+      let extra = r2(-principal);
+      const usedOnPenalty = r2(Math.min(extra, penaltyDebt));
+      penaltyDebt = r2(Math.max(penaltyDebt - usedOnPenalty, 0));
+      extra = r2(extra - usedOnPenalty);
+      principal = r2(-extra);
+    }
+    const total = r2(principal + penaltyDebt);
+    for (let rowIdx = 0; rowIdx < item.rows.length; rowIdx += 1) {
+      rowsById[String(item.rows[rowIdx].id)] = { pay_main: principal, pay_penalty: penaltyDebt, total: total };
+    }
+  }
+  return {
+    ok: true,
+    usedPath: "fast",
+    rowsById,
+    rowsCount: runtimeRows.length,
+    uniqueAsOfCount: dates.length,
+    oldCallsAvoided: runtimeRows.length,
+    elapsedMs: Math.round(Math.max(0, perfNow() - startedAt))
+  };
+}
+
+async function buildRowsByIdFastVerified(rows, selectedPeriod, abonentId, options){
+  const opts = options && typeof options === "object" ? options : {};
+  const startedAt = perfNow();
+  const runtimeRows = Array.isArray(rows) ? rows : [];
+  const verify = window.JKH_VERIFY_FAST_FULL_RECALC === true;
+  const fallbackReason = fastFullRecalcPreconditionFailure(runtimeRows, selectedPeriod, abonentId, opts);
+  const baseRows = Array.isArray(opts.baseRows) ? opts.baseRows : runningTotalsBaseRows(runtimeRows);
+  const sig = String(opts.signature || "");
+  const slowOptions = Object.assign({}, opts, { caller: opts.slowCaller || opts.caller || "fullRecalc.buildRowsByIdSlowLegacy" });
+  let fast = null;
+  let usedPath = "slow";
+  let reason = fallbackReason;
+  if (!fallbackReason) {
+    try {
+      fast = buildRowsByIdFastCore(runtimeRows, selectedPeriod, abonentId, Object.assign({}, opts, { baseRows }));
+      reason = "";
+      if (!verify) {
+        const sampleRows = sampleRowsForFastVerify(runtimeRows);
+        const expected = {};
+        for (let i = 0; i < sampleRows.length; i += 1) {
+          const row = sampleRows[i];
+          const t = calcTotalsAsOfMemoized(baseRows, asOfForRow(row), sig, "fullRecalc.fastSampleVerify");
+          expected[String(row.id)] = { pay_main: t.principal, pay_penalty: t.penalty, total: t.total };
+        }
+        const sampleMismatches = compareRowsByIdWithTolerance(expected, fast.rowsById, sampleRows, 0.01);
+        if (sampleMismatches.length) reason = "SAMPLE_MISMATCH";
+      }
+    } catch(eFast) {
+      reason = String(eFast && (eFast.reason || eFast.code || eFast.message) || eFast || "FAST_FAILED");
+      if (eFast && eFast.fullRecalcAbort === true) throw eFast;
+    }
+  }
+  if (verify) {
+    const slow = await buildRowsByIdSlowLegacy(runtimeRows, baseRows, sig, slowOptions);
+    const mismatches = fast && !reason ? compareRowsByIdWithTolerance(slow.rowsById, fast.rowsById, runtimeRows, 0.01) : [{ reason: reason || "FAST_NOT_AVAILABLE" }];
+    if (opts.suppressSummaryLog !== true) {
+      try {
+        console.log("[fast-recalc-verify]", {
+          rowsCount: runtimeRows.length,
+          mismatches: mismatches.length,
+          firstMismatch: mismatches[0] || null,
+          oldElapsedMs: slow.elapsedMs,
+          newElapsedMs: fast ? fast.elapsedMs : 0
+        });
+      } catch(eVerifyLog) {}
+    }
+    if (!mismatches.length && fast) {
+      usedPath = "fast";
+      if (opts.suppressSummaryLog !== true) {
+        try {
+          console.log("[fast-recalc-summary]", {
+            usedPath: "fast",
+            fallbackReason: "",
+            rowsCount: runtimeRows.length,
+            oldCallsAvoided: fast.oldCallsAvoided || runtimeRows.length,
+            elapsedMs: Math.round(Math.max(0, perfNow() - startedAt))
+          });
+        } catch(eSummaryLog) {}
+      }
+      return fast;
+    }
+    if (opts.suppressSummaryLog !== true) {
+      try {
+        console.log("[fast-recalc-summary]", {
+          usedPath: "slow",
+          fallbackReason: mismatches[0] && (mismatches[0].reason || "VERIFY_MISMATCH") || "VERIFY_MISMATCH",
+          rowsCount: runtimeRows.length,
+          oldCallsAvoided: 0,
+          elapsedMs: Math.round(Math.max(0, perfNow() - startedAt))
+        });
+      } catch(eSummaryLog) {}
+    }
+    return slow;
+  }
+  if (!reason && fast) {
+    usedPath = "fast";
+    if (opts.suppressSummaryLog !== true) {
+      try {
+        console.log("[fast-recalc-summary]", {
+          usedPath,
+          fallbackReason: "",
+          rowsCount: runtimeRows.length,
+          oldCallsAvoided: fast.oldCallsAvoided || runtimeRows.length,
+          elapsedMs: Math.round(Math.max(0, perfNow() - startedAt))
+        });
+      } catch(eSummaryLog) {}
+    }
+    return fast;
+  }
+  const slow = await buildRowsByIdSlowLegacy(runtimeRows, baseRows, sig, slowOptions);
+  if (opts.suppressSummaryLog !== true) {
+    try {
+      console.log("[fast-recalc-summary]", {
+        usedPath: "slow",
+        fallbackReason: reason || "FAST_PRECONDITION_FAILED",
+        rowsCount: runtimeRows.length,
+        oldCallsAvoided: 0,
+        elapsedMs: Math.round(Math.max(0, perfNow() - startedAt))
+      });
+    } catch(eSummaryLog) {}
+  }
+  return slow;
+}
+
 // Нарастающий итог: теперь это "состояние долга и пени на дату строки"
 
 // --- AS-OF дата для строки (важно для корректной помесячной истории пени)
@@ -4656,8 +5009,9 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
       let baseRows = [];
       let ledgerVersion = "";
       let sig = "";
-      const rowsById = {};
+      let rowsById = {};
       let rowsCount = 0;
+      let rowsByIdBuildResult = null;
       await measureRecalcStage("buildRuntimeRowsBeforeSummaryMs", async function(){
         incRecalcCallCount("buildRuntimeRows", 1);
         console.time("[recalc-detail] get ledger");
@@ -4699,17 +5053,18 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
         console.timeEnd("[recalc-detail] build maps/indexes");
         console.time("[recalc-detail] build rowsById row loop");
         console.time("[recalc-detail] rowsById row loop");
-        const runtimeRowsProgress = { lastYieldAt: perfNow() };
-        for (let runtimeIdx = 0; runtimeIdx < runtimeRows.length; runtimeIdx += 1) {
-          await maybeYieldFullRecalcProgress(runtimeRowsProgress, runId, "build-runtime-rows-before-summary", runtimeIdx);
-          const r = runtimeRows[runtimeIdx];
-          rowsCount += 1;
-          if (runtimeIdx > 0 && runtimeIdx % 25 === 0) emitFullRecalcHeartbeat(runId, "build-runtime-rows-before-summary");
-          const asOf = asOfForRow(r);
-          const t = calcTotalsAsOfMemoized(baseRows, asOf, sig, "fullRecalc.buildRuntimeRowsBeforeSummary");
-          rowsById[String(r.id)] = { pay_main: t.principal, pay_penalty: t.penalty, total: t.total };
-          await maybeYieldFullRecalcProgress(runtimeRowsProgress, runId, "build-runtime-rows-before-summary", runtimeIdx + 1);
-        }
+        rowsByIdBuildResult = await buildRowsByIdFastVerified(runtimeRows, selectedPeriod, id, {
+          runId: runId,
+          stage: "build-runtime-rows-before-summary",
+          recalcMode: recalcMode,
+          periodActive: periodActive,
+          baseRows: baseRows,
+          signature: sig,
+          caller: "fullRecalc.buildRuntimeRowsBeforeSummary",
+          slowCaller: "fullRecalc.buildRuntimeRowsBeforeSummary"
+        });
+        rowsById = rowsByIdBuildResult.rowsById || {};
+        rowsCount = rowsByIdBuildResult.rowsCount || runtimeRows.length;
         console.timeEnd("[recalc-detail] rowsById row loop");
         console.timeEnd("[recalc-detail] build rowsById row loop");
       });
@@ -4782,8 +5137,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
       let freshBaseRows = [];
       let freshLedgerVersion = "";
       let freshSig = "";
-      const freshRowsById = {};
-      const freshRowsProgress = { lastYieldAt: perfNow() };
+      let freshRowsById = {};
       await measureRecalcStage("buildRuntimeRowsAfterSummaryMs", async function(){
         incRecalcCallCount("buildRuntimeRows", 1);
         emitFullRecalcHeartbeat(runId, "build-fresh-runtime-rows-after-summary");
@@ -4793,14 +5147,21 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
         emitFullRecalcHeartbeat(runId, "build-fresh-runtime-rows-after-summary");
         freshLedgerVersion = (window.Data && Data.computeLedgerRuntimeVersion) ? String(Data.computeLedgerRuntimeVersion(id) || "") : "";
         freshSig = ledgerSignatureForRows(freshArr) + "::" + runtimeCacheSignature(freshLedgerVersion, freshPeriodActive, freshSelectedPeriod);
-        for (let freshIdx = 0; freshIdx < freshRuntimeRows.length; freshIdx += 1) {
-          await maybeYieldFullRecalcProgress(freshRowsProgress, runId, "build-fresh-runtime-rows-after-summary", freshIdx);
-          const r = freshRuntimeRows[freshIdx];
-          if (freshIdx > 0 && freshIdx % 25 === 0) emitFullRecalcHeartbeat(runId, "build-fresh-runtime-rows-after-summary");
-          const asOf = asOfForRow(r);
-          const t = calcTotalsAsOfMemoized(freshBaseRows, asOf, freshSig, "fullRecalc.buildRuntimeRowsAfterSummary");
-          freshRowsById[String(r.id)] = { pay_main: t.principal, pay_penalty: t.penalty, total: t.total };
-          await maybeYieldFullRecalcProgress(freshRowsProgress, runId, "build-fresh-runtime-rows-after-summary", freshIdx + 1);
+        if (!freshPeriodActive && !periodActive && freshSig === sig && Array.isArray(freshRuntimeRows) && Array.isArray(runtimeRows) && freshRuntimeRows.length === runtimeRows.length) {
+          freshRowsById = rowsById;
+        } else {
+          const freshBuild = await buildRowsByIdFastVerified(freshRuntimeRows, freshSelectedPeriod, id, {
+            runId: runId,
+            stage: "build-fresh-runtime-rows-after-summary",
+            recalcMode: recalcMode,
+            periodActive: freshPeriodActive,
+            baseRows: freshBaseRows,
+            signature: freshSig,
+            caller: "fullRecalc.buildRuntimeRowsAfterSummary",
+            slowCaller: "fullRecalc.buildRuntimeRowsAfterSummary",
+            suppressSummaryLog: true
+          });
+          freshRowsById = freshBuild.rowsById || {};
         }
       });
       console.timeEnd("[recalc-step] build fresh runtime rows after summary");
