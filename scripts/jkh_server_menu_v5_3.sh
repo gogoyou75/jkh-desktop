@@ -1017,7 +1017,7 @@ explain() {
       scenario_header 4 "Тестовая ветка с build"
       scenario_block \
         "Показывает remote-ветки origin/*, создаёт локальную ветку test-pr из выбранной ветки и запускает build." \
-        "Для проверки PR/Codex ветки, особенно если менялись backend, зависимости или Docker-настройки." \
+        "Разрешено только в LAB. Для проверки PR/Codex ветки, особенно если менялись backend, зависимости или Docker-настройки. PROD не запускает тестовые ветки." \
         "Текущую Git-ветку выбранной среды, локальную ветку test-pr, Docker-образы и контейнеры." \
         "GitHub-ветки, базу данных и локальные untracked-файлы. PROD не трогается, если выбрана LAB." \
         "Средний для LAB, опасный для PROD." \
@@ -1028,7 +1028,7 @@ explain() {
       scenario_header 5 "Тестовая ветка без build"
       scenario_block \
         "Показывает remote-ветки origin/*, создаёт локальную ветку test-pr и делает docker compose restart без build." \
-        "Для быстрой проверки UI/HTML/JS или мелких изменений, когда пересборка Docker не нужна." \
+        "Разрешено только в LAB. Для быстрой проверки UI/HTML/JS или мелких изменений, когда пересборка Docker не нужна. PROD не запускает тестовые ветки." \
         "Текущую Git-ветку выбранной среды и состояние контейнеров через restart." \
         "Docker-образы, базу данных, GitHub-ветки и локальные untracked-файлы." \
         "Средний для LAB, опасный для PROD." \
@@ -2077,6 +2077,11 @@ deploy_test_branch() {
   local description="Тестовая ветка без build"
   local infra_snapshot
   [ "$with_build" = "yes" ] && description="Тестовая ветка с build"
+
+  if [ "$ENVIRONMENT" = "PROD" ]; then
+    block_operation "BLOCKED: тестовые ветки запрещены в PROD. Сначала проверь ветку в LAB, затем merge в main, затем deploy PROD из main."
+    return 1
+  fi
 
   prepare_deploy "$description" "yes" || return 1
   select_branch || return 1
