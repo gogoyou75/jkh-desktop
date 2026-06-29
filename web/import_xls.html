@@ -577,12 +577,27 @@ function refreshWho(){
 function getDB(){ return window.AbonentsDB || null; }
 function saveDB(){ try{ if (typeof window.saveAbonentsDB === 'function') return window.saveAbonentsDB(); }catch(e){} }
 async function __waitForImportDbReady(reason){
-  const current = getDB();
-  const currentCount = current && current.abonents && typeof current.abonents === 'object' ? Object.keys(current.abonents).length : 0;
-  if (currentCount > 0){
-    console.log('[import_xls][db-ready]', { reason: reason || '', dbCount: currentCount, source: 'runtime' });
-    return true;
+  function inspectDb(source){
+    const db = getDB();
+    const abonents = db && db.abonents;
+    const dbExists = !!db;
+    const abonentsExists = !!(abonents && typeof abonents === 'object');
+    const abonentsCount = abonentsExists ? Object.keys(abonents).length : 0;
+    const info = {
+      reason: reason || '',
+      source: source || '',
+      db_exists: dbExists,
+      abonents_exists: abonentsExists,
+      abonents_count: abonentsCount,
+      owner: (typeof getCurrentOwnerId === 'function') ? getCurrentOwnerId() : '',
+      env: normStr(window.JKH_ENV_TYPE || window.ENV_TYPE || '')
+    };
+    console.log('[import_xls][db-ready]', info);
+    return info;
   }
+
+  const current = inspectDb('runtime');
+  if (current.db_exists && current.abonents_exists) return true;
 
   try{
     if (window.Data && typeof Data.waitForServerFirstDataReady === 'function'){
@@ -592,13 +607,10 @@ async function __waitForImportDbReady(reason){
     }
   }catch(e){}
 
-  const db = getDB();
-  const dbCount = db && db.abonents && typeof db.abonents === 'object' ? Object.keys(db.abonents).length : 0;
-  if (dbCount > 0){
-    console.log('[import_xls][db-ready]', { reason: reason || '', dbCount: dbCount, source: 'server-first' });
-    return true;
-  }
-  console.warn('[import_xls][db-ready]', { reason: reason || '', ready: false, dbCount: dbCount });
+  const retry = inspectDb('server-first');
+  if (retry.db_exists && retry.abonents_exists) return true;
+
+  console.warn('[import_xls][db-ready]', Object.assign({ ready: false }, retry));
   return false;
 }
 const LEDGER_FATAL_MESSAGE = 'Данные платежей повреждены. Расчёт/импорт остановлен, чтобы не потерять историю платежей.';
