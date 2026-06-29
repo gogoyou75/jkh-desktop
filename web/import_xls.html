@@ -576,13 +576,48 @@ function refreshWho(){
 
 function getDB(){ return window.AbonentsDB || null; }
 function saveDB(){ try{ if (typeof window.saveAbonentsDB === 'function') return window.saveAbonentsDB(); }catch(e){} }
+function getImportDbAbonentsCount(db){
+  return db && db.abonents && typeof db.abonents === 'object' ? Object.keys(db.abonents).length : 0;
+}
+function hydrateImportRuntimeDbFromStore(){
+  const before = getDB();
+  const beforeCount = getImportDbAbonentsCount(before);
+  let cachedDb = null;
+  let cachedCount = 0;
+  let ok = false;
+  try{
+    if (window.JKHStore && typeof JKHStore.getJSON === 'function'){
+      cachedDb = JKHStore.getJSON('abonents_db_v1', null, null);
+      cachedCount = getImportDbAbonentsCount(cachedDb);
+      const runtimeEmpty = !before || !before.abonents || typeof before.abonents !== 'object' || beforeCount === 0;
+      if (cachedDb && cachedDb.abonents && typeof cachedDb.abonents === 'object' && cachedCount > 0 && runtimeEmpty){
+        window.AbonentsDB = cachedDb;
+        try{
+          if (typeof window.saveAbonentsDB === 'function') window.saveAbonentsDB();
+        }catch(e){}
+        ok = getImportDbAbonentsCount(window.AbonentsDB) > 0;
+      }
+    }
+  }catch(e){
+    console.warn('[import_xls][db-hydrate-from-store][error]', e);
+  }
+  const afterCount = getImportDbAbonentsCount(window.AbonentsDB);
+  console.log('[import_xls][db-hydrate-from-store]', {
+    owner: (typeof getCurrentOwnerId === 'function') ? getCurrentOwnerId() : '',
+    beforeCount: beforeCount,
+    cachedCount: cachedCount,
+    afterCount: afterCount,
+    ok: !!ok
+  });
+  return !!ok;
+}
 async function __waitForImportDbReady(reason){
   function inspectDb(source){
     const db = getDB();
     const abonents = db && db.abonents;
     const dbExists = !!db;
     const abonentsExists = !!(abonents && typeof abonents === 'object');
-    const abonentsCount = abonentsExists ? Object.keys(abonents).length : 0;
+    const abonentsCount = getImportDbAbonentsCount(db);
     const info = {
       reason: reason || '',
       source: source || '',
@@ -597,20 +632,31 @@ async function __waitForImportDbReady(reason){
   }
 
   const current = inspectDb('runtime');
-  if (current.db_exists && current.abonents_exists) return true;
+  if (current.db_exists && current.abonents_exists && current.abonents_count > 0) return true;
 
   try{
     if (window.Data && typeof Data.waitForServerFirstDataReady === 'function'){
       await Data.waitForServerFirstDataReady({ timeoutMs: 8000 });
-    } else if (window.JKHDataLoader && typeof window.JKHDataLoader.loadFromServer === 'function'){
-      await window.JKHDataLoader.loadFromServer({ force: false, reason: reason || 'import_xls_db_ready' });
     }
   }catch(e){}
 
   const retry = inspectDb('server-first');
-  if (retry.db_exists && retry.abonents_exists) return true;
+  if (retry.db_exists && retry.abonents_exists && retry.abonents_count > 0) return true;
 
-  console.warn('[import_xls][db-ready]', Object.assign({ ready: false }, retry));
+  try{
+    if (window.JKHDataLoader && typeof window.JKHDataLoader.loadFromServer === 'function'){
+      await window.JKHDataLoader.loadFromServer({ force: true, reason: reason || 'import_xls_db_ready_force' });
+    }
+  }catch(e){}
+
+  const forceRetry = inspectDb('server-first-force');
+  if (forceRetry.db_exists && forceRetry.abonents_exists && forceRetry.abonents_count > 0) return true;
+
+  hydrateImportRuntimeDbFromStore();
+  const hydrated = inspectDb('store-hydrate');
+  if (hydrated.db_exists && hydrated.abonents_exists) return true;
+
+  console.warn('[import_xls][db-ready]', Object.assign({ ready: false }, hydrated));
   return false;
 }
 const LEDGER_FATAL_MESSAGE = 'Данные платежей повреждены. Расчёт/импорт остановлен, чтобы не потерять историю платежей.';
