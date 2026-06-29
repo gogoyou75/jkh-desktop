@@ -1085,6 +1085,15 @@
     return (v === null || v === undefined) ? "" : String(v);
   }
 
+  function _serializeServerDumpValue(value) {
+    if (value === null || value === undefined) return "";
+    if (typeof value === "string") return value;
+    if (typeof value === "object") {
+      try { return JSON.stringify(value); } catch (e) {}
+    }
+    return String(value);
+  }
+
   function _writeLocalCompat(baseKey, value, ownerId) {
     var v = (value === null || value === undefined) ? "" : String(value);
     if (window.JKHStore) window.JKHStore.setRaw(baseKey, v, ownerId);
@@ -1096,7 +1105,7 @@
   // This bypass is used ONLY while applying data received from /api/store_dump.
   function _writeServerDumpLocalCompat(baseKey, value, ownerId) {
     var kx = String(baseKey || "");
-    var v = (value === null || value === undefined) ? "" : String(value);
+    var v = _serializeServerDumpValue(value);
     if (!window.JKHStore) return;
     if (isGlobalProjectKey(kx)) {
       _lsSetDirect(k(kx, "GLOBAL"), v);
@@ -1235,10 +1244,13 @@
 
   function _replaceOwnerProjectScopeFromDump(ownerId, dumpObj) {
     if (!window.JKHStore) return { removed: 0, written: 0, invalidAbonentsDb: false, serverDbEmpty: true };
+    if (dumpObj && typeof dumpObj === "object" && !Array.isArray(dumpObj) && Object.prototype.hasOwnProperty.call(dumpObj, KEY_DB)) {
+      dumpObj[KEY_DB] = _serializeServerDumpValue(dumpObj[KEY_DB]);
+    }
     dumpObj = _normalizeCalcPeriodKeysInDump(dumpObj, ownerId);
     var dumpKeys = _projectKeysFromDump(dumpObj);
     var hasServerDbKey = Object.prototype.hasOwnProperty.call(dumpObj || {}, KEY_DB);
-    var serverRawDb = hasServerDbKey ? ((dumpObj[KEY_DB] === null || dumpObj[KEY_DB] === undefined) ? "" : String(dumpObj[KEY_DB])) : "";
+    var serverRawDb = hasServerDbKey ? _serializeServerDumpValue(dumpObj[KEY_DB]) : "";
     var serverDbValid = hasServerDbKey && _validateAbonentsDbRaw(serverRawDb);
     var serverDbEmpty = !serverDbValid || _isDbEffectivelyEmpty(serverRawDb);
     var keep = {};
@@ -1330,7 +1342,7 @@
       var kx = dumpKeys[i];
       var val = dumpObj[kx];
       if (kx === KEY_DB) {
-        var rawDb = (val === null || val === undefined) ? "" : String(val);
+        var rawDb = _serializeServerDumpValue(val);
         if (!_validateAbonentsDbRaw(rawDb)) {
           invalidAbonentsDb = true;
           try { window.JKHStore.removeRaw(KEY_DB, ownerId); } catch (eDbRemove) {}
@@ -1402,6 +1414,39 @@
     var lim = (typeof maxLen === "number" && maxLen > 0) ? maxLen : 400;
     if (s.length <= lim) return s;
     return s.slice(0, lim) + "...";
+  }
+
+  function _runtimeDbAbonentCount(db) {
+    return db && db.abonents && typeof db.abonents === "object" ? Object.keys(db.abonents).length : 0;
+  }
+
+  function _copyRuntimeDbExtras(target, source) {
+    if (!target || !source || typeof source !== "object" || Array.isArray(source)) return;
+    Object.keys(source).forEach(function (key) {
+      if (key === "abonents" || key === "premises" || key === "links" || key === "premiseEvents") return;
+      if (source[key] !== undefined && source[key] !== null) target[key] = source[key];
+    });
+  }
+
+  function _normalizeRuntimeDbHydrateShape(parsedDb, runtimeBefore) {
+    var normalized = {};
+    var before = runtimeBefore && typeof runtimeBefore === "object" && !Array.isArray(runtimeBefore) ? runtimeBefore : null;
+    var parsed = parsedDb && typeof parsedDb === "object" && !Array.isArray(parsedDb) ? parsedDb : null;
+    _copyRuntimeDbExtras(normalized, before);
+    _copyRuntimeDbExtras(normalized, parsed);
+    normalized.abonents = parsed && parsed.abonents && typeof parsed.abonents === "object" && !Array.isArray(parsed.abonents)
+      ? parsed.abonents
+      : (before && before.abonents && typeof before.abonents === "object" && !Array.isArray(before.abonents) ? before.abonents : {});
+    normalized.premises = parsed && parsed.premises && typeof parsed.premises === "object" && !Array.isArray(parsed.premises)
+      ? parsed.premises
+      : (before && before.premises && typeof before.premises === "object" && !Array.isArray(before.premises) ? before.premises : {});
+    normalized.links = Array.isArray(parsed && parsed.links)
+      ? parsed.links
+      : (Array.isArray(before && before.links) ? before.links : []);
+    normalized.premiseEvents = Array.isArray(parsed && parsed.premiseEvents)
+      ? parsed.premiseEvents
+      : (Array.isArray(before && before.premiseEvents) ? before.premiseEvents : []);
+    return normalized;
   }
 
   // ---- API calls ----
@@ -1772,7 +1817,15 @@
         var runtimeHadContent = !_isDbObjectEffectivelyEmpty(runtimeBefore);
         var parsedHasContent = !!(parsedRuntimeDb && typeof parsedRuntimeDb === "object" && !Array.isArray(parsedRuntimeDb) && !_isDbObjectEffectivelyEmpty(parsedRuntimeDb));
         if (!replaced.serverDbEmpty && parsedHasContent) {
-          window.AbonentsDB = parsedRuntimeDb;
+          window.AbonentsDB = _normalizeRuntimeDbHydrateShape(parsedRuntimeDb, runtimeBefore);
+          try {
+            console.info("[runtime-hydrate]", {
+              source: "store_dump.abonents_db_v1",
+              beforeCount: runtimeCounts.abonents,
+              parsedCount: _runtimeDbAbonentCount(parsedRuntimeDb),
+              afterCount: _runtimeDbAbonentCount(window.AbonentsDB)
+            });
+          } catch (hydrateCountsErr) {}
           try {
             console.log("[runtime-db-keys]", Object.keys(window.AbonentsDB || {}));
             console.log(
@@ -1801,7 +1854,15 @@
             });
           } catch (emptyBlockedLogErr) {}
           if (parsedHasContent && !runtimeHadContent) {
-            window.AbonentsDB = parsedRuntimeDb;
+            window.AbonentsDB = _normalizeRuntimeDbHydrateShape(parsedRuntimeDb, runtimeBefore);
+            try {
+              console.info("[runtime-hydrate]", {
+                source: "store_dump.abonents_db_v1",
+                beforeCount: runtimeCounts.abonents,
+                parsedCount: _runtimeDbAbonentCount(parsedRuntimeDb),
+                afterCount: _runtimeDbAbonentCount(window.AbonentsDB)
+              });
+            } catch (hydrateCountsErr2) {}
             try {
               console.log("[runtime-db-keys]", Object.keys(window.AbonentsDB || {}));
               console.log(
