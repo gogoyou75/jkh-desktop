@@ -2736,6 +2736,7 @@ function makeEmptyImportPaymentsCollection(){
     totalDuplicate: 0,
     totalConflict: 0,
     totalError: 0,
+    totalErrorRows: 0,
     byExcelRow: {}
   };
 }
@@ -2771,6 +2772,13 @@ function collectImportPaymentsToApply(db, options){
     result.totalError++;
     addReason(info, text);
   }
+  function addErrorRow(info, text){
+    if (!info.errorRowCount){
+      info.errorRowCount = 1;
+      result.totalErrorRows++;
+    }
+    addReason(info, text);
+  }
   function addConflict(info, text){
     info.conflictCount++;
     result.totalConflict++;
@@ -2792,6 +2800,7 @@ function collectImportPaymentsToApply(db, options){
         totalDuplicate: result.totalDuplicate,
         totalConflict: result.totalConflict,
         totalError: result.totalError,
+        totalErrorRows: result.totalErrorRows,
         mode: mode,
         parseMode: parseMeta && parseMeta.mode,
         fileYearBlocked: isImportBlockedByFileYear(),
@@ -2813,6 +2822,15 @@ function collectImportPaymentsToApply(db, options){
 
     const payments = Array.isArray(row.payments) ? row.payments : [];
     const expectedFound = paymentPairsCount(row);
+    const primaryCheck = evaluatePrimaryRow(db, row);
+    if (primaryCheck && (primaryCheck.status === 'ERROR' || primaryCheck.status === 'NOT_FOUND' || primaryCheck.status === 'FOUND_NEEDS_EXCEL_UID')){
+      info.foundCount += expectedFound;
+      addErrorRow(info, 'Строка пропущена из-за ошибки первички.');
+      if (Array.isArray(primaryCheck.details) && primaryCheck.details.length) addReason(info, primaryCheck.details[0]);
+      info.skippedCount = info.duplicateCount + info.conflictCount + info.errorCount + (info.errorRowCount || 0);
+      continue;
+    }
+
     const uid = getResolvedUid(row);
     const foundU = uid ? findAbonentByUid(db, uid) : null;
     const ab = foundU ? foundU.abonent : null;
@@ -2941,7 +2959,7 @@ function collectImportPaymentsToApply(db, options){
       }
     }
 
-    info.skippedCount = info.duplicateCount + info.conflictCount + info.errorCount;
+    info.skippedCount = info.duplicateCount + info.conflictCount + info.errorCount + (info.errorRowCount || 0);
     if (info.newCount > 0) addReason(info, 'OK: добавится дополнительный платеж.');
     if (info.duplicateCount > 0) addReason(info, 'Дубликаты: ' + info.duplicateCount + '.');
     if (info.conflictCount > 0) addReason(info, 'Конфликтов: ' + info.conflictCount + '.');
@@ -2955,6 +2973,7 @@ function collectImportPaymentsToApply(db, options){
       totalDuplicate: result.totalDuplicate,
       totalConflict: result.totalConflict,
       totalError: result.totalError,
+      totalErrorRows: result.totalErrorRows,
       mode: mode,
       parseMode: parseMeta && parseMeta.mode,
       fileYearBlocked: isImportBlockedByFileYear(),
@@ -2979,10 +2998,11 @@ function evaluatePaymentsRow(db, row){
   const dups = Number(info.duplicateCount || 0);
   const conflicts = Number(info.conflictCount || 0);
   const errs = Number(info.errorCount || 0);
+  const errorRows = Number(info.errorRowCount || 0);
 
   let status = 'OK';
   let critical = false;
-  if (errs > 0){ status = 'ERROR'; critical = true; }
+  if (errs > 0 || errorRows > 0){ status = 'ERROR'; critical = true; }
   else if (conflicts > 0){ status = 'CONFLICT'; }
   else if (adds === 0 && dups > 0){ status = 'SKIP_DUPLICATE'; }
 
@@ -2993,10 +3013,10 @@ function evaluatePaymentsRow(db, row){
   details.push('Новых платежей к добавлению: ' + adds + '.');
   details.push('Дубликатов: ' + dups + '.');
   details.push('Конфликтов: ' + conflicts + '.');
-  details.push('Ошибок: ' + errs + '.');
+  details.push('Ошибок: ' + (errs + errorRows) + '.');
   details.push('Найдено в Excel: ' + found + '; добавится: ' + adds + '; дубликаты: ' + dups + '; конфликты: ' + conflicts + '.');
 
-  return { status, critical, details, conflicts, unresolved:conflicts, adds, dups, found, skipped: dups + conflicts + errs, errors:errs };
+  return { status, critical, details, conflicts, unresolved:conflicts, adds, dups, found, skipped: dups + conflicts + errs + errorRows, errors:errs + errorRows };
 }
 
 function buildPreview(){
@@ -3210,7 +3230,7 @@ function renderPreview(){
     diag += '<br><span class="mono">Новых платежей к добавлению: ' + Number(paymentsCollect.totalNew || 0) + '</span>';
     diag += '<br><span class="mono">Дубликатов: ' + Number(paymentsCollect.totalDuplicate || 0) + '</span>';
     diag += '<br><span class="mono">Конфликтов: ' + Number(paymentsCollect.totalConflict || 0) + '</span>';
-    diag += '<br><span class="mono">Ошибок: ' + Number(paymentsCollect.totalError || 0) + '</span>';
+    diag += '<br><span class="mono">Ошибок: ' + (Number(paymentsCollect.totalError || 0) + Number(paymentsCollect.totalErrorRows || 0)) + '</span>';
   }
   $('errorsBox').innerHTML = diag;
 
@@ -3228,6 +3248,38 @@ function isApplyBlockedByTemplateMode(){
 }
 function hasPrimaryCritical(){ return preview.some(r => r.critical && (r.status==='ERROR' || r.status==='NOT_FOUND' || r.status==='FOUND_NEEDS_EXCEL_UID')); }
 function hasPaymentsCritical(){ return preview.some(r => r.critical && r.status==='ERROR'); }
+function getPrimaryApplyPlan(db){
+  const result = { applicable:0, skippedError:0, skippedOther:0 };
+  if (!db || !db.abonents) return result;
+  for (let i=0;i<dataRows.length;i++){
+    const row = dataRows[i] || {};
+    const p = evaluatePrimaryRow(db, row);
+    const status = p && p.status;
+    if (status === 'ERROR' || status === 'NOT_FOUND' || status === 'FOUND_NEEDS_EXCEL_UID'){
+      result.skippedError++;
+      continue;
+    }
+    if (!(status === 'OK' || status === 'UPDATED' || status === 'WARNING_CREATED')){
+      result.skippedOther++;
+      continue;
+    }
+    const found = p && p.found ? p.found : findAbonentByRules(db, row);
+    if (!found || found.type==='UID_STRUCTURAL_CONFLICT' || found.type==='UID_MISMATCH' || found.type==='UID_MISSING' || found.type==='NO_ID' || found.type==='AMBIG' || found.type==='NOT_FOUND' || found.type==='FOUND_NEEDS_EXCEL_UID' || found.type==='FOUND_EXISTING_NEEDS_UID_IN_EXCEL'){
+      result.skippedError++;
+      continue;
+    }
+    if (!Number.isFinite(row.square) || row.square<=0){
+      result.skippedError++;
+      continue;
+    }
+    if (found.abonent && getImportAbonentResponsibilityStatus(db, found.key, found.abonent).stopped){
+      result.skippedOther++;
+      continue;
+    }
+    result.applicable++;
+  }
+  return result;
+}
 function hasRowsWithUid(){
   for (let i=0;i<dataRows.length;i++){
     if (getResolvedUid(dataRows[i])) return true;
@@ -3288,10 +3340,12 @@ function setButtons(){
   const canWrite = canWriteOrExplain();
   const parsed = dataRows.length > 0;
   const fileYearBlocked = isImportBlockedByFileYear();
+  const db = getDB();
+  const primaryPlan = getPrimaryApplyPlan(db);
 
   $('btnModePrimary').disabled = importApplyBusy;
   $('btnModePayments').disabled = !canEnterPaymentsMode() || importApplyBusy || fileYearBlocked;
-  const canApplyPrimary = (mode==='primary' && parsed && canWrite && !primaryBlocked && !importApplyBusy && !isApplyBlockedByTemplateMode() && !fileYearBlocked);
+  const canApplyPrimary = (mode==='primary' && parsed && canWrite && primaryPlan.applicable > 0 && !importApplyBusy && !isApplyBlockedByTemplateMode() && !fileYearBlocked);
   $('btnApplyPrimary').disabled = !canApplyPrimary;
   const paymentsCount = getPaymentsToApplyCount();
   const templateModeBlocked = isApplyBlockedByTemplateMode();
@@ -3300,6 +3354,8 @@ function setButtons(){
   console.log('[import_xls][buttons]', {
     mode,
     parseMode: parseMeta && parseMeta.mode,
+    primaryApplicable: primaryPlan.applicable,
+    primarySkippedError: primaryPlan.skippedError,
     paymentsCount,
     templateModeBlocked,
     canEnterPayments: canEnterPaymentsMode(),
@@ -3432,32 +3488,57 @@ async function applyPrimary(){
 
   mode='primary';
   buildPreview();
-  if (primaryBlocked){ setImportStatus('Шаг 1 заблокирован: есть критические ошибки первички.', 'err'); setImportBusy(false); if (window.JKHBusy && typeof JKHBusy.hide === 'function') JKHBusy.hide(); return; }
+  const primaryPlan = getPrimaryApplyPlan(db);
+  if (primaryPlan.applicable <= 0){
+    setImportStatus('Нет строк первички для применения. Пропущено строк с ошибками: ' + primaryPlan.skippedError + '.', 'err');
+    setImportBusy(false);
+    if (window.JKHBusy && typeof JKHBusy.hide === 'function') JKHBusy.hide();
+    return;
+  }
 
   const localSnapshot = { db: deepCloneJSONSafe(getDB()) };
 
   try {
-  let updated=0, uidAssigned=0, premiseUpdated=0;
+  let updated=0, uidAssigned=0, premiseUpdated=0, skippedError=0, skippedOther=0;
   const allowSquareUpdate = !!$('optAllowSquareUpdate').checked;
 
   for (let i=0;i<dataRows.length;i++){
     const row = dataRows[i];
+    const p = evaluatePrimaryRow(db, row);
+    if (p && (p.status === 'ERROR' || p.status === 'NOT_FOUND' || p.status === 'FOUND_NEEDS_EXCEL_UID')){
+      skippedError++;
+      continue;
+    }
+    if (!(p && (p.status === 'OK' || p.status === 'UPDATED' || p.status === 'WARNING_CREATED'))){
+      skippedOther++;
+      continue;
+    }
     const found = findAbonentByRules(db, row);
-    if (found.type==='UID_STRUCTURAL_CONFLICT' || found.type==='UID_MISMATCH' || found.type==='UID_MISSING' || found.type==='NO_ID' || found.type==='AMBIG' || found.type==='NOT_FOUND') continue;
-    if (found.type==='FOUND_NEEDS_EXCEL_UID' || found.type==='FOUND_EXISTING_NEEDS_UID_IN_EXCEL') continue;
-    if (!Number.isFinite(row.square) || row.square<=0) continue;
+    if (found.type==='UID_STRUCTURAL_CONFLICT' || found.type==='UID_MISMATCH' || found.type==='UID_MISSING' || found.type==='NO_ID' || found.type==='AMBIG' || found.type==='NOT_FOUND'){
+      skippedError++;
+      continue;
+    }
+    if (found.type==='FOUND_NEEDS_EXCEL_UID' || found.type==='FOUND_EXISTING_NEEDS_UID_IN_EXCEL'){
+      skippedError++;
+      continue;
+    }
+    if (!Number.isFinite(row.square) || row.square<=0){
+      skippedError++;
+      continue;
+    }
 
     let a = found.abonent;
     const responsibilityStatus = getImportAbonentResponsibilityStatus(db, found.key, a);
     if (responsibilityStatus.stopped){
       logImportResponsibilityStopped(row, found.key, a, responsibilityStatus);
+      skippedOther++;
       continue;
     }
     if (!getExcelUid(row)){
       const applyMatch = abonentMatchesExcelRow(a, row, false);
       if (!applyMatch.ok){
         logImportPremiseOpenCheck(row, normStr(a && (a.premiseRegnum || a.regnum)), 'blocked', 'APPLY_BLOCK_' + applyMatch.reason);
-        setImportStatus(UID_MISMATCH_MESSAGE, 'err');
+        skippedError++;
         continue;
       }
     }
@@ -3502,7 +3583,7 @@ async function applyPrimary(){
   buildPreview();
   saveImportDraftState();
   setImportStatus('Идёт запись на сервер... Не закрывайте страницу.', 'info');
-  setImportStatus('Шаг 1 применён. Обновлено строк первички: ' + updated + '. Присвоено UID: ' + uidAssigned + '. Обновлено площадей квартир: ' + premiseUpdated + '.', 'ok');
+  setImportStatus('Шаг 1 применён. Применено строк: ' + updated + '. Добавлено платежей: 0. Пропущено строк с ошибками: ' + skippedError + '. Пропущено дублей: 0. Конфликтов: 0. Присвоено UID: ' + uidAssigned + '. Обновлено площадей квартир: ' + premiseUpdated + '.', 'ok');
   } catch (e) {
     console.error(e);
     setImportStatus('Ошибка записи на сервер. Данные не применены.', 'err');
@@ -3536,6 +3617,11 @@ async function applyPayments(){
   const rows = Array.isArray(collection.rows) ? collection.rows : [];
   const appliedExcelRows = {};
   const byExcelRow = collection.byExcelRow || {};
+  let localErrorRows = 0;
+  Object.keys(byExcelRow).forEach(function(excelRow){
+    const info = byExcelRow[excelRow] || {};
+    if (Number(info.errorCount || 0) > 0 || Number(info.errorRowCount || 0) > 0) localErrorRows++;
+  });
   Object.keys(byExcelRow).forEach(function(excelRow){
     if (Number(byExcelRow[excelRow] && byExcelRow[excelRow].newCount || 0) > 0) appliedExcelRows[String(excelRow)] = true;
   });
@@ -3543,6 +3629,9 @@ async function applyPayments(){
   if (!rows.length){ setImportStatus('Нет платежей для добавления.', 'err'); setImportBusy(false); if (window.JKHBusy && typeof JKHBusy.hide === 'function') JKHBusy.hide(); return; }
 
   let appliedCount = 0;
+  let serverSkippedCount = 0;
+  let serverDuplicateCount = 0;
+  let serverConflictCount = 0;
   let affectedUids = [];
   try{
     const uploaded = await apiJson('/api/import/payments/upload_rows', {
@@ -3555,11 +3644,11 @@ async function applyPayments(){
     const applied = await apiJson('/api/import/' + serverPaymentBatchId + '/apply', { method:'POST' });
     const s = applied.summary || {};
     appliedCount = Number(s.applied_count || 0);
-    const skippedCount = Number(s.skipped_count || 0);
-    const duplicateCount = Number(s.duplicate_count || 0);
-    const conflictCount = Number(s.conflict_count || 0);
+    serverSkippedCount = Number(s.skipped_count || 0);
+    serverDuplicateCount = Number(s.duplicate_count || 0);
+    serverConflictCount = Number(s.conflict_count || 0);
     affectedUids = Array.isArray(s.affected_uids) ? s.affected_uids.map(normStr).filter(Boolean) : [];
-    const summaryMsg = 'Импорт завершён. Добавлено платежей: ' + appliedCount + '. Пропущено: ' + skippedCount + '. Дубликатов: ' + duplicateCount + '. Конфликтов: ' + conflictCount + '.';
+    const summaryMsg = 'Импорт завершён. Добавлено платежей: ' + appliedCount + '. Пропущено: ' + (serverSkippedCount + Number(collection.totalDuplicate || 0) + Number(collection.totalConflict || 0) + Number(collection.totalError || 0) + Number(collection.totalErrorRows || 0)) + '. Дубликатов: ' + (serverDuplicateCount + Number(collection.totalDuplicate || 0)) + '. Конфликтов: ' + (serverConflictCount + Number(collection.totalConflict || 0)) + '.';
     const hardReject = rows.length > 0 && appliedCount === 0;
     setImportStatus(summaryMsg, hardReject ? 'err' : 'ok');
     if (appliedCount > 0 && !affectedUids.length) {
@@ -3626,7 +3715,7 @@ async function applyPayments(){
   for (let i=0;i<dataRows.length;i++){
     if (!(dataRows[i] && dataRows[i].paymentsImportStatus === 'applied')) remainingRows++;
   }
-  setImportStatus('Импорт выполнен. Добавлено: ' + appliedCount + '. Осталось: ' + remainingRows + '.', 'ok');
+  setImportStatus('Импорт выполнен. Применено строк: ' + appliedRowsCount + '. Добавлено платежей: ' + appliedCount + '. Пропущено строк с ошибками: ' + localErrorRows + '. Пропущено дублей: ' + (serverDuplicateCount + Number(collection.totalDuplicate || 0)) + '. Конфликтов: ' + (serverConflictCount + Number(collection.totalConflict || 0)) + '. Осталось: ' + remainingRows + '.', 'ok');
   updateRestoredFileInfo();
   updateStateLine();
   setButtons();
