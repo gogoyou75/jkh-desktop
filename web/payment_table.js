@@ -3956,6 +3956,8 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
       window.__PAYMENT_TABLE_ACTUAL_RENDER_LOG_COUNT += 1;
       console.log("[payment-table][actual-render]", {
         rowId: String(rowObj && rowObj.id || ""),
+        month: String(rowObj && rowObj.month || ""),
+        year: String(rowObj && rowObj.year || ""),
         debtCandidates: fields.debtCandidates,
         penaltyCandidates: fields.penaltyCandidates,
         totalCandidates: fields.totalCandidates,
