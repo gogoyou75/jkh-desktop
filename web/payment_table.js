@@ -215,9 +215,10 @@
     (Array.isArray(rows) ? rows : []).forEach(function(r){
       const item = map[String(r.id)] || null;
       if (!item) return;
-      r.pay_main = item.pay_main;
-      r.pay_penalty = item.pay_penalty;
-      r.total = item.total;
+      const fields = computedFinancialFields(item);
+      r.pay_main = fields.debt;
+      r.pay_penalty = fields.penalty;
+      r.total = fields.total;
     });
   }
 
@@ -229,9 +230,10 @@
       const copy = Object.assign({}, row || {});
       const item = map[String(copy.id || "")] || null;
       if (item && typeof item === "object") {
-        copy.pay_main = item.pay_main;
-        copy.pay_penalty = item.pay_penalty;
-        copy.total = item.total;
+        const fields = computedFinancialFields(item);
+        copy.pay_main = fields.debt;
+        copy.pay_penalty = fields.penalty;
+        copy.total = fields.total;
       }
       return copy;
     });
@@ -244,9 +246,10 @@
       const id = String(row && row.id || "").trim();
       if (!id) return;
       const item = map[id] || row || {};
-      const pm = Number(item.pay_main);
-      const pp = Number(item.pay_penalty);
-      const total = Number(item.total);
+      const fields = computedFinancialFields(item);
+      const pm = Number(fields.debt);
+      const pp = Number(fields.penalty);
+      const total = Number(fields.total);
       if (!Number.isFinite(pm) || !Number.isFinite(pp) || !Number.isFinite(total)) return;
       out[id] = { pay_main: pm, pay_penalty: pp, total: total };
     });
@@ -3549,6 +3552,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
   const token = ++__paymentTableCalcToken;
   const startedAt = perfNow();
   resetRenderFinancialFieldsLog();
+  resetActualRenderFinancialFieldsLog();
   if (__paymentTableCalcTimerActive) { try { console.timeEnd('[payment-table] calc-totals'); } catch(e) {} }
   __paymentTableCalcTimerActive = true;
   try { console.time('[payment-table] calc-totals'); } catch(e) {}
@@ -3881,10 +3885,27 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
     return fallback || { field: "", value: 0, present: false };
   }
 
+  function computedFieldCandidates(rowObj, candidates){
+    const row = rowObj && typeof rowObj === "object" ? rowObj : {};
+    const out = {};
+    for (const name of candidates) {
+      if (!Object.prototype.hasOwnProperty.call(row, name)) continue;
+      const raw = row[name];
+      out[name] = {
+        raw: raw,
+        value: (raw === null || raw === undefined || raw === "") ? null : toNum(raw)
+      };
+    }
+    return out;
+  }
+
   function computedFinancialFields(rowObj){
-    const debt = selectComputedFinancialField(rowObj, ["pay_main", "principal", "debt", "runningDebt", "balance", "total_debt"]);
-    const penalty = selectComputedFinancialField(rowObj, ["pay_penalty", "penalty", "runningPenalty", "penaltyDebt", "total_penalty"]);
-    const explicitTotal = selectComputedFinancialField(rowObj, ["total", "computedTotal", "runningTotal", "totalDebt", "debt_total"]);
+    const debtNames = ["pay_main", "debt", "principalDebt", "principal", "runningDebt", "balance", "total_debt"];
+    const penaltyNames = ["pay_penalty", "penalty", "penaltyDebt", "runningPenalty", "total_penalty"];
+    const totalNames = ["total", "runningTotal", "computedTotal", "totalDebt", "debt_total"];
+    const debt = selectComputedFinancialField(rowObj, debtNames);
+    const penalty = selectComputedFinancialField(rowObj, penaltyNames);
+    const explicitTotal = selectComputedFinancialField(rowObj, totalNames);
     const derivedTotal = r2(debt.value + penalty.value);
     const total = explicitTotal.present && (Math.abs(explicitTotal.value) > 0.0000001 || Math.abs(derivedTotal) <= 0.0000001)
       ? explicitTotal
@@ -3896,6 +3917,9 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
       selectedDebtField: debt.field,
       selectedPenaltyField: penalty.field,
       selectedTotalField: total.field,
+      debtCandidates: computedFieldCandidates(rowObj, debtNames),
+      penaltyCandidates: computedFieldCandidates(rowObj, penaltyNames),
+      totalCandidates: computedFieldCandidates(rowObj, totalNames),
       hasDebt: debt.present,
       hasPenalty: penalty.present,
       hasTotal: total.present
@@ -3925,6 +3949,36 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
     try { window.__PAYMENT_TABLE_RENDER_FINANCIAL_LOG_COUNT = 0; } catch(e) {}
   }
 
+  function logActualRenderFinancialFields(rowObj, fields){
+    try {
+      window.__PAYMENT_TABLE_ACTUAL_RENDER_LOG_COUNT = Number(window.__PAYMENT_TABLE_ACTUAL_RENDER_LOG_COUNT || 0);
+      if (window.__PAYMENT_TABLE_ACTUAL_RENDER_LOG_COUNT >= 3) return;
+      window.__PAYMENT_TABLE_ACTUAL_RENDER_LOG_COUNT += 1;
+      console.log("[payment-table][actual-render]", {
+        rowId: String(rowObj && rowObj.id || ""),
+        debtCandidates: fields.debtCandidates,
+        penaltyCandidates: fields.penaltyCandidates,
+        totalCandidates: fields.totalCandidates,
+        selectedDebt: {
+          field: fields.selectedDebtField,
+          value: fields.debt
+        },
+        selectedPenalty: {
+          field: fields.selectedPenaltyField,
+          value: fields.penalty
+        },
+        selectedTotal: {
+          field: fields.selectedTotalField,
+          value: fields.total
+        }
+      });
+    } catch(e) {}
+  }
+
+  function resetActualRenderFinancialFieldsLog(){
+    try { window.__PAYMENT_TABLE_ACTUAL_RENDER_LOG_COUNT = 0; } catch(e) {}
+  }
+
   function updateComputedCells(tr, rowObj){
   const ro = qsa("td.ro", tr);
   if (ro.length >= 3){
@@ -3941,6 +3995,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
 
     ro[2].textContent = (isReadonlyNoRecalcMode() && !__runtimeCacheState.valid && !fields.hasTotal) ? "—" : fmtMoney(fields.total);
     logRenderFinancialFields(rowObj, fields);
+    logActualRenderFinancialFields(rowObj, fields);
   }
 }
 
@@ -4000,6 +4055,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
   async function renderRowsChunked(tbody, view, chunkSize){
     tbody.innerHTML = "";
     resetRenderFinancialFieldsLog();
+    resetActualRenderFinancialFieldsLog();
     const size = Math.max(1, Number(chunkSize) || 50);
     for (let i = 0; i < view.length; i += size) {
       const frag = document.createDocumentFragment();
@@ -4514,6 +4570,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
     const penaltyCellValue = financialFields.penalty;
     const totalCellValue = financialFields.total;
     logRenderFinancialFields(r, financialFields);
+    logActualRenderFinancialFields(r, financialFields);
 
     const hasChildren = !!(__monthHasPayments && __monthHasPayments[ymKey] && __monthHasPayments[ymKey].hasPayments);
     const collapsed = !!(__collapsedMonths && __collapsedMonths[ymKey]);
