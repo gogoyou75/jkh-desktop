@@ -717,6 +717,7 @@ function getAbonentIdFromURL() {
     // если открыли по uid — найдём ЛС (текущий ключ) по uid;
     // если данные ещё не готовы, вернём пусто и дождёмся повторной инициализации.
     if (uid) {
+        hydrateCardRuntimeDbFromStore();
         const db = window.AbonentsDB?.abonents || {};
         for (const id of Object.keys(db)) {
             if (String(db[id]?.uid || "").trim() === uid) return id;
@@ -738,6 +739,50 @@ function __countRuntimeDb(db) {
         linksCount: db && Array.isArray(db.links) ? db.links.length : 0
     };
 }
+
+function hydrateCardRuntimeDbFromStore() {
+    const beforeCount = window.AbonentsDB && window.AbonentsDB.abonents && typeof window.AbonentsDB.abonents === "object"
+        ? Object.keys(window.AbonentsDB.abonents).length
+        : 0;
+    let cachedDb = null;
+    let cachedCount = 0;
+    let afterCount = beforeCount;
+    let owner = "";
+    let ok = false;
+    try {
+        owner = (window.JKHStore && typeof JKHStore.getOwnerId === "function") ? String(JKHStore.getOwnerId() || "").trim() : "";
+        cachedDb = (window.JKHStore && typeof JKHStore.getJSON === "function")
+            ? JKHStore.getJSON("abonents_db_v1", null, null)
+            : null;
+        cachedCount = cachedDb && cachedDb.abonents && typeof cachedDb.abonents === "object"
+            ? Object.keys(cachedDb.abonents).length
+            : 0;
+
+        if (cachedCount > 0 && beforeCount === 0) {
+            window.AbonentsDB = cachedDb;
+            window.AbonentsDB.abonents = window.AbonentsDB.abonents || {};
+            window.AbonentsDB.premises = window.AbonentsDB.premises || {};
+            window.AbonentsDB.links = Array.isArray(window.AbonentsDB.links) ? window.AbonentsDB.links : [];
+        }
+        afterCount = window.AbonentsDB && window.AbonentsDB.abonents && typeof window.AbonentsDB.abonents === "object"
+            ? Object.keys(window.AbonentsDB.abonents).length
+            : 0;
+        ok = afterCount > 0;
+    } catch (e) {
+        try { console.warn("[abonent_card][db-hydrate-from-store-error]", e); } catch (_) {}
+    }
+    try {
+        console.log("[abonent_card][db-hydrate-from-store]", {
+            beforeCount,
+            cachedCount,
+            afterCount,
+            owner,
+            ok
+        });
+    } catch (_) {}
+    return { beforeCount, cachedCount, afterCount, owner, ok };
+}
+window.hydrateCardRuntimeDbFromStore = hydrateCardRuntimeDbFromStore;
 
 function __installAbonentCardRuntimeDbGuard(rawHasContent) {
     try {
@@ -930,8 +975,10 @@ async function waitForHydratedDatabase(options){
         try {
             if (window.Data && typeof Data.waitForServerFirstDataReady === "function") {
                 await Data.waitForServerFirstDataReady({ timeoutMs: 1000 });
+                hydrateCardRuntimeDbFromStore();
             } else if (window.JKHDataLoader && typeof window.JKHDataLoader.loadFromServer === "function") {
                 await window.JKHDataLoader.loadFromServer({ force:false, reason:"waitForHydratedDatabase" });
+                hydrateCardRuntimeDbFromStore();
             }
         } catch(e) {}
         if (__isHydratedDatabaseReady()) {
@@ -1072,14 +1119,17 @@ function showAbonentCardContextError(reason) {
 }
 
 function getDb() {
+    hydrateCardRuntimeDbFromStore();
     return window.AbonentsDB?.abonents || {};
 }
 
 function getPremisesDb(){
+    hydrateCardRuntimeDbFromStore();
     return window.AbonentsDB?.premises || {};
 }
 
 function getLinks(){
+    hydrateCardRuntimeDbFromStore();
     return Array.isArray(window.AbonentsDB?.links) ? window.AbonentsDB.links : [];
 }
 
@@ -1121,6 +1171,7 @@ function getActiveLinkForPremise(regnum){
 }
 
 function getCurrentAbonent() {
+    hydrateCardRuntimeDbFromStore();
     const id = String(getAbonentIdFromURL() || "").trim();
     const db = window.AbonentsDB && typeof window.AbonentsDB === "object" ? window.AbonentsDB : { abonents: {}, premises: {}, links: [] };
     const abonent = db.abonents && typeof db.abonents === "object" ? db.abonents[id] || null : null;
@@ -1668,6 +1719,7 @@ async function __initAbonentCardSafe(){
             __logBlockedBeforeHydrate("INIT");
             return;
         }
+        hydrateCardRuntimeDbFromStore();
         __abonentCardInitStarted = true;
 
         await __repairEmptyExcludePeriodsKeysAfterServerLoad();
@@ -1697,6 +1749,7 @@ async function __initAbonentCardSafe(){
 function __isAbonentCardDataReady() {
     try {
         if (!hasExplicitAbonentCardContext()) return true;
+        hydrateCardRuntimeDbFromStore();
         const id = String(getAbonentIdFromURL() || "").trim();
         const db = window.AbonentsDB && typeof window.AbonentsDB === "object" ? window.AbonentsDB : null;
         const abonents = db && db.abonents ? db.abonents : null;
@@ -3970,6 +4023,7 @@ async function __saveAbonentSummaryAfterUidRecalc(abonentId, from, to){
         renderAbonentSummaryStatus("error", "SUMMARY_RECALC_UNAVAILABLE");
         return { ok: false, summary_status: "error", summary_reason: "SUMMARY_RECALC_UNAVAILABLE" };
     }
+    hydrateCardRuntimeDbFromStore();
     const result = await Data.recalculateAbonentCard(abonentId, { period: { from: from, to: to }, saveSummary: false, summaryScope: "period", periodActive: true });
     const summary = result && result.summary && typeof result.summary === "object" ? result.summary : null;
     window.__lastCardSummaryForDebug = summary || null;
@@ -3988,6 +4042,7 @@ async function ensureCurrentAbonentUidForCalcPeriod(source){
         return { ok: false, uid: "", reason: "UID_SERVICE_UNAVAILABLE" };
     }
     try {
+        hydrateCardRuntimeDbFromStore();
         return await Data.ensureAbonentUid(id, { source: source || "abonent_card.calc_period" });
     } catch (e) {
         return { ok: false, uid: "", reason: String(e && e.message || e) };
@@ -4095,6 +4150,7 @@ function bindCalcButtons(){
         if (runBtn.disabled) return;
         if (!canWriteOrExplainLocal()) return;
         const currentAbonentId = getAbonentIdFromURL();
+        hydrateCardRuntimeDbFromStore();
         const recalcRunId = __nextFullRecalcRunId();
         let from = String(fromEl.value || "").trim();
         let to   = String(toEl.value || "").trim();
@@ -4514,6 +4570,7 @@ function bindCalcButtons(){
             heartbeatFullRecalc("ensure-uid");
             try { console.log("[full-recalc][step]", { runId: recalcRunId, step: "ensure-uid" }); } catch(eStepLog) {}
             try {
+                hydrateCardRuntimeDbFromStore();
                 uidResult = await Data.ensureAbonentUid(currentAbonentId, { source: "abonent_card.calc" });
             } catch (e) {
                 uidResult = { ok: false, reason: String(e && e.message || e) };
@@ -4569,6 +4626,7 @@ function bindCalcButtons(){
                 }
                 const fullStatusBeforePeriod = String(fullSummaryUiBeforeRecalc.status || __lastRenderedSummaryStatusLocal || "");
                 __saveTemporaryPeriodState({ from: from, to: to }, { abonentId: currentAbonentId, source: "temporary-recalc" });
+                hydrateCardRuntimeDbFromStore();
                 const periodResult = await window.runTemporaryPeriodCalculation({
                     abonentId: currentAbonentId,
                     period: { from: from, to: to },
@@ -4599,6 +4657,7 @@ function bindCalcButtons(){
                 explicitFullRecalcStarted = true;
                 heartbeatFullRecalc("fullRecalcForCurrentAbonent");
                 try { console.log("[full-recalc][step]", { runId: recalcRunId, step: "fullRecalcForCurrentAbonent" }); } catch(eStepLog) {}
+                hydrateCardRuntimeDbFromStore();
                 const recalcResult = await window.fullRecalcForCurrentAbonent({ applyAutoAccrual: true, recalcMode: "FULL_SUMMARY_REBUILD", summaryScope: "full", recalcRunId: recalcRunId });
                 fullRecalcState.resultReceived = true;
                 fullRecalcState.resultOk = !!(recalcResult && recalcResult.ok === true);
