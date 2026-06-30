@@ -236,6 +236,7 @@
     const map = normalizeComputedRowsByIdForSnapshot(rows, rowsById);
     if (!Object.keys(map).length) return false;
     __paymentTableCalculatedRenderState = {
+      rows: clonePaymentRowsForSnapshot(rows, map),
       rowsById: map,
       ledgerVersion: String(meta && meta.ledgerVersion || ""),
       runtimeSignature: String(meta && meta.runtimeSignature || ""),
@@ -396,9 +397,12 @@
     const stats = computedRowsStats(arr, Object.keys(map).length ? map : null);
     try {
       console.log("[payment-table][render-source]", {
-        source: String(source || "raw_ledger"),
+        source: String(source || "raw_payments_ledger"),
         rowsCount: arr.length,
         rowsByIdCount: Object.keys(map).length,
+        hasDebt: !!stats.hasDebtTotals,
+        hasPenalty: !!stats.hasPenaltyTotals,
+        hasTotal: !!stats.hasTotalTotals,
         hasDebtPenaltyTotal: !!(stats.hasDebtTotals && stats.hasPenaltyTotals && stats.hasTotalTotals)
       });
     } catch(e) {}
@@ -4216,11 +4220,59 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
     }
   }
 
+  async function renderCalculatedRowsDirect(reason){
+    const state = __paymentTableCalculatedRenderState;
+    const tbody = qs("#paymentTableBody");
+    if (!tbody || !state || typeof state !== "object") return false;
+    const rows = Array.isArray(state.rows) ? state.rows.map(function(row){ return Object.assign({}, row || {}); }) : [];
+    const rowsById = state.rowsById && typeof state.rowsById === "object" && !Array.isArray(state.rowsById) ? state.rowsById : {};
+    if (!rows.length || !Object.keys(rowsById).length) return false;
+    applyRuntimeRowsById(rows, rowsById);
+    const stats = computedRowsStats(rows, null);
+    if (!(stats.hasDebtTotals && stats.hasPenaltyTotals && stats.hasTotalTotals)) return false;
+
+    __collapsedMonths = __collapsedMonths || loadCollapsedMap();
+    __monthHasPayments = {};
+    __monthPaidSum = {};
+    rows.forEach(function(r){
+      const YM = ymKeyOfRow(r);
+      if (!__monthHasPayments[YM]) __monthHasPayments[YM] = { hasPayments: false };
+      if (toNum(r && r.paid || 0) > 0.0000001) {
+        __monthHasPayments[YM].hasPayments = true;
+        __monthPaidSum[YM] = r2((__monthPaidSum[YM] || 0) + toNum(r && r.paid || 0));
+      }
+    });
+    rows.sort(function(a, b){
+      const ay = Number(a && a.year) || 0;
+      const by = Number(b && b.year) || 0;
+      if (ay !== by) return by - ay;
+      const am = Number(String(a && a.month || "").padStart(2, "0")) || 0;
+      const bm = Number(String(b && b.month || "").padStart(2, "0")) || 0;
+      if (am !== bm) return bm - am;
+      const aa = toNum(a && a.accrued || 0) > 0.0000001;
+      const ba = toNum(b && b.accrued || 0) > 0.0000001;
+      if (aa !== ba) return aa ? -1 : 1;
+      return (Number(b && b.id) || 0) - (Number(a && a.id) || 0);
+    });
+    __runtimeCacheState = { valid: true, reason: "", dataById: rowsById, periodMatches: true, builtForPeriod: !!state.periodActive, calculatedRows: true };
+    logPaymentTableRenderSource("calculated_rows", rows, rowsById);
+    try {
+      console.log("[payment-table][calculated-rows-direct-render]", {
+        reason: String(reason || ""),
+        rowsCount: rows.length,
+        rowsByIdCount: Object.keys(rowsById).length
+      });
+    } catch(e) {}
+    await renderRowsChunked(tbody, rows, 50);
+    return true;
+  }
+
   async function loadPaymentTableImpl() {
     const totalStartedAt = perfNow();
     try { console.time('[payment-table] init-total'); } catch(e) {}
     try {
       if (!await waitPaymentTableHydratedDatabase("PAYMENT_TABLE_LOAD")) {
+        if (await renderCalculatedRowsDirect("hydrate-not-ready")) return;
         const tbodyBlocked = qs("#paymentTableBody");
         if (tbodyBlocked) tbodyBlocked.innerHTML = '<tr><td colspan="20" style="color:#7a5300;font-weight:700;">База данных ещё загружается. Повторите через несколько секунд.</td></tr>';
         const statusBlocked = qs("#paymentTableStatus") || qs("#paymentStatus") || qs("#paymentsStatus");
@@ -4228,11 +4280,13 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
         return;
       }
       if (!isDataReady()) {
+        if (await renderCalculatedRowsDirect("data-not-ready")) return;
         try { console.warn('[payment-table] load skipped: DATA_NOT_READY'); } catch(e) {}
         return;
       }
       const keyForReadiness = paymentsKey();
       if (!keyForReadiness) {
+        if (await renderCalculatedRowsDirect("payment-key-not-ready")) return;
         try { console.warn('[payment-table] load skipped: PAYMENT_KEY_NOT_READY'); } catch(e) {}
         return;
       }
@@ -4502,6 +4556,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
       if (renderSource === "raw_ledger" && viewTotalsStats.rowsWithTotals > 0) {
         renderSource = "calculated_rows";
       }
+      if (renderSource === "raw_ledger") renderSource = "raw_payments_ledger";
       logPaymentTableRenderSource(renderSource, view, renderRowsById);
       try {
         if (isReadonlyNoRecalcMode()) {
