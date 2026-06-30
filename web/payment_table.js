@@ -3548,6 +3548,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
   const calcRows = Array.isArray(baseRows) ? baseRows : rows;
   const token = ++__paymentTableCalcToken;
   const startedAt = perfNow();
+  resetRenderFinancialFieldsLog();
   if (__paymentTableCalcTimerActive) { try { console.timeEnd('[payment-table] calc-totals'); } catch(e) {} }
   __paymentTableCalcTimerActive = true;
   try { console.time('[payment-table] calc-totals'); } catch(e) {}
@@ -3865,22 +3866,81 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
     return (v === null || v === undefined || v === "") ? "—" : fmtMoney(v);
   }
 
+  function selectComputedFinancialField(rowObj, candidates){
+    const row = rowObj && typeof rowObj === "object" ? rowObj : {};
+    let fallback = null;
+    for (const name of candidates) {
+      if (!Object.prototype.hasOwnProperty.call(row, name)) continue;
+      const raw = row[name];
+      if (raw === null || raw === undefined || raw === "") continue;
+      const value = toNum(raw);
+      const selected = { field: name, value: value, present: true };
+      if (Math.abs(value) > 0.0000001) return selected;
+      if (!fallback) fallback = selected;
+    }
+    return fallback || { field: "", value: 0, present: false };
+  }
+
+  function computedFinancialFields(rowObj){
+    const debt = selectComputedFinancialField(rowObj, ["pay_main", "principal", "debt", "runningDebt", "balance", "total_debt"]);
+    const penalty = selectComputedFinancialField(rowObj, ["pay_penalty", "penalty", "runningPenalty", "penaltyDebt", "total_penalty"]);
+    const explicitTotal = selectComputedFinancialField(rowObj, ["total", "computedTotal", "runningTotal", "totalDebt", "debt_total"]);
+    const derivedTotal = r2(debt.value + penalty.value);
+    const total = explicitTotal.present && (Math.abs(explicitTotal.value) > 0.0000001 || Math.abs(derivedTotal) <= 0.0000001)
+      ? explicitTotal
+      : { field: "debt+penalty", value: derivedTotal, present: debt.present || penalty.present };
+    return {
+      debt: debt.value,
+      penalty: penalty.value,
+      total: total.value,
+      selectedDebtField: debt.field,
+      selectedPenaltyField: penalty.field,
+      selectedTotalField: total.field,
+      hasDebt: debt.present,
+      hasPenalty: penalty.present,
+      hasTotal: total.present
+    };
+  }
+
+  function logRenderFinancialFields(rowObj, fields){
+    try {
+      window.__PAYMENT_TABLE_RENDER_FINANCIAL_LOG_COUNT = Number(window.__PAYMENT_TABLE_RENDER_FINANCIAL_LOG_COUNT || 0);
+      if (window.__PAYMENT_TABLE_RENDER_FINANCIAL_LOG_COUNT >= 3) return;
+      window.__PAYMENT_TABLE_RENDER_FINANCIAL_LOG_COUNT += 1;
+      console.log("[payment-table][render-financial-fields]", {
+        rowId: String(rowObj && rowObj.id || ""),
+        accrued: rowObj && rowObj.accrued,
+        paid: rowObj && rowObj.paid,
+        debt: fields.debt,
+        penalty: fields.penalty,
+        total: fields.total,
+        selectedDebtField: fields.selectedDebtField,
+        selectedPenaltyField: fields.selectedPenaltyField,
+        selectedTotalField: fields.selectedTotalField
+      });
+    } catch(e) {}
+  }
+
+  function resetRenderFinancialFieldsLog(){
+    try { window.__PAYMENT_TABLE_RENDER_FINANCIAL_LOG_COUNT = 0; } catch(e) {}
+  }
+
   function updateComputedCells(tr, rowObj){
   const ro = qsa("td.ro", tr);
   if (ro.length >= 3){
-    const pm = toNum(rowObj.pay_main ?? 0);
-    const pp = toNum(rowObj.pay_penalty ?? 0);
+    const fields = computedFinancialFields(rowObj);
+    const pm = fields.debt;
+    const pp = fields.penalty;
 
-    ro[0].textContent = (isReadonlyNoRecalcMode() && !__runtimeCacheState.valid && !rowObj.pay_main && rowObj.pay_main !== 0) ? "—" : fmtMoney(pm);
+    ro[0].textContent = (isReadonlyNoRecalcMode() && !__runtimeCacheState.valid && !fields.hasDebt) ? "—" : fmtMoney(pm);
     ro[0].style.color = (pm < -0.0000001) ? "#8B0000" : "";
     ro[0].style.fontWeight = (pm < -0.0000001) ? "700" : "";
 
-    if (isReadonlyNoRecalcMode() && !__runtimeCacheState.valid && !rowObj.pay_penalty && rowObj.pay_penalty !== 0) ro[1].textContent = "—";
-    else ro[1].textContent = (toNum(rowObj.paid ?? 0) > 0.0000001) ? "" : fmtMoney(pp);
+    if (isReadonlyNoRecalcMode() && !__runtimeCacheState.valid && !fields.hasPenalty) ro[1].textContent = "—";
+    else ro[1].textContent = fmtMoney(pp);
 
-    // ✅ CRITICAL: "Всего" в таблице = Долг + Пени (derived field, не хранится отдельно)
-    const total = pm + pp;
-    ro[2].textContent = (isReadonlyNoRecalcMode() && !__runtimeCacheState.valid && !rowObj.total && rowObj.total !== 0) ? "—" : fmtMoney(total);
+    ro[2].textContent = (isReadonlyNoRecalcMode() && !__runtimeCacheState.valid && !fields.hasTotal) ? "—" : fmtMoney(fields.total);
+    logRenderFinancialFields(rowObj, fields);
   }
 }
 
@@ -3939,6 +3999,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
 
   async function renderRowsChunked(tbody, view, chunkSize){
     tbody.innerHTML = "";
+    resetRenderFinancialFieldsLog();
     const size = Math.max(1, Number(chunkSize) || 50);
     for (let i = 0; i < view.length; i += size) {
       const frag = document.createDocumentFragment();
@@ -4448,6 +4509,11 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
     const icon = locked ? ' <span title="Импорт (Excel) — редактирование запрещено" style="font-weight:400; font-size:11px; opacity:0.8;">📥</span>' : "";
     const ymKey = ymKeyOfRow(r);
     tr.dataset.ym = ymKey;
+    const financialFields = computedFinancialFields(r);
+    const debtCellValue = financialFields.debt;
+    const penaltyCellValue = financialFields.penalty;
+    const totalCellValue = financialFields.total;
+    logRenderFinancialFields(r, financialFields);
 
     const hasChildren = !!(__monthHasPayments && __monthHasPayments[ymKey] && __monthHasPayments[ymKey].hasPayments);
     const collapsed = !!(__collapsedMonths && __collapsedMonths[ymKey]);
@@ -4491,9 +4557,9 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
 
       <td>${periodCell}</td>
 
-      <td class="ro" style="${toNum(r.pay_main ?? 0) < -0.0000001 ? 'color:#8B0000; font-weight:700;' : ''}">${(isReadonlyNoRecalcMode() && !__runtimeCacheState.valid && (r.pay_main === undefined || r.pay_main === null || r.pay_main === "")) ? "—" : fmtMoney(r.pay_main ?? 0)}</td>
-      <td class="ro">${(isReadonlyNoRecalcMode() && !__runtimeCacheState.valid && (r.pay_penalty === undefined || r.pay_penalty === null || r.pay_penalty === "")) ? "—" : ((toNum(r.paid ?? 0) > 0.0000001) ? "" : fmtMoney(r.pay_penalty ?? 0))}</td>
-      <td class="ro">${(isReadonlyNoRecalcMode() && !__runtimeCacheState.valid && (r.total === undefined || r.total === null || r.total === "")) ? "—" : fmtMoney(toNum(r.pay_main ?? 0) + toNum(r.pay_penalty ?? 0))}</td>
+      <td class="ro" style="${debtCellValue < -0.0000001 ? 'color:#8B0000; font-weight:700;' : ''}">${(isReadonlyNoRecalcMode() && !__runtimeCacheState.valid && !financialFields.hasDebt) ? "—" : fmtMoney(debtCellValue)}</td>
+      <td class="ro">${(isReadonlyNoRecalcMode() && !__runtimeCacheState.valid && !financialFields.hasPenalty) ? "—" : fmtMoney(penaltyCellValue)}</td>
+      <td class="ro">${(isReadonlyNoRecalcMode() && !__runtimeCacheState.valid && !financialFields.hasTotal) ? "—" : fmtMoney(totalCellValue)}</td>
 
       <td>
         <textarea class="note-inline" placeholder="" style="width:100%; min-height:34px; resize:vertical;" ${locked ? "readonly" : ""}>${escapeHtml(r.note || "")}</textarea>
