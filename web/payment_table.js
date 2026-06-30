@@ -219,6 +219,13 @@
       r.pay_main = fields.debt;
       r.pay_penalty = fields.penalty;
       r.total = fields.total;
+      r.debt = fields.debt;
+      r.principalDebt = fields.debt;
+      r.runningDebt = fields.debt;
+      r.penalty = fields.penalty;
+      r.penaltyDebt = fields.penalty;
+      r.runningPenalty = fields.penalty;
+      r.runningTotal = fields.total;
     });
   }
 
@@ -234,6 +241,13 @@
         copy.pay_main = fields.debt;
         copy.pay_penalty = fields.penalty;
         copy.total = fields.total;
+        copy.debt = fields.debt;
+        copy.principalDebt = fields.debt;
+        copy.runningDebt = fields.debt;
+        copy.penalty = fields.penalty;
+        copy.penaltyDebt = fields.penalty;
+        copy.runningPenalty = fields.penalty;
+        copy.runningTotal = fields.total;
       }
       return copy;
     });
@@ -251,7 +265,18 @@
       const pp = Number(fields.penalty);
       const total = Number(fields.total);
       if (!Number.isFinite(pm) || !Number.isFinite(pp) || !Number.isFinite(total)) return;
-      out[id] = { pay_main: pm, pay_penalty: pp, total: total };
+      out[id] = {
+        pay_main: pm,
+        pay_penalty: pp,
+        total: total,
+        debt: pm,
+        principalDebt: pm,
+        runningDebt: pm,
+        penalty: pp,
+        penaltyDebt: pp,
+        runningPenalty: pp,
+        runningTotal: total
+      };
     });
     return out;
   }
@@ -288,6 +313,72 @@
       rowsWithTotals: rowsWithAnyTotals,
       rowsWithZeroTotals: rowsWithZeroTotals
     };
+  }
+
+  function ledgerRowHasComputedFields(row){
+    if (!row || typeof row !== "object") return false;
+    const fields = computedFinancialFields(row);
+    return Math.abs(Number(fields.debt) || 0) > 0.0000001
+      || Math.abs(Number(fields.penalty) || 0) > 0.0000001
+      || Math.abs(Number(fields.total) || 0) > 0.0000001;
+  }
+
+  function logLedgerFields(rows, rowsById, source){
+    const arr = Array.isArray(rows) ? rows : [];
+    const map = rowsById && typeof rowsById === "object" && !Array.isArray(rowsById) ? rowsById : null;
+    const first = arr[0] || {};
+    let hasDebt = false;
+    let hasPenalty = false;
+    let hasTotal = false;
+    arr.forEach(function(row){
+      const item = map ? (map[String(row && row.id || "")] || row || {}) : (row || {});
+      const fields = computedFinancialFields(item);
+      if (Math.abs(Number(fields.debt) || 0) > 0.0000001) hasDebt = true;
+      if (Math.abs(Number(fields.penalty) || 0) > 0.0000001) hasPenalty = true;
+      if (Math.abs(Number(fields.total) || 0) > 0.0000001) hasTotal = true;
+    });
+    try {
+      console.log("[payment-table][ledger-fields]", {
+        source: String(source || ""),
+        firstRowKeys: Object.keys(first || {}),
+        hasDebt: hasDebt,
+        hasPenalty: hasPenalty,
+        hasTotal: hasTotal,
+        rowsCount: arr.length
+      });
+    } catch(e) {}
+    return { hasDebt: hasDebt, hasPenalty: hasPenalty, hasTotal: hasTotal, rowsCount: arr.length };
+  }
+
+  function applyComputedSnapshotRowsToLedgerRows(rows, reason){
+    const snapshot = __paymentTableComputedRowsSnapshot && typeof __paymentTableComputedRowsSnapshot === "object"
+      ? __paymentTableComputedRowsSnapshot
+      : null;
+    let map = snapshot && snapshot.rowsById && typeof snapshot.rowsById === "object" && !Array.isArray(snapshot.rowsById)
+      ? snapshot.rowsById
+      : {};
+    if ((!map || !Object.keys(map).length) && snapshot && Array.isArray(snapshot.rows)) {
+      const fromRows = {};
+      snapshot.rows.forEach(function(row){
+        const id = String(row && row.id || "").trim();
+        if (!id || !ledgerRowHasComputedFields(row)) return;
+        fromRows[id] = row;
+      });
+      map = fromRows;
+    }
+    if (!Array.isArray(rows) || !rows.length || !Object.keys(map).length) return false;
+    applyRuntimeRowsById(rows, map);
+    const ok = rows.some(ledgerRowHasComputedFields);
+    if (ok) {
+      try {
+        console.log("[payment-table][ledger-fields-restored-from-snapshot]", {
+          reason: String(reason || ""),
+          rowsCount: rows.length,
+          rowsByIdCount: Object.keys(map).length
+        });
+      } catch(e) {}
+    }
+    return ok;
   }
 
   function logCardReloadRestoreRowsSource(source, rows, rowsById, extra){
@@ -4298,13 +4389,19 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
         );
       }
       if (!restoredFromCardSnapshot) notifyRuntimeCacheSummaryState(__runtimeCacheState, periodActive, selectedPeriod);
-      const viewTotalsStats = computedRowsStats(view, null);
+      let viewTotalsStats = computedRowsStats(view, null);
+      logLedgerFields(view, __runtimeCacheState && __runtimeCacheState.valid === true ? (__runtimeCacheState.dataById || {}) : null, "after-runtime-cache-restore");
+      if (Array.isArray(view) && view.length && viewTotalsStats.rowsWithTotals <= 0 && applyComputedSnapshotRowsToLedgerRows(view, "raw-ledger-no-totals")) {
+        viewTotalsStats = computedRowsStats(view, null);
+        logLedgerFields(view, null, "after-snapshot-ledger-restore");
+      }
       if (Array.isArray(view) && view.length && viewTotalsStats.rowsWithTotals <= 0) {
         try {
           console.warn("[card-reload][raw-ledger-no-totals]", {
             uid: String(getAbonentId() || ""),
             source: "raw_payments_ledger",
             rowsCount: view.length,
+            rowsByIdCount: __runtimeCacheState && __runtimeCacheState.dataById && typeof __runtimeCacheState.dataById === "object" ? Object.keys(__runtimeCacheState.dataById).length : 0,
             periodActive: !!periodActive,
             selectedPeriod: selectedPeriod || null,
             runtimeCacheReason: String(__runtimeCacheState && __runtimeCacheState.reason || "")
@@ -5537,6 +5634,17 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
       console.timeEnd("[recalc] save runtime cache");
       logFullRecalcStepDone(runId, "save-runtime-cache-after-summary", { abonentId: id, rowsByIdCount: Object.keys(freshRowsById).length });
       await nextUiTick();
+      if (Object.keys(freshRowsById).length) {
+        throwIfFullRecalcAborted("table-render-after-summary");
+        __paymentTableRenderedSignature = "";
+        __paymentTableMode = "readonly_no_recalc";
+        logFullRecalcStep(runId, "table-render-after-summary", { abonentId: id, reason: "fresh_runtime_cache_after_summary" });
+        console.time("[recalc-step] loadPaymentTable after summary");
+        await loadPaymentTable("full_recalc_after_summary");
+        console.timeEnd("[recalc-step] loadPaymentTable after summary");
+        logFullRecalcStepDone(runId, "table-render-after-summary", { abonentId: id, rowsByIdCount: Object.keys(freshRowsById).length });
+        await nextUiTick();
+      }
       const summary = summaryResult && summaryResult.summary && typeof summaryResult.summary === "object" ? summaryResult.summary : null;
       try {
         console.log("[full-recalc][save-summary]", {
