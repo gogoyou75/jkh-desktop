@@ -821,7 +821,7 @@ ROW_STATUSES = {
 IMPORT_ALLOWED_TRANSITIONS = {
     "parse": {"uploaded", "failed"},
     "validate": {"parsed", "validated"},
-    "apply": {"ready_to_apply"},
+    "apply": {"validated", "ready_to_apply"},
 }
 
 IMPORT_REQUIRED_COLUMNS = {"account_uid", "account_number", "payment_date", "payment_period", "amount", "source_index"}
@@ -4458,7 +4458,7 @@ def import_payments_validate(batch_id):
     batch.rows_valid = valid
     batch.rows_invalid = invalid
     batch.rows_duplicate = duplicate
-    batch.status = "ready_to_apply" if invalid == 0 else "validated"
+    batch.status = "ready_to_apply" if valid > 0 else "validated"
     db.session.commit()
     return jsonify(ok=True, batch=_batch_payload(batch))
 
@@ -4505,24 +4505,18 @@ def import_payments_apply(batch_id):
             }
         ), 400
 
-    if batch.rows_invalid > 0:
-        return jsonify(
-            ok=False,
-            error="invalid_rows_present",
-            details={
-                "rows_invalid": batch.rows_invalid,
-                "message": "Импорт невозможен: в батче есть строки с ошибками. Исправьте их и повторите валидацию.",
-            },
-        ), 400
-
     rows = ImportBatchRow.query.filter_by(batch_id=batch.id).order_by(ImportBatchRow.row_no.asc()).all()
-    applicable_statuses = {"ready", "duplicate"}
-    not_ready = [r for r in rows if r.status not in applicable_statuses]
-    if not_ready:
+    ready_rows = [r for r in rows if r.status == "ready"]
+    if not ready_rows:
         return jsonify(
             ok=False,
-            error="non_ready_rows_present",
-            details={"count": len(not_ready)},
+            error="no_ready_rows_to_apply",
+            details={
+                "message": "Нет готовых к применению платежей.",
+                "rows_total": len(rows),
+                "rows_invalid": batch.rows_invalid,
+                "rows_duplicate": batch.rows_duplicate,
+            },
         ), 400
     applied_count = skipped_count = duplicate_count = conflict_count = failed_count = 0
     affected_uids = set()
@@ -4535,13 +4529,14 @@ def import_payments_apply(batch_id):
         for r in rows:
             current_row_id = r.id
             if r.status != "ready":
-                action = r.reason_code or "SKIPPED"
-                if r.reason_code == "DUPLICATE":
+                row_status = _norm_text(r.status).lower()
+                row_reason = _norm_text(r.reason_code).upper()
+                action = row_reason or row_status.upper() or "SKIPPED"
+                skipped_count += 1
+                if row_status == "duplicate" or row_reason == "DUPLICATE":
                     duplicate_count += 1
-                elif r.reason_code == "CONFLICT":
+                elif row_status == "conflict" or row_reason == "CONFLICT":
                     conflict_count += 1
-                else:
-                    skipped_count += 1
                 db.session.add(PaymentAuditLog(
                     owner_id=batch.owner_id,
                     batch_id=batch.id,
@@ -4572,6 +4567,7 @@ def import_payments_apply(batch_id):
                 r.reason_code = "DUPLICATE"
                 r.reason_text = "Платёж уже применён ранее"
                 r.matched_payment_id = existing_fingerprint.payment_id or ""
+                skipped_count += 1
                 duplicate_count += 1
                 db.session.add(PaymentAuditLog(
                     owner_id=batch.owner_id,
@@ -4658,7 +4654,7 @@ def import_payments_apply(batch_id):
             affected_uids.add(normalized_uid)
 
         batch.rows_applied = applied_count
-        batch.rows_skipped = duplicate_count + conflict_count + skipped_count
+        batch.rows_skipped = skipped_count
         batch.error_message = ""
         batch.status = "applied"
         batch.finished_at = datetime.utcnow()
