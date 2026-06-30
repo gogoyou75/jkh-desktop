@@ -955,7 +955,20 @@ async function prefillFromQueryParams() {
       hasQueryUid: !!uid
     });
   }
-  const draft = isFromImport ? await waitDraftNewAbonent() : loadDraftNewAbonent();
+  const queryFioLine = [last, first, mid].filter(Boolean).join(' ').trim() || queryFio;
+  let draft = null;
+  if (isFromImport) {
+    clearDraftNewAbonent();
+    console.log('[new_abonent][draft-skip-from-import]', {
+      excelRow: queryExcelRow,
+      ls: String(ls || ''),
+      fam: String(last || ''),
+      fio: String(queryFioLine || ''),
+      source: 'query'
+    });
+  } else {
+    draft = loadDraftNewAbonent();
+  }
   if (hasDraftNewAbonentData(draft)) {
     const draftFioParts = String(draft.fio || '').trim().split(/\s+/).filter(Boolean);
     console.log('[new_abonent][fill-from-import]', {
@@ -975,19 +988,15 @@ async function prefillFromQueryParams() {
     uid = String(draft.excelUid || draft.uid_import || uid || '').trim();
     src = 'import_xls';
   } else if (isFromImport) {
-    importDraftMissing = true;
-    const queryFioLine = [last, first, mid].filter(Boolean).join(' ').trim() || queryFio;
+    importDraftMissing = false;
     importQueryRestored = !!(ls && (queryFioLine || square));
-    console.log('[new_abonent][draft-not-found]', {
-      reason: 'draft_empty_or_not_found',
-      href: String(window.location.href || ''),
+    console.log('[new_abonent][fill-from-import-source]', {
+      source: 'query',
       excelRow: queryExcelRow,
       ls: String(ls || ''),
-      queryRestored: importQueryRestored
+      fam: String(last || ''),
+      fio: String(queryFioLine || '')
     });
-    if (!importQueryRestored && typeof setCreateStatus === 'function') {
-      setCreateStatus('draft_new_abonent_v1 пустой или не найден');
-    }
     if (importQueryRestored) {
       if (typeof setCreateStatus === 'function') setCreateStatus('Данные из Excel восстановлены из параметров импорта.');
       console.log('[new_abonent][fill-from-import]', {
