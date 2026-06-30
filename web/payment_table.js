@@ -227,6 +227,9 @@
       r.runningPenalty = fields.penalty;
       r.runningTotal = fields.total;
     });
+    paymentDiagLog("[PAYMENT-DIAG-MAPPER]", rows, rowsById, {
+      source: "applyRuntimeRowsById"
+    });
   }
 
   let __paymentTableComputedRowsSnapshot = null;
@@ -889,7 +892,13 @@
     ensurePaymentLedgerReadCacheFresh();
     const serviceAbonentId = String(abonentId || getAbonentId() || "");
     if (window.Data && typeof window.Data.readPaymentLedger === "function") {
-      return cloneLedgerRows(window.Data.readPaymentLedger(serviceAbonentId));
+      const rowsFromApi = cloneLedgerRows(window.Data.readPaymentLedger(serviceAbonentId));
+      paymentDiagLog("[PAYMENT-DIAG-API]", rowsFromApi, null, {
+        source: "Data.readPaymentLedger",
+        uid: serviceAbonentId,
+        key: String(key || "")
+      });
+      return rowsFromApi;
     }
 
     const cacheKey = currentOwnerIdForPaymentCache() + '::' + String(key || '');
@@ -898,14 +907,26 @@
 
     const cached = __ledgerReadCache.get(cacheKey);
     if (cached && cached.raw === raw && Array.isArray(cached.rows)) {
-      return cloneLedgerRows(cached.rows);
+      const cachedRows = cloneLedgerRows(cached.rows);
+      paymentDiagLog("[PAYMENT-DIAG-API]", cachedRows, null, {
+        source: "ledger-read-cache",
+        uid: serviceAbonentId,
+        key: String(key || "")
+      });
+      return cachedRows;
     }
 
     try {
       const arr = JSON.parse(raw);
       if (Array.isArray(arr)) {
         __ledgerReadCache.set(cacheKey, { raw: raw, rows: arr });
-        return cloneLedgerRows(arr);
+        const parsedRows = cloneLedgerRows(arr);
+        paymentDiagLog("[PAYMENT-DIAG-API]", parsedRows, null, {
+          source: "storeGetRaw",
+          uid: serviceAbonentId,
+          key: String(key || "")
+        });
+        return parsedRows;
       }
       logLedgerJsonInvalid(key, "parsed value is not an array");
       throw makeLedgerJsonInvalidError(key, "parsed value is not an array");
@@ -4076,6 +4097,55 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
     };
   }
 
+  const __PAYMENT_DIAG_LOGGED = {};
+  function paymentDiagValue(row, key){
+    return row && Object.prototype.hasOwnProperty.call(row, key) ? row[key] : undefined;
+  }
+  function paymentDiagSample(rows, rowsById){
+    const arr = Array.isArray(rows) ? rows : [];
+    const map = rowsById && typeof rowsById === "object" && !Array.isArray(rowsById) ? rowsById : null;
+    let selected = null;
+    for (let i = 0; i < arr.length; i++) {
+      const row = arr[i] || {};
+      const mapped = map ? (map[String(row.id || "")] || null) : null;
+      const merged = Object.assign({}, row, mapped || {});
+      const f = computedFinancialFields(merged);
+      if (Math.abs(Number(f.debt) || 0) > 0.0000001 || Math.abs(Number(f.penalty) || 0) > 0.0000001 || Math.abs(Number(f.total) || 0) > 0.0000001) {
+        selected = { row: row, mapped: mapped, merged: merged, fields: f };
+        break;
+      }
+      if (!selected) selected = { row: row, mapped: mapped, merged: merged, fields: f };
+    }
+    return selected || { row: {}, mapped: null, merged: {}, fields: computedFinancialFields({}) };
+  }
+  function paymentDiagLog(tag, rows, rowsById, extra){
+    try {
+      if (__PAYMENT_DIAG_LOGGED[tag]) return;
+      __PAYMENT_DIAG_LOGGED[tag] = true;
+      const s = paymentDiagSample(rows, rowsById);
+      const row = s.merged || {};
+      console.log(tag, Object.assign({
+        id: String(row.id || ""),
+        uid: String(row.uid || row.account_uid || getAbonentId() || ""),
+        period: String(row.payment_period || row.period || ((row.year || "") + "-" + String(row.month || "").padStart(2, "0"))),
+        rowsCount: Array.isArray(rows) ? rows.length : 0,
+        rowsByIdCount: rowsById && typeof rowsById === "object" && !Array.isArray(rowsById) ? Object.keys(rowsById).length : 0,
+        rowKeys: Object.keys(s.row || {}),
+        mappedKeys: s.mapped ? Object.keys(s.mapped || {}) : [],
+        debt: paymentDiagValue(row, "debt"),
+        principalDebt: paymentDiagValue(row, "principalDebt"),
+        runningDebt: paymentDiagValue(row, "runningDebt"),
+        penaltyDebt: paymentDiagValue(row, "penaltyDebt"),
+        runningPenalty: paymentDiagValue(row, "runningPenalty"),
+        total: paymentDiagValue(row, "total"),
+        runningTotal: paymentDiagValue(row, "runningTotal"),
+        selectedDebt: s.fields.debt,
+        selectedPenalty: s.fields.penalty,
+        selectedTotal: s.fields.total
+      }, extra || {}));
+    } catch(e) {}
+  }
+
   function logRenderFinancialFields(rowObj, fields){
     try {
       window.__PAYMENT_TABLE_RENDER_FINANCIAL_LOG_COUNT = Number(window.__PAYMENT_TABLE_RENDER_FINANCIAL_LOG_COUNT || 0);
@@ -4208,6 +4278,9 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
     tbody.innerHTML = "";
     resetRenderFinancialFieldsLog();
     resetActualRenderFinancialFieldsLog();
+    paymentDiagLog("[PAYMENT-DIAG-RENDER]", view, __runtimeCacheState && __runtimeCacheState.dataById, {
+      source: "renderRowsChunked"
+    });
     const size = Math.max(1, Number(chunkSize) || 50);
     for (let i = 0; i < view.length; i += size) {
       const frag = document.createDocumentFragment();
@@ -4818,6 +4891,13 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
     const debtCellValue = financialFields.debt;
     const penaltyCellValue = financialFields.penalty;
     const totalCellValue = financialFields.total;
+    paymentDiagLog("[PAYMENT-DIAG-CELL]", [r], null, {
+      source: "makeRow",
+      cellDebt: debtCellValue,
+      cellPenalty: penaltyCellValue,
+      cellTotal: totalCellValue,
+      runtimeCacheValid: !!(__runtimeCacheState && __runtimeCacheState.valid)
+    });
     logRenderFinancialFields(r, financialFields);
     logActualRenderFinancialFields(r, financialFields);
 
