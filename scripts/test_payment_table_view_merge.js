@@ -20,6 +20,7 @@ const documentStub = {
 const windowStub = {
   __JKH_PAYMENT_TABLE_TEST_HOOKS: true,
   JKH_UI_STATE: { data: { status: "loading" } },
+  location: { search: "?abonent=test-uid" },
   addEventListener: () => {},
   removeEventListener: () => {},
   setTimeout,
@@ -32,6 +33,7 @@ const context = {
   console,
   setTimeout,
   clearTimeout,
+  URLSearchParams,
   performance: { now: () => 0 },
   localStorage: { getItem: () => null, setItem: () => {}, removeItem: () => {} }
 };
@@ -44,6 +46,9 @@ vm.runInNewContext(source, context, { filename: "payment_table.js" });
 assert(context.window.__paymentTableTestHooks, "payment table test hooks were not installed");
 const { mergeComputedRowsIntoViewRows } = context.window.__paymentTableTestHooks;
 assert.strictEqual(typeof mergeComputedRowsIntoViewRows, "function");
+const { setPaymentTableCalculatedRenderState, applyFreshCalculatedRowsForRender } = context.window.__paymentTableTestHooks;
+assert.strictEqual(typeof setPaymentTableCalculatedRenderState, "function");
+assert.strictEqual(typeof applyFreshCalculatedRowsForRender, "function");
 
 const rawRows = [{
   id: "row-1",
@@ -74,5 +79,51 @@ assert.strictEqual(merged[0].penaltyDebt, 67.89);
 assert.strictEqual(merged[0].runningPenalty, 67.89);
 assert.strictEqual(merged[0].total, 191.34, "computed total must be rendered instead of empty raw value");
 assert.strictEqual(merged[0].runningTotal, 191.34);
+
+const freshRows = [{
+  id: "fresh-row-id",
+  year: 2026,
+  month: 1,
+  type: "accrual",
+  accrued: 100,
+  paid: 0
+}];
+const freshRowsById = {
+  "fresh-row-id": {
+    pay_main: 222,
+    pay_penalty: 33,
+    total: 255
+  }
+};
+assert.strictEqual(setPaymentTableCalculatedRenderState(freshRows, freshRowsById, {
+  uid: "test-uid",
+  ledgerVersion: "old-ledger-version",
+  runtimeSignature: "old-signature",
+  periodActive: false
+}), true);
+
+const mismatchedView = [{
+  id: "current-row-id",
+  year: 2026,
+  month: 1,
+  type: "accrual",
+  accrued: 100,
+  paid: 0,
+  debt: 0,
+  penalty: 0,
+  total: 0
+}];
+const relaxed = applyFreshCalculatedRowsForRender(mismatchedView, {
+  ledgerVersion: "new-ledger-version",
+  runtimeSignature: "new-signature",
+  periodActive: false
+});
+assert.strictEqual(relaxed.applied, true, "fresh calculated rows must render despite id/signature mismatch");
+assert.strictEqual(relaxed.mismatchReason, "relaxed_stable_fields");
+assert.strictEqual(relaxed.fallbackAllowed, false);
+assert.strictEqual(relaxed.matchedCount, 1);
+assert.strictEqual(mismatchedView[0].debt, 222);
+assert.strictEqual(mismatchedView[0].penalty, 33);
+assert.strictEqual(mismatchedView[0].total, 255);
 
 console.log("payment_table view merge test passed");

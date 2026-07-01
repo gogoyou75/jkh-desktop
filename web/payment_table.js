@@ -259,6 +259,7 @@
     const map = normalizeComputedRowsByIdForSnapshot(rows, rowsById);
     if (!Object.keys(map).length) return false;
     __paymentTableCalculatedRenderState = {
+      uid: String(meta && meta.uid || getAbonentId() || ""),
       rows: clonePaymentRowsForSnapshot(rows, map),
       rowsById: map,
       ledgerVersion: String(meta && meta.ledgerVersion || ""),
@@ -299,6 +300,7 @@
     const state = __paymentTableCalculatedRenderState;
     if (!state || typeof state !== "object") return null;
     if (Date.now() - Number(state.createdAt || 0) > 10 * 60 * 1000) return null;
+    if (state.uid && String(state.uid || "") !== String(getAbonentId() || "")) return null;
     const map = state.rowsById && typeof state.rowsById === "object" && !Array.isArray(state.rowsById) ? state.rowsById : {};
     if (!Object.keys(map).length) return null;
     const matchedRows = (Array.isArray(rows) ? rows : []).filter(function(row){
@@ -308,6 +310,165 @@
     const stats = computedRowsStats(matchedRows, map);
     return stats.rowsWithTotals > 0 ? map : null;
   }
+
+  function paymentRowStableKeys(row){
+    const r = row && typeof row === "object" ? row : {};
+    const keys = [];
+    const add = function(prefix, value){
+      const text = String(value == null ? "" : value).trim();
+      if (text) keys.push(prefix + ":" + text);
+    };
+    add("id", r.id);
+    const year = String(r.year || "").trim();
+    const month = String(r.month || "").trim().padStart(2, "0");
+    const type = String(r.type || r.row_type || r.rowType || r.kind || "").trim();
+    if (year && month && type) keys.push("ymt:" + year + "-" + month + ":" + type);
+    add("ym", r.yearMonth || r.year_month || r.ym || (year && month ? year + "-" + month : ""));
+    [
+      "source_payment_id",
+      "sourcePaymentId",
+      "payment_id",
+      "paymentId",
+      "import_payment_id",
+      "original_payment_id",
+      "sourceRowId",
+      "source_row_id"
+    ].forEach(function(field){ add(field, r[field]); });
+    return keys;
+  }
+
+  function buildUniqueCalculatedRowsByKey(rows, rowsById){
+    const map = rowsById && typeof rowsById === "object" && !Array.isArray(rowsById) ? rowsById : {};
+    const byKey = {};
+    const duplicates = {};
+    (Array.isArray(rows) ? rows : []).forEach(function(row){
+      const id = String(row && row.id || "").trim();
+      const item = map[id] || row || {};
+      if (!ledgerRowHasComputedFields(item) && !ledgerRowHasComputedFields(row)) return;
+      paymentRowStableKeys(row).forEach(function(key){
+        if (!key || duplicates[key]) return;
+        if (byKey[key]) {
+          delete byKey[key];
+          duplicates[key] = true;
+          return;
+        }
+        byKey[key] = item;
+      });
+    });
+    return byKey;
+  }
+
+  function applyFreshCalculatedRowsForRender(rows, context){
+    const state = __paymentTableCalculatedRenderState;
+    const arr = Array.isArray(rows) ? rows : [];
+    const originalViewRowsCount = arr.length;
+    const ctx = context && typeof context === "object" ? context : {};
+    const out = {
+      applied: false,
+      dataById: {},
+      sourceRows: null,
+      matchedCount: 0,
+      mismatchReason: "no_calculated_rows",
+      fallbackAllowed: true
+    };
+    let freshRowsCount = 0;
+    let freshRowsByIdCount = 0;
+    try {
+      if (!state || typeof state !== "object") return out;
+      const freshRows = Array.isArray(state.rows) ? state.rows : [];
+      const freshRowsById = state.rowsById && typeof state.rowsById === "object" && !Array.isArray(state.rowsById) ? state.rowsById : {};
+      freshRowsCount = freshRows.length;
+      freshRowsByIdCount = Object.keys(freshRowsById).length;
+      out.fallbackAllowed = !(freshRowsCount || freshRowsByIdCount);
+      if (Date.now() - Number(state.createdAt || 0) > 10 * 60 * 1000) {
+        out.mismatchReason = "calculated_rows_expired";
+        out.fallbackAllowed = true;
+        return out;
+      }
+      if (state.uid && String(state.uid || "") !== String(getAbonentId() || "")) {
+        out.mismatchReason = "uid_mismatch";
+        out.fallbackAllowed = true;
+        return out;
+      }
+      if (!freshRowsCount && !freshRowsByIdCount) return out;
+
+      const strictRowsById = getMatchingCalculatedRenderRows(
+        ctx.ledgerVersion,
+        !!ctx.periodActive,
+        ctx.selectedPeriod || null,
+        ctx.runtimeSignature
+      );
+      if (strictRowsById) {
+        applyRuntimeRowsById(arr, strictRowsById);
+        out.applied = true;
+        out.dataById = strictRowsById;
+        out.matchedCount = Object.keys(strictRowsById).length;
+        out.mismatchReason = "";
+        out.fallbackAllowed = false;
+        return out;
+      }
+
+      const byKey = buildUniqueCalculatedRowsByKey(freshRows, freshRowsById);
+      const matchedById = {};
+      arr.forEach(function(row){
+        const rowId = String(row && row.id || "").trim();
+        const keys = paymentRowStableKeys(row);
+        for (let i = 0; i < keys.length; i += 1) {
+          const item = byKey[keys[i]];
+          if (!item) continue;
+          assignComputedFieldsToPaymentRow(row, item);
+          if (rowId) matchedById[rowId] = normalizeComputedRowsByIdForSnapshot([row], { [rowId]: item })[rowId] || item;
+          out.matchedCount += 1;
+          break;
+        }
+      });
+      if (out.matchedCount > 0) {
+        out.applied = true;
+        out.dataById = matchedById;
+        out.mismatchReason = "relaxed_stable_fields";
+        out.fallbackAllowed = false;
+        return out;
+      }
+
+      const freshStats = computedRowsStats(freshRows, null);
+      if (freshRows.length && freshStats.rowsWithTotals > 0) {
+        const renderRows = mergeComputedRowsIntoViewRows(freshRows, freshRowsById);
+        const renderRowsById = normalizeComputedRowsByIdForSnapshot(renderRows, freshRowsById);
+        arr.splice.apply(arr, [0, arr.length].concat(renderRows));
+        out.applied = true;
+        out.dataById = renderRowsById;
+        out.sourceRows = renderRows;
+        out.matchedCount = renderRows.length;
+        out.mismatchReason = "fresh_calculated_rows_direct";
+        out.fallbackAllowed = false;
+        return out;
+      }
+
+      out.mismatchReason = "calculated_rows_not_renderable";
+      out.fallbackAllowed = false;
+      return out;
+    } finally {
+      try {
+        console.log("[payment-table][calculated-rows-match]", {
+          freshRowsCount: freshRowsCount,
+          freshRowsByIdCount: freshRowsByIdCount,
+          viewRowsCount: originalViewRowsCount,
+          matchedCount: out.matchedCount,
+          mismatchReason: out.mismatchReason,
+          fallbackAllowed: out.fallbackAllowed
+        });
+      } catch(eMatchLog) {}
+    }
+  }
+
+  try {
+    if (window.__JKH_PAYMENT_TABLE_TEST_HOOKS === true) {
+      window.__paymentTableTestHooks = Object.assign(window.__paymentTableTestHooks || {}, {
+        setPaymentTableCalculatedRenderState: setPaymentTableCalculatedRenderState,
+        applyFreshCalculatedRowsForRender: applyFreshCalculatedRowsForRender
+      });
+    }
+  } catch(e) {}
 
   function clonePaymentRowsForSnapshot(rows, rowsById){
     const map = rowsById && typeof rowsById === "object" && !Array.isArray(rowsById) ? rowsById : {};
@@ -4456,10 +4617,15 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
       let renderRowsById = {};
       let normalSnapshotState = { valid: false, reason: "NOT_ATTEMPTED" };
       const expectedRuntimeSignature = runtimeCacheSignature(runtimeLedgerVersion, periodActive, selectedPeriod);
-      const calculatedRowsById = getMatchingCalculatedRenderRows(runtimeLedgerVersion, periodActive, selectedPeriod, expectedRuntimeSignature);
-      if (calculatedRowsById) {
-        applyRuntimeRowsById(view, calculatedRowsById);
-        __runtimeCacheState = { valid: true, reason: "", dataById: calculatedRowsById, periodMatches: true, builtForPeriod: !!periodActive, temporary: false };
+      const calculatedRowsMatch = applyFreshCalculatedRowsForRender(view, {
+        ledgerVersion: runtimeLedgerVersion,
+        runtimeSignature: expectedRuntimeSignature,
+        periodActive: periodActive,
+        selectedPeriod: selectedPeriod
+      });
+      if (calculatedRowsMatch && calculatedRowsMatch.applied === true) {
+        const calculatedRowsById = calculatedRowsMatch.dataById || {};
+        __runtimeCacheState = { valid: true, reason: "", dataById: calculatedRowsById, periodMatches: true, builtForPeriod: !!periodActive, temporary: false, calculatedRows: true };
         runtimeCacheUsed = true;
         runtimeCachePeriodMatches = true;
         baseRowsSource = "calculated_rows";
