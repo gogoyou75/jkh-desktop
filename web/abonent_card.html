@@ -1528,7 +1528,8 @@ function __safeLoadPaymentTableOnce(reason, options){
         __paymentTableLoadScheduled = false;
         __paymentTableLoading = true;
         try {
-            window.__loadPaymentTable({ mode: opts.mode || 'readonly_no_recalc', reason: reason || 'abonent-card', force: !!opts.force });
+            const loadMode = opts.mode || ((reason === "calc-period-bootstrap-url" || reason === "calc-period-bootstrap-session") && window.JKH_CARD_PERIOD_MODE_ACTIVE === true ? "temporary_court_period" : "readonly_no_recalc");
+            window.__loadPaymentTable({ mode: loadMode, reason: reason || 'abonent-card', force: !!opts.force });
             __hideExcludesFatalBox();
         } catch(e) {
             if (__isExcludesFatalError(e)) __showExcludesFatalBox(e);
@@ -3296,7 +3297,7 @@ function loadCalcPeriodUI(){
                 try { console.log("[card-return][from-spravka]", { from: urlFrom, to: urlTo, requestedId: meta.requestedId, uid: meta.resolvedUid, ownerId: meta.ownerId, writes: false }); } catch(eReturnLog) {}
                 try { console.log("[period][restore-source]", { source: "url", key: "location.search", raw: window.location.search || "", from: urlFrom, to: urlTo, requestedId: meta.requestedId, uid: meta.resolvedUid, ownerId: meta.ownerId }); } catch (eRestoreUrlLog) {}
                 try { console.log("[period-recalc][return-state-restored]", { source: "url", periodFrom: urlFrom, periodTo: urlTo, mode: "temporary_court_period" }); } catch(eReturnStateUrl) {}
-                __safeLoadPaymentTableOnce("calc-period-bootstrap-url", { force: true, mode: "temporary_court_period" });
+                __safeLoadPaymentTableOnce("calc-period-bootstrap-url", { force: true });
                 try {
                     console.log("[card-period][bootstrap-inputs-from-url]", {
                         requestedId: meta.requestedId,
@@ -3329,7 +3330,7 @@ function loadCalcPeriodUI(){
                 toEl.value = sessionPeriod.period_to || "";
                 window.JKH_CARD_PERIOD_MODE_ACTIVE = true;
                 try { console.log("[period-recalc][return-state-restored]", { source: "session", periodFrom: fromEl.value || "", periodTo: toEl.value || "", mode: "temporary_court_period" }); } catch(eSessionRestoreLog) {}
-                __safeLoadPaymentTableOnce("calc-period-bootstrap-session", { force: true, mode: "temporary_court_period" });
+                __safeLoadPaymentTableOnce("calc-period-bootstrap-session", { force: true });
                 return;
             }
             fromEl.value = "";
@@ -4658,7 +4659,7 @@ function bindCalcButtons(){
                 heartbeatFullRecalc("fullRecalcForCurrentAbonent");
                 try { console.log("[full-recalc][step]", { runId: recalcRunId, step: "fullRecalcForCurrentAbonent" }); } catch(eStepLog) {}
                 hydrateCardRuntimeDbFromStore();
-                const recalcResult = await window.fullRecalcForCurrentAbonent({ applyAutoAccrual: true, recalcMode: "FULL_SUMMARY_REBUILD", summaryScope: "full", recalcRunId: recalcRunId });
+                const recalcResult = await window.fullRecalcForCurrentAbonent({ applyAutoAccrual: true, period: { from: from, to: to }, recalcMode: "FULL_SUMMARY_REBUILD", summaryScope: "full", recalcRunId: recalcRunId });
                 fullRecalcState.resultReceived = true;
                 fullRecalcState.resultOk = !!(recalcResult && recalcResult.ok === true);
                 if (fullRecalcState.resultOk) {
@@ -4759,6 +4760,7 @@ function bindCalcButtons(){
                 rememberExplicitFullRecalcFinal("fresh", "OK", recalcResult);
                 heartbeatFullRecalc("final-render");
                 heartbeatPostRecalcStage("final-render-start");
+                renderAbonentSummaryStatus(summaryStatus, __normalizeSummaryStatus(summaryStatus) === "fresh" ? "OK" : summaryReason);
                 renderExplicitFullRecalcFinal("recalc-success");
                 heartbeatPostRecalcStage("final-render-done");
                 if (!watchdogFired) unlockFullRecalcUi("recalc-success");
