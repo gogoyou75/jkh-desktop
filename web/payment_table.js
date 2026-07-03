@@ -5540,14 +5540,6 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
       const dbg = window.JKHAutoAccrual.debugMonth(abonentId, firstMonth.year, firstMonth.month);
       const tariffs = Array.isArray(dbg && dbg.tariffs) ? dbg.tariffs : [];
       if (!tariffs.length) {
-        const ownerId = (window.JKHStore && typeof JKHStore.getOwnerId === "function") ? String(JKHStore.getOwnerId() || "") : "";
-        const tariffsWait = null;
-        console.warn("[AUTOACCRUAL_BEFORE_FATAL]", {
-          ownerId,
-          tariffsWait,
-          tariffsLength: tariffs.length,
-          tariffs
-        });
         return true;
       }
       return false;
@@ -5638,16 +5630,6 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
       };
     }
     if (detectManualRecalcTariffsMissing(abonentId, opts.period)) {
-      const ownerId = (window.JKHStore && typeof JKHStore.getOwnerId === "function") ? String(JKHStore.getOwnerId() || "") : "";
-      const tariffsWait = null;
-      const tariffs = null;
-      console.warn("[AUTOACCRUAL_FATAL]", {
-        ownerId,
-        tariffsWait,
-        normalizedLength: tariffs ? tariffs.length : null,
-        tariffs,
-        stack: new Error().stack
-      });
       return { ok:false, changed:false, reason:"TARIFFS_NOT_FOUND", responsibility:responsibility };
     }
 
@@ -5935,17 +5917,14 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
       console.timeEnd("[recalc] save runtime cache");
       logFullRecalcStepDone(runId, "save-runtime-cache-before-summary", { abonentId: id, rowsByIdCount: Object.keys(rowsById).length });
       await nextUiTick();
-      throwIfFullRecalcAborted("table-render");
-      __paymentTableRenderedSignature = "";
-      __paymentTableMode = "readonly_no_recalc";
-      logFullRecalcStep(runId, "table-render", { abonentId: id, reason: "full_recalc_completed" });
-      console.time("[recalc] loadPaymentTable");
-      console.time("[recalc-step] loadPaymentTable before summary");
-      await loadPaymentTable("full_recalc_completed");
-      console.timeEnd("[recalc-step] loadPaymentTable before summary");
-      console.timeEnd("[recalc] loadPaymentTable");
-      logFullRecalcStepDone(runId, "table-render", { abonentId: id });
-      await nextUiTick();
+      try {
+        console.log("[full-recalc][stage-skip]", {
+          runId: runId,
+          abonentId: id,
+          stage: "table-render-before-summary",
+          reason: "summary-save-first"
+        });
+      } catch(eSkipPreSummaryRenderLog) {}
       throwIfFullRecalcAborted("summary-save");
       if (!window.Data || typeof Data.recalculateAbonentCard !== "function") {
         endRecalcTotalTimer();
@@ -5972,39 +5951,24 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
       throwIfFullRecalcAborted("build-fresh-runtime-rows-after-summary");
       logFullRecalcStep(runId, "build-fresh-runtime-rows-after-summary", { abonentId: id });
       console.time("[recalc-step] build fresh runtime rows after summary");
-      const freshArr = getPayments();
       const freshPeriodActive = periodActive;
       const freshSelectedPeriod = selectedPeriod;
-      let freshRuntimeRows = [];
-      let freshBaseRows = [];
-      let freshLedgerVersion = "";
-      let freshSig = "";
-      let freshRowsById = {};
+      let freshRuntimeRows = runtimeRows;
+      let freshBaseRows = baseRows;
+      let freshLedgerVersion = ledgerVersion;
+      let freshSig = sig;
+      let freshRowsById = rowsById;
       await measureRecalcStage("buildRuntimeRowsAfterSummaryMs", async function(){
-        incRecalcCallCount("buildRuntimeRows", 1);
         emitFullRecalcHeartbeat(runId, "build-fresh-runtime-rows-after-summary");
-        freshRuntimeRows = freshPeriodActive && freshSelectedPeriod ? applyResponsibilityRangeToView(applyCalcFilter(freshArr, true, freshSelectedPeriod)).slice() : freshArr;
-        emitFullRecalcHeartbeat(runId, "build-fresh-runtime-rows-after-summary");
-        freshBaseRows = runningTotalsBaseRows(freshRuntimeRows);
-        emitFullRecalcHeartbeat(runId, "build-fresh-runtime-rows-after-summary");
-        freshLedgerVersion = (window.Data && Data.computeLedgerRuntimeVersion) ? String(Data.computeLedgerRuntimeVersion(id) || "") : "";
-        freshSig = ledgerSignatureForRows(freshArr) + "::" + runtimeCacheSignature(freshLedgerVersion, freshPeriodActive, freshSelectedPeriod);
-        if (!freshPeriodActive && !periodActive && freshSig === sig && Array.isArray(freshRuntimeRows) && Array.isArray(runtimeRows) && freshRuntimeRows.length === runtimeRows.length) {
-          freshRowsById = rowsById;
-        } else {
-          const freshBuild = await buildRowsByIdFastVerified(freshRuntimeRows, freshSelectedPeriod, id, {
+        try {
+          console.log("[full-recalc][stage-reuse]", {
             runId: runId,
+            abonentId: id,
             stage: "build-fresh-runtime-rows-after-summary",
-            recalcMode: recalcMode,
-            periodActive: freshPeriodActive,
-            baseRows: freshBaseRows,
-            signature: freshSig,
-            caller: "fullRecalc.buildRuntimeRowsAfterSummary",
-            slowCaller: "fullRecalc.buildRuntimeRowsAfterSummary",
-            suppressSummaryLog: true
+            reason: "summary-save-does-not-change-ledger",
+            rowsByIdCount: Object.keys(freshRowsById || {}).length
           });
-          freshRowsById = freshBuild.rowsById || {};
-        }
+        } catch(eReuseRowsLog) {}
       });
       console.timeEnd("[recalc-step] build fresh runtime rows after summary");
       throwIfFullRecalcAborted("save-runtime-cache-after-summary");
