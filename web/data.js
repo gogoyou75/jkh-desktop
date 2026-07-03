@@ -3202,6 +3202,20 @@
     });
   }
 
+  function traceDataTariffsNotFound(functionName, reason, summary_reason, input, result) {
+    var reasonText = String(reason || "");
+    var summaryReasonText = String(summary_reason || "");
+    if (reasonText !== "TARIFFS_NOT_FOUND" && summaryReasonText !== "TARIFFS_NOT_FOUND") return;
+    console.warn("[DATA_TARIFFS_NOT_FOUND_TRACE]", {
+      functionName: functionName,
+      reason: reason,
+      summary_reason: summary_reason,
+      input: input,
+      result: result,
+      stack: new Error().stack
+    });
+  }
+
   async function saveAbonentSummaryAfterRecalc(abonentOrId, summary) {
     var saveLogCtx = { uid: "", status: "", reason: "", totalsKeys: [] };
     try {
@@ -3216,6 +3230,12 @@
       var summaryTotals = summaryPayload && summaryPayload.totals && typeof summaryPayload.totals === "object" ? summaryPayload.totals : {};
       var summaryTotalsKeys = Object.keys(summaryTotals);
       saveLogCtx = { uid: uid, status: String(summaryStatus || ""), reason: String(summaryReason || ""), totalsKeys: summaryTotalsKeys };
+      traceDataTariffsNotFound("saveAbonentSummaryAfterRecalc", summaryReason, summaryReason, {
+        abonentOrId: abonentOrId,
+        summaryStatus: summaryStatus,
+        summaryScope: summaryScope,
+        uid: uid
+      }, summaryPayload);
 
       if (!isValidUid(uid)) {
         try { console.warn("[summary][save-failed]", { uid: uid, status: summaryStatus, reason: "INVALID_UID", totalsKeys: summaryTotalsKeys, abonentId: abonentId }); } catch (eWarn) {}
@@ -4628,6 +4648,12 @@
     var name = String(abonent && (abonent.name || abonent.first_name || abonent.firstName) || fioParts[1] || "").trim();
     var otch = String(abonent && (abonent.otch || abonent.middle_name || abonent.middleName) || fioParts.slice(2).join(" ") || "").trim();
     var regnum = resolveAbonentRegnumForSummary(abonentId, abonent);
+    traceDataTariffsNotFound("buildAbonentSummaryErrorAfterExplicitRecalc", reason, reason, {
+      abonentOrId: abonentOrId,
+      period: period,
+      abonentId: abonentId,
+      uid: accountUid
+    }, null);
     return {
       status: "error",
       reason: String(reason || "CALC_FAILED"),
@@ -5055,6 +5081,11 @@
       }
     } catch (e) {
       var reason = _summaryCalcErrorCode(e);
+      traceDataTariffsNotFound("recalcAbonentSummaryExplicit.catch", reason, reason, {
+        abonentOrId: abonentOrId,
+        period: period,
+        mode: mode
+      }, e);
       _logFullRecalcStepDone(runId, "calc-totals", { status: "error", reason: reason });
       summary = buildAbonentSummaryErrorAfterExplicitRecalc(abonentOrId, period, reason);
       if (periodActive) {
@@ -5077,6 +5108,12 @@
         summary_reason: summary.summary_reason || summary.reason || "OK",
         summary_scope: periodActive ? "period" : "full"
       };
+      traceDataTariffsNotFound("recalcAbonentSummaryExplicit.skipSaveResult", saveResult.reason, saveResult.summary_reason, {
+        abonentOrId: abonentOrId,
+        period: period,
+        mode: mode,
+        periodActive: periodActive
+      }, saveResult);
       try {
         console.log(periodActive ? "[summary][skip-save-period-summary]" : "[summary][skip-save-summary]", {
           uid: String(summary.account_uid || summary.uid || ""),
@@ -5099,6 +5136,12 @@
       try {
         _logFullRecalcStep(runId, "summary-save", { uid: String(summary.account_uid || summary.uid || "") });
         saveResult = await saveAbonentSummaryAfterRecalc(abonentOrId, summary);
+        traceDataTariffsNotFound("recalcAbonentSummaryExplicit.saveResult", saveResult && saveResult.reason, saveResult && saveResult.summary_reason, {
+          abonentOrId: abonentOrId,
+          period: period,
+          mode: mode,
+          summaryReason: summary && (summary.summary_reason || summary.reason)
+        }, saveResult);
         _logFullRecalcStepDone(runId, "summary-save", { ok: !!(saveResult && saveResult.ok === true), status: saveResult && (saveResult.summary_status || saveResult.status) || "", reason: saveResult && (saveResult.summary_reason || saveResult.reason) || "" });
         await _dataUiYield();
       } finally {
@@ -5107,6 +5150,12 @@
     }
     var status = saveResult && (saveResult.summary_status || saveResult.status) || summary.summary_status || summary.status || "error";
     var reasonOut = saveResult && (saveResult.summary_reason || saveResult.reason) || summary.summary_reason || summary.reason || "";
+    traceDataTariffsNotFound("recalcAbonentSummaryExplicit.return", reasonOut, reasonOut, {
+      abonentOrId: abonentOrId,
+      status: status,
+      period: period,
+      mode: mode
+    }, { summary: summary, saveResult: saveResult });
     return {
       ok: !!(saveResult && saveResult.ok === true && status === "fresh"),
       uid: String(summary.account_uid || summary.uid || ""),
@@ -5324,6 +5373,12 @@
         if (raw !== null && raw !== undefined) _parseLedgerRows(raw, ledgerKey);
       } catch (e) {
       var ledgerReason = _summaryCalcErrorCode(e);
+      traceDataTariffsNotFound("recalculateAbonentCard.ledgerCatch", ledgerReason, ledgerReason, {
+        abonentOrId: abonentOrId,
+        abonentId: abonentId,
+        uid: uid,
+        ledgerKey: ledgerKey
+      }, e);
       var errorScopeOpt = String(opts.summaryScope || opts.summary_scope || "").toLowerCase();
       var periodErrorScope = errorScopeOpt === "period" || errorScopeOpt === "report";
       var skipErrorSummarySave = opts.saveSummary === false;
@@ -5353,6 +5408,12 @@
       var errorSave = (periodErrorScope || skipErrorSummarySave)
         ? { ok: true, skipped: true, reason: periodErrorScope ? "PERIOD_SUMMARY_NOT_SAVED" : "CLIENT_BATCH_SUMMARY_NOT_SAVED", summary_status: errorSummary.summary_status || errorSummary.status || "error", summary_reason: errorSummary.summary_reason || errorSummary.reason || ledgerReason, summary_scope: periodErrorScope ? "period" : "full" }
         : await saveAbonentSummaryAfterRecalc(abonentOrId, errorSummary);
+      traceDataTariffsNotFound("recalculateAbonentCard.ledgerErrorSave", errorSave && errorSave.reason, errorSave && errorSave.summary_reason, {
+        abonentOrId: abonentOrId,
+        abonentId: abonentId,
+        uid: uid,
+        ledgerReason: ledgerReason
+      }, { errorSummary: errorSummary, errorSave: errorSave });
       endCardRecalcFullTimer();
       return {
         ok: false,
@@ -5367,6 +5428,11 @@
       }
 
       var result = await recalcAbonentSummaryExplicit(abonentOrId, opts);
+      traceDataTariffsNotFound("recalculateAbonentCard.recalcResult", result && result.reason, result && result.summary_reason, {
+        abonentOrId: abonentOrId,
+        abonentId: abonentId,
+        uid: uid
+      }, result);
       endCardRecalcFullTimer();
       return {
         ok: !!(result && result.ok === true),
@@ -5463,6 +5529,12 @@
     var summary = summaryResult && summaryResult.summary && typeof summaryResult.summary === "object" ? summaryResult.summary : null;
     var summaryStatus = String(summaryResult && (summaryResult.summary_status || summaryResult.status) || "");
     var summaryReason = String(summaryResult && (summaryResult.summary_reason || summaryResult.reason) || "");
+    traceDataTariffsNotFound("recalculateAbonentCardWithRows.summaryResult", summaryResult && summaryResult.reason, summaryReason, {
+      abonentOrId: abonentOrId,
+      abonentId: abonentId,
+      uid: uid,
+      summaryStatus: summaryStatus
+    }, summaryResult);
     if (!summaryResult || summaryResult.ok !== true || summaryStatus !== "fresh" || !summary) {
       return attachProfile(Object.assign({}, summaryResult || {}, {
         ok: false,
@@ -5536,6 +5608,12 @@
           responsibility: responsibility
         };
       });
+      traceDataTariffsNotFound("recalculateAbonentCardWithRows.fastPathReturn", fastPayload.reason, fastPayload.summary_reason, {
+        abonentOrId: abonentOrId,
+        abonentId: abonentId,
+        uid: uid,
+        cacheFastPath: cacheFastPath
+      }, fastPayload);
       return attachProfile(fastPayload, {
         ledgerRowsCount: ledgerRows.length,
         rowsByIdCount: fastPayload.rowsByIdCount,
@@ -5559,6 +5637,12 @@
     });
     if (!rowsResult || rowsResult.ok !== true) {
       var rowsReason = String(rowsResult && rowsResult.reason || "ROWS_BY_ID_BUILD_FAILED");
+      traceDataTariffsNotFound("recalculateAbonentCardWithRows.rowsResultFailed", rowsReason, summaryReason || rowsReason, {
+        abonentOrId: abonentOrId,
+        abonentId: abonentId,
+        uid: uid,
+        rowsReason: rowsReason
+      }, rowsResult);
       return attachProfile({
         ok: false,
         uid: uid,
@@ -5724,6 +5808,11 @@
         responsibility: responsibility
       };
     });
+    traceDataTariffsNotFound("recalculateAbonentCardWithRows.return", payload.reason, payload.summary_reason, {
+      abonentOrId: abonentOrId,
+      abonentId: abonentId,
+      uid: uid
+    }, payload);
     return attachProfile(payload, {
       ledgerRowsCount: ledgerRows.length,
       rowsByIdCount: payload.rowsByIdCount,
