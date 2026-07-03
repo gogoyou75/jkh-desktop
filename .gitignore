@@ -21,3 +21,4 @@ Thumbs.db
 .env
 *.sql
 /root/jkh_backups/
+graphify-out/
