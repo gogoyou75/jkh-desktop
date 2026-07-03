@@ -5550,7 +5550,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
         });
         return true;
       }
-      return Number(dbg && dbg.totalAccrued) <= 0 && Number(dbg && dbg.perM2Part) <= 0 && Number(dbg && dbg.fixedPart) <= 0;
+      return false;
     } catch (e) {
       return false;
     }
