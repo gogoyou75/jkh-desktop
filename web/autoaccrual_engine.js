@@ -779,8 +779,16 @@
     const sq = getSquareForAbonent(ls);
     const regnum = getPremiseRegnumForAbonent(ls);
     const ownerId = getOwnerId();
+    let tariffs = null;
     const tariffsWait = await waitForOwnerTariffs(ownerId);
     if (!tariffsWait || tariffsWait.found !== true){
+      console.warn('[AUTOACCRUAL_FATAL]', {
+        ownerId,
+        tariffsWait,
+        normalizedLength: tariffs ? tariffs.length : null,
+        tariffs,
+        stack: new Error().stack
+      });
       return {
         ok:false,
         changed:false,
@@ -799,7 +807,7 @@
         }
       };
     }
-    const tariffs = normalizeOwnerTariffs(tariffsWait.list);
+    tariffs = normalizeOwnerTariffs(tariffsWait.list);
     try {
       console.log('[autoaccrual][reuse-loaded-tariffs]', {
         ownerId: ownerId,
@@ -808,6 +816,12 @@
     } catch(eReuseLog) {}
     const hasPerM2Tariffs = tariffs.some(t => t.type === 'per_m2');
     if (!tariffs.length){
+      console.warn('[AUTOACCRUAL_BEFORE_FATAL]', {
+        ownerId,
+        tariffsWait,
+        tariffsLength: tariffs.length,
+        tariffs
+      });
       const details = {
         abonentId: String(ls || ''),
         ownerId: ownerId,
@@ -824,6 +838,13 @@
         message: 'Откройте страницу Тарифы и нажмите сохранить всё для переноса тарифов в canonical storage.'
       };
       try { console.error('[autoaccrual][blocked-invalid-input]', details); } catch(e) {}
+      console.warn('[AUTOACCRUAL_FATAL]', {
+        ownerId,
+        tariffsWait,
+        normalizedLength: tariffs ? tariffs.length : null,
+        tariffs,
+        stack: new Error().stack
+      });
       return { changed:false, reason:'TARIFFS_NOT_FOUND', fatal:true, details:details };
     }
     if (hasPerM2Tariffs && !(sq > 0)){

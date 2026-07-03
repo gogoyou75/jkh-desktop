@@ -5539,7 +5539,17 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
       if (!firstMonth) return false;
       const dbg = window.JKHAutoAccrual.debugMonth(abonentId, firstMonth.year, firstMonth.month);
       const tariffs = Array.isArray(dbg && dbg.tariffs) ? dbg.tariffs : [];
-      if (!tariffs.length) return true;
+      if (!tariffs.length) {
+        const ownerId = (window.JKHStore && typeof JKHStore.getOwnerId === "function") ? String(JKHStore.getOwnerId() || "") : "";
+        const tariffsWait = null;
+        console.warn("[AUTOACCRUAL_BEFORE_FATAL]", {
+          ownerId,
+          tariffsWait,
+          tariffsLength: tariffs.length,
+          tariffs
+        });
+        return true;
+      }
       return Number(dbg && dbg.totalAccrued) <= 0 && Number(dbg && dbg.perM2Part) <= 0 && Number(dbg && dbg.fixedPart) <= 0;
     } catch (e) {
       return false;
@@ -5628,6 +5638,16 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
       };
     }
     if (detectManualRecalcTariffsMissing(abonentId, opts.period)) {
+      const ownerId = (window.JKHStore && typeof JKHStore.getOwnerId === "function") ? String(JKHStore.getOwnerId() || "") : "";
+      const tariffsWait = null;
+      const tariffs = null;
+      console.warn("[AUTOACCRUAL_FATAL]", {
+        ownerId,
+        tariffsWait,
+        normalizedLength: tariffs ? tariffs.length : null,
+        tariffs,
+        stack: new Error().stack
+      });
       return { ok:false, changed:false, reason:"TARIFFS_NOT_FOUND", responsibility:responsibility };
     }
 
