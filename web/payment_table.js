@@ -6003,7 +6003,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
         __paymentTableMode = "readonly_no_recalc";
         logFullRecalcStep(runId, "table-render-after-summary", { abonentId: id, reason: "fresh_runtime_cache_after_summary" });
         console.time("[recalc-step] loadPaymentTable after summary");
-        await loadPaymentTable("full_recalc_after_summary");
+        await loadPaymentTable("full_recalc_completed");
         console.timeEnd("[recalc-step] loadPaymentTable after summary");
         logFullRecalcStepDone(runId, "table-render-after-summary", { abonentId: id, rowsByIdCount: Object.keys(freshRowsById).length });
         await nextUiTick();
