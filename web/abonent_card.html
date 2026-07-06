@@ -1535,7 +1535,12 @@ function __safeLoadPaymentTableOnce(reason, options){
             if (__isExcludesFatalError(e)) __showExcludesFatalBox(e);
             try { console.error('[abonent_card] __loadPaymentTable failed:', reason, e); } catch(_){}
         } finally {
-            setTimeout(() => { __paymentTableLoading = false; }, 300);
+            setTimeout(() => {
+                __paymentTableLoading = false;
+                try { __maybeStartCardAutoRecalc("payment-table-loaded:" + String(reason || "")); } catch(eAutoRecalc) {
+                    try { console.warn("[abonent_card][auto-recalc]", { event: "error", stage: "payment-table-loaded", error: String(eAutoRecalc && eAutoRecalc.message || eAutoRecalc) }); } catch(_) {}
+                }
+            }, 300);
         }
     }, 0);
 }
@@ -1730,7 +1735,7 @@ async function __initAbonentCardSafe(){
         try { loadAbonentSummaryStatus(); } catch(e) { try { console.warn('[summary][status-load-failed]', e); } catch(_){} }
 
         setTimeout(() => {
-            // Opening the card is read-only for summary/accrual state: no auto-recalc here.
+            // First table load remains readonly; auto-recalc is a separate guarded lifecycle step after it.
             const fromSpravka = __isCardReturnFromSpravkaUrl();
             if (fromSpravka) {
                 try { console.log("[card-init][ready-after-return]", { reason: "server-first-ready", force: true }); } catch(eReturnReady) {}
@@ -3613,6 +3618,16 @@ let __lastRuntimeCacheValidation = { valid: false, reason: "RUNTIME_CACHE_NOT_VA
 let __cardSnapshotFreshValidated = false;
 let __lastCardSnapshotValidation = { valid: false, reason: "CARD_SNAPSHOT_NOT_VALIDATED" };
 let __fullRecalcRunSeq = 0;
+let __JKH_CARD_AUTO_RECALC = {
+    uid: null,
+    pending: false,
+    inFlight: false,
+    done: false,
+    lastReason: "",
+    requestedStatus: "",
+    startedAt: 0
+};
+window.__JKH_CARD_AUTO_RECALC = __JKH_CARD_AUTO_RECALC;
 
 function __nextFullRecalcRunId(){
     __fullRecalcRunSeq += 1;
@@ -3626,6 +3641,172 @@ function __fullRecalcUiYield(){
 function __currentFullRecalcRun(){
     const state = window.__JKH_FULL_RECALC_STATE;
     return state && state.running === true ? state : null;
+}
+
+function __resetCardAutoRecalcForUid(uid){
+    const normalizedUid = String(uid || "").trim();
+    if (__JKH_CARD_AUTO_RECALC.uid === normalizedUid) return;
+    __JKH_CARD_AUTO_RECALC.uid = normalizedUid;
+    __JKH_CARD_AUTO_RECALC.pending = false;
+    __JKH_CARD_AUTO_RECALC.inFlight = false;
+    __JKH_CARD_AUTO_RECALC.done = false;
+    __JKH_CARD_AUTO_RECALC.lastReason = "";
+    __JKH_CARD_AUTO_RECALC.requestedStatus = "";
+    __JKH_CARD_AUTO_RECALC.startedAt = 0;
+}
+
+function __skipCardAutoRecalcFreshSnapshot(uid){
+    __resetCardAutoRecalcForUid(uid);
+    __JKH_CARD_AUTO_RECALC.pending = false;
+    __JKH_CARD_AUTO_RECALC.inFlight = false;
+    __JKH_CARD_AUTO_RECALC.done = true;
+    __JKH_CARD_AUTO_RECALC.lastReason = "FRESH_SNAPSHOT";
+    try {
+        console.log("[abonent_card][auto-recalc]", {
+            event: "skipped fresh snapshot",
+            uid: String(uid || "")
+        });
+    } catch(eLog) {}
+}
+
+function __requestCardAutoRecalc(uid, reason, status){
+    const normalizedUid = String(uid || "").trim();
+    if (!normalizedUid) return;
+    __resetCardAutoRecalcForUid(normalizedUid);
+    if (__JKH_CARD_AUTO_RECALC.done === true) {
+        try {
+            console.log("[abonent_card][auto-recalc]", {
+                event: "skipped already done",
+                uid: normalizedUid,
+                reason: String(reason || "")
+            });
+        } catch(eDoneLog) {}
+        return;
+    }
+    if (__JKH_CARD_AUTO_RECALC.inFlight === true) {
+        try {
+            console.log("[abonent_card][auto-recalc]", {
+                event: "already in flight",
+                uid: normalizedUid,
+                reason: String(reason || "")
+            });
+        } catch(eFlightLog) {}
+        return;
+    }
+    __JKH_CARD_AUTO_RECALC.pending = true;
+    __JKH_CARD_AUTO_RECALC.lastReason = String(reason || "CARD_SNAPSHOT_NOT_FRESH");
+    __JKH_CARD_AUTO_RECALC.requestedStatus = __normalizeSummaryStatus(status || "dirty");
+    try {
+        console.log("[abonent_card][auto-recalc]", {
+            event: "requested",
+            uid: normalizedUid,
+            reason: __JKH_CARD_AUTO_RECALC.lastReason,
+            status: __JKH_CARD_AUTO_RECALC.requestedStatus
+        });
+    } catch(eRequestLog) {}
+    setTimeout(function(){ __maybeStartCardAutoRecalc("request"); }, 0);
+}
+
+function __isCurrentCardSnapshotFreshForAutoRecalc(uid){
+    try {
+        if (!window.Data || typeof Data.readCardSnapshot !== "function") return false;
+        return __isFreshCardSnapshotUsable(uid, Data.readCardSnapshot(uid));
+    } catch(e) {
+        return false;
+    }
+}
+
+function __monitorCardAutoRecalc(uid, attempt){
+    const nextAttempt = Math.max(0, Number(attempt) || 0) + 1;
+    setTimeout(function(){
+        const activeRun = __currentFullRecalcRun();
+        if (activeRun) {
+            __monitorCardAutoRecalc(uid, nextAttempt);
+            return;
+        }
+        const fresh = __isCurrentCardSnapshotFreshForAutoRecalc(uid);
+        if (!fresh && nextAttempt < 40) {
+            __monitorCardAutoRecalc(uid, nextAttempt);
+            return;
+        }
+        __JKH_CARD_AUTO_RECALC.inFlight = false;
+        __JKH_CARD_AUTO_RECALC.done = true;
+        try {
+            console.log("[abonent_card][auto-recalc]", {
+                event: fresh ? "done" : "error",
+                uid: String(uid || ""),
+                reason: fresh ? "OK" : String(__JKH_CARD_AUTO_RECALC.lastReason || "AUTO_RECALC_FINISHED_WITHOUT_FRESH_SNAPSHOT")
+            });
+        } catch(eDoneLog) {}
+        try { loadAbonentSummaryStatus(); } catch(eStatusReload) {
+            renderAbonentSummaryStatus("error", String(eStatusReload && eStatusReload.message || eStatusReload || "AUTO_RECALC_STATUS_RELOAD_FAILED"));
+        }
+    }, 500);
+}
+
+function __maybeStartCardAutoRecalc(source){
+    const state = __JKH_CARD_AUTO_RECALC;
+    if (!state || state.pending !== true) return;
+    const uid = String(state.uid || "").trim();
+    if (!uid) return;
+    if (state.done === true) return;
+    if (state.inFlight === true) {
+        try { console.log("[abonent_card][auto-recalc]", { event: "already in flight", uid: uid, source: String(source || "") }); } catch(eFlightLog) {}
+        return;
+    }
+    if (__isCurrentCardSnapshotFreshForAutoRecalc(uid)) {
+        __skipCardAutoRecalcFreshSnapshot(uid);
+        return;
+    }
+    const activeRun = __currentFullRecalcRun();
+    if (activeRun) {
+        state.pending = false;
+        state.done = true;
+        try {
+            console.log("[abonent_card][auto-recalc]", {
+                event: "already in flight",
+                uid: uid,
+                source: String(source || ""),
+                runId: String(activeRun.runId || "")
+            });
+        } catch(eActiveLog) {}
+        return;
+    }
+    if (!__isHydratedDatabaseReady() || !__abonentCardServerRepairDone) {
+        setTimeout(function(){ __maybeStartCardAutoRecalc("wait-data-ready"); }, 250);
+        return;
+    }
+    if (__paymentTableLoading || __paymentTableLoadScheduled) {
+        setTimeout(function(){ __maybeStartCardAutoRecalc("wait-payment-table"); }, 250);
+        return;
+    }
+    if (typeof window.fullRecalcForCurrentAbonent !== "function") {
+        setTimeout(function(){ __maybeStartCardAutoRecalc("wait-full-recalc-api"); }, 250);
+        return;
+    }
+    const runBtn = document.getElementById("calcRunBtn");
+    if (!runBtn) {
+        setTimeout(function(){ __maybeStartCardAutoRecalc("wait-run-button"); }, 250);
+        return;
+    }
+    if (runBtn.disabled) {
+        try { console.log("[abonent_card][auto-recalc]", { event: "already in flight", uid: uid, source: "button-disabled" }); } catch(eDisabledLog) {}
+        return;
+    }
+    state.pending = false;
+    state.inFlight = true;
+    state.startedAt = Date.now();
+    renderAbonentSummaryStatus(state.requestedStatus || "dirty", "Требуется пересчёт. Запускаю пересчёт карточки...");
+    try {
+        console.log("[abonent_card][auto-recalc]", {
+            event: "start",
+            uid: uid,
+            reason: String(state.lastReason || ""),
+            source: String(source || "")
+        });
+    } catch(eStartLog) {}
+    runBtn.click();
+    __monitorCardAutoRecalc(uid);
 }
 
 function __logFullRecalcEventIgnored(eventName, detail){
@@ -3865,6 +4046,10 @@ window.addEventListener("jkh:card-snapshot-invalid", function(event){
     __lastCardSnapshotValidation = { valid: false, reason: reason, detail: detail };
     try { console.warn("[summary][card-snapshot-invalid]", detail); } catch(eLog) {}
     __debugCurrentCardSnapshotLifecycle(reason);
+    try {
+        const uid = getAbonentTechnicalIdFromURL();
+        if (uid) __requestCardAutoRecalc(uid, reason, "dirty");
+    } catch(eAutoRequest) {}
     if (__lastRenderedSummaryStatusLocal === "fresh" || __normalizeSummaryStatus(window.__lastCardSummaryForDebug && window.__lastCardSummaryForDebug.summary_status) === "fresh") {
         renderAbonentSummaryStatus("dirty", reason);
     }
@@ -3949,6 +4134,7 @@ async function loadAbonentSummaryStatus(){
             __debugCurrentCardSnapshotLifecycle("CARD_SNAPSHOT_MISSING");
             window.__lastCardSummaryForDebug = null;
             renderAbonentSummaryStatus("missing", "Требуется пересчёт");
+            __requestCardAutoRecalc(uid, "CARD_SNAPSHOT_MISSING", "missing");
             return;
         }
         if (snapshot.dirty === true) {
@@ -3957,6 +4143,7 @@ async function loadAbonentSummaryStatus(){
             __lastCardSnapshotValidation = { valid: false, reason: snapshot.dirtyReason || "CARD_SNAPSHOT_DIRTY" };
             window.__lastCardSummaryForDebug = null;
             renderAbonentSummaryStatus("dirty", snapshot.dirtyReason || "Требуется пересчёт");
+            __requestCardAutoRecalc(uid, snapshot.dirtyReason || "CARD_SNAPSHOT_DIRTY", "dirty");
             return;
         }
         if (!__isFreshCardSnapshotUsable(uid, snapshot)) {
@@ -3965,6 +4152,7 @@ async function loadAbonentSummaryStatus(){
             __cardSnapshotFreshValidated = false;
             __lastCardSnapshotValidation = { valid: false, reason: "CARD_ROWS_NOT_RESTORED" };
             renderAbonentSummaryStatus("dirty", "CARD_ROWS_NOT_RESTORED");
+            __requestCardAutoRecalc(uid, "CARD_ROWS_NOT_RESTORED", "dirty");
             return;
         }
         const summary = {
@@ -3977,9 +4165,12 @@ async function loadAbonentSummaryStatus(){
         __lastCardSnapshotValidation = { valid: true, reason: "", detail: { uid: uid, ledgerVersion: snapshot.ledgerVersion, rowsByIdCount: Object.keys(snapshot.rowsById).length } };
         __runtimeCacheFreshBlocked = false;
         renderAbonentSummaryStatus("fresh", "OK");
+        __skipCardAutoRecalcFreshSnapshot(uid);
         __renderAbonentTotalsFromFreshSummary(summary);
     } catch (e) {
-        renderAbonentSummaryStatus("error", String(e && e.message || e || "CARD_SNAPSHOT_READ_ERROR"));
+        const reason = String(e && e.message || e || "CARD_SNAPSHOT_READ_ERROR");
+        renderAbonentSummaryStatus("error", reason);
+        __requestCardAutoRecalc(uid, reason || "CARD_SNAPSHOT_READ_ERROR", "error");
     }
 }
 

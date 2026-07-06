@@ -1880,6 +1880,37 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         calc_after = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
         self.assertEqual(calc_before, calc_after)
 
+    def test_card_auto_recalc_when_snapshot_not_fresh_contract(self):
+        card_path = self._find_repo_file("web", "abonent_card.html")
+        calc_engine_path = self._find_repo_file("web", "calc_engine.js")
+        self.assertIsNotNone(card_path)
+        self.assertIsNotNone(calc_engine_path)
+        card_source = card_path.read_text(encoding="utf-8")
+        calc_before = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
+
+        self.assertIn("window.__JKH_CARD_AUTO_RECALC", card_source)
+        self.assertIn("function __requestCardAutoRecalc", card_source)
+        self.assertIn("function __maybeStartCardAutoRecalc", card_source)
+        self.assertIn("function __skipCardAutoRecalcFreshSnapshot", card_source)
+        self.assertIn("[abonent_card][auto-recalc]", card_source)
+        self.assertIn('"skipped fresh snapshot"', card_source)
+        self.assertIn('"already in flight"', card_source)
+        self.assertIn('"start"', card_source)
+        self.assertIn('"done"', card_source)
+        self.assertIn('"error"', card_source)
+        self.assertIn('__maybeStartCardAutoRecalc("payment-table-loaded:" + String(reason || ""))', card_source)
+        self.assertIn('renderAbonentSummaryStatus(state.requestedStatus || "dirty", "Требуется пересчёт. Запускаю пересчёт карточки...")', card_source)
+        self.assertIn("runBtn.click()", card_source)
+
+        status_body = card_source.split("async function loadAbonentSummaryStatus()", 1)[1].split("function __summaryCalcErrorCode", 1)[0]
+        self.assertIn('__requestCardAutoRecalc(uid, "CARD_SNAPSHOT_MISSING", "missing")', status_body)
+        self.assertIn('__requestCardAutoRecalc(uid, snapshot.dirtyReason || "CARD_SNAPSHOT_DIRTY", "dirty")', status_body)
+        self.assertIn('__requestCardAutoRecalc(uid, "CARD_ROWS_NOT_RESTORED", "dirty")', status_body)
+        self.assertIn("__skipCardAutoRecalcFreshSnapshot(uid)", status_body)
+
+        calc_after = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
+        self.assertEqual(calc_before, calc_after)
+
     def test_stage_13_2d_card_report_period_flow_diagnostics(self):
         card_path = self._find_repo_file("web", "abonent_card.html")
         payment_path = self._find_repo_file("web", "payment_table.js")
