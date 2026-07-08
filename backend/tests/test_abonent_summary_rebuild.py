@@ -1966,7 +1966,11 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         self.assertIn('block.reason === "ZERO_ACCRUAL_OVERWRITE_BLOCKED"', auto_body)
         self.assertIn('"[full-recalc][autoaccrual-write-skipped]"', auto_body)
         self.assertIn("result.changed = false", auto_body)
+        self.assertIn("Data.writePaymentLedgerServerBacked", auto_body)
+        self.assertIn('reason:"SERVER_PERSIST_REQUIRED"', auto_body)
+        self.assertIn('reason:"LOCAL_CACHE_WRITE_FAILED"', auto_body)
         self.assertIn('return { ok:false, changed:true, reason:"PAYMENT_LEDGER_WRITE_BLOCKED"', auto_body)
+        self.assertIn("writePaymentLedgerServerBacked: writePaymentLedgerServerBacked", self._find_repo_file("web", "data.js").read_text(encoding="utf-8"))
 
         index_status_body = index_source.split("function summaryBatchResultStatus", 1)[1].split("function summaryBatchResultReason", 1)[0]
         self.assertIn("rowsByIdCount > 0", index_status_body)

@@ -169,11 +169,23 @@
 
 
 
+  var __projectRawRuntimeOverrides = {};
+
   function _getProjectRaw(key) {
+    var overrideKey = String(key || "");
+    if (overrideKey && Object.prototype.hasOwnProperty.call(__projectRawRuntimeOverrides, overrideKey)) {
+      return __projectRawRuntimeOverrides[overrideKey];
+    }
     try {
       if (window.JKHStore && typeof JKHStore.getRaw === "function") return JKHStore.getRaw(key);
     } catch (e) { }
     return null;
+  }
+
+  function _setProjectRawRuntimeOverride(key, value) {
+    var overrideKey = String(key || "");
+    if (!overrideKey) return;
+    __projectRawRuntimeOverrides[overrideKey] = String(value == null ? "" : value);
   }
 
   function _projectRawDiagnosticUid(key) {
@@ -1964,6 +1976,136 @@
       }
     }
     return ok;
+  }
+
+  async function writePaymentLedgerServerBacked(abonentOrId, rows, options) {
+    var opts = options || {};
+    var proposedRowsForDiagnostics = Array.isArray(rows) ? rows : [];
+    if (!Data.ensureWriteOrExplain()) {
+      try { console.log("[manual-recalc][ledger-block]", { stage:"Data.ensureWriteOrExplain", subreason:"WRITE_NOT_ALLOWED", existingRows:null, newRows:proposedRowsForDiagnostics.length, proposedRows:proposedRowsForDiagnostics, blockedBy:"Data.ensureWriteOrExplain", details:null }); } catch(eLedgerBlockLog) {}
+      return { ok:false, reason:"WRITE_NOT_ALLOWED" };
+    }
+    if (!_isHydratedDatabaseReady() && String(opts.eventType || "").trim() === "AUTOACCRUAL_WRITE") {
+      _logBlockedBeforeHydrateData(abonentOrId, "AUTOACCRUAL_WRITE");
+      try { console.log("[manual-recalc][ledger-block]", { stage:"_isHydratedDatabaseReady", subreason:"DB_NOT_HYDRATED", existingRows:null, newRows:proposedRowsForDiagnostics.length, proposedRows:proposedRowsForDiagnostics, blockedBy:"Data.writePaymentLedgerServerBacked", details:{ eventType:opts.eventType || "" } }); } catch(eLedgerBlockLog) {}
+      return { ok:false, reason:"DB_NOT_HYDRATED" };
+    }
+    var found = _findAbonentByIdOrUid(abonentOrId);
+    var id = String(found && found.id || (typeof abonentOrId === "object" ? abonentOrId && abonentOrId.id : abonentOrId) || "").trim();
+    var abonent = found && found.abonent ? found.abonent : null;
+    var uid = String(abonent && abonent.uid || "").trim();
+    var key = resolvePaymentLedgerKey(abonentOrId);
+    if (!key || !isValidUid(uid)) {
+      console.warn("[financial][ledger-write-blocked]", { abonentId: id, reason: "UID_REQUIRED" });
+      try { console.log("[manual-recalc][ledger-block]", { stage:"resolvePaymentLedgerKey", subreason:"UID_REQUIRED", existingRows:null, newRows:proposedRowsForDiagnostics.length, proposedRows:proposedRowsForDiagnostics, blockedBy:"Data.writePaymentLedgerServerBacked", details:{ abonentId:id, uid:uid, key:key || "" } }); } catch(eLedgerBlockLog) {}
+      return { ok:false, reason:"UID_REQUIRED" };
+    }
+    if (key !== "payments_" + uid || (id && id !== uid && key === "payments_" + id)) {
+      console.warn("[financial][ledger-write-blocked]", { abonentId: id, uid: uid, key: key, reason: "LS_LEDGER_WRITE_FORBIDDEN" });
+      try { console.log("[manual-recalc][ledger-block]", { stage:"canonicalLedgerKey", subreason:"LS_LEDGER_WRITE_FORBIDDEN", existingRows:null, newRows:proposedRowsForDiagnostics.length, proposedRows:proposedRowsForDiagnostics, blockedBy:"Data.writePaymentLedgerServerBacked", details:{ abonentId:id, uid:uid, key:key, expectedKey:"payments_" + uid } }); } catch(eLedgerBlockLog) {}
+      return { ok:false, reason:"LS_LEDGER_WRITE_FORBIDDEN" };
+    }
+    var currentRaw = _getProjectRaw(key);
+    if (currentRaw !== null && currentRaw !== undefined) {
+      try {
+        _parseLedgerRows(currentRaw, key);
+      } catch (e) {
+        console.warn("[financial][ledger-write-blocked]", { abonentId: id, uid: uid, key: key, reason: "LEDGER_JSON_INVALID" });
+        try { console.log("[manual-recalc][ledger-block]", { stage:"_parseLedgerRows.currentRaw", subreason:"LEDGER_JSON_INVALID", existingRows:null, newRows:proposedRowsForDiagnostics.length, proposedRows:proposedRowsForDiagnostics, blockedBy:"_parseLedgerRows", details:{ abonentId:id, uid:uid, key:key, error:e } }); } catch(eLedgerBlockLog) {}
+        return { ok:false, reason:"LEDGER_JSON_INVALID" };
+      }
+    }
+    var oldRows = [];
+    if (currentRaw !== null && currentRaw !== undefined) {
+      try { oldRows = _parseLedgerRows(currentRaw, key); } catch (eOldRows) { oldRows = []; }
+    }
+    var newRows = Array.isArray(rows) ? rows : [];
+    var oldAccruedCount = _ledgerAccruedPositiveCount(oldRows);
+    var newAccruedCount = _ledgerAccruedPositiveCount(newRows);
+    if (String(opts.eventType || "").trim() === "AUTOACCRUAL_WRITE" &&
+        oldAccruedCount > 0 &&
+        newAccruedCount === 0 &&
+        _hasResponsibilityPeriodForLedgerWrite(id, abonent) &&
+        !_isExplicitLedgerClear(opts)) {
+      var affectedMonths = {};
+      var affectedRowIds = [];
+      oldRows.forEach(function(row) {
+        if (Math.abs(_summaryNumber(row && row.accrued)) <= 0.0000001) return;
+        var monthKey = String(row && (row.period_from || row.month && row.year && (row.month + "." + row.year) || row.month || row.year || "") || "");
+        if (monthKey) affectedMonths[monthKey] = true;
+        if (row && row.id !== undefined && row.id !== null) affectedRowIds.push(row.id);
+      });
+      var blockInfo = {
+        abonentId: id,
+        uid: uid,
+        oldAccruedCount: oldAccruedCount,
+        newAccruedCount: newAccruedCount,
+        rowsOld: oldRows.length,
+        rowsNew: newRows.length,
+        affectedMonths: Object.keys(affectedMonths),
+        affectedRowIds: affectedRowIds,
+        reason: "ZERO_ACCRUAL_OVERWRITE_BLOCKED"
+      };
+      try { window.__JKH_LAST_AUTOACCRUAL_BLOCK = blockInfo; } catch (eBlockState) {}
+      try { console.error("[autoaccrual][blocked-zero-overwrite]", blockInfo); } catch (eBlockLog) {}
+      try { console.log("[manual-recalc][ledger-block]", { stage:"zeroAccrualOverwriteGuard", subreason:"ZERO_ACCRUAL_OVERWRITE_BLOCKED", existingRows:oldRows.length, newRows:newRows.length, proposedRows:newRows, blockedBy:"Data.writePaymentLedgerServerBacked", details:blockInfo }); } catch(eLedgerBlockLog) {}
+      return { ok:false, reason:"ZERO_ACCRUAL_OVERWRITE_BLOCKED", block:blockInfo };
+    }
+    if (typeof fetch !== "function") {
+      try { console.log("[manual-recalc][project-raw]", { stage:"writePaymentLedgerServerBacked.fetch.unavailable", httpStatus:null, responseBody:null, exception:null, requestUrl:"/api/store", requestPayloadSize:0, storageKey:key, owner:_ownerId(), uid:uid }); } catch(eNoFetchLog) {}
+      return { ok:false, reason:"SERVER_PERSIST_REQUIRED", serverOk:false, localOk:false };
+    }
+    var payload = JSON.stringify(newRows);
+    var serverResult = null;
+    try {
+      serverResult = await _serverStoreSet(_ownerId(), key, payload);
+    } catch (eServerSet) {
+      try { console.log("[manual-recalc][project-raw]", { stage:"writePaymentLedgerServerBacked.serverSet.exception", httpStatus:null, responseBody:null, exception:eServerSet, requestUrl:"/api/store", requestPayloadSize:payload.length, storageKey:key, owner:_ownerId(), uid:uid }); } catch(eServerSetLog) {}
+      return { ok:false, reason:"SERVER_PERSIST_REQUIRED", serverOk:false, localOk:false, serverResult:null, exception:eServerSet };
+    }
+    if (!(serverResult && serverResult.ok === true)) {
+      try { console.log("[manual-recalc][project-raw]", { stage:"writePaymentLedgerServerBacked.serverSet.failed", httpStatus:serverResult && serverResult.status, responseBody:serverResult && (serverResult.data || serverResult.text), exception:null, requestUrl:"/api/store", requestPayloadSize:payload.length, storageKey:key, owner:_ownerId(), uid:uid }); } catch(eServerFailedLog) {}
+      return { ok:false, reason:"SERVER_PERSIST_REQUIRED", serverOk:false, localOk:false, serverResult:serverResult || null };
+    }
+    var readback = null;
+    try {
+      readback = await _serverStoreGet(_ownerId(), key);
+    } catch (eServerReadback) {
+      try { console.log("[manual-recalc][project-raw]", { stage:"writePaymentLedgerServerBacked.serverReadback.exception", httpStatus:null, responseBody:null, exception:eServerReadback, requestUrl:"/api/store", requestPayloadSize:payload.length, storageKey:key, owner:_ownerId(), uid:uid }); } catch(eReadbackExceptionLog) {}
+      return { ok:false, reason:"SERVER_PERSIST_REQUIRED", serverOk:true, serverReadbackOk:false, localOk:false, serverResult:serverResult, exception:eServerReadback };
+    }
+    if (!(readback && readback.ok === true && String(readback.raw || "") === payload)) {
+      try { console.log("[manual-recalc][project-raw]", { stage:"writePaymentLedgerServerBacked.serverReadback.failed", httpStatus:readback && readback.status, responseBody:readback && (readback.data || readback.text), exception:null, requestUrl:"/api/store", requestPayloadSize:payload.length, storageKey:key, owner:_ownerId(), uid:uid }); } catch(eReadbackFailedLog) {}
+      return { ok:false, reason:"SERVER_PERSIST_REQUIRED", serverOk:true, serverReadbackOk:false, localOk:false, serverResult:serverResult, readback:readback || null };
+    }
+    _setProjectRawRuntimeOverride(key, payload);
+    var localOk = true;
+    try {
+      var localResult = _setProjectRaw(key, payload);
+      localOk = localResult !== false;
+    } catch (eLocalSet) {
+      localOk = false;
+      try { console.warn("[manual-recalc][project-raw]", { stage:"writePaymentLedgerServerBacked.localCache.exception", reason:"LOCAL_CACHE_WRITE_FAILED", exception:eLocalSet, storageKey:key, owner:_ownerId(), uid:uid }); } catch(eLocalExceptionLog) {}
+    }
+    if (!localOk) {
+      try { console.warn("[manual-recalc][project-raw]", { stage:"writePaymentLedgerServerBacked.localCache.failed", reason:"LOCAL_CACHE_WRITE_FAILED", storageKey:key, owner:_ownerId(), uid:uid }); } catch(eLocalFailedLog) {}
+    }
+    if (opts.event !== false) {
+      recordFinancialEvent(Object.assign({
+        type: opts.eventType || "LEDGER_WRITE",
+        sourceAbonentId: id,
+        targetAbonentId: id,
+        mode: opts.mode || "",
+        date: opts.date || ""
+      }, opts.event || {}));
+    }
+    try { console.warn("[ledger][write-invalidates-card-snapshot]", { abonentId: id, uid: uid, eventType: opts.eventType || "LEDGER_WRITE", summaryDirtyReason: opts.summaryDirtyReason, source: opts.source || "server_backed" }); } catch (eInvLog) {}
+    invalidateLedgerRuntimeCache(abonentOrId);
+    invalidateCardSnapshot(abonentOrId, opts.summaryDirtyReason || "LEDGER_WRITE");
+    if (opts.summaryDirtyReason !== false) {
+      markAbonentSummaryDirtyLater(abonent || id, opts.summaryDirtyReason || "LEDGER_WRITE");
+    }
+    return { ok:true, reason:localOk ? "OK" : "LOCAL_CACHE_WRITE_FAILED", serverOk:true, serverReadbackOk:true, localOk:localOk, key:key, uid:uid, rows:newRows.length };
   }
 
   function createEmptyPaymentLedger(abonentOrId) {
@@ -5868,6 +6010,7 @@
     saveAbonentSummaryAfterRecalc: saveAbonentSummaryAfterRecalc,
     markAbonentSummaryDirty: markAbonentSummaryDirty,
     writePaymentLedger: writePaymentLedger,
+    writePaymentLedgerServerBacked: writePaymentLedgerServerBacked,
     createEmptyPaymentLedger: createEmptyPaymentLedger,
     normalizeFinancialMode: normalizeFinancialMode,
     recordFinancialEvent: recordFinancialEvent,
