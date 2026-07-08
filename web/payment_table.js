@@ -2590,7 +2590,10 @@ if (parts.length) {
       const abonentId = String(getAbonentId() || "");
       if (!(window.Data && typeof window.Data.writePaymentLedger === "function")) throw new Error("Data.writePaymentLedger not available");
       const savedLedger = window.Data.writePaymentLedger(abonentId, arr, { eventType: "PAYMENT_TABLE_WRITE", summaryDirtyReason: "PAYMENTS_CHANGED" });
-      if (savedLedger === false) throw new Error("PAYMENT_LEDGER_WRITE_BLOCKED");
+      if (savedLedger === false) {
+        try { console.log("[manual-recalc][ledger-block]", { stage:"savePaymentsAndFlush.writePaymentLedger", subreason:"PAYMENT_LEDGER_WRITE_BLOCKED", existingRows:null, newRows:Array.isArray(arr) ? arr.length : null, proposedRows:arr, blockedBy:"Data.writePaymentLedger", details:window.__JKH_LAST_AUTOACCRUAL_BLOCK || null }); } catch(eLedgerBlockLog) {}
+        throw new Error("PAYMENT_LEDGER_WRITE_BLOCKED");
+      }
       clearPaymentLedgerReadCache('save-payments');
 
       // ОБЯЗАТЕЛЬНО: сервер
@@ -5690,6 +5693,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
           result.writeBlockReason = "ZERO_ACCRUAL_OVERWRITE_BLOCKED";
           result.reason = "ZERO_ACCRUAL_OVERWRITE_BLOCKED";
         } else {
+          try { console.log("[manual-recalc][ledger-block]", { stage:"applyControlledAutoAccrualForManualRecalc.writePaymentLedger", subreason:"PAYMENT_LEDGER_WRITE_BLOCKED", existingRows:null, newRows:Array.isArray(proposedRows) ? proposedRows.length : null, proposedRows:proposedRows, blockedBy:"Data.writePaymentLedger", details:block || null }); } catch(eLedgerBlockLog) {}
           try { console.log("[manual-recalc][autoaccrual]", { stage:"Data.writePaymentLedger", reason:"PAYMENT_LEDGER_WRITE_BLOCKED", error:null, result:savedLedger }); } catch(eManualRecalcAutoLog) {}
           return { ok:false, changed:true, reason:"PAYMENT_LEDGER_WRITE_BLOCKED", autoaccrual:result };
         }

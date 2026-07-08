@@ -1837,10 +1837,15 @@
   }
 
   function writePaymentLedger(abonentOrId, rows, options) {
-    if (!Data.ensureWriteOrExplain()) return false;
     var opts = options || {};
+    var proposedRowsForDiagnostics = Array.isArray(rows) ? rows : [];
+    if (!Data.ensureWriteOrExplain()) {
+      try { console.log("[manual-recalc][ledger-block]", { stage:"Data.ensureWriteOrExplain", subreason:"WRITE_NOT_ALLOWED", existingRows:null, newRows:proposedRowsForDiagnostics.length, proposedRows:proposedRowsForDiagnostics, blockedBy:"Data.ensureWriteOrExplain", details:null }); } catch(eLedgerBlockLog) {}
+      return false;
+    }
     if (!_isHydratedDatabaseReady() && String(opts.eventType || "").trim() === "AUTOACCRUAL_WRITE") {
       _logBlockedBeforeHydrateData(abonentOrId, "AUTOACCRUAL_WRITE");
+      try { console.log("[manual-recalc][ledger-block]", { stage:"_isHydratedDatabaseReady", subreason:"DB_NOT_HYDRATED", existingRows:null, newRows:proposedRowsForDiagnostics.length, proposedRows:proposedRowsForDiagnostics, blockedBy:"Data.writePaymentLedger", details:{ eventType:opts.eventType || "" } }); } catch(eLedgerBlockLog) {}
       return false;
     }
     var found = _findAbonentByIdOrUid(abonentOrId);
@@ -1850,10 +1855,12 @@
     var key = resolvePaymentLedgerKey(abonentOrId);
     if (!key || !isValidUid(uid)) {
       console.warn("[financial][ledger-write-blocked]", { abonentId: id, reason: "UID_REQUIRED" });
+      try { console.log("[manual-recalc][ledger-block]", { stage:"resolvePaymentLedgerKey", subreason:"UID_REQUIRED", existingRows:null, newRows:proposedRowsForDiagnostics.length, proposedRows:proposedRowsForDiagnostics, blockedBy:"Data.writePaymentLedger", details:{ abonentId:id, uid:uid, key:key || "" } }); } catch(eLedgerBlockLog) {}
       return false;
     }
     if (key !== "payments_" + uid || (id && id !== uid && key === "payments_" + id)) {
       console.warn("[financial][ledger-write-blocked]", { abonentId: id, uid: uid, key: key, reason: "LS_LEDGER_WRITE_FORBIDDEN" });
+      try { console.log("[manual-recalc][ledger-block]", { stage:"canonicalLedgerKey", subreason:"LS_LEDGER_WRITE_FORBIDDEN", existingRows:null, newRows:proposedRowsForDiagnostics.length, proposedRows:proposedRowsForDiagnostics, blockedBy:"Data.writePaymentLedger", details:{ abonentId:id, uid:uid, key:key, expectedKey:"payments_" + uid } }); } catch(eLedgerBlockLog) {}
       return false;
     }
     var currentRaw = _getProjectRaw(key);
@@ -1862,6 +1869,7 @@
         _parseLedgerRows(currentRaw, key);
       } catch (e) {
         console.warn("[financial][ledger-write-blocked]", { abonentId: id, uid: uid, key: key, reason: "LEDGER_JSON_INVALID" });
+        try { console.log("[manual-recalc][ledger-block]", { stage:"_parseLedgerRows.currentRaw", subreason:"LEDGER_JSON_INVALID", existingRows:null, newRows:proposedRowsForDiagnostics.length, proposedRows:proposedRowsForDiagnostics, blockedBy:"_parseLedgerRows", details:{ abonentId:id, uid:uid, key:key, error:e } }); } catch(eLedgerBlockLog) {}
         return false;
       }
     }
@@ -1877,6 +1885,14 @@
         newAccruedCount === 0 &&
         _hasResponsibilityPeriodForLedgerWrite(id, abonent) &&
         !_isExplicitLedgerClear(opts)) {
+      var affectedMonths = {};
+      var affectedRowIds = [];
+      oldRows.forEach(function(row) {
+        if (Math.abs(_summaryNumber(row && row.accrued)) <= 0.0000001) return;
+        var monthKey = String(row && (row.period_from || row.month && row.year && (row.month + "." + row.year) || row.month || row.year || "") || "");
+        if (monthKey) affectedMonths[monthKey] = true;
+        if (row && row.id !== undefined && row.id !== null) affectedRowIds.push(row.id);
+      });
       var blockInfo = {
         abonentId: id,
         uid: uid,
@@ -1884,14 +1900,20 @@
         newAccruedCount: newAccruedCount,
         rowsOld: oldRows.length,
         rowsNew: newRows.length,
+        affectedMonths: Object.keys(affectedMonths),
+        affectedRowIds: affectedRowIds,
         reason: "ZERO_ACCRUAL_OVERWRITE_BLOCKED"
       };
       try { window.__JKH_LAST_AUTOACCRUAL_BLOCK = blockInfo; } catch (eBlockState) {}
       try { console.error("[autoaccrual][blocked-zero-overwrite]", blockInfo); } catch (eBlockLog) {}
+      try { console.log("[manual-recalc][ledger-block]", { stage:"zeroAccrualOverwriteGuard", subreason:"ZERO_ACCRUAL_OVERWRITE_BLOCKED", existingRows:oldRows.length, newRows:newRows.length, proposedRows:newRows, blockedBy:"Data.writePaymentLedger", details:blockInfo }); } catch(eLedgerBlockLog) {}
       return false;
     }
     var payload = JSON.stringify(Array.isArray(rows) ? rows : []);
     var ok = _setProjectRaw(key, payload);
+    if (ok === false) {
+      try { console.log("[manual-recalc][ledger-block]", { stage:"_setProjectRaw", subreason:"PROJECT_RAW_WRITE_FAILED", existingRows:oldRows.length, newRows:newRows.length, proposedRows:newRows, blockedBy:"_setProjectRaw", details:{ abonentId:id, uid:uid, key:key, eventType:opts.eventType || "" } }); } catch(eLedgerBlockLog) {}
+    }
     if (ok !== false && opts.event !== false) {
       recordFinancialEvent(Object.assign({
         type: opts.eventType || "LEDGER_WRITE",
