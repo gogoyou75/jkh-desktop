@@ -5705,6 +5705,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
   }
 
   window.fullRecalcForCurrentAbonent = async function fullRecalcForCurrentAbonent(options){
+    try { console.log("[manual-recalc] entering fullRecalcForCurrentAbonent"); } catch(eManualRecalcEnterLog) {}
     console.time("[recalc] total");
     if (window.__calcTotalsMemoStats) window.__calcTotalsMemoStats.reset();
     let recalcTotalTimerEnded = false;
@@ -5954,6 +5955,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
       }
       logFullRecalcStep(runId, "summary-save", { abonentId: id });
       console.time("[recalc] Data.recalculateAbonentCard");
+      try { console.log("[manual-recalc] calling Data.recalculateAbonentCard"); } catch(eManualRecalcCallDataLog) {}
       const summaryResult = await measureRecalcStage("summarySaveMs", async function(){
         throwIfFullRecalcAborted("summary-save");
         return await Data.recalculateAbonentCard(id, {

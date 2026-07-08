@@ -4341,6 +4341,7 @@ function bindCalcButtons(){
     }
 
     runBtn.addEventListener("click", async () => {
+        try { console.log("[manual-recalc] button clicked"); } catch(eManualRecalcClickLog) {}
         const existingRun = __currentFullRecalcRun();
         if (existingRun) {
             try {
@@ -4973,6 +4974,7 @@ function bindCalcButtons(){
                 rememberExplicitFullRecalcFinal("fresh", "OK", recalcResult);
                 heartbeatFullRecalc("final-render");
                 heartbeatPostRecalcStage("final-render-start");
+                try { console.log("[manual-recalc] render started"); } catch(eManualRecalcRenderStartLog) {}
                 renderAbonentSummaryStatus(summaryStatus, __normalizeSummaryStatus(summaryStatus) === "fresh" ? "OK" : summaryReason);
                 renderExplicitFullRecalcFinal("recalc-success");
                 heartbeatPostRecalcStage("final-render-done");
@@ -4998,6 +5000,7 @@ function bindCalcButtons(){
                     const statusBox = document.getElementById("paymentTableStatus") || document.getElementById("paymentStatus") || document.getElementById("paymentsStatus");
                     if (statusBox) statusBox.textContent = "Итог обновлён.";
                 }
+                try { console.log("[manual-recalc] render finished"); } catch(eManualRecalcRenderFinishLog) {}
                 recalcHandled = true;
             }
             if (!recalcHandled) {

@@ -3251,12 +3251,18 @@
         });
       } catch (eBuildLog) {}
 
-      var res = await fetch("/api/abonent_summary/rebuild", {
-        method: "POST",
-        credentials: "include",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload)
-      });
+      var res = null;
+      try { console.log("[manual-recalc] fetch started"); } catch (eManualRecalcFetchStartLog) {}
+      try {
+        res = await fetch("/api/abonent_summary/rebuild", {
+          method: "POST",
+          credentials: "include",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload)
+        });
+      } finally {
+        try { console.log("[manual-recalc] fetch finished"); } catch (eManualRecalcFetchFinishLog) {}
+      }
       var text = await res.text();
       var data = null;
       try { data = text ? JSON.parse(text) : null; } catch (eParse) { data = null; }
