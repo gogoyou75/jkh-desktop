@@ -1911,6 +1911,34 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         calc_after = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
         self.assertEqual(calc_before, calc_after)
 
+    def test_card_auto_recalc_persists_snapshot_before_fresh_final_contract(self):
+        card_path = self._find_repo_file("web", "abonent_card.html")
+        calc_engine_path = self._find_repo_file("web", "calc_engine.js")
+        self.assertIsNotNone(card_path)
+        self.assertIsNotNone(calc_engine_path)
+        card_source = card_path.read_text(encoding="utf-8")
+        calc_before = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
+
+        self.assertIn("async function savePostRecalcSnapshot(snapshot)", card_source)
+        self.assertNotIn("function schedulePostRecalcSnapshotSave", card_source)
+        self.assertNotIn("save-card-snapshot-async", card_source)
+        self.assertIn("Data.saveCardSnapshotAndWait(currentAbonentId, snapshot, { runId: recalcRunId })", card_source)
+
+        success_body = card_source.split('if (__normalizeSummaryStatus(summaryStatus) === "fresh") {', 1)[1].split('if (finishFullRecalcAbortFromUi("abort-before-final-render")) return;', 1)[0]
+        self.assertIn("const snapshotSave = await savePostRecalcSnapshot(snapshot);", success_body)
+        self.assertIn("snapshotSave.ok !== true", success_body)
+        self.assertIn('renderAbonentSummaryStatus("error", snapshotReason)', success_body)
+        self.assertIn("__skipCardAutoRecalcFreshSnapshot(fullRecalcState.uid || currentAbonentId)", success_body)
+
+        self.assertIn("serverReadbackOk === true", card_source.split("async function savePostRecalcSnapshot(snapshot)", 1)[1].split("async function ensureCurrentAbonentUidForCalcPeriod", 1)[0])
+
+        final_render_idx = card_source.index('renderExplicitFullRecalcFinal("recalc-success")')
+        snapshot_save_idx = card_source.index("const snapshotSave = await savePostRecalcSnapshot(snapshot);")
+        self.assertLess(snapshot_save_idx, final_render_idx)
+
+        calc_after = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
+        self.assertEqual(calc_before, calc_after)
+
     def test_stage_13_2d_card_report_period_flow_diagnostics(self):
         card_path = self._find_repo_file("web", "abonent_card.html")
         payment_path = self._find_repo_file("web", "payment_table.js")

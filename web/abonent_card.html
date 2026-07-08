@@ -4506,7 +4506,6 @@ function bindCalcButtons(){
                 "save-runtime-cache-after-summary": "сохранение свежего runtime cache",
                 "build-card-snapshot": "построение snapshot",
                 "save-card-snapshot": "сохранение snapshot",
-                "save-card-snapshot-async": "сохранение snapshot",
                 "final-render": "финальная отрисовка",
                 "unlock": "разблокировка UI"
             };
@@ -4719,42 +4718,42 @@ function bindCalcButtons(){
         function heartbeatPostRecalcStage(stage){
             heartbeatFullRecalc(stage || "snapshot-save");
         }
-        function schedulePostRecalcSnapshotSave(snapshot){
-            setTimeout(async function(){
-                let snapshotSaveResult = null;
+        async function savePostRecalcSnapshot(snapshot){
+            let snapshotSaveResult = null;
+            try {
+                heartbeatFullRecalc("save-card-snapshot");
+                heartbeatPostRecalcStage("snapshot-save-start");
+                if (fullRecalcState.abortRequested === true) return { ok: false, reason: "FULL_RECALC_CANCELLED" };
+                try { console.log("[full-recalc][step]", { runId: recalcRunId, step: "save-card-snapshot" }); } catch(eStepLog) {}
+                const snapshotSaveStartedAt = Date.now();
+                snapshotSaveResult = await Data.saveCardSnapshotAndWait(currentAbonentId, snapshot, { runId: recalcRunId });
+                setRecalcReportStage("snapshotSaveMs", Date.now() - snapshotSaveStartedAt);
+                const saveOk = !!(snapshotSaveResult && snapshotSaveResult.localOk === true && snapshotSaveResult.serverOk === true && snapshotSaveResult.serverReadbackOk === true);
+                if (typeof window.__setPostRecalcSnapshotSaveResult === "function") window.__setPostRecalcSnapshotSaveResult(recalcRunId, saveOk);
                 try {
-                    heartbeatFullRecalc("save-card-snapshot-async");
-                    heartbeatPostRecalcStage("snapshot-save-start");
-                    if (fullRecalcState.abortRequested === true) return;
-                    try { console.log("[full-recalc][step]", { runId: recalcRunId, step: "save-card-snapshot-async" }); } catch(eStepLog) {}
-                    const snapshotSaveStartedAt = Date.now();
-                    snapshotSaveResult = await Data.saveCardSnapshotAndWait(currentAbonentId, snapshot, { runId: recalcRunId, skipReadback: true });
-                    setRecalcReportStage("snapshotSaveMs", Date.now() - snapshotSaveStartedAt);
-                    const saveOk = !!(snapshotSaveResult && snapshotSaveResult.localOk === true && snapshotSaveResult.serverOk === true);
-                    if (typeof window.__setPostRecalcSnapshotSaveResult === "function") window.__setPostRecalcSnapshotSaveResult(recalcRunId, saveOk);
-                    try {
-                        console.log("[full-recalc][step-done]", { runId: recalcRunId, step: "save-card-snapshot-async", ok: saveOk });
-                        console.log("[full-recalc][save-snapshot]", {
-                            runId: recalcRunId,
-                            abonentId: String(currentAbonentId || ""),
-                            uid: String(snapshot && snapshot.uid || ""),
-                            key: String(snapshotSaveResult && snapshotSaveResult.key || ""),
-                            localOk: !!(snapshotSaveResult && snapshotSaveResult.localOk === true),
-                            serverOk: !!(snapshotSaveResult && snapshotSaveResult.serverOk === true),
-                            serverReadbackOk: !!(snapshotSaveResult && snapshotSaveResult.serverReadbackOk === true),
-                            ledgerVersion: String(snapshot && snapshot.ledgerVersion || ""),
-                            snapshotLedgerVersion: String(snapshotSaveResult && snapshotSaveResult.ledgerVersion || "")
-                        });
-                    } catch(eSnapshotSaveLog) {}
-                    heartbeatPostRecalcStage("snapshot-save-done");
-                } catch(eSnapshotAsync) {
-                    if (typeof window.__setPostRecalcSnapshotSaveResult === "function") window.__setPostRecalcSnapshotSaveResult(recalcRunId, false);
-                    heartbeatPostRecalcStage("snapshot-save-failed");
-                } finally {
-                    fullRecalcState.snapshotSavePending = false;
-                    printRecalcCallCountReport("snapshot-save-done", { force: true });
-                }
-            }, 0);
+                    console.log("[full-recalc][step-done]", { runId: recalcRunId, step: "save-card-snapshot", ok: saveOk });
+                    console.log("[full-recalc][save-snapshot]", {
+                        runId: recalcRunId,
+                        abonentId: String(currentAbonentId || ""),
+                        uid: String(snapshot && snapshot.uid || ""),
+                        key: String(snapshotSaveResult && snapshotSaveResult.key || ""),
+                        localOk: !!(snapshotSaveResult && snapshotSaveResult.localOk === true),
+                        serverOk: !!(snapshotSaveResult && snapshotSaveResult.serverOk === true),
+                        serverReadbackOk: !!(snapshotSaveResult && snapshotSaveResult.serverReadbackOk === true),
+                        ledgerVersion: String(snapshot && snapshot.ledgerVersion || ""),
+                        snapshotLedgerVersion: String(snapshotSaveResult && snapshotSaveResult.ledgerVersion || "")
+                    });
+                } catch(eSnapshotSaveLog) {}
+                heartbeatPostRecalcStage(saveOk ? "snapshot-save-done" : "snapshot-save-failed");
+                return saveOk ? { ok: true, result: snapshotSaveResult } : { ok: false, reason: String(snapshotSaveResult && snapshotSaveResult.reason || "CARD_SNAPSHOT_SAVE_FAILED"), result: snapshotSaveResult };
+            } catch(eSnapshotSave) {
+                if (typeof window.__setPostRecalcSnapshotSaveResult === "function") window.__setPostRecalcSnapshotSaveResult(recalcRunId, false);
+                heartbeatPostRecalcStage("snapshot-save-failed");
+                return { ok: false, reason: String(eSnapshotSave && eSnapshotSave.message || eSnapshotSave || "CARD_SNAPSHOT_SAVE_FAILED"), result: snapshotSaveResult };
+            } finally {
+                fullRecalcState.snapshotSavePending = false;
+                printRecalcCallCountReport("snapshot-save-done", { force: true });
+            }
         }
 
         try {
@@ -4945,7 +4944,17 @@ function bindCalcButtons(){
                     __runtimeCacheFreshBlocked = false;
                     if (typeof window.__markPostRecalcSnapshotFresh === "function") window.__markPostRecalcSnapshotFresh(recalcRunId, snapshot);
                     fullRecalcState.snapshotSavePending = true;
-                    schedulePostRecalcSnapshotSave(snapshot);
+                    const snapshotSave = await savePostRecalcSnapshot(snapshot);
+                    if (!snapshotSave || snapshotSave.ok !== true) {
+                        const snapshotReason = String(snapshotSave && snapshotSave.reason || "CARD_SNAPSHOT_SAVE_FAILED");
+                        rememberExplicitFullRecalcFinal("error", snapshotReason, recalcResult);
+                        renderExplicitFullRecalcFinal("snapshot-save-failed");
+                        renderAbonentSummaryStatus("error", snapshotReason);
+                        try { console.log("[full-recalc][ui-status-final]", { abonentId: String(currentAbonentId || ""), status: "error", reason: snapshotReason }); } catch(eUiFinalSnapshotSaveLog) {}
+                        alert("Расчёт выполнен, но fresh snapshot карточки не сохранён: " + snapshotReason);
+                        return;
+                    }
+                    __skipCardAutoRecalcFreshSnapshot(fullRecalcState.uid || currentAbonentId);
                 }
                 if (finishFullRecalcAbortFromUi("abort-before-final-render")) return;
                 rememberExplicitFullRecalcFinal("fresh", "OK", recalcResult);
