@@ -1948,6 +1948,42 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         calc_after = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
         self.assertEqual(calc_before, calc_after)
 
+    def test_manual_card_recalc_zero_overwrite_block_is_nonfatal_contract(self):
+        payment_path = self._find_repo_file("web", "payment_table.js")
+        index_path = self._find_repo_file("web", "index.html")
+        backend_path = self._find_repo_file("backend", "app.py")
+        calc_engine_path = self._find_repo_file("web", "calc_engine.js")
+        self.assertIsNotNone(payment_path)
+        self.assertIsNotNone(index_path)
+        self.assertIsNotNone(backend_path)
+        self.assertIsNotNone(calc_engine_path)
+        payment_source = payment_path.read_text(encoding="utf-8")
+        index_source = index_path.read_text(encoding="utf-8")
+        backend_source = backend_path.read_text(encoding="utf-8")
+        calc_before = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
+
+        auto_body = payment_source.split("async function applyControlledAutoAccrualForManualRecalc", 1)[1].split("window.fullRecalcForCurrentAbonent", 1)[0]
+        self.assertIn('block.reason === "ZERO_ACCRUAL_OVERWRITE_BLOCKED"', auto_body)
+        self.assertIn('"[full-recalc][autoaccrual-write-skipped]"', auto_body)
+        self.assertIn("result.changed = false", auto_body)
+        self.assertIn('return { ok:false, changed:true, reason:"PAYMENT_LEDGER_WRITE_BLOCKED"', auto_body)
+
+        index_status_body = index_source.split("function summaryBatchResultStatus", 1)[1].split("function summaryBatchResultReason", 1)[0]
+        self.assertIn("rowsByIdCount > 0", index_status_body)
+        batch_body = index_source.split("async function runSelectedSummaryBatch", 1)[1].split("function renderSummaryBatchError", 1)[0]
+        self.assertIn("Data.recalculateAbonentCardWithRows(uid", batch_body)
+        self.assertNotIn("Data.recalculateAbonentCard(uid", batch_body)
+        self.assertIn("Data.saveCardSnapshotAndWait(uid, snapshot)", batch_body)
+        self.assertIn('if (status === "fresh")', batch_body)
+        self.assertIn("completePayload = await Data.completeRecalcUid(jobId, itemId, status, summary, reason)", batch_body)
+
+        self.assertIn("def _client_recalc_fresh_guard", backend_source)
+        self.assertIn('return False, "CARD_SNAPSHOT_MISSING"', backend_source)
+        self.assertIn('return False, "CARD_SNAPSHOT_ROWS_MISSING"', backend_source)
+
+        calc_after = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
+        self.assertEqual(calc_before, calc_after)
+
     def test_stage_13_2d_card_report_period_flow_diagnostics(self):
         card_path = self._find_repo_file("web", "abonent_card.html")
         payment_path = self._find_repo_file("web", "payment_table.js")

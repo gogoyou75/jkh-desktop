@@ -1992,6 +1992,34 @@ def _client_recalc_summary_payload(status: str, summary: dict | None, target: di
     return payload, clean_status, clean_reason
 
 
+def _client_recalc_fresh_guard(owner_id: str, account_uid: str, summary: dict | None):
+    if not isinstance(summary, dict):
+        return False, "SUMMARY_INVALID"
+    totals = summary.get("totals") if isinstance(summary.get("totals"), dict) else {}
+    required = {
+        "debt": totals.get("debt", totals.get("total", summary.get("total_debt"))),
+        "accrued": totals.get("accrued", summary.get("total_accrued")),
+        "paid": totals.get("paid", summary.get("total_paid")),
+        "penalty": totals.get("penalty", summary.get("total_penalty", summary.get("penalty_debt"))),
+    }
+    if not all(_summary_finite_number(value) for value in required.values()):
+        return False, "SUMMARY_TOTALS_INVALID"
+
+    row = CardSnapshot.query.filter_by(owner_id=owner_id, abonent_uid=account_uid).first()
+    if not row:
+        return False, "CARD_SNAPSHOT_MISSING"
+    if _cache_status(row.snapshot_status) != "fresh":
+        return False, "CARD_SNAPSHOT_NOT_FRESH"
+    try:
+        snapshot = json.loads(row.snapshot_json or "{}")
+    except (TypeError, ValueError):
+        return False, "CARD_SNAPSHOT_JSON_INVALID"
+    rows_by_id = snapshot.get("rowsById") if isinstance(snapshot, dict) else None
+    if not isinstance(rows_by_id, dict) or not rows_by_id:
+        return False, "CARD_SNAPSHOT_ROWS_MISSING"
+    return True, ""
+
+
 @app.get("/api/recalc_batch_job/<int:job_id>/next_uid")
 def client_recalc_batch_job_next_uid(job_id: int):
     user, err = _require_user()
@@ -2083,6 +2111,11 @@ def client_recalc_batch_job_complete_uid(job_id: int):
         "identity": {"account_uid": item.account_uid},
     }
     error_reason = _norm_text(body.get("error_reason"))
+    if status == "fresh":
+        fresh_ok, fresh_reason = _client_recalc_fresh_guard(owner, _norm_text(item.account_uid), summary)
+        if not fresh_ok:
+            status = "error"
+            error_reason = fresh_reason
     payload, summary_status, summary_reason = _client_recalc_summary_payload(
         status,
         summary,

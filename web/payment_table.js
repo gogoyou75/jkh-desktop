@@ -5655,23 +5655,45 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
       if (!hasAccrualInManualRecalcPeriod(proposedRows, opts.period)) return { ok:false, changed:true, reason:"ACCRUALS_NOT_CREATED", autoaccrual:result };
       if (!(window.Data && typeof Data.writePaymentLedger === "function")) return { ok:false, changed:true, reason:"LEDGER_WRITE_UNAVAILABLE", autoaccrual:result };
       const savedLedger = window.Data.writePaymentLedger(abonentId, proposedRows, { eventType:"AUTOACCRUAL_WRITE", summaryDirtyReason:false });
-      if (savedLedger === false) return { ok:false, changed:true, reason:"PAYMENT_LEDGER_WRITE_BLOCKED", autoaccrual:result };
-      try {
-        console.log("[full-recalc][save-ledger]", {
-          abonentId: String(abonentId || ""),
-          rows: proposedRows.length,
-          changed: true,
-          eventType: "AUTOACCRUAL_WRITE"
-        });
-      } catch(eSaveLedgerLog) {}
-      clearPaymentLedgerReadCache("manual-recalc-autoaccrual");
-      try {
-        if (window.Data && typeof Data.invalidateLedgerRuntimeCache === "function") Data.invalidateLedgerRuntimeCache(abonentId);
-      } catch (e0) {}
-      if (window.Data && typeof Data.flushDbToServer === "function") {
-        await Data.flushDbToServer();
-      } else {
-        return { ok:false, changed:true, reason:"SERVER_FLUSH_UNAVAILABLE", autoaccrual:result };
+      if (savedLedger === false) {
+        const block = window.__JKH_LAST_AUTOACCRUAL_BLOCK || null;
+        if (block && block.reason === "ZERO_ACCRUAL_OVERWRITE_BLOCKED") {
+          try {
+            console.warn("[full-recalc][autoaccrual-write-skipped]", {
+              abonentId: String(abonentId || ""),
+              reason: "ZERO_ACCRUAL_OVERWRITE_BLOCKED",
+              rowsOld: block.rowsOld,
+              rowsNew: block.rowsNew,
+              oldAccruedCount: block.oldAccruedCount,
+              newAccruedCount: block.newAccruedCount
+            });
+          } catch(eSkipLog) {}
+          result.changed = false;
+          result.writeBlocked = true;
+          result.writeBlockReason = "ZERO_ACCRUAL_OVERWRITE_BLOCKED";
+          result.reason = "ZERO_ACCRUAL_OVERWRITE_BLOCKED";
+        } else {
+          return { ok:false, changed:true, reason:"PAYMENT_LEDGER_WRITE_BLOCKED", autoaccrual:result };
+        }
+      }
+      if (savedLedger !== false) {
+        try {
+          console.log("[full-recalc][save-ledger]", {
+            abonentId: String(abonentId || ""),
+            rows: proposedRows.length,
+            changed: true,
+            eventType: "AUTOACCRUAL_WRITE"
+          });
+        } catch(eSaveLedgerLog) {}
+        clearPaymentLedgerReadCache("manual-recalc-autoaccrual");
+        try {
+          if (window.Data && typeof Data.invalidateLedgerRuntimeCache === "function") Data.invalidateLedgerRuntimeCache(abonentId);
+        } catch (e0) {}
+        if (window.Data && typeof Data.flushDbToServer === "function") {
+          await Data.flushDbToServer();
+        } else {
+          return { ok:false, changed:true, reason:"SERVER_FLUSH_UNAVAILABLE", autoaccrual:result };
+        }
       }
     }
 

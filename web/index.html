@@ -1709,12 +1709,12 @@ async function runSelectedSummaryBatch(options){
     const progress = document.getElementById("summaryBatchProgress");
     if (summaryBatchRunning) return;
     if (progress) progress.textContent = batchMode === "snapshot" ? "Запуск создания snapshot для выбранных UID..." : "Запуск пересчёта выбранных UID...";
-    if (!window.Data || typeof Data.createAbonentSummaryRecalcBatchJob !== "function" || typeof Data.getNextRecalcUid !== "function" || typeof Data.completeRecalcUid !== "function" || typeof Data.recalculateAbonentCard !== "function") {
+    if (!window.Data || typeof Data.createAbonentSummaryRecalcBatchJob !== "function" || typeof Data.getNextRecalcUid !== "function" || typeof Data.completeRecalcUid !== "function") {
         if (progress) progress.textContent = "Batch job API unavailable: Data API is not loaded.";
         alert("Batch job API недоступен: Data API не загружен.");
         return;
     }
-    if (batchMode === "snapshot" && (typeof Data.recalculateAbonentCardWithRows !== "function" || typeof Data.buildCardSnapshotFromCurrentResult !== "function" || typeof Data.saveCardSnapshotAndWait !== "function")) {
+    if (typeof Data.recalculateAbonentCardWithRows !== "function" || typeof Data.buildCardSnapshotFromCurrentResult !== "function" || typeof Data.saveCardSnapshotAndWait !== "function") {
         if (progress) progress.textContent = "Snapshot API unavailable: Data snapshot API is not loaded.";
         alert("Snapshot API недоступен: Data snapshot API не загружен.");
         return;
@@ -1840,7 +1840,9 @@ function summaryBatchYield(delayMs){
 
 function summaryBatchResultStatus(result){
     const status = String(result && (result.summary_status || result.status) || "").toLowerCase();
-    if (result && result.ok === true && status === "fresh") return "fresh";
+    const rowsById = result && result.rowsById && typeof result.rowsById === "object" && !Array.isArray(result.rowsById) ? result.rowsById : {};
+    const rowsByIdCount = Number(result && result.rowsByIdCount || Object.keys(rowsById).length || 0);
+    if (result && result.ok === true && status === "fresh" && rowsByIdCount > 0) return "fresh";
     return "error";
 }
 
@@ -2060,44 +2062,34 @@ async function processClientSummaryBatchJob(jobId, totalAccepted, mode){
             let reason = "CLIENT_RECALC_FAILED";
             let summary = {};
             try {
-                if (batchMode === "snapshot") {
-                    result = await Data.recalculateAbonentCardWithRows(uid, {
-                        saveSummary: false,
-                        summaryScope: "full",
-                        recalcMode: "FULL_SUMMARY_REBUILD",
-                        mode: "FULL_SUMMARY_REBUILD",
-                        timeoutMs: 15000
-                    });
-                    summaryBatchPerfStats.push({
-                        uid: uid,
-                        account: summaryBatchAccountLabel(uid),
-                        durationMs: Number(result && result.rowsBuildDurationMs || 0),
-                        profileTotalMs: Number(result && result.profileTotalMs || 0),
-                        profileSteps: Array.isArray(result && result.profileSteps) ? result.profileSteps : [],
-                        rowsBuildProfileTotalMs: Number(result && result.rowsBuildProfileTotalMs || 0),
-                        rowsBuildProfileSteps: Array.isArray(result && result.rowsBuildProfileSteps) ? result.rowsBuildProfileSteps : [],
-                        rowsByIdSource: String(result && result.rowsByIdSource || ""),
-                        runtimeCacheHit: result && result.runtimeCacheHit === true,
-                        runtimeCacheReason: String(result && result.runtimeCacheReason || ""),
-                        calcTotalsAsOfAdjustedCallCount: Number(result && result.calcTotalsAsOfAdjustedCallCount || 0),
-                        calcTotalsAsOfAdjustedCacheHits: Number(result && result.calcTotalsAsOfAdjustedCacheHits || 0),
-                        calcTotalsAsOfAdjustedAvgMs: Number(result && result.calcTotalsAsOfAdjustedAvgMs || 0),
-                        calcTotalsAsOfAdjustedMaxMs: Number(result && result.calcTotalsAsOfAdjustedMaxMs || 0),
-                        uniqueAsOfKeys: Number(result && result.uniqueAsOfKeys || 0),
-                        ledgerRowsCount: Number(result && result.ledgerRowsCount || 0),
-                        filteredRowsCount: Number(result && result.filteredRowsCount || 0),
-                        rowsByIdCount: Number(result && result.rowsByIdCount || 0),
-                        reason: String(result && (result.summary_reason || result.reason) || "")
-                    });
-                } else {
-                    result = await Data.recalculateAbonentCard(uid, {
-                        saveSummary: false,
-                        summaryScope: "full",
-                        recalcMode: "FULL_SUMMARY_REBUILD",
-                        mode: "FULL_SUMMARY_REBUILD",
-                        timeoutMs: 15000
-                    });
-                }
+                result = await Data.recalculateAbonentCardWithRows(uid, {
+                    saveSummary: false,
+                    summaryScope: "full",
+                    recalcMode: "FULL_SUMMARY_REBUILD",
+                    mode: "FULL_SUMMARY_REBUILD",
+                    timeoutMs: 15000
+                });
+                summaryBatchPerfStats.push({
+                    uid: uid,
+                    account: summaryBatchAccountLabel(uid),
+                    durationMs: Number(result && result.rowsBuildDurationMs || 0),
+                    profileTotalMs: Number(result && result.profileTotalMs || 0),
+                    profileSteps: Array.isArray(result && result.profileSteps) ? result.profileSteps : [],
+                    rowsBuildProfileTotalMs: Number(result && result.rowsBuildProfileTotalMs || 0),
+                    rowsBuildProfileSteps: Array.isArray(result && result.rowsBuildProfileSteps) ? result.rowsBuildProfileSteps : [],
+                    rowsByIdSource: String(result && result.rowsByIdSource || ""),
+                    runtimeCacheHit: result && result.runtimeCacheHit === true,
+                    runtimeCacheReason: String(result && result.runtimeCacheReason || ""),
+                    calcTotalsAsOfAdjustedCallCount: Number(result && result.calcTotalsAsOfAdjustedCallCount || 0),
+                    calcTotalsAsOfAdjustedCacheHits: Number(result && result.calcTotalsAsOfAdjustedCacheHits || 0),
+                    calcTotalsAsOfAdjustedAvgMs: Number(result && result.calcTotalsAsOfAdjustedAvgMs || 0),
+                    calcTotalsAsOfAdjustedMaxMs: Number(result && result.calcTotalsAsOfAdjustedMaxMs || 0),
+                    uniqueAsOfKeys: Number(result && result.uniqueAsOfKeys || 0),
+                    ledgerRowsCount: Number(result && result.ledgerRowsCount || 0),
+                    filteredRowsCount: Number(result && result.filteredRowsCount || 0),
+                    rowsByIdCount: Number(result && result.rowsByIdCount || 0),
+                    reason: String(result && (result.summary_reason || result.reason) || "")
+                });
             } catch (itemError) {
                 reason = String(itemError && itemError.message || itemError || "CLIENT_RECALC_FAILED");
                 result = null;
@@ -2106,16 +2098,16 @@ async function processClientSummaryBatchJob(jobId, totalAccepted, mode){
                 status = summaryBatchResultStatus(result);
                 reason = summaryBatchResultReason(result, status === "fresh" ? "RECALC_OK" : "CLIENT_RECALC_FAILED");
                 summary = result && result.summary || {};
-                if (batchMode === "snapshot" && status !== "fresh" && String(result.summary_status || result.status || "").toLowerCase() === "fresh") {
+                if (status !== "fresh" && String(result.summary_status || result.status || "").toLowerCase() === "fresh") {
                     status = "skipped";
-                    reason = String(result.reason || result.summary_reason || "ROWS_BY_ID_BUILD_FAILED");
+                    reason = String(result.reason || result.summary_reason || "ROWS_BY_ID_REQUIRED_FOR_FRESH");
                     const diagnostic = await collectSnapshotBackfillDiagnostic(uid, result, "recalculateAbonentCardWithRows", { snapshotReturned: false });
                     addSummaryBatchError(uid, reason, diagnostic);
                 }
             } else {
                 summary = { account_uid: uid, summary_status: "error", summary_reason: reason };
             }
-            if (batchMode === "snapshot" && status === "fresh") {
+            if (status === "fresh") {
                 const snapshot = Data.buildCardSnapshotFromCurrentResult(uid, result, {
                     rowsById: result && result.rowsById
                 });
