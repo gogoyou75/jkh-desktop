@@ -5728,6 +5728,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
         });
       } catch(eDupSameRunLog) {}
       endRecalcTotalTimer();
+      try { console.log("[manual-recalc][return] ALREADY_RUNNING"); } catch(eManualRecalcReturnLog) {}
       return { ok:false, reason:"RECALC_ALREADY_RUNNING", summary_status:"already_running", summary_reason:"RECALC_ALREADY_RUNNING", status:"already_running", duplicateIgnored:true, runId:runningFullRecalc.runId || runId };
     }
     if (runningFullRecalc && runningFullRecalc.abonentId && String(runningFullRecalc.abonentId) !== id) {
@@ -5740,14 +5741,17 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
         });
       } catch(eDupLog) {}
       endRecalcTotalTimer();
+      try { console.log("[manual-recalc][return] ALREADY_RUNNING"); } catch(eManualRecalcReturnLog) {}
       return { ok:false, reason:"RECALC_ALREADY_RUNNING", summary_status:"already_running", summary_reason:"RECALC_ALREADY_RUNNING", status:"already_running", duplicateIgnored:true, runId:runningFullRecalc.runId || runId };
     }
     if (!id) {
       endRecalcTotalTimer();
+      try { console.log("[manual-recalc][return] ABONENT_REQUIRED"); } catch(eManualRecalcReturnLog) {}
       return { ok:false, reason:"ABONENT_REQUIRED" };
     }
     if (!await waitPaymentTableHydratedDatabase("FULL_SUMMARY_REBUILD")) {
       endRecalcTotalTimer();
+      try { console.log("[manual-recalc][return] DB_NOT_HYDRATED"); } catch(eManualRecalcReturnLog) {}
       return { ok:false, reason:"DB_NOT_HYDRATED", summary_status:"error", summary_reason:"DB_NOT_HYDRATED" };
     }
     const mode = String(opts.recalcMode || opts.mode || "").trim().toUpperCase();
@@ -5764,6 +5768,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
     try {
       if (!window.Data || typeof Data.beginRecalcUidLock !== "function" || typeof Data.finishRecalcUidLock !== "function") {
         endRecalcTotalTimer();
+        try { console.log("[manual-recalc][return] LOCK_UNAVAILABLE"); } catch(eManualRecalcReturnLog) {}
         return { ok:false, reason:"RECALC_LOCK_UNAVAILABLE", summary_status:"error", summary_reason:"RECALC_LOCK_UNAVAILABLE" };
       }
       logFullRecalcStep(runId, "begin-lock", { abonentId: id });
@@ -5779,11 +5784,13 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
         try { console.log("[payment-table][recalc-explicit]", { runId: runId, abonentId: id, stage: "already_running", recalcMode: recalcMode }); } catch(eLogLock) {}
         try { console.log("[full-recalc][duplicate-call-ignored]", { runId: runId, abonentId: id, source: "recalc-lock", reason: "RECALC_ALREADY_RUNNING" }); } catch(eFullAlreadyLog) {}
         endRecalcTotalTimer();
+        try { console.log("[manual-recalc][return] ALREADY_RUNNING"); } catch(eManualRecalcReturnLog) {}
         return { ok:false, reason:"RECALC_ALREADY_RUNNING", summary_status:"already_running", summary_reason:"RECALC_ALREADY_RUNNING", status:"already_running", recalc_lock:recalcLock };
       }
       if (!recalcLock || recalcLock.ok !== true || recalcLock.status !== "started") {
         try { console.log("[full-recalc][result]", { abonentId: id, ok: false, summaryStatus: "error", summaryReason: "RECALC_LOCK_FAILED" }); } catch(eFullLockFailedLog) {}
         endRecalcTotalTimer();
+        try { console.log("[manual-recalc][return] LOCK_FAILED"); } catch(eManualRecalcReturnLog) {}
         return { ok:false, reason:(recalcLock && (recalcLock.reason || recalcLock.error)) || "RECALC_LOCK_FAILED", summary_status:"error", summary_reason:"RECALC_LOCK_FAILED", recalc_lock:recalcLock };
       }
       resetCalcTotalsHotspotReport(runId, id);
@@ -5801,6 +5808,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
         try { console.log("[payment-table][recalc-explicit]", { abonentId: id, stage: "autoaccrual_failed", reason: normalizeManualRecalcReason(autoResult && autoResult.reason) }); } catch(eLogAuto) {}
         try { console.log("[full-recalc][result]", { abonentId: id, ok: false, summaryStatus: "error", summaryReason: normalizeManualRecalcReason(autoResult && autoResult.reason), autoaccrualChanged: !!(autoResult && autoResult.changed) }); } catch(eFullAutoFailLog) {}
         endRecalcTotalTimer();
+        try { console.log("[manual-recalc][return] AUTOACCRUAL_FAILED"); } catch(eManualRecalcReturnLog) {}
         return { ok:false, reason:normalizeManualRecalcReason(autoResult && autoResult.reason), autoaccrual:autoResult, autoaccrual_changed:!!(autoResult && autoResult.changed) };
       }
       const alreadyFresh = tryReuseFreshFullRecalcRuntimeCache(id, {
@@ -5824,6 +5832,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
           });
         } catch(eAlreadyFreshResultLog) {}
         endRecalcTotalTimer();
+        try { console.log("[manual-recalc][return] ALREADY_FRESH"); } catch(eManualRecalcReturnLog) {}
         return {
           ok: true,
           reason: "ALREADY_FRESH",
@@ -5951,6 +5960,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
       throwIfFullRecalcAborted("summary-save");
       if (!window.Data || typeof Data.recalculateAbonentCard !== "function") {
         endRecalcTotalTimer();
+        try { console.log("[manual-recalc][return] SUMMARY_RECALC_UNAVAILABLE"); } catch(eManualRecalcReturnLog) {}
         return { ok:false, reason:"SUMMARY_RECALC_UNAVAILABLE", autoaccrual_changed:!!autoResult.changed, summary_status:"error", summary_reason:"SUMMARY_RECALC_UNAVAILABLE", summary:null, summary_save:{ ok:false, reason:"SUMMARY_RECALC_UNAVAILABLE" } };
       }
       logFullRecalcStep(runId, "summary-save", { abonentId: id });
@@ -6067,6 +6077,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
         });
       } catch(eMemoSummary) {}
       endRecalcTotalTimer();
+      try { console.log("[manual-recalc][return] SUCCESS"); } catch(eManualRecalcReturnLog) {}
       return {
         ok:!!(summaryResult && summaryResult.ok === true),
         reason: summaryResult && (summaryResult.summary_reason || summaryResult.reason) || "",
@@ -6081,6 +6092,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
     } catch(eFullRecalcAbort) {
       if (eFullRecalcAbort && eFullRecalcAbort.fullRecalcAbort === true) {
         endRecalcTotalTimer();
+        try { console.log("[manual-recalc][return] ABORTED"); } catch(eManualRecalcReturnLog) {}
         return fullRecalcAbortResult(eFullRecalcAbort, runId, id);
       }
       throw eFullRecalcAbort;
