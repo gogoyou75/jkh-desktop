@@ -84,3 +84,26 @@ Rules:
 - If graphify-out/wiki/index.md exists, use it for broad navigation instead of raw source browsing.
 - Read graphify-out/GRAPH_REPORT.md only for broad architecture review or when query/path/explain do not surface enough context.
 - After modifying code, run `graphify update .` to keep the graph current (AST-only, no API cost).
+
+### Continue / DeepSeek integration
+
+When working inside Continue Chat or Continue Plan:
+
+- Prefer Chat mode for diagnostics, architecture analysis, dependency tracing, lifecycle analysis, and root cause investigation.
+- Use Agent mode only when the user explicitly requests code modifications or file creation.
+- Treat Graphify as the primary navigation layer for large codebase exploration.
+- Before broad source browsing, prefer:
+  - `graphify query "<question>"`
+  - `graphify path "<A>" "<B>"`
+  - `graphify explain "<concept>"`
+- Verify important conclusions against the actual source code before making recommendations.
+- For diagnostic tasks, answer directly in chat instead of generating report files unless explicitly requested.
+- Do not create empty report files or placeholder commits.
+
+### Financial Safety
+
+Graphify provides navigation and dependency information only.
+
+Never treat Graphify output as the source of truth for financial calculations.
+
+All financial logic must be verified against the implementation in the source code before proposing or implementing changes.
