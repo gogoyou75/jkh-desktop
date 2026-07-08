@@ -5614,13 +5614,16 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
     const opts = options || {};
     if (opts.applyAutoAccrual !== true) return { ok:true, changed:false, reason:"SKIPPED" };
     if (!await waitPaymentTableHydratedDatabase("AUTOACCRUAL_WRITE")) {
+      try { console.log("[manual-recalc][autoaccrual]", { stage:"waitPaymentTableHydratedDatabase", reason:"DB_NOT_HYDRATED", error:null, result:false }); } catch(eManualRecalcAutoLog) {}
       return { ok:false, changed:false, reason:"DB_NOT_HYDRATED" };
     }
     if (!window.JKHAutoAccrual || typeof window.JKHAutoAccrual.dryRunForAbonent !== "function") {
+      try { console.log("[manual-recalc][autoaccrual]", { stage:"JKHAutoAccrual.dryRunForAbonent.unavailable", reason:"AUTOACCRUAL_UNAVAILABLE", error:null, result:null }); } catch(eManualRecalcAutoLog) {}
       return { ok:false, changed:false, reason:"AUTOACCRUAL_UNAVAILABLE" };
     }
     const responsibility = validateResponsibilityRangeForManualRecalc(abonentId, opts);
     if (!responsibility || responsibility.ok !== true) {
+      try { console.log("[manual-recalc][autoaccrual]", { stage:"validateResponsibilityRangeForManualRecalc", reason:normalizeManualRecalcReason(responsibility && responsibility.reason || "RESPONSIBILITY_PERIOD_MISSING"), error:null, result:responsibility || null }); } catch(eManualRecalcAutoLog) {}
       return {
         ok:false,
         changed:false,
@@ -5630,6 +5633,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
       };
     }
     if (detectManualRecalcTariffsMissing(abonentId, opts.period)) {
+      try { console.log("[manual-recalc][autoaccrual]", { stage:"detectManualRecalcTariffsMissing", reason:"TARIFFS_NOT_FOUND", error:null, result:true }); } catch(eManualRecalcAutoLog) {}
       return { ok:false, changed:false, reason:"TARIFFS_NOT_FOUND", responsibility:responsibility };
     }
 
@@ -5638,22 +5642,35 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
       result = await window.JKHAutoAccrual.dryRunForAbonent(abonentId);
     } catch (e) {
       const reason = normalizeManualRecalcReason(e && (e.code || e.reason || e.message) || e);
+      try { console.log("[manual-recalc][autoaccrual]", { stage:"JKHAutoAccrual.dryRunForAbonent.catch", reason:reason, error:e, result:null }); } catch(eManualRecalcAutoLog) {}
+      try { console.log("[manual-recalc][autoaccrual]", { stage:"JKHAutoAccrual.dryRunForAbonent.return", reason:reason, error:e, result:{ ok:false, changed:false, reason:reason, responsibility:responsibility } }); } catch(eManualRecalcAutoReturnLog) {}
       return { ok:false, changed:false, reason:reason, responsibility:responsibility };
     }
 
     const reason = normalizeManualRecalcReason(result && result.reason);
     if (!result || result.ok !== true) {
+      try { console.log("[manual-recalc][autoaccrual]", { stage:"JKHAutoAccrual.dryRunForAbonent.result", reason:reason, error:null, result:result || null }); } catch(eManualRecalcAutoLog) {}
       return { ok:false, changed:false, reason:reason, responsibility:responsibility };
     }
     if (reason === "RESPONSIBILITY_PERIOD_MISSING" || reason === "TARIFFS_NOT_FOUND" || reason === "LEDGER_JSON_INVALID") {
+      try { console.log("[manual-recalc][autoaccrual]", { stage:"JKHAutoAccrual.dryRunForAbonent.reason", reason:reason, error:null, result:result }); } catch(eManualRecalcAutoLog) {}
       return { ok:false, changed:false, reason:reason, responsibility:responsibility };
     }
 
     if (result.changed === true) {
       const proposedRows = Array.isArray(result.proposedRows) ? result.proposedRows : null;
-      if (!proposedRows) return { ok:false, changed:true, reason:"AUTOACCRUAL_ROWS_MISSING", autoaccrual:result };
-      if (!hasAccrualInManualRecalcPeriod(proposedRows, opts.period)) return { ok:false, changed:true, reason:"ACCRUALS_NOT_CREATED", autoaccrual:result };
-      if (!(window.Data && typeof Data.writePaymentLedger === "function")) return { ok:false, changed:true, reason:"LEDGER_WRITE_UNAVAILABLE", autoaccrual:result };
+      if (!proposedRows) {
+        try { console.log("[manual-recalc][autoaccrual]", { stage:"proposedRows", reason:"AUTOACCRUAL_ROWS_MISSING", error:null, result:result }); } catch(eManualRecalcAutoLog) {}
+        return { ok:false, changed:true, reason:"AUTOACCRUAL_ROWS_MISSING", autoaccrual:result };
+      }
+      if (!hasAccrualInManualRecalcPeriod(proposedRows, opts.period)) {
+        try { console.log("[manual-recalc][autoaccrual]", { stage:"hasAccrualInManualRecalcPeriod.proposedRows", reason:"ACCRUALS_NOT_CREATED", error:null, result:false }); } catch(eManualRecalcAutoLog) {}
+        return { ok:false, changed:true, reason:"ACCRUALS_NOT_CREATED", autoaccrual:result };
+      }
+      if (!(window.Data && typeof Data.writePaymentLedger === "function")) {
+        try { console.log("[manual-recalc][autoaccrual]", { stage:"Data.writePaymentLedger.unavailable", reason:"LEDGER_WRITE_UNAVAILABLE", error:null, result:null }); } catch(eManualRecalcAutoLog) {}
+        return { ok:false, changed:true, reason:"LEDGER_WRITE_UNAVAILABLE", autoaccrual:result };
+      }
       const savedLedger = window.Data.writePaymentLedger(abonentId, proposedRows, { eventType:"AUTOACCRUAL_WRITE", summaryDirtyReason:false });
       if (savedLedger === false) {
         const block = window.__JKH_LAST_AUTOACCRUAL_BLOCK || null;
@@ -5673,6 +5690,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
           result.writeBlockReason = "ZERO_ACCRUAL_OVERWRITE_BLOCKED";
           result.reason = "ZERO_ACCRUAL_OVERWRITE_BLOCKED";
         } else {
+          try { console.log("[manual-recalc][autoaccrual]", { stage:"Data.writePaymentLedger", reason:"PAYMENT_LEDGER_WRITE_BLOCKED", error:null, result:savedLedger }); } catch(eManualRecalcAutoLog) {}
           return { ok:false, changed:true, reason:"PAYMENT_LEDGER_WRITE_BLOCKED", autoaccrual:result };
         }
       }
@@ -5692,12 +5710,14 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
         if (window.Data && typeof Data.flushDbToServer === "function") {
           await Data.flushDbToServer();
         } else {
+          try { console.log("[manual-recalc][autoaccrual]", { stage:"Data.flushDbToServer.unavailable", reason:"SERVER_FLUSH_UNAVAILABLE", error:null, result:null }); } catch(eManualRecalcAutoLog) {}
           return { ok:false, changed:true, reason:"SERVER_FLUSH_UNAVAILABLE", autoaccrual:result };
         }
       }
     }
 
     if (result.changed !== true && !hasAccrualInManualRecalcPeriod(getPayments(), opts.period)) {
+      try { console.log("[manual-recalc][autoaccrual]", { stage:"hasAccrualInManualRecalcPeriod.currentPayments", reason:"ACCRUALS_NOT_CREATED", error:null, result:false }); } catch(eManualRecalcAutoLog) {}
       return { ok:false, changed:false, reason:"ACCRUALS_NOT_CREATED", autoaccrual:result };
     }
 
@@ -5808,6 +5828,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
         try { console.log("[payment-table][recalc-explicit]", { abonentId: id, stage: "autoaccrual_failed", reason: normalizeManualRecalcReason(autoResult && autoResult.reason) }); } catch(eLogAuto) {}
         try { console.log("[full-recalc][result]", { abonentId: id, ok: false, summaryStatus: "error", summaryReason: normalizeManualRecalcReason(autoResult && autoResult.reason), autoaccrualChanged: !!(autoResult && autoResult.changed) }); } catch(eFullAutoFailLog) {}
         endRecalcTotalTimer();
+        try { console.log("[manual-recalc][autoaccrual]", { stage:"fullRecalcForCurrentAbonent.autoResult", reason:normalizeManualRecalcReason(autoResult && autoResult.reason), error:null, result:autoResult || null }); } catch(eManualRecalcAutoLog) {}
         try { console.log("[manual-recalc][return] AUTOACCRUAL_FAILED"); } catch(eManualRecalcReturnLog) {}
         return { ok:false, reason:normalizeManualRecalcReason(autoResult && autoResult.reason), autoaccrual:autoResult, autoaccrual_changed:!!(autoResult && autoResult.changed) };
       }
