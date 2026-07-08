@@ -176,10 +176,41 @@
     return null;
   }
 
+  function _projectRawDiagnosticUid(key) {
+    var m = String(key || "").match(/^payments_(uid_[a-z0-9][a-z0-9_-]*)$/i);
+    return m ? m[1] : "";
+  }
+
+  function _logManualRecalcProjectRaw(payload) {
+    try {
+      console.log("[manual-recalc][project-raw]", Object.assign({
+        stage: "",
+        httpStatus: null,
+        responseBody: null,
+        exception: null,
+        requestUrl: null,
+        requestPayloadSize: null,
+        storageKey: "",
+        owner: _ownerId(),
+        uid: ""
+      }, payload || {}));
+    } catch (eProjectRawLog) {}
+  }
+
   function _setProjectRaw(key, value) {
     try {
-      if (window.JKHStore && typeof JKHStore.setRaw === "function") return JKHStore.setRaw(key, value);
-    } catch (e) { }
+      if (window.JKHStore && typeof JKHStore.setRaw === "function") {
+        var result = JKHStore.setRaw(key, value);
+        if (result === false) {
+          _logManualRecalcProjectRaw({ stage:"JKHStore.setRaw.return_false", requestPayloadSize:String(value == null ? "" : value).length, storageKey:String(key || ""), uid:_projectRawDiagnosticUid(key), exception:null });
+        }
+        return result;
+      }
+      _logManualRecalcProjectRaw({ stage:"JKHStore.setRaw.unavailable", requestPayloadSize:String(value == null ? "" : value).length, storageKey:String(key || ""), uid:_projectRawDiagnosticUid(key), exception:null });
+    } catch (e) {
+      _logManualRecalcProjectRaw({ stage:"JKHStore.setRaw.exception", requestPayloadSize:String(value == null ? "" : value).length, storageKey:String(key || ""), uid:_projectRawDiagnosticUid(key), exception:e });
+    }
+    _logManualRecalcProjectRaw({ stage:"_setProjectRaw.return_false", requestPayloadSize:String(value == null ? "" : value).length, storageKey:String(key || ""), uid:_projectRawDiagnosticUid(key), exception:null });
     return false;
   }
 
@@ -1912,6 +1943,7 @@
     var payload = JSON.stringify(Array.isArray(rows) ? rows : []);
     var ok = _setProjectRaw(key, payload);
     if (ok === false) {
+      _logManualRecalcProjectRaw({ stage:"writePaymentLedger._setProjectRaw.false", requestPayloadSize:payload.length, storageKey:key, uid:uid, exception:null });
       try { console.log("[manual-recalc][ledger-block]", { stage:"_setProjectRaw", subreason:"PROJECT_RAW_WRITE_FAILED", existingRows:oldRows.length, newRows:newRows.length, proposedRows:newRows, blockedBy:"_setProjectRaw", details:{ abonentId:id, uid:uid, key:key, eventType:opts.eventType || "" } }); } catch(eLedgerBlockLog) {}
     }
     if (ok !== false && opts.event !== false) {

@@ -193,6 +193,27 @@
 
   var __tariffServerReadDiagSeen = {};
 
+  function _projectRawDiagnosticUid(baseKey) {
+    var m = String(baseKey || "").match(/^payments_(uid_[a-z0-9][a-z0-9_-]*)$/i);
+    return m ? m[1] : "";
+  }
+
+  function _logManualRecalcProjectRaw(payload) {
+    try {
+      console.log("[manual-recalc][project-raw]", Object.assign({
+        stage: "",
+        httpStatus: null,
+        responseBody: null,
+        exception: null,
+        requestUrl: null,
+        requestPayloadSize: null,
+        storageKey: "",
+        owner: normalizeOwnerId(payload && payload.owner || getActiveOwnerId()),
+        uid: ""
+      }, payload || {}));
+    } catch (eProjectRawLog) {}
+  }
+
   function _diagnoseTariffServerRead(baseKey, ownerId, localRaw) {
     try {
       var key = String(baseKey || "");
@@ -243,12 +264,37 @@
   }
 
   function setItem(key, value, ownerId) {
-    if (!_guardCalcPeriodWrite(key, ownerId, "setItem")) return false;
-    if (isGuestMode()) throw new Error("GUEST_READONLY");
-    if (isAllMode()) throw new Error("ALLMODE_READONLY");
-    if (isGlobalProjectKey(key) && !_isAdmin()) throw new Error("GLOBAL_ADMIN_ONLY");
-    if (_isProjectDataKey(key)) { _cacheSet(key, value, ownerId); return; }
-    _lsSetDirect(k(key, ownerId), value);
+    if (!_guardCalcPeriodWrite(key, ownerId, "setItem")) {
+      _logManualRecalcProjectRaw({ stage:"storage.setItem.calcPeriodGuard", requestPayloadSize:String(value == null ? "" : value).length, storageKey:String(key || ""), owner:ownerId || getActiveOwnerId(), uid:_projectRawDiagnosticUid(key), exception:null });
+      return false;
+    }
+    if (isGuestMode()) {
+      _logManualRecalcProjectRaw({ stage:"storage.setItem.guestReadonly", requestPayloadSize:String(value == null ? "" : value).length, storageKey:String(key || ""), owner:ownerId || getActiveOwnerId(), uid:_projectRawDiagnosticUid(key), exception:"GUEST_READONLY" });
+      throw new Error("GUEST_READONLY");
+    }
+    if (isAllMode()) {
+      _logManualRecalcProjectRaw({ stage:"storage.setItem.allModeReadonly", requestPayloadSize:String(value == null ? "" : value).length, storageKey:String(key || ""), owner:ownerId || getActiveOwnerId(), uid:_projectRawDiagnosticUid(key), exception:"ALLMODE_READONLY" });
+      throw new Error("ALLMODE_READONLY");
+    }
+    if (isGlobalProjectKey(key) && !_isAdmin()) {
+      _logManualRecalcProjectRaw({ stage:"storage.setItem.globalAdminOnly", requestPayloadSize:String(value == null ? "" : value).length, storageKey:String(key || ""), owner:ownerId || getActiveOwnerId(), uid:_projectRawDiagnosticUid(key), exception:"GLOBAL_ADMIN_ONLY" });
+      throw new Error("GLOBAL_ADMIN_ONLY");
+    }
+    if (_isProjectDataKey(key)) {
+      try {
+        _cacheSet(key, value, ownerId);
+      } catch (eCacheSet) {
+        _logManualRecalcProjectRaw({ stage:"storage._cacheSet.exception", requestPayloadSize:String(value == null ? "" : value).length, storageKey:String(key || ""), owner:ownerId || getActiveOwnerId(), uid:_projectRawDiagnosticUid(key), exception:eCacheSet });
+        throw eCacheSet;
+      }
+      return;
+    }
+    try {
+      _lsSetDirect(k(key, ownerId), value);
+    } catch (eLsSet) {
+      _logManualRecalcProjectRaw({ stage:"storage._lsSetDirect.exception", requestPayloadSize:String(value == null ? "" : value).length, storageKey:String(key || ""), owner:ownerId || getActiveOwnerId(), uid:_projectRawDiagnosticUid(key), exception:eLsSet });
+      throw eLsSet;
+    }
   }
 
   function removeItem(key, ownerId) {
