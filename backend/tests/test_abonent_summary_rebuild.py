@@ -1880,7 +1880,7 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         calc_after = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
         self.assertEqual(calc_before, calc_after)
 
-    def test_card_auto_recalc_when_snapshot_not_fresh_contract(self):
+    def test_card_snapshot_open_lifecycle_does_not_auto_recalc_contract(self):
         card_path = self._find_repo_file("web", "abonent_card.html")
         calc_engine_path = self._find_repo_file("web", "calc_engine.js")
         self.assertIsNotNone(card_path)
@@ -1892,6 +1892,8 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         self.assertIn("function __requestCardAutoRecalc", card_source)
         self.assertIn("function __maybeStartCardAutoRecalc", card_source)
         self.assertIn("function __skipCardAutoRecalcFreshSnapshot", card_source)
+        self.assertIn("function __renderAbonentTotalsFromSummary", card_source)
+        self.assertIn("function __summaryFromCardSnapshot", card_source)
         self.assertIn("[abonent_card][auto-recalc]", card_source)
         self.assertIn('"skipped fresh snapshot"', card_source)
         self.assertIn('"already in flight"', card_source)
@@ -1903,10 +1905,17 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         self.assertIn("runBtn.click()", card_source)
 
         status_body = card_source.split("async function loadAbonentSummaryStatus()", 1)[1].split("function __summaryCalcErrorCode", 1)[0]
-        self.assertIn('__requestCardAutoRecalc(uid, "CARD_SNAPSHOT_MISSING", "missing")', status_body)
-        self.assertIn('__requestCardAutoRecalc(uid, snapshot.dirtyReason || "CARD_SNAPSHOT_DIRTY", "dirty")', status_body)
-        self.assertIn('__requestCardAutoRecalc(uid, "CARD_ROWS_NOT_RESTORED", "dirty")', status_body)
+        self.assertNotIn("__requestCardAutoRecalc(", status_body)
+        self.assertIn('__resetCardAutoRecalcForUid(uid)', status_body)
+        self.assertIn('renderAbonentSummaryStatus("missing", "Нет сохранённого расчёта. Нажмите «Пересчитать»")', status_body)
+        self.assertIn('renderAbonentSummaryStatus("dirty", "Требуется пересчёт. Показан последний сохранённый расчёт")', status_body)
+        self.assertIn("__renderAbonentTotalsFromSummary(dirtySummary)", status_body)
+        self.assertIn("__renderAbonentTotalsFromSummary(invalidSummary)", status_body)
         self.assertIn("__skipCardAutoRecalcFreshSnapshot(uid)", status_body)
+
+        invalid_event_body = card_source.split('window.addEventListener("jkh:card-snapshot-invalid"', 1)[1].split("function __baseStorageKeyForCurrentOwner", 1)[0]
+        self.assertNotIn("__requestCardAutoRecalc(", invalid_event_body)
+        self.assertIn("__resetCardAutoRecalcForUid(uid)", invalid_event_body)
 
         calc_after = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
         self.assertEqual(calc_before, calc_after)

@@ -3878,8 +3878,8 @@ function __summaryStatusText(status){
 
 function __summaryWarningText(status){
     if (status === "calculating") return "Выполняется пересчёт…";
-    if (status === "dirty") return "Итог устарел — нажмите «Пересчитать». Старые totals не считаются актуальными.";
-    if (status === "missing") return "Итог ещё не создан. Старые totals не подставляются. Нажмите «Пересчитать», чтобы создать summary.";
+    if (status === "dirty") return "Требуется пересчёт. Показан последний сохранённый расчёт. Нажмите «Пересчитать», чтобы обновить итог.";
+    if (status === "missing") return "Нет сохранённого расчёта. Нажмите «Пересчитать».";
     if (status === "cancelled") return "Пересчёт остановлен пользователем. Частичные данные не сохранялись как актуальный итог.";
     if (status === "timeout") return "Пересчёт остановлен по таймауту. Частичные данные не сохранялись как актуальный итог.";
     if (status === "error") return "Расчёт summary невозможен. Проверьте причину ошибки и выполните «Пересчитать» после исправления данных.";
@@ -4048,7 +4048,7 @@ window.addEventListener("jkh:card-snapshot-invalid", function(event){
     __debugCurrentCardSnapshotLifecycle(reason);
     try {
         const uid = getAbonentTechnicalIdFromURL();
-        if (uid) __requestCardAutoRecalc(uid, reason, "dirty");
+        if (uid) __resetCardAutoRecalcForUid(uid);
     } catch(eAutoRequest) {}
     if (__lastRenderedSummaryStatusLocal === "fresh" || __normalizeSummaryStatus(window.__lastCardSummaryForDebug && window.__lastCardSummaryForDebug.summary_status) === "fresh") {
         renderAbonentSummaryStatus("dirty", reason);
@@ -4133,33 +4133,33 @@ async function loadAbonentSummaryStatus(){
         if (!snapshot) {
             __debugCurrentCardSnapshotLifecycle("CARD_SNAPSHOT_MISSING");
             window.__lastCardSummaryForDebug = null;
-            renderAbonentSummaryStatus("missing", "Требуется пересчёт");
-            __requestCardAutoRecalc(uid, "CARD_SNAPSHOT_MISSING", "missing");
+            __resetCardAutoRecalcForUid(uid);
+            renderAbonentSummaryStatus("missing", "Нет сохранённого расчёта. Нажмите «Пересчитать»");
             return;
         }
         if (snapshot.dirty === true) {
             __debugCurrentCardSnapshotLifecycle(snapshot.dirtyReason || "CARD_SNAPSHOT_DIRTY");
             __cardSnapshotFreshValidated = false;
             __lastCardSnapshotValidation = { valid: false, reason: snapshot.dirtyReason || "CARD_SNAPSHOT_DIRTY" };
-            window.__lastCardSummaryForDebug = null;
-            renderAbonentSummaryStatus("dirty", snapshot.dirtyReason || "Требуется пересчёт");
-            __requestCardAutoRecalc(uid, snapshot.dirtyReason || "CARD_SNAPSHOT_DIRTY", "dirty");
+            const dirtySummary = __summaryFromCardSnapshot(snapshot, "dirty", snapshot.dirtyReason || "Требуется пересчёт");
+            window.__lastCardSummaryForDebug = dirtySummary;
+            __resetCardAutoRecalcForUid(uid);
+            renderAbonentSummaryStatus("dirty", "Требуется пересчёт. Показан последний сохранённый расчёт");
+            __renderAbonentTotalsFromSummary(dirtySummary);
             return;
         }
         if (!__isFreshCardSnapshotUsable(uid, snapshot)) {
             __debugCurrentCardSnapshotLifecycle("CARD_ROWS_NOT_RESTORED");
-            window.__lastCardSummaryForDebug = null;
+            const invalidSummary = __summaryFromCardSnapshot(snapshot, "dirty", "CARD_ROWS_NOT_RESTORED");
+            window.__lastCardSummaryForDebug = invalidSummary;
             __cardSnapshotFreshValidated = false;
             __lastCardSnapshotValidation = { valid: false, reason: "CARD_ROWS_NOT_RESTORED" };
+            __resetCardAutoRecalcForUid(uid);
             renderAbonentSummaryStatus("dirty", "CARD_ROWS_NOT_RESTORED");
-            __requestCardAutoRecalc(uid, "CARD_ROWS_NOT_RESTORED", "dirty");
+            __renderAbonentTotalsFromSummary(invalidSummary);
             return;
         }
-        const summary = {
-            summary_status: snapshot.summary_status || "fresh",
-            summary_reason: snapshot.summary_reason || "",
-            totals: snapshot.totals || {}
-        };
+        const summary = __summaryFromCardSnapshot(snapshot, snapshot.summary_status || "fresh", snapshot.summary_reason || "");
         window.__lastCardSummaryForDebug = summary;
         __cardSnapshotFreshValidated = true;
         __lastCardSnapshotValidation = { valid: true, reason: "", detail: { uid: uid, ledgerVersion: snapshot.ledgerVersion, rowsByIdCount: Object.keys(snapshot.rowsById).length } };
@@ -4169,8 +4169,8 @@ async function loadAbonentSummaryStatus(){
         __renderAbonentTotalsFromFreshSummary(summary);
     } catch (e) {
         const reason = String(e && e.message || e || "CARD_SNAPSHOT_READ_ERROR");
+        __resetCardAutoRecalcForUid(uid);
         renderAbonentSummaryStatus("error", reason);
-        __requestCardAutoRecalc(uid, reason || "CARD_SNAPSHOT_READ_ERROR", "error");
     }
 }
 
@@ -4189,6 +4189,10 @@ function __renderAbonentTotalsFromFreshSummary(summary){
     const status = __normalizeSummaryStatus(summary && (summary.summary_status || summary.status));
     if (status !== "fresh") return;
     if (!__freshSummaryVisibleGuard().ok) return;
+    __renderAbonentTotalsFromSummary(summary);
+}
+
+function __renderAbonentTotalsFromSummary(summary){
     const totals = summary && summary.totals && typeof summary.totals === "object" ? summary.totals : null;
     if (!totals) return;
 
@@ -4208,6 +4212,15 @@ function __renderAbonentTotalsFromFreshSummary(summary){
     put(document.getElementById('abonent_total_debt') || document.getElementById('total_debt') || document.querySelector('[data-field="total_debt"]') || document.querySelector('[data-total="debt"]'), total);
     put(document.getElementById('abonent_total_main_debt') || document.getElementById('total_main_debt') || document.querySelector('[data-field="total_main_debt"]'), principal);
     put(document.getElementById('abonent_total_penalty_debt') || document.getElementById('total_penalty_debt') || document.querySelector('[data-field="total_penalty_debt"]'), penalty);
+}
+
+function __summaryFromCardSnapshot(snapshot, statusOverride, reasonOverride){
+    const sourceStatus = statusOverride || snapshot && (snapshot.summary_status || snapshot.status) || "missing";
+    return {
+        summary_status: sourceStatus,
+        summary_reason: reasonOverride || snapshot && (snapshot.summary_reason || snapshot.reason) || "",
+        totals: snapshot && snapshot.totals && typeof snapshot.totals === "object" ? snapshot.totals : {}
+    };
 }
 
 async function __saveAbonentSummaryAfterUidRecalc(abonentId, from, to){
@@ -4266,10 +4279,10 @@ function bindCalcButtons(){
             state.cancelled = true;
             state.abortRequested = true;
             state.abortReason = "FULL_RECALC_CANCELLED";
-            state.abortMessage = "Пересчёт остановлен пользователем";
+            state.abortMessage = "Запрошена остановка пересчёта пользователем";
             state.cancelledAt = Date.now();
             state.currentStage = String(state.currentStage || "cancel-requested");
-            renderAbonentSummaryStatus((window.JKH_SUMMARY_STATUS && window.JKH_SUMMARY_STATUS.CALCULATING) || "calculating", "Останавливаем пересчёт…");
+            renderAbonentSummaryStatus((window.JKH_SUMMARY_STATUS && window.JKH_SUMMARY_STATUS.CALCULATING) || "calculating", "Запрошена остановка пересчёта…");
             __setFullRecalcStopVisible(false);
         });
     }

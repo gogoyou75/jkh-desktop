@@ -1,252 +1,63 @@
 # HANDOFF
 
-Дата: 2026-07-08
+Date: 2026-07-08
 
----
+## Current Task
 
-# Текущая задача
+Stabilize the abonent card lifecycle:
 
-Исправление архитектуры расчёта карточки абонента.
+- make card snapshot freshness and dirty detection explicit;
+- prevent full recalc from starting only because the card was opened;
+- keep showing the last successful snapshot when data is dirty;
+- require a manual recalc unless a future task explicitly enables an allowed auto-flow.
 
-Цель:
+## Current Branch / Commits
 
-Карточка абонента должна самостоятельно выполнять полный серверный расчёт при необходимости.
+- Branch: `lab-card-ab-01`
+- Baseline HEAD at start of this task: `a628434 fix: persist fresh card status after auto recalc`
+- Relevant earlier commit: `18773e1 fix: auto recalc abonent card when snapshot is not fresh`
 
-После успешного расчёта состояние должно сохраняться.
+## What Was Discovered
 
-Повторный вход в карточку без изменений НЕ должен запускать новый full recalc.
+- `index.html` and `abonent_card.html` are related but use different state surfaces:
+  - index reads `abonent_summary`;
+  - card opening reads `card_snapshot`.
+- A successful card recalc updating index/summary is expected behavior.
+- The root issue is not in `web/calc_engine.js`.
+- The problem is lifecycle/state handling: when snapshot/status is dirty or missing, the card must diagnose and display state, not immediately start heavy full recalc.
+- `temporary_court_period` and period report totals are separate from full summary and must not mark full summary fresh.
 
-calc_engine.js менять запрещено.
+## Desired Behavior
 
----
+- Fresh snapshot: show calculated totals, status "Итог актуален", no auto recalc.
+- Dirty snapshot: show the last saved totals, status "Требуется пересчёт. Показан последний сохранённый расчёт", no auto recalc.
+- Missing snapshot: show "Нет сохранённого расчёта. Нажмите 'Пересчитать'", no auto recalc.
+- Invalid/error snapshot: show error/diagnostic status, no infinite auto-recalc loop.
+- Manual full recalc continues through `fullRecalcForCurrentAbonent` / `Data.recalculateAbonentCard`, saves `card_snapshot` with readback, and updates `abonent_summary` for index.
 
-# Что уже сделано
+## What Not To Do
 
-## Диагностика
+- Do not change `web/calc_engine.js`.
+- Do not create a second calculation engine.
+- Do not change penalty formula, FIFO, transfer, merge, or split financial logic.
+- Do not clear old totals only because snapshot is dirty.
+- Do not run full recalc on every card open.
+- Do not mix `period_report_totals` / `temporary_court_period` with full summary freshness.
+- Do not run recalc for all abonents as part of this lifecycle fix.
 
-Установлено:
+## Next Step
 
-- связь "Index -> Card" как обязательная не подтверждена;
-- index может создавать card_snapshot;
-- карточка использует snapshot только для быстрого отображения;
-- auto-recalc добавлен для случаев:
-    missing
-    dirty
-    invalid
-    error
+Manual LAB verification:
 
-Коммит:
+1. Open fresh abonent `1008` repeatedly and confirm full recalc does not start.
+2. Open dirty abonent `1008` or another dirty test abonent and confirm it shows stale saved totals plus manual recalc prompt, without auto start.
+3. Open abonent `1007` to verify existing period/full summary isolation still holds.
+4. Click `Пересчитать` manually and confirm snapshot is saved with readback, card status becomes fresh, and index shows fresh.
+5. Make a financial change and confirm the card becomes dirty while still showing the last saved calculation.
 
-18773e1
+## Tools Note
 
----
-
-## Что работает
-
-После открытия карточки:
-
-auto-recalc действительно запускается.
-
-После окончания:
-
-- долги появляются;
-- пени появляются;
-- расчёт значительно быстрее прежнего.
-
-Index после этого показывает абонента как рассчитанного.
-
----
-
-# Обнаруженная проблема
-
-После успешного auto-recalc:
-
-карточка продолжает считать, что
-
-summary = missing
-
-или
-
-"Основной итог карточки требует пересчёта"
-
-Из-за этого:
-
-повторный вход
-
-↓
-
-новый auto-recalc
-
-↓
-
-повторный вход
-
-↓
-
-ещё один auto-recalc
-
-То есть возникает цикл.
-
----
-
-# Дополнительная проблема
-
-Кнопка
-
-"Остановить пересчёт"
-
-не останавливает выполняющийся процесс.
-
-Нужно проверить:
-
-есть ли реальная отмена задачи,
-
-или кнопка меняет только интерфейс.
-
----
-
-# Главная гипотеза
-
-Очень вероятно,
-
-что после успешного recalc
-
-обновляются разные источники данных.
-
-Например:
-
-Index читает один источник.
-
-Карточка проверяет другой.
-
-Нужно установить:
-
-что именно считается признаком
-
-fresh.
-
----
-
-# Что НЕ делать
-
-НЕ менять:
-
-calc_engine.js
-
-НЕ переписывать архитектуру.
-
-НЕ делать массовый рефакторинг.
-
-НЕ устранять симптомы.
-
-Сначала найти
-
-единственную причину.
-
----
-
-# Инструменты
-
-Graphify
-
-настроен.
-
-post-commit автоматически выполняет
-
-graphify update .
-
-Continue
-
-настроен.
-
-Использовать:
-
-Chat
-
-для анализа.
-
-Agent
-
-только для изменения кода.
-
----
-
-# Проверенное состояние проекта
-
-Workspace
-
-C:\Users\SERGIO TOBETO\Documents\GitHub\jkh-desktop
-
-branch
-
-lab-card-ab-01
-
-HEAD
-
-18773e1
-
-Graphify
-
-работает.
-
-Continue
-
-индексирует проект.
-
-DeepSeek Chat
-
-работает корректно.
-
----
-
-# Следующий шаг
-
-Найти,
-
-почему после успешного auto-recalc
-
-карточка продолжает видеть
-
-summary = missing
-
-и снова запускает полный расчёт.
-
-Проверить цепочку:
-
-auto-recalc
-
-↓
-
-saveCardSnapshot()
-
-↓
-
-save summary
-
-↓
-
-render summary status
-
-↓
-
-условие
-
-"fresh"
-
-↓
-
-решение
-
-нужен ли следующий recalc.
-
----
-
-# Важно
-
-При открытии новой сессии:
-
-сначала прочитать этот файл,
-
-после чего продолжать работу именно с этого места,
-
-не повторяя уже выполненную диагностику.
+- Graphify is configured; post-commit hook runs `graphify update .`.
+- Use Continue Chat/Plan for diagnostics and architecture analysis.
+- Use Agent mode only for explicit file modifications.
+- DeepSeek through Continue may print raw DSML `tool_calls`; for evidence-based audits, prefer Codex plus `rg`/grep and source verification.
