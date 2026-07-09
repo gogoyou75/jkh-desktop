@@ -2114,6 +2114,36 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         calc_after = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
         self.assertEqual(calc_before, calc_after)
 
+    def test_manual_full_recalc_hydrates_global_refinancing_rates_before_sync_calc(self):
+        payment_path = self._find_repo_file("web", "payment_table.js")
+        calc_engine_path = self._find_repo_file("web", "calc_engine.js")
+        self.assertIsNotNone(payment_path)
+        self.assertIsNotNone(calc_engine_path)
+        payment_source = payment_path.read_text(encoding="utf-8")
+        calc_before = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
+
+        self.assertIn("async function ensureGlobalRefinancingRatesHydrated", payment_source)
+        self.assertIn("refinancing_rates_normal_v1", payment_source)
+        self.assertIn("refinancing_rates_moratorium_v1", payment_source)
+        self.assertIn("JKHStore.setRaw(String(key), value)", payment_source)
+        self.assertIn('"/api/store?key=" + encodeURIComponent(key)', payment_source)
+        self.assertIn("rates_hydrate_before_recalc_start", payment_source)
+        self.assertIn("rates_hydrate_global_key_loaded", payment_source)
+        self.assertIn("rates_hydrate_global_key_missing_after_fetch", payment_source)
+        self.assertIn("rates_hydrate_before_recalc_done", payment_source)
+
+        full_recalc_body = payment_source.split("window.fullRecalcForCurrentAbonent", 1)[1].split("window.__loadPaymentTable", 1)[0]
+        hydrate_pos = full_recalc_body.index('ensureGlobalRefinancingRatesHydrated("payment_table.fullRecalcForCurrentAbonent.before-sync-calc")')
+        begin_lock_pos = full_recalc_body.index('logFullRecalcStep(runId, "begin-lock"')
+        autoaccrual_pos = full_recalc_body.index('logFullRecalcStep(runId, "autoaccrual"')
+        runtime_rows_pos = full_recalc_body.index('logFullRecalcStep(runId, "build-runtime-rows-before-summary"')
+        self.assertLess(hydrate_pos, begin_lock_pos)
+        self.assertLess(hydrate_pos, autoaccrual_pos)
+        self.assertLess(hydrate_pos, runtime_rows_pos)
+
+        calc_after = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
+        self.assertEqual(calc_before, calc_after)
+
     def test_backend_global_refinancing_rates_are_read_for_active_owner(self):
         normal_rates = json.dumps([{"from": "2020-01-01", "rate": 7.5}], ensure_ascii=False)
         moratorium_rates = json.dumps([{"from": "2020-01-01", "rate": 0}], ensure_ascii=False)

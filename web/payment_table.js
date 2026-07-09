@@ -4136,6 +4136,103 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
   const REFI_KEY_MORA = (window.JKH_CONST && window.JKH_CONST.REFI_KEY_MORA)
     ? window.JKH_CONST.REFI_KEY_MORA
     : "refinancing_rates_moratorium_v1";
+
+  async function ensureGlobalRefinancingRatesHydrated(source){
+    const keys = [REFI_KEY_NORMAL, REFI_KEY_MORA];
+    const ownerId = currentOwnerIdForPaymentCache();
+    const result = {
+      ok: true,
+      source: String(source || ""),
+      ownerId: String(ownerId || ""),
+      loaded: [],
+      existing: [],
+      missing: []
+    };
+    try {
+      console.log("[manual-recalc][rates-hydrate]", {
+        reason: "rates_hydrate_before_recalc_start",
+        source: result.source,
+        ownerId: result.ownerId,
+        keys
+      });
+    } catch(eStartLog) {}
+    for (let i = 0; i < keys.length; i += 1) {
+      const key = keys[i];
+      let raw = storeGetRaw(key);
+      if (raw !== null && raw !== undefined && String(raw) !== "") {
+        result.existing.push(key);
+        continue;
+      }
+      if (typeof fetch !== "function") {
+        result.ok = false;
+        result.missing.push(key);
+        continue;
+      }
+      try {
+        const url = "/api/store?key=" + encodeURIComponent(key) + "&client_owner_hint=" + encodeURIComponent(ownerId);
+        const res = await fetch(url, { method: "GET", credentials: "include" });
+        let data = null;
+        try { data = await res.json(); } catch(eJson) {}
+        const value = data && data.value;
+        if (res.ok && data && data.ok === true && value !== null && value !== undefined && String(value) !== "") {
+          storeSetRaw(key, String(value));
+          raw = storeGetRaw(key);
+          if (raw !== null && raw !== undefined && String(raw) !== "") {
+            result.loaded.push(key);
+            try {
+              console.log("[manual-recalc][rates-hydrate]", {
+                reason: "rates_hydrate_global_key_loaded",
+                source: result.source,
+                ownerId: result.ownerId,
+                key: key,
+                serverOwner: String(data && data.owner || ""),
+                rawLength: String(raw || "").length
+              });
+            } catch(eLoadedLog) {}
+            continue;
+          }
+        }
+        result.ok = false;
+        result.missing.push(key);
+        try {
+          console.warn("[manual-recalc][rates-hydrate]", {
+            reason: "rates_hydrate_global_key_missing_after_fetch",
+            source: result.source,
+            ownerId: result.ownerId,
+            key: key,
+            serverOk: !!(res.ok && data && data.ok === true),
+            serverOwner: String(data && data.owner || ""),
+            status: res.status
+          });
+        } catch(eMissingLog) {}
+      } catch(eFetch) {
+        result.ok = false;
+        result.missing.push(key);
+        try {
+          console.warn("[manual-recalc][rates-hydrate]", {
+            reason: "rates_hydrate_global_key_missing_after_fetch",
+            source: result.source,
+            ownerId: result.ownerId,
+            key: key,
+            error: String(eFetch && eFetch.message || eFetch)
+          });
+        } catch(eFetchLog) {}
+      }
+    }
+    try {
+      console.log("[manual-recalc][rates-hydrate]", {
+        reason: "rates_hydrate_before_recalc_done",
+        source: result.source,
+        ownerId: result.ownerId,
+        ok: result.ok,
+        existing: result.existing,
+        loaded: result.loaded,
+        missing: result.missing
+      });
+    } catch(eDoneLog) {}
+    return result;
+  }
+
   function excludePeriodsKey() { return "exclude_periods_" + getAbonentTechnicalId(); }
   function moratoriumKey() { return "moratorium_" + getAbonentTechnicalId(); }
 
@@ -5961,6 +6058,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
       try { console.log("[manual-recalc][return] DB_NOT_HYDRATED"); } catch(eManualRecalcReturnLog) {}
       return { ok:false, reason:"DB_NOT_HYDRATED", summary_status:"error", summary_reason:"DB_NOT_HYDRATED" };
     }
+    await ensureGlobalRefinancingRatesHydrated("payment_table.fullRecalcForCurrentAbonent.before-sync-calc");
     const mode = String(opts.recalcMode || opts.mode || "").trim().toUpperCase();
     const explicitReportPeriod = (mode === "REPORT_PERIOD_CALCULATION" || mode === "REPORT" || mode === "PERIOD" || String(opts.summaryScope || opts.summary_scope || "").toLowerCase() === "period")
       && opts.period && isManualRecalcPeriodValid(opts.period);
