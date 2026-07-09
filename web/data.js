@@ -1075,7 +1075,8 @@
     }
   }
 
-  function _validateFreshCardSnapshotForCurrentInputs(abonentOrId, snapshot, source) {
+  function _validateFreshCardSnapshotForCurrentInputs(abonentOrId, snapshot, source, options) {
+    var opts = options && typeof options === "object" ? options : {};
     var normalized = _normalizeCardSnapshot(abonentOrId, snapshot);
     if (!normalized) return { ok: false, reason: "CARD_SNAPSHOT_INVALID", snapshot: null };
     var status = String(normalized.summary_status || normalized.snapshot_status || normalized.status || "").toLowerCase();
@@ -1085,6 +1086,18 @@
     }
     var rowsByIdCount = _cardSnapshotRowsByIdCount(normalized.rowsById);
     if (rowsByIdCount <= 0) return { ok: false, reason: "CARD_SNAPSHOT_ROWS_MISSING", snapshot: normalized };
+    if (opts.validateLocalInputs === false) {
+      return {
+        ok: true,
+        reason: "OK",
+        snapshot: normalized,
+        source: String(source || ""),
+        currentLedgerVersion: "",
+        snapshotLedgerVersion: String(normalized.ledgerVersion || normalized.ledger_version || ""),
+        rowsByIdCount: rowsByIdCount,
+        localInputValidationSkipped: true
+      };
+    }
 
     var currentVersions = computeFinancialInputVersions(abonentOrId);
     var currentLedgerVersion = String(currentVersions.ledger_version || computeLedgerRuntimeVersion(abonentOrId) || "");
@@ -1140,7 +1153,9 @@
       try { console.log("[card-snapshot][backend-read-through]", { uid: uid, reason: "card_auto_recalc_backend_snapshot_missing" }); } catch (eMissingLog) {}
       return { ok: false, reason: "card_auto_recalc_backend_snapshot_missing", snapshot: null, status: res.status };
     }
-    var validation = _validateFreshCardSnapshotForCurrentInputs(abonent || uid, serverSnapshot, "backend_card_snapshot");
+    var validation = _validateFreshCardSnapshotForCurrentInputs(abonent || uid, serverSnapshot, "backend_card_snapshot", {
+      validateLocalInputs: opts.validateLocalInputs !== false
+    });
     if (!validation.ok) {
       try {
         console.warn("[card-snapshot][backend-read-through]", {

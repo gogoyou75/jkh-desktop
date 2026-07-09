@@ -1903,37 +1903,45 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         self.assertIn("[abonent_card][backend-snapshot]", card_source)
         self.assertIn('"skipped fresh snapshot"', card_source)
         self.assertIn('"already in flight"', card_source)
-        self.assertIn('"start"', card_source)
+        self.assertIn('"blocked passive cache"', card_source)
         self.assertIn('"done"', card_source)
         self.assertIn('"error"', card_source)
         self.assertIn('__maybeStartCardAutoRecalc("payment-table-loaded:" + String(reason || ""))', card_source)
-        self.assertIn('renderAbonentSummaryStatus(state.requestedStatus || "dirty", "Требуется пересчёт. Запускаю пересчёт карточки...")', card_source)
-        self.assertIn("runBtn.click()", card_source)
+        self.assertIn("card_auto_recalc_disabled_passive_cache", card_source)
+        self.assertNotIn('renderAbonentSummaryStatus(state.requestedStatus || "dirty", "Требуется пересчёт. Запускаю пересчёт карточки...")', card_source)
 
         status_body = card_source.split("async function loadAbonentSummaryStatus()", 1)[1].split("function __summaryCalcErrorCode", 1)[0]
         self.assertNotIn("__requestCardAutoRecalc(", status_body)
-        self.assertIn('if (await __tryUseBackendFreshSnapshot(uid, "CARD_SNAPSHOT_MISSING")) return;', status_body)
-        self.assertIn('if (await __tryUseBackendFreshSnapshot(uid, snapshot.dirtyReason || "CARD_SNAPSHOT_DIRTY")) return;', status_body)
-        self.assertIn('if (await __tryUseBackendFreshSnapshot(uid, "CARD_ROWS_NOT_RESTORED")) return;', status_body)
+        self.assertIn('if (await __tryUseBackendFreshSnapshot(uid, "CARD_OPEN_BACKEND_FIRST")) return;', status_body)
+        self.assertLess(status_body.index('__tryUseBackendFreshSnapshot(uid, "CARD_OPEN_BACKEND_FIRST")'), status_body.index("Data.readCardSnapshot(uid)"))
         self.assertIn('__resetCardAutoRecalcForUid(uid)', status_body)
         self.assertIn('renderAbonentSummaryStatus("missing", "Нет сохранённого расчёта. Нажмите «Пересчитать»")', status_body)
-        self.assertIn('renderAbonentSummaryStatus("dirty", "Требуется пересчёт. Показан последний сохранённый расчёт")', status_body)
-        self.assertIn("__renderAbonentTotalsFromSummary(dirtySummary)", status_body)
+        self.assertIn('renderAbonentSummaryStatus("missing", "Серверный snapshot недоступен. Локальный cache не является источником актуальности.")', status_body)
+        self.assertIn("__renderAbonentTotalsFromSummary(cachedSummary)", status_body)
         self.assertIn("__renderAbonentTotalsFromSummary(invalidSummary)", status_body)
-        self.assertIn('__renderFreshCardSnapshot(uid, snapshot, "local_card_snapshot")', status_body)
+        self.assertIn('__renderFreshCardSnapshot(uid, snapshot, "local_card_snapshot_passive_fallback")', status_body)
         fresh_render_body = card_source.split("function __renderFreshCardSnapshot", 1)[1].split("async function __tryUseBackendFreshSnapshot", 1)[0]
         self.assertIn("__skipCardAutoRecalcFreshSnapshot(uid)", fresh_render_body)
 
         invalid_event_body = card_source.split('window.addEventListener("jkh:card-snapshot-invalid"', 1)[1].split("function __baseStorageKeyForCurrentOwner", 1)[0]
         self.assertNotIn("__requestCardAutoRecalc(", invalid_event_body)
         self.assertIn("__resetCardAutoRecalcForUid(uid)", invalid_event_body)
+        self.assertNotIn('renderAbonentSummaryStatus("dirty"', invalid_event_body)
+        runtime_invalid_body = card_source.split('window.addEventListener("jkh:runtime-cache-invalid"', 1)[1].split('window.addEventListener("jkh:runtime-cache-valid"', 1)[0]
+        self.assertNotIn('renderAbonentSummaryStatus("dirty"', runtime_invalid_body)
+        storage_recheck_body = card_source.split('window.addEventListener("storage"', 1)[1].split("function __isFreshCardSnapshotUsable", 1)[0]
+        self.assertNotIn('new CustomEvent("jkh:card-snapshot-invalid"', storage_recheck_body)
+        self.assertIn("card_local_snapshot_invalid_passive", card_source)
 
         auto_recalc_body = card_source.split("async function __maybeStartCardAutoRecalc", 1)[1].split("function __logFullRecalcEventIgnored", 1)[0]
         self.assertIn('if (await __tryUseBackendFreshSnapshot(uid, state.lastReason || "AUTO_RECALC_GATE"))', auto_recalc_body)
-        self.assertLess(auto_recalc_body.index("__tryUseBackendFreshSnapshot"), auto_recalc_body.index("runBtn.click()"))
+        self.assertNotIn("runBtn.click()", auto_recalc_body)
+        self.assertIn("card_auto_recalc_disabled_passive_cache", auto_recalc_body)
 
         self.assertIn("async function readFreshBackendCardSnapshotForCard", data_source)
         self.assertIn("_validateFreshCardSnapshotForCurrentInputs", data_source)
+        self.assertIn("validateLocalInputs: false", card_source)
+        self.assertIn("localInputValidationSkipped", data_source)
         self.assertIn("readFreshBackendCardSnapshotForCard: readFreshBackendCardSnapshotForCard", data_source)
         for reason in (
             "card_backend_snapshot_used",

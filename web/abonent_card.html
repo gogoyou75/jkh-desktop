@@ -3764,55 +3764,18 @@ async function __maybeStartCardAutoRecalc(source){
         state.done = true;
         return;
     }
-    const activeRun = __currentFullRecalcRun();
-    if (activeRun) {
-        state.pending = false;
-        state.done = true;
-        try {
-            console.log("[abonent_card][auto-recalc]", {
-                event: "already in flight",
-                uid: uid,
-                source: String(source || ""),
-                runId: String(activeRun.runId || "")
-            });
-        } catch(eActiveLog) {}
-        return;
-    }
-    if (!__isHydratedDatabaseReady() || !__abonentCardServerRepairDone) {
-        setTimeout(function(){ __maybeStartCardAutoRecalc("wait-data-ready"); }, 250);
-        return;
-    }
-    if (__paymentTableLoading || __paymentTableLoadScheduled) {
-        setTimeout(function(){ __maybeStartCardAutoRecalc("wait-payment-table"); }, 250);
-        return;
-    }
-    if (typeof window.fullRecalcForCurrentAbonent !== "function") {
-        setTimeout(function(){ __maybeStartCardAutoRecalc("wait-full-recalc-api"); }, 250);
-        return;
-    }
-    const runBtn = document.getElementById("calcRunBtn");
-    if (!runBtn) {
-        setTimeout(function(){ __maybeStartCardAutoRecalc("wait-run-button"); }, 250);
-        return;
-    }
-    if (runBtn.disabled) {
-        try { console.log("[abonent_card][auto-recalc]", { event: "already in flight", uid: uid, source: "button-disabled" }); } catch(eDisabledLog) {}
-        return;
-    }
     state.pending = false;
-    state.inFlight = true;
-    state.startedAt = Date.now();
-    renderAbonentSummaryStatus(state.requestedStatus || "dirty", "Требуется пересчёт. Запускаю пересчёт карточки...");
+    state.inFlight = false;
+    state.done = true;
     try {
         console.log("[abonent_card][auto-recalc]", {
-            event: "start",
+            event: "blocked passive cache",
             uid: uid,
-            reason: String(state.lastReason || ""),
+            reason: "card_auto_recalc_disabled_passive_cache",
+            originalReason: String(state.lastReason || ""),
             source: String(source || "")
         });
-    } catch(eStartLog) {}
-    runBtn.click();
-    __monitorCardAutoRecalc(uid);
+    } catch(eBlockedLog) {}
 }
 
 function __logFullRecalcEventIgnored(eventName, detail){
@@ -3997,14 +3960,7 @@ window.addEventListener("jkh:runtime-cache-invalid", function(event){
     __runtimeCacheFreshBlocked = true;
     __lastRuntimeCacheValidation = { valid: false, reason: reason, detail: detail };
     try { console.warn("[summary][runtime-cache-downgrade]", detail); } catch(eLog) {}
-    if (__cardSnapshotFreshValidated && __lastCardSnapshotValidation.valid) return;
-    if (__lastRenderedSummaryStatusLocal === "fresh" && __lastCardSnapshotValidation && __lastCardSnapshotValidation.valid === false && __lastCardSnapshotValidation.reason) {
-        renderAbonentSummaryStatus("dirty", __lastCardSnapshotValidation.reason);
-        return;
-    }
-    if (__lastRenderedSummaryStatusLocal === "fresh") {
-        renderAbonentSummaryStatus("dirty", reason === "RUNTIME_CACHE_PERIOD_MISMATCH" ? "Требуется пересчёт таблицы для выбранного периода" : reason);
-    }
+    try { console.log("[summary][runtime-cache-passive]", { reason: reason, source: String(detail.source || "") }); } catch(ePassiveLog) {}
 });
 
 window.addEventListener("jkh:runtime-cache-valid", function(event){
@@ -4051,14 +4007,12 @@ window.addEventListener("jkh:card-snapshot-invalid", function(event){
     __cardSnapshotFreshValidated = false;
     __lastCardSnapshotValidation = { valid: false, reason: reason, detail: detail };
     try { console.warn("[summary][card-snapshot-invalid]", detail); } catch(eLog) {}
+    try { console.log("[summary][card-local-snapshot-passive]", { reason: "card_local_snapshot_invalid_passive", detailReason: reason }); } catch(ePassiveLog) {}
     __debugCurrentCardSnapshotLifecycle(reason);
     try {
         const uid = getAbonentTechnicalIdFromURL();
         if (uid) __resetCardAutoRecalcForUid(uid);
     } catch(eAutoRequest) {}
-    if (__lastRenderedSummaryStatusLocal === "fresh" || __normalizeSummaryStatus(window.__lastCardSummaryForDebug && window.__lastCardSummaryForDebug.summary_status) === "fresh") {
-        renderAbonentSummaryStatus("dirty", reason);
-    }
 });
 
 function __baseStorageKeyForCurrentOwner(storageKey){
@@ -4104,7 +4058,14 @@ window.addEventListener("storage", function(event){
             if (!window.Data || typeof Data.readCardSnapshot !== "function" || !uid) return;
             const snapshot = Data.readCardSnapshot(uid);
             if (snapshot && snapshot.dirty === true) {
-                window.dispatchEvent(new CustomEvent("jkh:card-snapshot-invalid", { detail: { reason: snapshot.dirtyReason || "FINANCIAL_INPUT_CHANGED", source: "storage", key: baseKey } }));
+                try {
+                    console.log("[card-snapshot][storage-passive-cache-mismatch]", {
+                        reason: "card_local_snapshot_invalid_passive",
+                        detailReason: snapshot.dirtyReason || "FINANCIAL_INPUT_CHANGED",
+                        source: "storage",
+                        key: baseKey
+                    });
+                } catch(ePassiveLog) {}
             }
         } catch(e) {
             try { console.warn("[card-snapshot][storage-recheck-failed]", e); } catch(_) {}
@@ -4146,7 +4107,7 @@ async function __tryUseBackendFreshSnapshot(uid, reason){
     const normalizedUid = String(uid || "").trim();
     if (!normalizedUid || !window.Data || typeof Data.readFreshBackendCardSnapshotForCard !== "function") return false;
     try {
-        const result = await Data.readFreshBackendCardSnapshotForCard(normalizedUid, { hydrateLocal: true });
+        const result = await Data.readFreshBackendCardSnapshotForCard(normalizedUid, { hydrateLocal: true, validateLocalInputs: false });
         if (result && result.ok === true && result.snapshot) {
             try {
                 console.log("[abonent_card][backend-snapshot]", {
@@ -4193,40 +4154,36 @@ async function loadAbonentSummaryStatus(){
     }
 
     try {
+        if (await __tryUseBackendFreshSnapshot(uid, "CARD_OPEN_BACKEND_FIRST")) return;
         const snapshot = Data.readCardSnapshot(uid);
         if (!snapshot) {
-            __debugCurrentCardSnapshotLifecycle("CARD_SNAPSHOT_MISSING");
-            if (await __tryUseBackendFreshSnapshot(uid, "CARD_SNAPSHOT_MISSING")) return;
+            __debugCurrentCardSnapshotLifecycle("LOCAL_CARD_SNAPSHOT_MISSING_PASSIVE");
             window.__lastCardSummaryForDebug = null;
             __resetCardAutoRecalcForUid(uid);
             renderAbonentSummaryStatus("missing", "Нет сохранённого расчёта. Нажмите «Пересчитать»");
             return;
         }
         if (snapshot.dirty === true) {
-            __debugCurrentCardSnapshotLifecycle(snapshot.dirtyReason || "CARD_SNAPSHOT_DIRTY");
-            if (await __tryUseBackendFreshSnapshot(uid, snapshot.dirtyReason || "CARD_SNAPSHOT_DIRTY")) return;
-            __cardSnapshotFreshValidated = false;
-            __lastCardSnapshotValidation = { valid: false, reason: snapshot.dirtyReason || "CARD_SNAPSHOT_DIRTY" };
-            const dirtySummary = __summaryFromCardSnapshot(snapshot, "dirty", snapshot.dirtyReason || "Требуется пересчёт");
-            window.__lastCardSummaryForDebug = dirtySummary;
+            __debugCurrentCardSnapshotLifecycle(snapshot.dirtyReason || "LOCAL_CARD_SNAPSHOT_DIRTY_PASSIVE");
+            const cachedSummary = __summaryFromCardSnapshot(snapshot, "missing", "LOCAL_CARD_SNAPSHOT_DIRTY_PASSIVE");
+            window.__lastCardSummaryForDebug = cachedSummary;
             __resetCardAutoRecalcForUid(uid);
-            renderAbonentSummaryStatus("dirty", "Требуется пересчёт. Показан последний сохранённый расчёт");
-            __renderAbonentTotalsFromSummary(dirtySummary);
+            renderAbonentSummaryStatus("missing", "Серверный snapshot недоступен. Локальный cache не является источником актуальности.");
+            __renderAbonentTotalsFromSummary(cachedSummary);
             return;
         }
         if (!__isFreshCardSnapshotUsable(uid, snapshot)) {
-            __debugCurrentCardSnapshotLifecycle("CARD_ROWS_NOT_RESTORED");
-            if (await __tryUseBackendFreshSnapshot(uid, "CARD_ROWS_NOT_RESTORED")) return;
-            const invalidSummary = __summaryFromCardSnapshot(snapshot, "dirty", "CARD_ROWS_NOT_RESTORED");
+            __debugCurrentCardSnapshotLifecycle("LOCAL_CARD_SNAPSHOT_INVALID_PASSIVE");
+            const invalidSummary = __summaryFromCardSnapshot(snapshot, "missing", "LOCAL_CARD_SNAPSHOT_INVALID_PASSIVE");
             window.__lastCardSummaryForDebug = invalidSummary;
             __cardSnapshotFreshValidated = false;
-            __lastCardSnapshotValidation = { valid: false, reason: "CARD_ROWS_NOT_RESTORED" };
+            __lastCardSnapshotValidation = { valid: false, reason: "LOCAL_CARD_SNAPSHOT_INVALID_PASSIVE" };
             __resetCardAutoRecalcForUid(uid);
-            renderAbonentSummaryStatus("dirty", "CARD_ROWS_NOT_RESTORED");
+            renderAbonentSummaryStatus("missing", "Серверный snapshot недоступен. Локальный cache не является источником актуальности.");
             __renderAbonentTotalsFromSummary(invalidSummary);
             return;
         }
-        __renderFreshCardSnapshot(uid, snapshot, "local_card_snapshot");
+        __renderFreshCardSnapshot(uid, snapshot, "local_card_snapshot_passive_fallback");
     } catch (e) {
         const reason = String(e && e.message || e || "CARD_SNAPSHOT_READ_ERROR");
         __resetCardAutoRecalcForUid(uid);
