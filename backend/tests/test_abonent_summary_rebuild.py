@@ -2133,12 +2133,24 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         self.assertIn("rates_hydrate_global_key_loaded", payment_source)
         self.assertIn("rates_hydrate_global_key_missing_after_fetch", payment_source)
         self.assertIn("rates_hydrate_before_recalc_done", payment_source)
+        self.assertIn("async function waitForManualRecalcDataReady", payment_source)
+        self.assertIn("manual_recalc_data_ready_wait_start", payment_source)
+        self.assertIn("manual_recalc_data_ready_wait_done", payment_source)
+        self.assertIn("manual_recalc_data_ready_timeout", payment_source)
+        self.assertIn("manual_recalc_direct_rate_read_after_hydrate", payment_source)
+        self.assertIn("manual_recalc_env_prefix_check", payment_source)
+        self.assertIn('return { ok:false, reason:"DATA_READY_TIMEOUT"', payment_source)
 
         full_recalc_body = payment_source.split("window.fullRecalcForCurrentAbonent", 1)[1].split("window.__loadPaymentTable", 1)[0]
         hydrate_pos = full_recalc_body.index('ensureGlobalRefinancingRatesHydrated("payment_table.fullRecalcForCurrentAbonent.before-sync-calc")')
+        ready_pos = full_recalc_body.index('waitForManualRecalcDataReady("payment_table.fullRecalcForCurrentAbonent.before-sync-calc")')
         begin_lock_pos = full_recalc_body.index('logFullRecalcStep(runId, "begin-lock"')
         autoaccrual_pos = full_recalc_body.index('logFullRecalcStep(runId, "autoaccrual"')
         runtime_rows_pos = full_recalc_body.index('logFullRecalcStep(runId, "build-runtime-rows-before-summary"')
+        self.assertLess(hydrate_pos, ready_pos)
+        self.assertLess(ready_pos, begin_lock_pos)
+        self.assertLess(ready_pos, autoaccrual_pos)
+        self.assertLess(ready_pos, runtime_rows_pos)
         self.assertLess(hydrate_pos, begin_lock_pos)
         self.assertLess(hydrate_pos, autoaccrual_pos)
         self.assertLess(hydrate_pos, runtime_rows_pos)
@@ -2170,6 +2182,36 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         self.assertNotIn("storeSetRaw(key, String(value))", helper_recalc_body)
         self.assertIn("rates_hydrate_global_read_cache_written", helper_recalc_body)
         self.assertIn("rates_hydrate_global_read_cache_rejected", helper_recalc_body)
+
+    def test_manual_full_recalc_data_ready_wait_verifies_direct_rate_reads(self):
+        payment_path = self._find_repo_file("web", "payment_table.js")
+        calc_engine_path = self._find_repo_file("web", "calc_engine.js")
+        self.assertIsNotNone(payment_path)
+        self.assertIsNotNone(calc_engine_path)
+        payment_source = payment_path.read_text(encoding="utf-8")
+        calc_before = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
+
+        self.assertIn("function directGlobalRateReadState(source)", payment_source)
+        direct_body = payment_source.split("function directGlobalRateReadState(source)", 1)[1].split("function manualRecalcDataReadyForSync", 1)[0]
+        self.assertIn('JKHStore.getRaw(key)', direct_body)
+        self.assertIn("hasNormal", direct_body)
+        self.assertIn("hasMoratorium", direct_body)
+        self.assertIn("envType", direct_body)
+        self.assertIn("uiStatus", direct_body)
+        self.assertIn("jkhDataReady", direct_body)
+
+        wait_body = payment_source.split("async function waitForManualRecalcDataReady", 1)[1].split("function excludePeriodsKey", 1)[0]
+        self.assertIn("manualRecalcDataReadyForSync() && state.hasNormal && state.hasMoratorium", wait_body)
+        self.assertIn("Data.waitForServerFirstDataReady", wait_body)
+        self.assertIn("JKHDataLoader.loadFromServer", wait_body)
+        self.assertIn('reason: "manual_recalc_data_ready_timeout"', wait_body)
+        self.assertIn('return { ok: false, reason: "DATA_READY_TIMEOUT"', wait_body)
+
+        ready_body = payment_source.split("function manualRecalcDataReadyForSync()", 1)[1].split("async function waitForManualRecalcDataReady", 1)[0]
+        self.assertIn('String(st.status || "") === "ready"', ready_body)
+
+        calc_after = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
+        self.assertEqual(calc_before, calc_after)
 
     def test_backend_global_refinancing_rates_are_read_for_active_owner(self):
         normal_rates = json.dumps([{"from": "2020-01-01", "rate": 7.5}], ensure_ascii=False)

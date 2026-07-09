@@ -4246,6 +4246,93 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
     return result;
   }
 
+  function directGlobalRateReadState(source){
+    const keys = [REFI_KEY_NORMAL, REFI_KEY_MORA];
+    const out = {
+      source: String(source || ""),
+      envType: "",
+      uiStatus: "",
+      uiSource: "",
+      jkhDataReady: window.JKH_DATA_READY === true,
+      hasNormal: false,
+      hasMoratorium: false,
+      normalLength: 0,
+      moratoriumLength: 0
+    };
+    try {
+      out.envType = window.JKHStore && typeof JKHStore.getEnvType === "function" ? String(JKHStore.getEnvType() || "") : "";
+    } catch(eEnv) {}
+    try {
+      const st = window.JKH_UI_STATE && window.JKH_UI_STATE.data || {};
+      out.uiStatus = String(st.status || "");
+      out.uiSource = String(st.source || "");
+    } catch(eState) {}
+    for (let i = 0; i < keys.length; i += 1) {
+      const key = keys[i];
+      let raw = null;
+      try {
+        raw = window.JKHStore && typeof JKHStore.getRaw === "function" ? JKHStore.getRaw(key) : null;
+      } catch(eRaw) {}
+      const exists = raw !== null && raw !== undefined && String(raw) !== "";
+      if (key === REFI_KEY_NORMAL) {
+        out.hasNormal = exists;
+        out.normalLength = exists ? String(raw).length : 0;
+      } else if (key === REFI_KEY_MORA) {
+        out.hasMoratorium = exists;
+        out.moratoriumLength = exists ? String(raw).length : 0;
+      }
+    }
+    return out;
+  }
+
+  function manualRecalcDataReadyForSync(){
+    try {
+      const st = window.JKH_UI_STATE && window.JKH_UI_STATE.data;
+      return !!(st && String(st.status || "") === "ready");
+    } catch(e) {
+      return false;
+    }
+  }
+
+  async function waitForManualRecalcDataReady(source){
+    const timeoutMs = 5000;
+    const startedAt = Date.now();
+    try {
+      const startState = directGlobalRateReadState(source);
+      console.log("[manual-recalc][data-ready]", Object.assign({}, startState, { reason: "manual_recalc_data_ready_wait_start" }));
+      console.log("[manual-recalc][data-ready]", Object.assign({}, startState, { reason: "manual_recalc_direct_rate_read_after_hydrate" }));
+      console.log("[manual-recalc][data-ready]", Object.assign({}, startState, { reason: "manual_recalc_env_prefix_check" }));
+    } catch(eStartLog) {}
+    while ((Date.now() - startedAt) <= timeoutMs) {
+      const state = directGlobalRateReadState(source);
+      if (manualRecalcDataReadyForSync() && state.hasNormal && state.hasMoratorium) {
+        try {
+          console.log("[manual-recalc][data-ready]", Object.assign({}, state, {
+            reason: "manual_recalc_data_ready_wait_done",
+            elapsedMs: Date.now() - startedAt
+          }));
+        } catch(eDoneLog) {}
+        return { ok: true, state };
+      }
+      try {
+        if (window.Data && typeof Data.waitForServerFirstDataReady === "function") {
+          await Data.waitForServerFirstDataReady({ timeoutMs: 500 });
+        } else if (window.JKHDataLoader && typeof window.JKHDataLoader.loadFromServer === "function") {
+          await window.JKHDataLoader.loadFromServer({ force: false, reason: "manual_recalc_data_ready_wait" });
+        }
+      } catch(eWait) {}
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    const finalState = directGlobalRateReadState(source);
+    try {
+      console.warn("[manual-recalc][data-ready]", Object.assign({}, finalState, {
+        reason: "manual_recalc_data_ready_timeout",
+        elapsedMs: Date.now() - startedAt
+      }));
+    } catch(eTimeoutLog) {}
+    return { ok: false, reason: "DATA_READY_TIMEOUT", state: finalState };
+  }
+
   function excludePeriodsKey() { return "exclude_periods_" + getAbonentTechnicalId(); }
   function moratoriumKey() { return "moratorium_" + getAbonentTechnicalId(); }
 
@@ -6072,6 +6159,12 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
       return { ok:false, reason:"DB_NOT_HYDRATED", summary_status:"error", summary_reason:"DB_NOT_HYDRATED" };
     }
     await ensureGlobalRefinancingRatesHydrated("payment_table.fullRecalcForCurrentAbonent.before-sync-calc");
+    const dataReady = await waitForManualRecalcDataReady("payment_table.fullRecalcForCurrentAbonent.before-sync-calc");
+    if (!dataReady || dataReady.ok !== true) {
+      endRecalcTotalTimer();
+      try { console.log("[manual-recalc][return] DATA_READY_TIMEOUT"); } catch(eManualRecalcReadyReturnLog) {}
+      return { ok:false, reason:"DATA_READY_TIMEOUT", summary_status:"error", summary_reason:"DATA_READY_TIMEOUT", readiness:dataReady || null };
+    }
     const mode = String(opts.recalcMode || opts.mode || "").trim().toUpperCase();
     const explicitReportPeriod = (mode === "REPORT_PERIOD_CALCULATION" || mode === "REPORT" || mode === "PERIOD" || String(opts.summaryScope || opts.summary_scope || "").toLowerCase() === "period")
       && opts.period && isManualRecalcPeriodValid(opts.period);
