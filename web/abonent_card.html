@@ -3913,7 +3913,7 @@ function renderAbonentSummaryStatus(status, reason){
     }
     if (warningEl) {
         const modeMismatchReason = visibleReason === "CARD_SNAPSHOT_MODE_MISMATCH_FULL_VS_PERIOD" || visibleReason === "CARD_SNAPSHOT_PERIOD_MISMATCH" || visibleReason === "CARD_SNAPSHOT_LEGACY_MODE_AMBIGUOUS";
-        const text = modeMismatchReason ? "Сохранённый snapshot не соответствует текущему режиму расчёта. Нажмите «Пересчитать» для этого режима." : visibleReason === "CARD_ROWS_NOT_RESTORED"
+        const text = __isRatesSummaryReason(visibleReason) ? __ratesFatalLedgerVisibleMessage() : modeMismatchReason ? "Сохранённый snapshot не соответствует текущему режиму расчёта. Нажмите «Пересчитать» для этого режима." : visibleReason === "CARD_ROWS_NOT_RESTORED"
             ? "Итоги есть, но строки карточки не восстановлены. Нажмите «Пересчитать»."
             : __summaryWarningText(normalized);
         warningEl.textContent = text;
@@ -4185,6 +4185,15 @@ function __summaryCalcErrorCode(e){
     return msg || "CALC_FAILED";
 }
 
+function __isRatesSummaryReason(reason){
+    const code = String(reason || "");
+    return code === "RATES_MISSING" || code === "RATES_JSON_INVALID" || code === "MISSING_REQUIRED_RATE";
+}
+
+function __ratesFatalLedgerVisibleMessage(){
+    return "Ставки рефинансирования отсутствуют или повреждены. Начисления показаны, пеня и итоговый summary не рассчитаны.";
+}
+
 function __renderAbonentTotalsFromFreshSummary(summary){
     const status = __normalizeSummaryStatus(summary && (summary.summary_status || summary.status));
     if (status !== "fresh") return;
@@ -4326,6 +4335,9 @@ function bindCalcButtons(){
         }
         if (String(reason || "") === "DB_NOT_HYDRATED") {
             return "База данных ещё загружается. Повторите через несколько секунд.";
+        }
+        if (__isRatesSummaryReason(reason)) {
+            return __ratesFatalLedgerVisibleMessage();
         }
         if (String(reason || "") === "ZERO_ACCRUAL_OVERWRITE_BLOCKED" ||
             (String(reason || "") === "PAYMENT_LEDGER_WRITE_BLOCKED" && window.__JKH_LAST_AUTOACCRUAL_BLOCK && window.__JKH_LAST_AUTOACCRUAL_BLOCK.reason === "ZERO_ACCRUAL_OVERWRITE_BLOCKED")) {
@@ -4919,6 +4931,10 @@ function bindCalcButtons(){
                     }
                     rememberExplicitFullRecalcFinal("error", reason, recalcResult);
                     renderExplicitFullRecalcFinal("recalc-result-error");
+                    renderAbonentSummaryStatus("error", reason);
+                    if (__isRatesSummaryReason(reason)) {
+                        __safeLoadPaymentTableOnce("manual-full-recalc-rates-error");
+                    }
                     printRecalcCallCountReport("recalc-result-error", { force: true });
                     try { console.log("[full-recalc][ui-status-final]", { abonentId: String(currentAbonentId || ""), status: "error", reason: reason }); } catch(eUiFinalFailLog) {}
                     alert(manualRecalcErrorMessage(recalcResult, reason));

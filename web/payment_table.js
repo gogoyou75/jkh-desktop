@@ -1183,6 +1183,7 @@
   }
 
   const RATES_FATAL_MESSAGE = "Ставки рефинансирования отсутствуют или повреждены. Расчёт пени остановлен.";
+  const RATES_FATAL_LEDGER_VISIBLE_MESSAGE = "Ставки рефинансирования отсутствуют или повреждены. Начисления показаны, пеня и итоговый summary не рассчитаны.";
 
   function isRatesFatalError(e){
     const code = String(e && e.code || "");
@@ -1213,8 +1214,14 @@
 
   function renderRatesFatal(tbody){
     try { alert(RATES_FATAL_MESSAGE); } catch (_) {}
-    if (tbody) {
-      tbody.innerHTML = '<tr><td colspan="20" style="color:#b00020;font-weight:700;">' + RATES_FATAL_MESSAGE + '</td></tr>';
+    const hasRows = !!(tbody && tbody.querySelector && tbody.querySelector("tr[data-row-id]"));
+    const statusBox = qs("#paymentTableStatus") || qs("#paymentStatus") || qs("#paymentsStatus");
+    if (hasRows) {
+      if (statusBox) statusBox.textContent = RATES_FATAL_LEDGER_VISIBLE_MESSAGE;
+      try { console.warn("[payment-table][rates-fatal-rows-preserved]", { rows: tbody.querySelectorAll("tr[data-row-id]").length }); } catch(ePreserveLog) {}
+    } else if (tbody) {
+      tbody.innerHTML = '<tr><td colspan="20" style="color:#b00020;font-weight:700;">' + RATES_FATAL_MESSAGE + ' Строки ledger недоступны.</td></tr>';
+      if (statusBox) statusBox.textContent = RATES_FATAL_MESSAGE + " Строки ledger недоступны.";
     }
   }
 

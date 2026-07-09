@@ -1988,6 +1988,33 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         calc_after = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
         self.assertEqual(calc_before, calc_after)
 
+    def test_manual_card_recalc_rates_fatal_preserves_payment_rows_contract(self):
+        payment_path = self._find_repo_file("web", "payment_table.js")
+        card_path = self._find_repo_file("web", "abonent_card.html")
+        calc_engine_path = self._find_repo_file("web", "calc_engine.js")
+        self.assertIsNotNone(payment_path)
+        self.assertIsNotNone(card_path)
+        self.assertIsNotNone(calc_engine_path)
+        payment_source = payment_path.read_text(encoding="utf-8")
+        card_source = card_path.read_text(encoding="utf-8")
+        calc_before = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
+
+        self.assertIn("RATES_FATAL_LEDGER_VISIBLE_MESSAGE", payment_source)
+        render_rates_body = payment_source.split("function renderRatesFatal(tbody)", 1)[1].split("// ===========================", 1)[0]
+        self.assertIn('tbody.querySelector("tr[data-row-id]")', render_rates_body)
+        self.assertIn("[payment-table][rates-fatal-rows-preserved]", render_rates_body)
+        self.assertIn("Строки ledger недоступны", render_rates_body)
+
+        self.assertIn("function __isRatesSummaryReason(reason)", card_source)
+        self.assertIn("function __ratesFatalLedgerVisibleMessage()", card_source)
+        error_body = card_source.split('rememberExplicitFullRecalcFinal("error", reason, recalcResult);', 1)[1].split('alert(manualRecalcErrorMessage(recalcResult, reason));', 1)[0]
+        self.assertIn('renderAbonentSummaryStatus("error", reason);', error_body)
+        self.assertIn('__safeLoadPaymentTableOnce("manual-full-recalc-rates-error")', error_body)
+        self.assertNotIn("savePostRecalcSnapshot", error_body)
+
+        calc_after = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
+        self.assertEqual(calc_before, calc_after)
+
     def test_stage_13_2d_card_report_period_flow_diagnostics(self):
         card_path = self._find_repo_file("web", "abonent_card.html")
         payment_path = self._find_repo_file("web", "payment_table.js")
