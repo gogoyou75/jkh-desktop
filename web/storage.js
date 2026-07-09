@@ -217,7 +217,8 @@
   function _diagnoseTariffServerRead(baseKey, ownerId, localRaw) {
     try {
       var key = String(baseKey || "");
-      if (key.indexOf("tariffs_") !== 0) return;
+      var isRateKey = key === "refinancing_rates_normal_v1" || key === "refinancing_rates_moratorium_v1";
+      if (key.indexOf("tariffs_") !== 0 && !isRateKey) return;
       var owner = normalizeOwnerId(ownerId || getActiveOwnerId());
       if (!owner || owner === "guest" || owner === "ALL") return;
       if (typeof fetch !== "function") return;
@@ -232,14 +233,24 @@
           var serverValue = data && Object.prototype.hasOwnProperty.call(data, "value") && data.value !== null && data.value !== undefined
             ? String(data.value)
             : "";
+          var localExists = localValue !== "";
+          var serverExists = !!(data && data.ok === true && serverValue !== "");
           console.log("[diagnose][tariff-server-read]", {
             source: "JKHStore.getRaw",
             ownerId: owner,
             key: key,
-            localExists: localValue !== "",
-            serverExists: !!(data && data.ok === true && serverValue !== ""),
+            requestedKey: key,
+            localExists: localExists,
+            serverExists: serverExists,
+            serverOk: !!(data && data.ok === true),
+            serverOwner: String(data && data.owner || ""),
+            returnedKeysCount: serverValue !== "" ? 1 : 0,
             serverLength: serverValue.length,
-            localLength: localValue.length
+            localLength: localValue.length,
+            hasRefinancingRatesNormalV1: key === "refinancing_rates_normal_v1" && serverExists,
+            hasRefinancingRatesMoratoriumV1: key === "refinancing_rates_moratorium_v1" && serverExists,
+            localExistsFalseExpected: isRateKey && !localExists && serverExists,
+            reason: isRateKey && !localExists && serverExists ? "diagnose_rates_server_ok_local_false_expected" : (isRateKey && !serverExists ? "diagnose_rates_backend_missing" : "diagnose_rates_backend_exists")
           });
         })
         .catch(function (e) {
@@ -247,10 +258,17 @@
             source: "JKHStore.getRaw",
             ownerId: owner,
             key: key,
+            requestedKey: key,
             localExists: localValue !== "",
             serverExists: null,
+            serverOk: false,
+            returnedKeysCount: 0,
             serverLength: 0,
             localLength: localValue.length,
+            hasRefinancingRatesNormalV1: false,
+            hasRefinancingRatesMoratoriumV1: false,
+            localExistsFalseExpected: false,
+            reason: isRateKey ? "diagnose_rates_backend_missing" : "SERVER_READ_EXCEPTION",
             error: String(e && e.message || e)
           });
         });

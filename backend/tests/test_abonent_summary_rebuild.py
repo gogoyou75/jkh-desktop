@@ -2052,14 +2052,17 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
     def test_manual_card_recalc_rates_missing_diagnostics_contract(self):
         data_path = self._find_repo_file("web", "data.js")
         payment_path = self._find_repo_file("web", "payment_table.js")
+        storage_path = self._find_repo_file("web", "storage.js")
         refinancing_path = self._find_repo_file("web", "refinancing.html")
         calc_engine_path = self._find_repo_file("web", "calc_engine.js")
         self.assertIsNotNone(data_path)
         self.assertIsNotNone(payment_path)
+        self.assertIsNotNone(storage_path)
         self.assertIsNotNone(refinancing_path)
         self.assertIsNotNone(calc_engine_path)
         data_source = data_path.read_text(encoding="utf-8")
         payment_source = payment_path.read_text(encoding="utf-8")
+        storage_source = storage_path.read_text(encoding="utf-8")
         refinancing_source = refinancing_path.read_text(encoding="utf-8")
         calc_before = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
 
@@ -2081,9 +2084,28 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
             ):
                 self.assertIn(field, source)
 
+        for source in (data_source, payment_source, storage_source):
+            for field in (
+                "serverOk",
+                "serverOwner",
+                "requestedKey",
+                "returnedKeysCount",
+                "hasRefinancingRatesNormalV1",
+                "hasRefinancingRatesMoratoriumV1",
+                "localExistsFalseExpected",
+            ):
+                self.assertIn(field, source)
+        for source in (data_source, payment_source):
+            for field in ("normalShape", "moratoriumShape", "calcInputAssembly", "hasCalcEngineLoadRates"):
+                self.assertIn(field, source)
+
         self.assertIn('"server:/api/store:" + item.kind', data_source)
         self.assertIn("payment_table.throwRatesFatal", payment_source)
         self.assertIn("refinancing.html.server-load", refinancing_source)
+        self.assertIn("diagnose_rates_backend_exists", data_source + payment_source + storage_source)
+        self.assertIn("diagnose_rates_backend_shape_mismatch", data_source + payment_source)
+        self.assertIn("diagnose_rates_missing_in_calc_input", data_source)
+        self.assertIn("diagnose_rates_server_ok_local_false_expected", storage_source)
         self.assertIn("refinancing_rates_normal_v1", data_source)
         self.assertIn("refinancing_rates_moratorium_v1", data_source)
         self.assertIn("ref_rates_", data_source)
@@ -2091,6 +2113,36 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
 
         calc_after = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
         self.assertEqual(calc_before, calc_after)
+
+    def test_backend_global_refinancing_rates_are_read_for_active_owner(self):
+        normal_rates = json.dumps([{"from": "2020-01-01", "rate": 7.5}], ensure_ascii=False)
+        moratorium_rates = json.dumps([{"from": "2020-01-01", "rate": 0}], ensure_ascii=False)
+        with app_module.app.app_context():
+            self._add_user("owner-rates-read")
+            app_module.db.session.add(app_module.KVStore(
+                owner=app_module.GLOBAL_OWNER,
+                k="refinancing_rates_normal_v1",
+                v=normal_rates,
+            ))
+            app_module.db.session.add(app_module.KVStore(
+                owner=app_module.GLOBAL_OWNER,
+                k="refinancing_rates_moratorium_v1",
+                v=moratorium_rates,
+            ))
+            app_module.db.session.commit()
+        self._login("owner-rates-read")
+
+        response = self.client.get("/api/store?key=refinancing_rates_normal_v1&client_owner_hint=owner-rates-read")
+        payload = response.get_json()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["owner"], app_module.GLOBAL_OWNER)
+        self.assertEqual(json.loads(payload["value"]), [{"from": "2020-01-01", "rate": 7.5}])
+
+        keys = self.client.get("/api/store_keys?client_owner_hint=owner-rates-read").get_json()
+        self.assertIn("refinancing_rates_normal_v1", keys["keys"])
+        self.assertIn("refinancing_rates_moratorium_v1", keys["keys"])
 
     def test_stage_13_2d_card_report_period_flow_diagnostics(self):
         card_path = self._find_repo_file("web", "abonent_card.html")

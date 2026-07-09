@@ -5055,6 +5055,21 @@ def store_get():
                 ensure_ascii=False,
             ),
         )
+    if key in GLOBAL_KEYS:
+        app.logger.info(
+            "[diagnose][rates-server-read] %s",
+            json.dumps(
+                {
+                    "reason": "diagnose_rates_backend_exists" if row and (row.v or "") != "" else "diagnose_rates_backend_missing",
+                    "requested_key": key,
+                    "resolved_owner": owner_eff,
+                    "normalized_owner": owner,
+                    "value_exists": bool(row and (row.v or "") != ""),
+                    "value_length": len(row.v or "") if row else 0,
+                },
+                ensure_ascii=False,
+            ),
+        )
     if not row:
         _sync_log("load", owner_eff, server_owner=owner, client_owner_hint=client_owner_hint, key=key, status="not_found")
         return jsonify(ok=False, error="not_found", value=None), 404

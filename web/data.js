@@ -3860,6 +3860,24 @@
     return null;
   }
 
+  function _manualRatesDiagShape(raw) {
+    var out = { isArray: false, count: 0, firstKeys: [] };
+    if (raw === null || raw === undefined) return out;
+    try {
+      var parsed = JSON.parse(String(raw || ""));
+      out.isArray = Array.isArray(parsed);
+      out.count = Array.isArray(parsed) ? parsed.length : 0;
+      if (Array.isArray(parsed) && parsed.length && parsed[0] && typeof parsed[0] === "object") {
+        out.firstKeys = Object.keys(parsed[0]).slice(0, 12);
+      } else if (parsed && typeof parsed === "object") {
+        out.firstKeys = Object.keys(parsed).slice(0, 12);
+      }
+    } catch (eShape) {
+      out.parseError = String(eShape && eShape.message || eShape);
+    }
+    return out;
+  }
+
   function _emitManualRatesDiagnostic(ctx) {
     try {
       var ownerId = String(_ownerId() || "");
@@ -3887,6 +3905,8 @@
       if (rawMora === null || rawMora === undefined) rawMora = _manualRatesDiagRaw(ownerMora, ownerId);
       var parsedNormal = _manualRatesDiagParse(rawNormal);
       var parsedMora = _manualRatesDiagParse(rawMora);
+      var shapeNormal = _manualRatesDiagShape(rawNormal);
+      var shapeMora = _manualRatesDiagShape(rawMora);
       var payload = {
         uid: String(ctx && ctx.uid || ""),
         abonentId: String(ctx && ctx.abonentId || ""),
@@ -3901,12 +3921,16 @@
         moratoriumKeysChecked: moraKeys,
         rawNormalExists: rawNormal !== null && rawNormal !== undefined,
         rawMoratoriumExists: rawMora !== null && rawMora !== undefined,
+        normalShape: shapeNormal,
+        moratoriumShape: shapeMora,
         parsedNormalCount: parsedNormal.count,
         parsedMoratoriumCount: parsedMora.count,
         firstNormalRate: parsedNormal.first,
         lastNormalRate: parsedNormal.last,
         firstMoratoriumRate: parsedMora.first,
         lastMoratoriumRate: parsedMora.last,
+        hasCalcEngineLoadRates: !!(window.JKHCalcEngine && typeof window.JKHCalcEngine.loadRates === "function"),
+        calcInputAssembly: "JKHCalcEngine.loadRates_internal",
         source: String(ctx && ctx.source || "data.recalcAbonentSummaryExplicit"),
         reason: String(ctx && ctx.reason || "")
       };
@@ -3923,9 +3947,13 @@
                 var data = null;
                 try { data = JSON.parse(text); } catch (eJson) {}
                 var parsed = _manualRatesDiagParse(data && data.value);
+                var shape = _manualRatesDiagShape(data && data.value);
+                var serverHasRates = !!(res.ok && data && data.ok === true && parsed.count > 0);
                 console.log("[manual-recalc][rates]", Object.assign({}, payload, {
                   rawNormalExists: item.kind === "normal" ? data && data.value !== null && data.value !== undefined : payload.rawNormalExists,
                   rawMoratoriumExists: item.kind === "moratorium" ? data && data.value !== null && data.value !== undefined : payload.rawMoratoriumExists,
+                  normalShape: item.kind === "normal" ? shape : payload.normalShape,
+                  moratoriumShape: item.kind === "moratorium" ? shape : payload.moratoriumShape,
                   parsedNormalCount: item.kind === "normal" ? parsed.count : payload.parsedNormalCount,
                   parsedMoratoriumCount: item.kind === "moratorium" ? parsed.count : payload.parsedMoratoriumCount,
                   firstNormalRate: item.kind === "normal" ? parsed.first : payload.firstNormalRate,
@@ -3933,7 +3961,14 @@
                   firstMoratoriumRate: item.kind === "moratorium" ? parsed.first : payload.firstMoratoriumRate,
                   lastMoratoriumRate: item.kind === "moratorium" ? parsed.last : payload.lastMoratoriumRate,
                   source: "server:/api/store:" + item.kind,
-                  reason: res.ok && data && data.ok === true ? "SERVER_RATE_READ_OK" : "SERVER_RATE_READ_FAILED"
+                  serverOk: !!(res.ok && data && data.ok === true),
+                  serverOwner: String(data && data.owner || ""),
+                  requestedKey: item.key,
+                  returnedKeysCount: data && data.value !== null && data.value !== undefined ? 1 : 0,
+                  hasRefinancingRatesNormalV1: item.kind === "normal" && serverHasRates,
+                  hasRefinancingRatesMoratoriumV1: item.kind === "moratorium" && serverHasRates,
+                  localExistsFalseExpected: item.kind === "normal" ? payload.rawNormalExists === false && serverHasRates : payload.rawMoratoriumExists === false && serverHasRates,
+                  reason: serverHasRates ? "diagnose_rates_backend_exists" : (res.ok && data && data.ok === true ? "diagnose_rates_backend_shape_mismatch" : "diagnose_rates_backend_missing")
                 }));
               });
             })
@@ -4953,6 +4988,18 @@
     }
     console.time("[card-recalc] calc totals");
     try {
+      var summaryRateDiagMoraRaw = "";
+      try { summaryRateDiagMoraRaw = _getProjectRaw("moratorium_" + (uid || abonentId)); } catch (eSummaryMoraRaw) {}
+      _emitManualRatesDiagnostic({
+        uid: uid,
+        abonentId: abonentId,
+        moratorium: String(summaryRateDiagMoraRaw || "") === "1",
+        requestedDate: to,
+        periodFrom: from,
+        periodTo: to,
+        source: "data.buildAbonentSummaryAfterExplicitRecalc.before-calc",
+        reason: "diagnose_rates_missing_in_calc_input"
+      });
       _emitActiveFullRecalcHeartbeat("summary-calc-totals", true);
       var totals = window.JKHCalcEngine.calcTotalsAsOfAdjusted(rows, asOf, {
         abonentId: String(abonentId),
