@@ -3709,6 +3709,85 @@ def _snapshot_target_for_owner(owner_id: str, uid: str):
     return _owner_recalc_targets_by_uid(owner_id).get(uid)
 
 
+def _snapshot_rows_by_id_count(snapshot: dict):
+    rows_by_id = snapshot.get("rowsById") if isinstance(snapshot, dict) else None
+    if not isinstance(rows_by_id, dict):
+        return 0
+    return len([key for key, value in rows_by_id.items() if _norm_text(key) and isinstance(value, dict)])
+
+
+def _card_snapshot_validation_error(snapshot: dict, target: dict, uid: str):
+    if not isinstance(snapshot, dict) or not snapshot:
+        return "snapshot_invalid"
+
+    snapshot_uid = _snapshot_uid_from_payload(snapshot)
+    if not snapshot_uid:
+        return "account_uid_required"
+    if snapshot_uid != uid:
+        return "uid_mismatch"
+
+    target_abonent_id = _norm_text(target.get("abonent_id"))
+    snapshot_abonent_id = _norm_text(
+        snapshot.get("abonentId")
+        or snapshot.get("abonent_id")
+        or snapshot.get("account_id")
+    )
+    if not snapshot_abonent_id:
+        return "abonent_id_required"
+    if target_abonent_id and snapshot_abonent_id != target_abonent_id:
+        return "abonent_id_mismatch"
+
+    status_values = [
+        _norm_text(snapshot.get("snapshot_status") or snapshot.get("snapshotStatus")),
+        _norm_text(snapshot.get("summary_status") or snapshot.get("status")),
+        _norm_text(snapshot.get("calculation_status") or snapshot.get("calculationStatus")),
+    ]
+    for status in status_values:
+        clean = status.lower()
+        if clean and clean not in {"fresh", "ok", "success"}:
+            return "snapshot_not_fresh"
+
+    reason_values = [
+        _norm_text(snapshot.get("snapshot_reason") or snapshot.get("snapshotReason")),
+        _norm_text(snapshot.get("summary_reason") or snapshot.get("reason")),
+        _norm_text(snapshot.get("calculation_reason") or snapshot.get("calculationReason")),
+    ]
+    for reason in reason_values:
+        clean_reason = reason.upper()
+        if clean_reason and clean_reason not in {"OK", "RECALC_OK", "ALREADY_FRESH"}:
+            return "snapshot_not_successful"
+
+    scope_values = [
+        _norm_text(snapshot.get("summary_scope") or snapshot.get("summaryScope")),
+        _norm_text(snapshot.get("report_scope") or snapshot.get("reportScope")),
+        _norm_text(snapshot.get("scope")),
+        _norm_text(snapshot.get("snapshotMode") or snapshot.get("snapshot_mode")),
+        _norm_text(snapshot.get("calculation_mode") or snapshot.get("calculationMode")),
+        _norm_text(snapshot.get("recalcMode") or snapshot.get("recalc_mode") or snapshot.get("mode")),
+    ]
+    forbidden_scopes = {"period", "report", "temporary", "temporary_court_period", "report_period_calculation"}
+    for scope in scope_values:
+        clean_scope = scope.lower()
+        if clean_scope in forbidden_scopes:
+            return "snapshot_period_not_allowed"
+    if snapshot.get("periodActive") is True or snapshot.get("period_active") is True:
+        return "snapshot_period_not_allowed"
+    if snapshot.get("temporary") is True or snapshot.get("temporaryCalculation") is True or snapshot.get("temporary_calculation") is True:
+        return "snapshot_period_not_allowed"
+
+    if _snapshot_rows_by_id_count(snapshot) <= 0:
+        return "snapshot_rows_missing"
+
+    input_hash = _norm_text(snapshot.get("input_hash") or snapshot.get("inputHash"))
+    ledger_version = _norm_text(snapshot.get("ledger_version") or snapshot.get("ledgerVersion"))
+    if not input_hash:
+        return "input_hash_required"
+    if not ledger_version:
+        return "ledger_version_required"
+
+    return ""
+
+
 @app.get("/api/audit/snapshot_summary")
 def audit_snapshot_summary_endpoint():
     # Read-only diagnostics endpoint. Do not recalc, repair, rebuild, or mutate DB here.
@@ -3761,6 +3840,9 @@ def card_snapshot_put(account_uid: str):
     target = _snapshot_target_for_owner(owner, uid)
     if not target:
         return jsonify(ok=False, error="uid_not_found"), 404
+    validation_error = _card_snapshot_validation_error(snapshot, target, uid)
+    if validation_error:
+        return jsonify(ok=False, error=validation_error), 400
     status = "fresh"
     reason = "OK"
     snapshot = dict(snapshot)

@@ -92,6 +92,9 @@ class CardSnapshotSaveTest(unittest.TestCase):
             "totals": {"debt": 12, "accrued": 15, "paid": 3, "penalty": 2},
         }
 
+    def _post_snapshot(self, snapshot):
+        return self.client.post("/api/card_snapshot/uid-1", json={"snapshot": snapshot})
+
     def test_snapshot_save_requires_auth(self):
         response = self.client.post("/api/card_snapshot/uid-1", json={"snapshot": self._snapshot()})
         self.assertEqual(response.status_code, 401)
@@ -105,13 +108,97 @@ class CardSnapshotSaveTest(unittest.TestCase):
 
     def test_snapshot_save_rejects_uid_mismatch(self):
         self._login("owner1")
-        response = self.client.post("/api/card_snapshot/uid-1", json={"snapshot": self._snapshot(uid="uid-2")})
+        response = self._post_snapshot(self._snapshot(uid="uid-2"))
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.get_json()["error"], "uid_mismatch")
 
+    def test_snapshot_save_accepts_valid_full_canonical_snapshot(self):
+        self._login("owner1")
+        response = self._post_snapshot(dict(
+            self._snapshot(),
+            snapshot_status="fresh",
+            summary_status="fresh",
+            summary_scope="full",
+            snapshotMode="full",
+            summary_reason="OK",
+        ))
+        body = response.get_json()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(body["snapshot_status"], "fresh")
+        self.assertEqual(body["snapshot_reason"], "OK")
+        self.assertEqual(body["snapshot"]["summary_status"], "fresh")
+
+    def test_snapshot_save_rejects_period_or_report_snapshot(self):
+        self._login("owner1")
+        for payload in (
+            dict(self._snapshot(), summary_scope="period"),
+            dict(self._snapshot(), report_scope="report"),
+            dict(self._snapshot(), snapshotMode="period"),
+            dict(self._snapshot(), recalcMode="REPORT_PERIOD_CALCULATION"),
+            dict(self._snapshot(), periodActive=True),
+            dict(self._snapshot(), temporaryCalculation=True),
+        ):
+            response = self._post_snapshot(payload)
+            self.assertEqual(response.status_code, 400)
+            self.assertEqual(response.get_json()["error"], "snapshot_period_not_allowed")
+
+    def test_snapshot_save_rejects_empty_rows_by_id(self):
+        self._login("owner1")
+        response = self._post_snapshot(dict(self._snapshot(), rowsById={}))
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json()["error"], "snapshot_rows_missing")
+
+    def test_snapshot_save_rejects_error_or_fatal_status(self):
+        self._login("owner1")
+        for payload in (
+            dict(self._snapshot(), snapshot_status="error", snapshot_reason="CALC_FAILED"),
+            dict(self._snapshot(), summary_status="fatal", summary_reason="RATES_FATAL"),
+            dict(self._snapshot(), calculation_status="error", calculation_reason="CALC_FAILED"),
+        ):
+            response = self._post_snapshot(payload)
+            self.assertEqual(response.status_code, 400)
+            self.assertEqual(response.get_json()["error"], "snapshot_not_fresh")
+
+    def test_snapshot_save_requires_abonent_identity_and_versions(self):
+        self._login("owner1")
+        for field, error in (
+            ("abonentId", "abonent_id_required"),
+            ("input_hash", "input_hash_required"),
+            ("ledgerVersion", "ledger_version_required"),
+        ):
+            snapshot = self._snapshot()
+            snapshot.pop(field, None)
+            response = self._post_snapshot(snapshot)
+            self.assertEqual(response.status_code, 400)
+            self.assertEqual(response.get_json()["error"], error)
+
+    def test_snapshot_save_rejects_abonent_id_mismatch(self):
+        self._login("owner1")
+        response = self._post_snapshot(dict(self._snapshot(), abonentId="1002"))
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json()["error"], "abonent_id_mismatch")
+
+    def test_rejected_snapshot_does_not_overwrite_previous_success(self):
+        self._login("owner1")
+        first = self._post_snapshot(self._snapshot())
+        self.assertEqual(first.status_code, 200)
+
+        rejected = self._post_snapshot(dict(
+            self._snapshot(input_hash="bad-hash"),
+            summary_scope="period",
+            rowsById={"bad": {"pay_main": 999}},
+        ))
+        self.assertEqual(rejected.status_code, 400)
+        self.assertEqual(rejected.get_json()["error"], "snapshot_period_not_allowed")
+
+        current = self.client.get("/api/card_snapshot/uid-1").get_json()
+        self.assertEqual(current["snapshot_status"], "fresh")
+        self.assertEqual(current["input_hash"], "hash-1")
+        self.assertEqual(current["snapshot"]["rowsById"], {"r1": {"pay_main": 3, "pay_penalty": 0}})
+
     def test_fresh_snapshot_with_matching_hash_is_clean_in_audit(self):
         self._login("owner1")
-        response = self.client.post("/api/card_snapshot/uid-1", json={"snapshot": self._snapshot()})
+        response = self._post_snapshot(self._snapshot())
         body = response.get_json()
         self.assertEqual(response.status_code, 200)
         self.assertEqual(body["snapshot_status"], "fresh")
