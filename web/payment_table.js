@@ -2990,6 +2990,7 @@ function calcTotalsAsOf(rows, asOfDate){
   } catch (e) {
     if (isRatesFatalError(e)) {
       logRatesFatal(e);
+      emitManualRatesDiagnostic(e, "payment_table.calcTotalsAsOf.JKHCalcEngine");
       throw e;
     }
     if (isExcludesFatalError(e)) {
@@ -3855,6 +3856,9 @@ async function buildRowsByIdFastVerified(rows, selectedPeriod, abonentId, option
         if (sampleMismatches.length) reason = "SAMPLE_MISMATCH";
       }
     } catch(eFast) {
+      if (isRatesFatalError(eFast)) {
+        emitManualRatesDiagnostic(eFast, "payment_table.buildRowsByIdFastVerified.fastPath");
+      }
       reason = String(eFast && (eFast.reason || eFast.code || eFast.message) || eFast || "FAST_FAILED");
       if (eFast && eFast.fullRecalcAbort === true) throw eFast;
     }
