@@ -2015,6 +2015,49 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         calc_after = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
         self.assertEqual(calc_before, calc_after)
 
+    def test_manual_card_recalc_rates_missing_diagnostics_contract(self):
+        data_path = self._find_repo_file("web", "data.js")
+        payment_path = self._find_repo_file("web", "payment_table.js")
+        refinancing_path = self._find_repo_file("web", "refinancing.html")
+        calc_engine_path = self._find_repo_file("web", "calc_engine.js")
+        self.assertIsNotNone(data_path)
+        self.assertIsNotNone(payment_path)
+        self.assertIsNotNone(refinancing_path)
+        self.assertIsNotNone(calc_engine_path)
+        data_source = data_path.read_text(encoding="utf-8")
+        payment_source = payment_path.read_text(encoding="utf-8")
+        refinancing_source = refinancing_path.read_text(encoding="utf-8")
+        calc_before = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
+
+        for source in (data_source, payment_source, refinancing_source):
+            self.assertIn('"[manual-recalc][rates]"', source)
+            for field in (
+                "normalKeysChecked",
+                "moratoriumKeysChecked",
+                "rawNormalExists",
+                "rawMoratoriumExists",
+                "parsedNormalCount",
+                "parsedMoratoriumCount",
+                "firstNormalRate",
+                "lastNormalRate",
+                "firstMoratoriumRate",
+                "lastMoratoriumRate",
+                "activeOwnerId",
+                "envType",
+            ):
+                self.assertIn(field, source)
+
+        self.assertIn('"server:/api/store:" + item.kind', data_source)
+        self.assertIn("payment_table.throwRatesFatal", payment_source)
+        self.assertIn("refinancing.html.server-load", refinancing_source)
+        self.assertIn("refinancing_rates_normal_v1", data_source)
+        self.assertIn("refinancing_rates_moratorium_v1", data_source)
+        self.assertIn("ref_rates_", data_source)
+        self.assertIn("refinancing_v1", data_source)
+
+        calc_after = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
+        self.assertEqual(calc_before, calc_after)
+
     def test_stage_13_2d_card_report_period_flow_diagnostics(self):
         card_path = self._find_repo_file("web", "abonent_card.html")
         payment_path = self._find_repo_file("web", "payment_table.js")

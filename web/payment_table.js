@@ -1206,9 +1206,131 @@
     console.error(tag, { code: code, key: err && err.key || "", details: err && err.details || {} });
   }
 
+  function parseRatesDiagnostic(raw){
+    const out = { count: 0, first: null, last: null };
+    if (raw === null || raw === undefined) return out;
+    try {
+      const arr = JSON.parse(String(raw || ""));
+      if (!Array.isArray(arr)) return out;
+      const normalized = arr.map(function(item){
+        return {
+          from: String(item && (item.from || item.dateFrom || item.start || item.fromISO || item.from_iso) || ""),
+          rate: item && (item.rate !== undefined ? item.rate : item.value)
+        };
+      }).filter(function(item){ return item.from || item.rate !== undefined; });
+      normalized.sort(function(a, b){ return String(a.from || "").localeCompare(String(b.from || "")); });
+      out.count = normalized.length;
+      out.first = normalized.length ? normalized[0] : null;
+      out.last = normalized.length ? normalized[normalized.length - 1] : null;
+    } catch(eParse) {}
+    return out;
+  }
+
+  function ratesDiagnosticStorageKey(baseKey, ownerId){
+    try {
+      if (window.JKHStore && typeof JKHStore.key === "function") return JKHStore.key(baseKey, ownerId);
+    } catch(eKey) {}
+    return String(baseKey || "");
+  }
+
+  function ratesDiagnosticRaw(baseKey, ownerId){
+    try {
+      if (window.JKHStore && typeof JKHStore.getRaw === "function") return JKHStore.getRaw(baseKey, ownerId);
+    } catch(eStore) {}
+    try {
+      const storageKey = ratesDiagnosticStorageKey(baseKey, ownerId);
+      if (storageKey && window.localStorage) return localStorage.getItem(storageKey);
+    } catch(eLs) {}
+    return null;
+  }
+
+  function emitManualRatesDiagnostic(err, source){
+    try {
+      const rawOwnerId = currentOwnerIdForPaymentCache();
+      const ownerId = (window.JKHStore && typeof JKHStore.normalizeOwnerId === "function") ? JKHStore.normalizeOwnerId(rawOwnerId) : String(rawOwnerId || "").replace(/^(LAB|PROD):/i, "");
+      let activeOwnerId = ownerId;
+      try {
+        if (window.Auth && typeof Auth.getActiveDbOwnerId === "function") activeOwnerId = (window.JKHStore && typeof JKHStore.normalizeOwnerId === "function") ? JKHStore.normalizeOwnerId(Auth.getActiveDbOwnerId()) : String(Auth.getActiveDbOwnerId() || "");
+      } catch(eActiveOwner) {}
+      let envType = "";
+      try { envType = window.JKHStore && typeof JKHStore.getEnvType === "function" ? String(JKHStore.getEnvType() || "") : ""; } catch(eEnv) {}
+      const normalBase = REFI_KEY_NORMAL;
+      const moraBase = REFI_KEY_MORA;
+      const legacyNormal = "refinancing_v1";
+      const ownerNormal = "ref_rates_" + ownerId;
+      const ownerMora = "ref_rates_moratorium_" + ownerId;
+      const normalKeys = [normalBase, ratesDiagnosticStorageKey(normalBase, "GLOBAL"), ratesDiagnosticStorageKey(normalBase, ownerId), ownerNormal, legacyNormal];
+      const moraKeys = [moraBase, ratesDiagnosticStorageKey(moraBase, "GLOBAL"), ratesDiagnosticStorageKey(moraBase, ownerId), ownerMora];
+      let rawNormal = ratesDiagnosticRaw(normalBase, "GLOBAL");
+      if (rawNormal === null || rawNormal === undefined) rawNormal = ratesDiagnosticRaw(normalBase, ownerId);
+      if (rawNormal === null || rawNormal === undefined) rawNormal = ratesDiagnosticRaw(ownerNormal, ownerId);
+      if (rawNormal === null || rawNormal === undefined) rawNormal = ratesDiagnosticRaw(legacyNormal, ownerId);
+      let rawMora = ratesDiagnosticRaw(moraBase, "GLOBAL");
+      if (rawMora === null || rawMora === undefined) rawMora = ratesDiagnosticRaw(moraBase, ownerId);
+      if (rawMora === null || rawMora === undefined) rawMora = ratesDiagnosticRaw(ownerMora, ownerId);
+      const parsedNormal = parseRatesDiagnostic(rawNormal);
+      const parsedMora = parseRatesDiagnostic(rawMora);
+      const period = getCalcPeriod();
+      const payload = {
+        uid: String(getAbonentTechnicalId() || ""),
+        abonentId: String(getAbonentId() || ""),
+        ownerId: ownerId,
+        activeOwnerId: activeOwnerId,
+        envType: envType,
+        moratorium: isMoratoriumActive(),
+        requestedDate: String(err && err.details && err.details.date || ""),
+        periodFrom: String(period && period.from || ""),
+        periodTo: String(period && period.to || ""),
+        normalKeysChecked: normalKeys,
+        moratoriumKeysChecked: moraKeys,
+        rawNormalExists: rawNormal !== null && rawNormal !== undefined,
+        rawMoratoriumExists: rawMora !== null && rawMora !== undefined,
+        parsedNormalCount: parsedNormal.count,
+        parsedMoratoriumCount: parsedMora.count,
+        firstNormalRate: parsedNormal.first,
+        lastNormalRate: parsedNormal.last,
+        firstMoratoriumRate: parsedMora.first,
+        lastMoratoriumRate: parsedMora.last,
+        source: String(source || "payment_table.throwRatesFatal"),
+        reason: String(err && err.code || "")
+      };
+      console.log("[manual-recalc][rates]", payload);
+      if (typeof fetch === "function") {
+        [
+          { kind: "normal", key: normalBase },
+          { kind: "moratorium", key: moraBase }
+        ].forEach(function(item){
+          const url = "/api/store?key=" + encodeURIComponent(item.key) + "&client_owner_hint=" + encodeURIComponent(ownerId);
+          fetch(url, { method: "GET", credentials: "include" })
+            .then(function(res){ return res.text().then(function(text){
+              let data = null;
+              try { data = JSON.parse(text); } catch(eJson) {}
+              const parsed = parseRatesDiagnostic(data && data.value);
+              console.log("[manual-recalc][rates]", Object.assign({}, payload, {
+                rawNormalExists: item.kind === "normal" ? data && data.value !== null && data.value !== undefined : payload.rawNormalExists,
+                rawMoratoriumExists: item.kind === "moratorium" ? data && data.value !== null && data.value !== undefined : payload.rawMoratoriumExists,
+                parsedNormalCount: item.kind === "normal" ? parsed.count : payload.parsedNormalCount,
+                parsedMoratoriumCount: item.kind === "moratorium" ? parsed.count : payload.parsedMoratoriumCount,
+                firstNormalRate: item.kind === "normal" ? parsed.first : payload.firstNormalRate,
+                lastNormalRate: item.kind === "normal" ? parsed.last : payload.lastNormalRate,
+                firstMoratoriumRate: item.kind === "moratorium" ? parsed.first : payload.firstMoratoriumRate,
+                lastMoratoriumRate: item.kind === "moratorium" ? parsed.last : payload.lastMoratoriumRate,
+                source: "server:/api/store:" + item.kind,
+                reason: res.ok && data && data.ok === true ? "SERVER_RATE_READ_OK" : "SERVER_RATE_READ_FAILED"
+              }));
+            }); })
+            .catch(function(eFetch){
+              console.log("[manual-recalc][rates]", Object.assign({}, payload, { source: "server:/api/store:" + item.kind, reason: "SERVER_RATE_READ_EXCEPTION:" + String(eFetch && eFetch.message || eFetch) }));
+            });
+        });
+      }
+    } catch(eDiag) {}
+  }
+
   function throwRatesFatal(code, key, details){
     const err = makeRatesFatalError(code, key, details);
     logRatesFatal(err);
+    emitManualRatesDiagnostic(err, "payment_table.throwRatesFatal");
     throw err;
   }
 

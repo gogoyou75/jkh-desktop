@@ -3706,6 +3706,129 @@
     return msg || "CALC_FAILED";
   }
 
+  function _manualRatesDiagParse(raw) {
+    var out = { count: 0, first: null, last: null };
+    if (raw === null || raw === undefined) return out;
+    try {
+      var arr = JSON.parse(String(raw || ""));
+      if (!Array.isArray(arr)) return out;
+      var normalized = arr.map(function(item) {
+        return {
+          from: String(item && (item.from || item.dateFrom || item.start || item.fromISO || item.from_iso) || ""),
+          rate: item && (item.rate !== undefined ? item.rate : item.value)
+        };
+      }).filter(function(item) { return item.from || item.rate !== undefined; });
+      normalized.sort(function(a, b) { return String(a.from || "").localeCompare(String(b.from || "")); });
+      out.count = normalized.length;
+      out.first = normalized.length ? normalized[0] : null;
+      out.last = normalized.length ? normalized[normalized.length - 1] : null;
+    } catch (eParse) {}
+    return out;
+  }
+
+  function _manualRatesDiagStorageKey(baseKey, ownerId) {
+    try {
+      if (window.JKHStore && typeof JKHStore.key === "function") return JKHStore.key(baseKey, ownerId);
+    } catch (eKey) {}
+    return String(baseKey || "");
+  }
+
+  function _manualRatesDiagRaw(baseKey, ownerId) {
+    try {
+      if (window.JKHStore && typeof JKHStore.getRaw === "function") return JKHStore.getRaw(baseKey, ownerId);
+    } catch (eStore) {}
+    try {
+      var storageKey = _manualRatesDiagStorageKey(baseKey, ownerId);
+      if (storageKey && window.localStorage) return localStorage.getItem(storageKey);
+    } catch (eLs) {}
+    return null;
+  }
+
+  function _emitManualRatesDiagnostic(ctx) {
+    try {
+      var ownerId = String(_ownerId() || "");
+      var activeOwnerId = ownerId;
+      try {
+        if (window.Auth && typeof Auth.getActiveDbOwnerId === "function") activeOwnerId = normalizeOwnerId(Auth.getActiveDbOwnerId());
+      } catch (eActiveOwner) {}
+      var envType = "";
+      try {
+        envType = window.JKHStore && typeof JKHStore.getEnvType === "function" ? String(JKHStore.getEnvType() || "") : "";
+      } catch (eEnv) {}
+      var normalBase = window.JKH_CONST && window.JKH_CONST.REFI_KEY_NORMAL ? window.JKH_CONST.REFI_KEY_NORMAL : "refinancing_rates_normal_v1";
+      var moraBase = window.JKH_CONST && window.JKH_CONST.REFI_KEY_MORA ? window.JKH_CONST.REFI_KEY_MORA : "refinancing_rates_moratorium_v1";
+      var legacyNormal = "refinancing_v1";
+      var ownerNormal = "ref_rates_" + ownerId;
+      var ownerMora = "ref_rates_moratorium_" + ownerId;
+      var normalKeys = [normalBase, _manualRatesDiagStorageKey(normalBase, "GLOBAL"), _manualRatesDiagStorageKey(normalBase, ownerId), ownerNormal, legacyNormal];
+      var moraKeys = [moraBase, _manualRatesDiagStorageKey(moraBase, "GLOBAL"), _manualRatesDiagStorageKey(moraBase, ownerId), ownerMora];
+      var rawNormal = _manualRatesDiagRaw(normalBase, "GLOBAL");
+      if (rawNormal === null || rawNormal === undefined) rawNormal = _manualRatesDiagRaw(normalBase, ownerId);
+      if (rawNormal === null || rawNormal === undefined) rawNormal = _manualRatesDiagRaw(ownerNormal, ownerId);
+      if (rawNormal === null || rawNormal === undefined) rawNormal = _manualRatesDiagRaw(legacyNormal, ownerId);
+      var rawMora = _manualRatesDiagRaw(moraBase, "GLOBAL");
+      if (rawMora === null || rawMora === undefined) rawMora = _manualRatesDiagRaw(moraBase, ownerId);
+      if (rawMora === null || rawMora === undefined) rawMora = _manualRatesDiagRaw(ownerMora, ownerId);
+      var parsedNormal = _manualRatesDiagParse(rawNormal);
+      var parsedMora = _manualRatesDiagParse(rawMora);
+      var payload = {
+        uid: String(ctx && ctx.uid || ""),
+        abonentId: String(ctx && ctx.abonentId || ""),
+        ownerId: ownerId,
+        activeOwnerId: activeOwnerId,
+        envType: envType,
+        moratorium: !!(ctx && ctx.moratorium),
+        requestedDate: String(ctx && ctx.requestedDate || ""),
+        periodFrom: String(ctx && ctx.periodFrom || ""),
+        periodTo: String(ctx && ctx.periodTo || ""),
+        normalKeysChecked: normalKeys,
+        moratoriumKeysChecked: moraKeys,
+        rawNormalExists: rawNormal !== null && rawNormal !== undefined,
+        rawMoratoriumExists: rawMora !== null && rawMora !== undefined,
+        parsedNormalCount: parsedNormal.count,
+        parsedMoratoriumCount: parsedMora.count,
+        firstNormalRate: parsedNormal.first,
+        lastNormalRate: parsedNormal.last,
+        firstMoratoriumRate: parsedMora.first,
+        lastMoratoriumRate: parsedMora.last,
+        source: String(ctx && ctx.source || "data.recalcAbonentSummaryExplicit"),
+        reason: String(ctx && ctx.reason || "")
+      };
+      console.log("[manual-recalc][rates]", payload);
+      if (typeof fetch === "function") {
+        [
+          { kind: "normal", key: normalBase },
+          { kind: "moratorium", key: moraBase }
+        ].forEach(function(item) {
+          var url = "/api/store?key=" + encodeURIComponent(item.key) + "&client_owner_hint=" + encodeURIComponent(ownerId);
+          fetch(url, { method: "GET", credentials: "include" })
+            .then(function(res) {
+              return res.text().then(function(text) {
+                var data = null;
+                try { data = JSON.parse(text); } catch (eJson) {}
+                var parsed = _manualRatesDiagParse(data && data.value);
+                console.log("[manual-recalc][rates]", Object.assign({}, payload, {
+                  rawNormalExists: item.kind === "normal" ? data && data.value !== null && data.value !== undefined : payload.rawNormalExists,
+                  rawMoratoriumExists: item.kind === "moratorium" ? data && data.value !== null && data.value !== undefined : payload.rawMoratoriumExists,
+                  parsedNormalCount: item.kind === "normal" ? parsed.count : payload.parsedNormalCount,
+                  parsedMoratoriumCount: item.kind === "moratorium" ? parsed.count : payload.parsedMoratoriumCount,
+                  firstNormalRate: item.kind === "normal" ? parsed.first : payload.firstNormalRate,
+                  lastNormalRate: item.kind === "normal" ? parsed.last : payload.lastNormalRate,
+                  firstMoratoriumRate: item.kind === "moratorium" ? parsed.first : payload.firstMoratoriumRate,
+                  lastMoratoriumRate: item.kind === "moratorium" ? parsed.last : payload.lastMoratoriumRate,
+                  source: "server:/api/store:" + item.kind,
+                  reason: res.ok && data && data.ok === true ? "SERVER_RATE_READ_OK" : "SERVER_RATE_READ_FAILED"
+                }));
+              });
+            })
+            .catch(function(eFetch) {
+              console.log("[manual-recalc][rates]", Object.assign({}, payload, { source: "server:/api/store:" + item.kind, reason: "SERVER_RATE_READ_EXCEPTION:" + String(eFetch && eFetch.message || eFetch) }));
+            });
+        });
+      }
+    } catch (eDiag) {}
+  }
+
   function _todayIsoLocal() {
     var d = new Date();
     var y = d.getFullYear();
@@ -5257,6 +5380,24 @@
       }
     } catch (e) {
       var reason = _summaryCalcErrorCode(e);
+      if (reason === "RATES_MISSING" || reason === "RATES_JSON_INVALID" || reason === "MISSING_REQUIRED_RATE") {
+        var rateDiagFound = _findAbonentByIdOrUid(abonentOrId);
+        var rateDiagAbonent = rateDiagFound && rateDiagFound.abonent ? rateDiagFound.abonent : (abonentOrId && typeof abonentOrId === "object" ? abonentOrId : null);
+        var rateDiagId = String(rateDiagFound && rateDiagFound.id || (typeof abonentOrId === "object" ? abonentOrId && abonentOrId.id : abonentOrId) || "").trim();
+        var rateDiagUid = String(rateDiagAbonent && (rateDiagAbonent.uid || rateDiagAbonent.account_uid || rateDiagAbonent.accountUid) || "").trim();
+        var rateDiagMoraRaw = "";
+        try { rateDiagMoraRaw = _getProjectRaw("moratorium_" + (rateDiagUid || rateDiagId)); } catch (eMoraRaw) {}
+        _emitManualRatesDiagnostic({
+          uid: rateDiagUid,
+          abonentId: rateDiagId,
+          moratorium: String(rateDiagMoraRaw || "") === "1",
+          requestedDate: e && e.details && e.details.date || "",
+          periodFrom: period && period.from || "",
+          periodTo: period && period.to || "",
+          source: "data.recalcAbonentSummaryExplicit.catch",
+          reason: reason
+        });
+      }
       _logFullRecalcStepDone(runId, "calc-totals", { status: "error", reason: reason });
       summary = buildAbonentSummaryErrorAfterExplicitRecalc(abonentOrId, period, reason);
       if (periodActive) {

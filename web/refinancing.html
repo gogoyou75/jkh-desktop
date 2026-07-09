@@ -122,6 +122,63 @@ function activeOwnerId(){
     return "";
 }
 
+function refRatesDiagParse(raw){
+    const out = { count: 0, first: null, last: null };
+    if (raw === null || raw === undefined) return out;
+    try{
+        const arr = JSON.parse(String(raw || ""));
+        if (!Array.isArray(arr)) return out;
+        const normalized = arr.map(item => ({
+            from: String(item && (item.from || item.dateFrom || item.start || item.fromISO || item.from_iso) || ""),
+            rate: item && (item.rate !== undefined ? item.rate : item.value)
+        })).filter(item => item.from || item.rate !== undefined);
+        normalized.sort((a,b) => String(a.from || "").localeCompare(String(b.from || "")));
+        out.count = normalized.length;
+        out.first = normalized.length ? normalized[0] : null;
+        out.last = normalized.length ? normalized[normalized.length - 1] : null;
+    }catch(e){}
+    return out;
+}
+
+function refRatesStorageKey(baseKey, ownerId){
+    try{
+        if (window.JKHStore && typeof JKHStore.key === "function") return JKHStore.key(baseKey, ownerId);
+    }catch(e){}
+    return String(baseKey || "");
+}
+
+function logRefRatesUiDiagnostic(rawNormal, rawMora, source, reason){
+    try{
+        const ownerId = activeOwnerId();
+        const envType = (window.JKHStore && typeof JKHStore.getEnvType === "function") ? String(JKHStore.getEnvType() || "") : "";
+        const normalParsed = refRatesDiagParse(rawNormal);
+        const moraParsed = refRatesDiagParse(rawMora);
+        console.log("[manual-recalc][rates]", {
+            uid: "",
+            abonentId: "",
+            ownerId: ownerId,
+            activeOwnerId: ownerId,
+            envType: envType,
+            moratorium: false,
+            requestedDate: "",
+            periodFrom: "",
+            periodTo: "",
+            normalKeysChecked: [KEY_NORMAL, refRatesStorageKey(KEY_NORMAL, "GLOBAL"), refRatesStorageKey(KEY_NORMAL, ownerId), "ref_rates_" + ownerId, "refinancing_v1"],
+            moratoriumKeysChecked: [KEY_MORA, refRatesStorageKey(KEY_MORA, "GLOBAL"), refRatesStorageKey(KEY_MORA, ownerId), "ref_rates_moratorium_" + ownerId],
+            rawNormalExists: rawNormal !== null && rawNormal !== undefined,
+            rawMoratoriumExists: rawMora !== null && rawMora !== undefined,
+            parsedNormalCount: normalParsed.count,
+            parsedMoratoriumCount: moraParsed.count,
+            firstNormalRate: normalParsed.first,
+            lastNormalRate: normalParsed.last,
+            firstMoratoriumRate: moraParsed.first,
+            lastMoratoriumRate: moraParsed.last,
+            source: source || "refinancing.html",
+            reason: reason || ""
+        });
+    }catch(e){}
+}
+
 function esc(s){
     return String(s ?? "")
         .replaceAll("&","&amp;").replaceAll("<","&lt;")
@@ -471,6 +528,7 @@ async function loadAllRates(){
 
         updateLocalCacheSoft(KEY_NORMAL, rawNormal);
         updateLocalCacheSoft(KEY_MORA, rawMora);
+        logRefRatesUiDiagnostic(rawNormal, rawMora, "refinancing.html.server-load", "SERVER_RATE_READ_OK");
 
         renderTable("ratesBodyNormal", REF_STATE.normal);
         renderTable("ratesBodyMora", REF_STATE.mora);
