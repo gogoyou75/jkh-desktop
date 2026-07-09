@@ -2125,7 +2125,9 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         self.assertIn("async function ensureGlobalRefinancingRatesHydrated", payment_source)
         self.assertIn("refinancing_rates_normal_v1", payment_source)
         self.assertIn("refinancing_rates_moratorium_v1", payment_source)
-        self.assertIn("JKHStore.setRaw(String(key), value)", payment_source)
+        self.assertIn("JKHStore.hydrateGlobalReadCache(key, String(value))", payment_source)
+        self.assertIn("rates_hydrate_global_read_cache_written", payment_source)
+        self.assertIn("rates_hydrate_global_read_cache_rejected", payment_source)
         self.assertIn('"/api/store?key=" + encodeURIComponent(key)', payment_source)
         self.assertIn("rates_hydrate_before_recalc_start", payment_source)
         self.assertIn("rates_hydrate_global_key_loaded", payment_source)
@@ -2143,6 +2145,31 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
 
         calc_after = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
         self.assertEqual(calc_before, calc_after)
+
+    def test_global_refinancing_rate_hydration_uses_trusted_read_cache_only(self):
+        storage_path = self._find_repo_file("web", "storage.js")
+        payment_path = self._find_repo_file("web", "payment_table.js")
+        self.assertIsNotNone(storage_path)
+        self.assertIsNotNone(payment_path)
+        storage_source = storage_path.read_text(encoding="utf-8")
+        payment_source = payment_path.read_text(encoding="utf-8")
+
+        self.assertIn("function hydrateGlobalReadCache(baseKey, value)", storage_source)
+        helper_body = storage_source.split("function hydrateGlobalReadCache(baseKey, value)", 1)[1].split("function resolveOwnerForKey", 1)[0]
+        self.assertIn("if (!isGlobalProjectKey(key))", helper_body)
+        self.assertIn('throw new Error("GLOBAL_READ_CACHE_KEY_REJECTED")', helper_body)
+        self.assertIn('_lsSetDirect(k(key, "GLOBAL"), v)', helper_body)
+        self.assertIn("hydrateGlobalReadCache: hydrateGlobalReadCache", storage_source)
+
+        set_item_body = storage_source.split("function setItem(key, value, ownerId)", 1)[1].split("function removeItem", 1)[0]
+        self.assertIn("GLOBAL_ADMIN_ONLY", set_item_body)
+        self.assertIn("isGlobalProjectKey(key) && !_isAdmin()", set_item_body)
+
+        helper_recalc_body = payment_source.split("async function ensureGlobalRefinancingRatesHydrated", 1)[1].split("function excludePeriodsKey", 1)[0]
+        self.assertIn("JKHStore.hydrateGlobalReadCache(key, String(value))", helper_recalc_body)
+        self.assertNotIn("storeSetRaw(key, String(value))", helper_recalc_body)
+        self.assertIn("rates_hydrate_global_read_cache_written", helper_recalc_body)
+        self.assertIn("rates_hydrate_global_read_cache_rejected", helper_recalc_body)
 
     def test_backend_global_refinancing_rates_are_read_for_active_owner(self):
         normal_rates = json.dumps([{"from": "2020-01-01", "rate": 7.5}], ensure_ascii=False)

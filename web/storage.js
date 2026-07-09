@@ -172,6 +172,16 @@
     return false;
   }
 
+  function hydrateGlobalReadCache(baseKey, value) {
+    var key = String(baseKey || "");
+    if (!isGlobalProjectKey(key)) {
+      throw new Error("GLOBAL_READ_CACHE_KEY_REJECTED");
+    }
+    var v = (value === null || value === undefined) ? "" : String(value);
+    _lsSetDirect(k(key, "GLOBAL"), v);
+    return true;
+  }
+
   function resolveOwnerForKey(baseKey, ownerId) {
     if (isGlobalProjectKey(baseKey)) return "GLOBAL";
     return ownerId || getActiveOwnerId();
@@ -703,6 +713,7 @@
     getRaw: function (baseKey, ownerId) { return getItem(baseKey, ownerId); },
     setRaw: function (baseKey, value, ownerId) { return setItem(baseKey, value, ownerId); },
     removeRaw: function (baseKey, ownerId) { return removeItem(baseKey, ownerId); },
+    hydrateGlobalReadCache: hydrateGlobalReadCache,
 
     // JSON helpers
     getJSON: function (baseKey, fallback, ownerId) {

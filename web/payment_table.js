@@ -4175,7 +4175,20 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
         try { data = await res.json(); } catch(eJson) {}
         const value = data && data.value;
         if (res.ok && data && data.ok === true && value !== null && value !== undefined && String(value) !== "") {
-          storeSetRaw(key, String(value));
+          if (!(window.JKHStore && typeof JKHStore.hydrateGlobalReadCache === "function")) {
+            throw new Error("GLOBAL_READ_CACHE_HELPER_UNAVAILABLE");
+          }
+          JKHStore.hydrateGlobalReadCache(key, String(value));
+          try {
+            console.log("[manual-recalc][rates-hydrate]", {
+              reason: "rates_hydrate_global_read_cache_written",
+              source: result.source,
+              ownerId: result.ownerId,
+              key: key,
+              serverOwner: String(data && data.owner || ""),
+              valueLength: String(value || "").length
+            });
+          } catch(eCacheWrittenLog) {}
           raw = storeGetRaw(key);
           if (raw !== null && raw !== undefined && String(raw) !== "") {
             result.loaded.push(key);
@@ -4210,7 +4223,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
         result.missing.push(key);
         try {
           console.warn("[manual-recalc][rates-hydrate]", {
-            reason: "rates_hydrate_global_key_missing_after_fetch",
+            reason: String(eFetch && eFetch.message || "") === "GLOBAL_READ_CACHE_KEY_REJECTED" ? "rates_hydrate_global_read_cache_rejected" : "rates_hydrate_global_key_missing_after_fetch",
             source: result.source,
             ownerId: result.ownerId,
             key: key,
