@@ -1882,10 +1882,13 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
 
     def test_card_snapshot_open_lifecycle_does_not_auto_recalc_contract(self):
         card_path = self._find_repo_file("web", "abonent_card.html")
+        data_path = self._find_repo_file("web", "data.js")
         calc_engine_path = self._find_repo_file("web", "calc_engine.js")
         self.assertIsNotNone(card_path)
+        self.assertIsNotNone(data_path)
         self.assertIsNotNone(calc_engine_path)
         card_source = card_path.read_text(encoding="utf-8")
+        data_source = data_path.read_text(encoding="utf-8")
         calc_before = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
 
         self.assertIn("window.__JKH_CARD_AUTO_RECALC", card_source)
@@ -1894,7 +1897,10 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         self.assertIn("function __skipCardAutoRecalcFreshSnapshot", card_source)
         self.assertIn("function __renderAbonentTotalsFromSummary", card_source)
         self.assertIn("function __summaryFromCardSnapshot", card_source)
+        self.assertIn("async function __tryUseBackendFreshSnapshot", card_source)
+        self.assertIn("function __renderFreshCardSnapshot", card_source)
         self.assertIn("[abonent_card][auto-recalc]", card_source)
+        self.assertIn("[abonent_card][backend-snapshot]", card_source)
         self.assertIn('"skipped fresh snapshot"', card_source)
         self.assertIn('"already in flight"', card_source)
         self.assertIn('"start"', card_source)
@@ -1906,16 +1912,36 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
 
         status_body = card_source.split("async function loadAbonentSummaryStatus()", 1)[1].split("function __summaryCalcErrorCode", 1)[0]
         self.assertNotIn("__requestCardAutoRecalc(", status_body)
+        self.assertIn('if (await __tryUseBackendFreshSnapshot(uid, "CARD_SNAPSHOT_MISSING")) return;', status_body)
+        self.assertIn('if (await __tryUseBackendFreshSnapshot(uid, snapshot.dirtyReason || "CARD_SNAPSHOT_DIRTY")) return;', status_body)
+        self.assertIn('if (await __tryUseBackendFreshSnapshot(uid, "CARD_ROWS_NOT_RESTORED")) return;', status_body)
         self.assertIn('__resetCardAutoRecalcForUid(uid)', status_body)
         self.assertIn('renderAbonentSummaryStatus("missing", "Нет сохранённого расчёта. Нажмите «Пересчитать»")', status_body)
         self.assertIn('renderAbonentSummaryStatus("dirty", "Требуется пересчёт. Показан последний сохранённый расчёт")', status_body)
         self.assertIn("__renderAbonentTotalsFromSummary(dirtySummary)", status_body)
         self.assertIn("__renderAbonentTotalsFromSummary(invalidSummary)", status_body)
-        self.assertIn("__skipCardAutoRecalcFreshSnapshot(uid)", status_body)
+        self.assertIn('__renderFreshCardSnapshot(uid, snapshot, "local_card_snapshot")', status_body)
+        fresh_render_body = card_source.split("function __renderFreshCardSnapshot", 1)[1].split("async function __tryUseBackendFreshSnapshot", 1)[0]
+        self.assertIn("__skipCardAutoRecalcFreshSnapshot(uid)", fresh_render_body)
 
         invalid_event_body = card_source.split('window.addEventListener("jkh:card-snapshot-invalid"', 1)[1].split("function __baseStorageKeyForCurrentOwner", 1)[0]
         self.assertNotIn("__requestCardAutoRecalc(", invalid_event_body)
         self.assertIn("__resetCardAutoRecalcForUid(uid)", invalid_event_body)
+
+        auto_recalc_body = card_source.split("async function __maybeStartCardAutoRecalc", 1)[1].split("function __logFullRecalcEventIgnored", 1)[0]
+        self.assertIn('if (await __tryUseBackendFreshSnapshot(uid, state.lastReason || "AUTO_RECALC_GATE"))', auto_recalc_body)
+        self.assertLess(auto_recalc_body.index("__tryUseBackendFreshSnapshot"), auto_recalc_body.index("runBtn.click()"))
+
+        self.assertIn("async function readFreshBackendCardSnapshotForCard", data_source)
+        self.assertIn("_validateFreshCardSnapshotForCurrentInputs", data_source)
+        self.assertIn("readFreshBackendCardSnapshotForCard: readFreshBackendCardSnapshotForCard", data_source)
+        for reason in (
+            "card_backend_snapshot_used",
+            "card_backend_snapshot_hydrated_local",
+            "card_auto_recalc_backend_snapshot_missing",
+            "card_auto_recalc_backend_snapshot_incompatible",
+        ):
+            self.assertIn(reason, card_source + data_source)
 
         calc_after = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
         self.assertEqual(calc_before, calc_after)

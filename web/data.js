@@ -1075,6 +1075,107 @@
     }
   }
 
+  function _validateFreshCardSnapshotForCurrentInputs(abonentOrId, snapshot, source) {
+    var normalized = _normalizeCardSnapshot(abonentOrId, snapshot);
+    if (!normalized) return { ok: false, reason: "CARD_SNAPSHOT_INVALID", snapshot: null };
+    var status = String(normalized.summary_status || normalized.snapshot_status || normalized.status || "").toLowerCase();
+    if (status !== "fresh") return { ok: false, reason: "CARD_SNAPSHOT_NOT_FRESH", snapshot: normalized };
+    if (normalized.periodActive === true || String(normalized.snapshotMode || "").toLowerCase() === "period") {
+      return { ok: false, reason: "CARD_SNAPSHOT_PERIOD_ACTIVE", snapshot: normalized };
+    }
+    var rowsByIdCount = _cardSnapshotRowsByIdCount(normalized.rowsById);
+    if (rowsByIdCount <= 0) return { ok: false, reason: "CARD_SNAPSHOT_ROWS_MISSING", snapshot: normalized };
+
+    var currentVersions = computeFinancialInputVersions(abonentOrId);
+    var currentLedgerVersion = String(currentVersions.ledger_version || computeLedgerRuntimeVersion(abonentOrId) || "");
+    var snapshotLedgerVersion = String(normalized.ledgerVersion || normalized.ledger_version || "");
+    if (!currentLedgerVersion || !snapshotLedgerVersion || snapshotLedgerVersion !== currentLedgerVersion) {
+      return {
+        ok: false,
+        reason: "LEDGER_VERSION_CHANGED",
+        snapshot: normalized,
+        currentLedgerVersion: currentLedgerVersion,
+        snapshotLedgerVersion: snapshotLedgerVersion,
+        rowsByIdCount: rowsByIdCount
+      };
+    }
+    if (normalized.input_hash && currentVersions.input_hash && normalized.input_hash !== currentVersions.input_hash) {
+      return {
+        ok: false,
+        reason: "INPUT_HASH_CHANGED",
+        snapshot: normalized,
+        currentInputHash: currentVersions.input_hash,
+        snapshotInputHash: normalized.input_hash,
+        rowsByIdCount: rowsByIdCount
+      };
+    }
+    return {
+      ok: true,
+      reason: "OK",
+      snapshot: normalized,
+      source: String(source || ""),
+      currentLedgerVersion: currentLedgerVersion,
+      snapshotLedgerVersion: snapshotLedgerVersion,
+      rowsByIdCount: rowsByIdCount
+    };
+  }
+
+  async function readFreshBackendCardSnapshotForCard(abonentOrId, options) {
+    var opts = options && typeof options === "object" ? options : {};
+    var found = _findAbonentByIdOrUid(abonentOrId);
+    var abonent = found && found.abonent ? found.abonent : null;
+    var uid = String(abonent && abonent.uid || (typeof abonentOrId === "object" ? abonentOrId && abonentOrId.uid : abonentOrId) || "").trim();
+    if (!isValidUid(uid)) return { ok: false, reason: "UID_REQUIRED", snapshot: null };
+    if (typeof fetch !== "function") return { ok: false, reason: "FETCH_UNAVAILABLE", snapshot: null };
+    var res = await fetch("/api/card_snapshot/" + encodeURIComponent(uid), { method: "GET", credentials: "include" });
+    var text = await res.text();
+    var data = null;
+    try { data = text ? JSON.parse(text) : null; } catch (eParse) { data = null; }
+    if (!res.ok || !data || data.ok === false) {
+      return { ok: false, reason: (data && data.error) || ("HTTP_" + res.status), snapshot: null, status: res.status };
+    }
+    var serverStatus = String(data.snapshot_status || data.status || "").toLowerCase();
+    var serverSnapshot = data.snapshot && typeof data.snapshot === "object" ? data.snapshot : null;
+    if (!serverSnapshot || serverStatus === "missing") {
+      try { console.log("[card-snapshot][backend-read-through]", { uid: uid, reason: "card_auto_recalc_backend_snapshot_missing" }); } catch (eMissingLog) {}
+      return { ok: false, reason: "card_auto_recalc_backend_snapshot_missing", snapshot: null, status: res.status };
+    }
+    var validation = _validateFreshCardSnapshotForCurrentInputs(abonent || uid, serverSnapshot, "backend_card_snapshot");
+    if (!validation.ok) {
+      try {
+        console.warn("[card-snapshot][backend-read-through]", {
+          uid: uid,
+          reason: "card_auto_recalc_backend_snapshot_incompatible",
+          detail: validation.reason,
+          rowsByIdCount: validation.rowsByIdCount || 0
+        });
+      } catch (eIncompatLog) {}
+      return Object.assign({}, validation, { ok: false, reason: "card_auto_recalc_backend_snapshot_incompatible", detail: validation.reason, status: res.status });
+    }
+    var key = resolveCardSnapshotKey(abonent || uid);
+    var hydratedLocal = false;
+    if (opts.hydrateLocal !== false && key) {
+      var localOk = _setProjectRaw(key, JSON.stringify(validation.snapshot));
+      hydratedLocal = localOk !== false;
+    }
+    try {
+      console.log("[card-snapshot][backend-read-through]", {
+        uid: uid,
+        reason: hydratedLocal ? "card_backend_snapshot_hydrated_local" : "card_backend_snapshot_used",
+        key: key,
+        rowsByIdCount: validation.rowsByIdCount,
+        ledgerVersion: validation.snapshotLedgerVersion
+      });
+    } catch (eUsedLog) {}
+    return Object.assign({}, validation, {
+      ok: true,
+      reason: hydratedLocal ? "card_backend_snapshot_hydrated_local" : "card_backend_snapshot_used",
+      hydratedLocal: hydratedLocal,
+      key: key,
+      status: res.status
+    });
+  }
+
   function _parseCardSnapshotRawForDiagnostics(raw) {
     var out = { ok: false, rowsByIdCount: 0, ledgerVersion: "", snapshot: null, reason: "" };
     try {
@@ -6111,6 +6212,7 @@
     computeLedgerVersion: computeLedgerVersion,
     computeFinancialInputVersions: computeFinancialInputVersions,
     readCardSnapshot: readCardSnapshot,
+    readFreshBackendCardSnapshotForCard: readFreshBackendCardSnapshotForCard,
     saveCardSnapshot: saveCardSnapshot,
     saveCardSnapshotAndWait: saveCardSnapshotAndWait,
     debugCardSnapshotLifecycle: debugCardSnapshotLifecycle,
