@@ -2162,6 +2162,69 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         calc_after = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
         self.assertEqual(calc_before, calc_after)
 
+    def test_manual_full_recalc_exit_before_snapshot_diagnostics_contract(self):
+        card_path = self._find_repo_file("web", "abonent_card.html")
+        calc_engine_path = self._find_repo_file("web", "calc_engine.js")
+        self.assertIsNotNone(card_path)
+        self.assertIsNotNone(calc_engine_path)
+        card_source = card_path.read_text(encoding="utf-8")
+        calc_before = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
+
+        run_body = card_source.split('console.log("[full-recalc][run-start]"', 1)[1].split("async function savePostRecalcSnapshot(snapshot)", 1)[0]
+        self.assertIn("function fullRecalcExitPayload(reason, branch, step, returnValue, exception, caller)", run_body)
+        self.assertIn('console.warn("[full-recalc][exit]"', run_body)
+        self.assertIn('console.log("[full-recalc][after-await]"', run_body)
+        for field in (
+            "reason:",
+            "branch:",
+            "step:",
+            "runId:",
+            "uid:",
+            "summaryStatus:",
+            "summaryReason:",
+            "snapshotReason:",
+            "returnValue:",
+            "exception:",
+            "caller:",
+        ):
+            self.assertIn(field, run_body)
+
+        main_body = card_source.split("try {\n            let uidResult = null;", 1)[1].split("} finally {", 1)[0]
+        for marker in (
+            'logFullRecalcAfterAwait("ensure-uid"',
+            'logFullRecalcAfterAwait("ui-yield-after-ensure-uid"',
+            'logFullRecalcAfterAwait("temporary-period-calculation"',
+            'logFullRecalcAfterAwait("fullRecalcForCurrentAbonent"',
+            'logFullRecalcAfterAwait("ui-yield-after-fullRecalcForCurrentAbonent"',
+            'logFullRecalcAfterAwait("ui-yield-after-build-card-snapshot"',
+        ):
+            self.assertIn(marker, main_body)
+
+        for reason in (
+            "UID_NOT_SAVED",
+            "FULL_PERIOD_REQUIRED",
+            "CALC_PERIOD_CONFIRM_FAILED",
+            "TEMPORARY_PERIOD_API_UNAVAILABLE",
+            "TEMPORARY_PERIOD_CALC_FAILED",
+            "TEMPORARY_PERIOD_CALC_DONE",
+            "FULL_RECALC_FUNCTION_UNAVAILABLE",
+            "RECALC_NOT_HANDLED",
+            "WATCHDOG_OR_TIMEOUT",
+            "CARD_SNAPSHOT_API_UNAVAILABLE",
+            "EMPTY_ROWS_BY_ID",
+        ):
+            self.assertIn(reason, main_body)
+
+        self.assertIn("ENSURE_UID_REJECTED", main_body)
+        self.assertIn("recalc-result-error", main_body)
+        self.assertIn("abort-after-result-ok", main_body)
+        self.assertIn("abort-before-snapshot", main_body)
+        self.assertIn("abort-after-snapshot-build", main_body)
+        self.assertIn('logFullRecalcExit(reason, "catch"', main_body)
+
+        calc_after = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
+        self.assertEqual(calc_before, calc_after)
+
     def test_manual_card_recalc_zero_overwrite_block_is_nonfatal_contract(self):
         payment_path = self._find_repo_file("web", "payment_table.js")
         index_path = self._find_repo_file("web", "index.html")
