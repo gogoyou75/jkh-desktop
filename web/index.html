@@ -2112,11 +2112,39 @@ async function processClientSummaryBatchJob(jobId, totalAccepted, mode){
                     rowsById: result && result.rowsById
                 });
                 if (!snapshot) {
+                    try {
+                        console.warn("[card-snapshot][save-callsite-skip]", {
+                            reason: "SNAPSHOT_BUILD_FAILED_AFTER_ROWS",
+                            caller: "index.runSelectedSummaryBatch",
+                            runId: "summary-batch:" + String(jobId || "") + ":" + String(itemId || ""),
+                            abonentId: String(uid || ""),
+                            uid: String(uid || ""),
+                            summaryStatus: String(status || ""),
+                            summaryReason: String(reason || ""),
+                            recalculationMode: "index_summary_batch",
+                            snapshotMode: "canonical_full",
+                            invocationReason: "save-not-called-snapshot-build-failed"
+                        });
+                    } catch(eIndexSnapshotBuildSkipLog) {}
                     status = "skipped";
                     reason = result && result.rowsByIdSource === "datajs_batch_rows_builder" ? "ROWS_BY_ID_EMPTY_AFTER_WITH_ROWS_RECALC" : "SNAPSHOT_BUILD_FAILED_AFTER_ROWS";
                     const diagnostic = await collectSnapshotBackfillDiagnostic(uid, result, "buildCardSnapshotFromCurrentResult", { snapshotReturned: false });
                     addSummaryBatchError(uid, reason, diagnostic);
                 } else {
+                    try {
+                        console.log("[card-snapshot][save-callsite]", {
+                            reason: "before_saveCardSnapshotAndWait",
+                            caller: "index.runSelectedSummaryBatch",
+                            runId: "summary-batch:" + String(jobId || "") + ":" + String(itemId || ""),
+                            abonentId: String(uid || ""),
+                            uid: String(snapshot && snapshot.uid || uid || ""),
+                            summaryStatus: String(status || ""),
+                            summaryReason: String(reason || ""),
+                            recalculationMode: "index_summary_batch",
+                            snapshotMode: String(snapshot && (snapshot.snapshot_mode || snapshot.mode || snapshot.scope || "canonical_full") || ""),
+                            invocationReason: "calling-saveCardSnapshotAndWait"
+                        });
+                    } catch(eIndexSnapshotCallsiteLog) {}
                     const snapshotSave = await Data.saveCardSnapshotAndWait(uid, snapshot);
                     if (!snapshotSave || snapshotSave.ok !== true || snapshotSave.serverOk !== true || snapshotSave.serverReadbackOk !== true) {
                         status = "skipped";
@@ -2125,6 +2153,21 @@ async function processClientSummaryBatchJob(jobId, totalAccepted, mode){
                         addSummaryBatchError(uid, reason, diagnostic);
                     }
                 }
+            } else {
+                try {
+                    console.warn("[card-snapshot][save-callsite-skip]", {
+                        reason: "SUMMARY_NOT_FRESH",
+                        caller: "index.runSelectedSummaryBatch",
+                        runId: "summary-batch:" + String(jobId || "") + ":" + String(itemId || ""),
+                        abonentId: String(uid || ""),
+                        uid: String(uid || ""),
+                        summaryStatus: String(status || ""),
+                        summaryReason: String(reason || ""),
+                        recalculationMode: "index_summary_batch",
+                        snapshotMode: "canonical_full",
+                        invocationReason: "save-not-called-summary-not-fresh"
+                    });
+                } catch(eIndexSnapshotSummarySkipLog) {}
             }
             completePayload = await Data.completeRecalcUid(jobId, itemId, status, summary, reason);
             if (status === "fresh") freshLocal += 1;

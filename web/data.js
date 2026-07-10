@@ -1431,7 +1431,55 @@
     return data;
   }
 
+  function _cardSnapshotSaveDiagPayload(result, extra) {
+    var out = {};
+    try {
+      if (result && typeof result === "object") {
+        out.ok = result.ok === true;
+        out.reason = String(result.reason || "");
+        out.warning = String(result.warning || "");
+        out.key = String(result.key || "");
+        out.ownerId = String(result.ownerId || "");
+        out.status = Number(result.status || 0);
+        out.localOk = result.localOk === true;
+        out.localCacheOk = result.localCacheOk === true;
+        out.serverOk = result.serverOk === true;
+        out.backendKvOk = result.backendKvOk === true;
+        out.backendSnapshotOk = result.backendSnapshotOk === true;
+        out.serverReadbackOk = result.serverReadbackOk === true;
+        out.backendReadbackOk = result.backendReadbackOk === true;
+        out.rowsByIdCount = Number(result.rowsByIdCount || 0);
+        out.ledgerVersion = String(result.ledgerVersion || "");
+      }
+      if (extra && typeof extra === "object") {
+        for (var kx in extra) {
+          if (Object.prototype.hasOwnProperty.call(extra, kx)) out[kx] = extra[kx];
+        }
+      }
+    } catch (ePayload) {}
+    return out;
+  }
+
+  function _logCardSnapshotSaveDiag(tag, result, extra) {
+    try {
+      var payload = _cardSnapshotSaveDiagPayload(result, extra);
+      if (!payload.reason && extra && extra.reason) payload.reason = String(extra.reason || "");
+      console.log("[card-snapshot][" + tag + "]", payload);
+    } catch (eLog) {}
+  }
+
   async function saveCardSnapshotAndWait(abonentOrId, snapshot, options) {
+    try {
+      console.log("[card-snapshot][save-enter]", {
+        reason: "card_snapshot_save_enter",
+        abonentId: String(abonentOrId && typeof abonentOrId === "object" ? (abonentOrId.id || abonentOrId.uid || "") : (abonentOrId || "")),
+        uid: String(snapshot && snapshot.uid || ""),
+        summaryStatus: String(snapshot && (snapshot.summary_status || snapshot.snapshot_status || "") || ""),
+        summaryReason: String(snapshot && (snapshot.summary_reason || snapshot.snapshot_reason || "") || ""),
+        snapshotMode: String(snapshot && (snapshot.snapshot_mode || snapshot.mode || snapshot.scope || "") || ""),
+        runId: String(options && options.runId || "")
+      });
+    } catch (eEnterLog) {}
     var opts = options && typeof options === "object" ? options : {};
     var result = {
       ok: false,
@@ -1458,6 +1506,8 @@
       if (!Data.ensureWriteOrExplain()) {
         result.reason = "WRITE_BLOCKED";
         try { console.warn("[card-snapshot][save-and-wait-failed]", result); } catch (eWriteLog) {}
+        _logCardSnapshotSaveDiag("save-skip", result, { reason: result.reason, runId: runId, skipStage: "ensure-write" });
+        _logCardSnapshotSaveDiag("save-return", result, { reason: result.reason, runId: runId, returnStage: "ensure-write" });
         return result;
       }
       var prepared = _prepareCardSnapshotForSave(abonentOrId, snapshot);
@@ -1466,6 +1516,8 @@
       if (!prepared.ok) {
         result.reason = prepared.reason || "SNAPSHOT_INVALID";
         try { console.warn("[card-snapshot][save-and-wait-failed]", result); } catch (ePreparedLog) {}
+        _logCardSnapshotSaveDiag("save-skip", result, { reason: result.reason, runId: runId, skipStage: "prepare-snapshot" });
+        _logCardSnapshotSaveDiag("save-return", result, { reason: result.reason, runId: runId, returnStage: "prepare-snapshot" });
         return result;
       }
       var key = prepared.key;
@@ -1502,8 +1554,11 @@
         try { console.warn("[card-snapshot][kv-save-skipped]", { reason: "card_snapshot_kv_save_skipped", skipReason: result.reason, runId: runId, ownerId: ownerId, snapshotKey: key, key: key, uid: _cardSnapshotUidFromStorageKey(key), serializedSize: String(serialized || "").length }); } catch (eSkipKvLog) {}
         try { console.warn("[card-snapshot][server-save-failed]", { ownerId: ownerId, key: key, reason: result.reason }); } catch (eOwnerLog) {}
         try { console.warn("[card-snapshot][save-and-wait-failed]", result); } catch (eOwnerWaitLog) {}
+        _logCardSnapshotSaveDiag("save-skip", result, { reason: result.reason, runId: runId, skipStage: "owner-scope" });
+        _logCardSnapshotSaveDiag("save-return", result, { reason: result.reason, runId: runId, returnStage: "owner-scope" });
         return result;
       }
+      _logCardSnapshotSaveDiag("before-kv-save", result, { reason: "card_snapshot_before_kv_save", runId: runId, uid: _cardSnapshotUidFromStorageKey(key), serializedSize: String(serialized || "").length });
       var serverResult = await _serverStoreSet(ownerId, key, serialized);
       result.status = Number(serverResult && serverResult.status || 0);
       result.backendKvOk = !!(serverResult && serverResult.ok === true);
@@ -1528,9 +1583,12 @@
         result.reason = serverResult && (serverResult.text || serverResult.data && serverResult.data.error) || "SERVER_STORE_FAILED";
         try { console.warn("[card-snapshot][server-save-failed]", { reason: "card_snapshot_backend_save_failed", ownerId: ownerId, key: key, status: result.status, failure: result.reason }); } catch (eServerFailLog) {}
         try { console.warn("[card-snapshot][save-and-wait-failed]", result); } catch (eWaitFailLog) {}
+        _logCardSnapshotSaveDiag("save-skip", result, { reason: result.reason, runId: runId, skipStage: "kv-save-failed" });
+        _logCardSnapshotSaveDiag("save-return", result, { reason: result.reason, runId: runId, returnStage: "kv-save-failed" });
         return result;
       }
       try {
+        _logCardSnapshotSaveDiag("before-canonical-save", result, { reason: "card_snapshot_before_canonical_save", runId: runId, uid: _cardSnapshotUidFromStorageKey(key) });
         var backendSnapshotResult = await saveCardSnapshotToBackend(abonentOrId, normalized);
         result.backendSnapshotOk = !!(backendSnapshotResult && backendSnapshotResult.ok === true);
         try {
@@ -1562,6 +1620,8 @@
             responseBody: String(eTable && eTable.cardSnapshotResponseBody || "")
           });
         } catch (eTableLog) {}
+        _logCardSnapshotSaveDiag("save-skip", result, { reason: result.reason, runId: runId, skipStage: "canonical-save-failed" });
+        _logCardSnapshotSaveDiag("save-return", result, { reason: result.reason, runId: runId, returnStage: "canonical-save-failed" });
         return result;
       }
       try { console.log("[card-snapshot][server-save-ok]", { ownerId: ownerId, key: key, status: result.status }); } catch (eServerOkLog) {}
@@ -1576,6 +1636,7 @@
           try { console.warn("[card-snapshot][backend-save-ok-local-cache-failed]", { reason: "card_snapshot_backend_save_succeeded_local_cache_failed", runId: runId, ownerId: ownerId, key: key, warning: result.warning }); } catch (eWarnOkLog) {}
         }
         try { console.log("[card-snapshot][save-and-wait-ok]", result); } catch (eWaitSkipOkLog) {}
+        _logCardSnapshotSaveDiag("save-return", result, { reason: result.reason || "OK", runId: runId, returnStage: "readback-skipped" });
         return result;
       }
       var readback = await _serverStoreGet(ownerId, key);
@@ -1599,6 +1660,8 @@
           });
         } catch (eReadbackFailLog) {}
         try { console.warn("[card-snapshot][save-and-wait-failed]", result); } catch (eReadbackWaitLog) {}
+        _logCardSnapshotSaveDiag("save-skip", result, { reason: result.reason, runId: runId, skipStage: "server-readback-failed" });
+        _logCardSnapshotSaveDiag("save-return", result, { reason: result.reason, runId: runId, returnStage: "server-readback-failed" });
         return result;
       }
       result.ok = result.backendSnapshotOk === true;
@@ -1608,11 +1671,14 @@
         try { console.warn("[card-snapshot][backend-save-ok-local-cache-failed]", { reason: "card_snapshot_backend_save_succeeded_local_cache_failed", runId: runId, ownerId: ownerId, key: key, warning: result.warning }); } catch (eWarnOkLog2) {}
       }
       try { console.log("[card-snapshot][save-and-wait-ok]", result); } catch (eWaitOkLog) {}
+      _logCardSnapshotSaveDiag("save-return", result, { reason: result.reason || "OK", runId: runId, returnStage: "success" });
       return result;
     } catch (e) {
       result.reason = String(e && e.message || e || "CARD_SNAPSHOT_SAVE_FAILED");
       try { console.warn("[card-snapshot][server-save-failed]", { ownerId: result.ownerId, key: result.key, status: result.status, reason: result.reason }); } catch (eCatchServerLog) {}
       try { console.warn("[card-snapshot][save-and-wait-failed]", result); } catch (eCatchWaitLog) {}
+      _logCardSnapshotSaveDiag("save-skip", result, { reason: result.reason, runId: runId, skipStage: "exception" });
+      _logCardSnapshotSaveDiag("save-return", result, { reason: result.reason, runId: runId, returnStage: "exception" });
       return result;
     }
   }

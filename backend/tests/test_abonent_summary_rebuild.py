@@ -2054,6 +2054,7 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
             "card_snapshot_backend_snapshot_ok_false",
             "card_snapshot_backend_post_invalid_uid",
             "card_snapshot_canonical_save_result",
+            "[card-snapshot][save-enter]",
         ):
             self.assertIn(marker, data_source)
 
@@ -2070,6 +2071,15 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
             self.assertIn(marker, backend_source)
 
         save_body = data_source.split("async function saveCardSnapshotAndWait", 1)[1].split("async function debugCardSnapshotLifecycle", 1)[0]
+        self.assertIn("card_snapshot_save_enter", save_body)
+        self.assertIn("function _logCardSnapshotSaveDiag", data_source)
+        self.assertIn('"[card-snapshot][" + tag + "]"', data_source)
+        self.assertIn('"save-return"', save_body)
+        self.assertIn('"save-skip"', save_body)
+        self.assertIn('"before-kv-save"', save_body)
+        self.assertIn('"before-canonical-save"', save_body)
+        self.assertIn("returnStage", save_body)
+        self.assertIn("skipStage", save_body)
         kv_save_idx = save_body.index("var serverResult = await _serverStoreSet(ownerId, key, serialized)")
         kv_result_idx = save_body.index("card_snapshot_kv_save_result")
         canonical_save_idx = save_body.index("saveCardSnapshotToBackend(abonentOrId, normalized)")
@@ -2102,6 +2112,52 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         self.assertIn("owner_eff = _effective_owner_for_key(owner, key)", store_set_body)
         self.assertIn("KVStore.query.filter_by(owner=owner_eff, k=key).first()", store_set_body)
         self.assertIn("CardSnapshot.query.filter_by(owner_id=owner, abonent_uid=uid).first()", canonical_put_body)
+
+        calc_after = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
+        self.assertEqual(calc_before, calc_after)
+
+    def test_card_snapshot_save_callsite_diagnostics_contract(self):
+        card_path = self._find_repo_file("web", "abonent_card.html")
+        index_path = self._find_repo_file("web", "index.html")
+        calc_engine_path = self._find_repo_file("web", "calc_engine.js")
+        self.assertIsNotNone(card_path)
+        self.assertIsNotNone(index_path)
+        self.assertIsNotNone(calc_engine_path)
+        card_source = card_path.read_text(encoding="utf-8")
+        index_source = index_path.read_text(encoding="utf-8")
+        calc_before = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
+
+        for source in (card_source, index_source):
+            self.assertIn("[card-snapshot][save-callsite]", source)
+            self.assertIn("[card-snapshot][save-callsite-skip]", source)
+            self.assertIn("caller:", source)
+            self.assertIn("runId:", source)
+            self.assertIn("abonentId:", source)
+            self.assertIn("uid:", source)
+            self.assertIn("summaryStatus:", source)
+            self.assertIn("summaryReason:", source)
+            self.assertIn("recalculationMode:", source)
+            self.assertIn("snapshotMode:", source)
+            self.assertIn("invocationReason:", source)
+
+        card_save_body = card_source.split("async function savePostRecalcSnapshot(snapshot)", 1)[1].split("function heartbeatFullRecalc", 1)[0]
+        self.assertIn('caller: "abonent_card.savePostRecalcSnapshot"', card_save_body)
+        self.assertIn('reason: "before_saveCardSnapshotAndWait"', card_save_body)
+        self.assertIn("Data.saveCardSnapshotAndWait(currentAbonentId, snapshot, { runId: recalcRunId })", card_save_body)
+
+        card_result_body = card_source.split("const summaryStatus =", 1)[1].split('if (finishFullRecalcAbortFromUi("abort-before-final-render")) return;', 1)[0]
+        self.assertIn("save-not-called-summary-not-fresh", card_result_body)
+        self.assertIn("save-not-called-api-unavailable", card_result_body)
+        self.assertIn("save-not-called-empty-rows-by-id", card_result_body)
+        self.assertIn("save-not-called-abort-before-snapshot", card_result_body)
+        self.assertIn("save-not-called-abort-after-snapshot-build", card_result_body)
+
+        index_body = index_source.split('if (status === "fresh")', 1)[1].split("completePayload = await Data.completeRecalcUid", 1)[0]
+        self.assertIn('caller: "index.runSelectedSummaryBatch"', index_body)
+        self.assertIn('reason: "before_saveCardSnapshotAndWait"', index_body)
+        self.assertIn("Data.saveCardSnapshotAndWait(uid, snapshot)", index_body)
+        self.assertIn("save-not-called-snapshot-build-failed", index_body)
+        self.assertIn("save-not-called-summary-not-fresh", index_body)
 
         calc_after = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
         self.assertEqual(calc_before, calc_after)

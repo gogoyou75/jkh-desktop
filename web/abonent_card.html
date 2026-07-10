@@ -4766,9 +4766,53 @@ function bindCalcButtons(){
             try {
                 heartbeatFullRecalc("save-card-snapshot");
                 heartbeatPostRecalcStage("snapshot-save-start");
-                if (fullRecalcState.abortRequested === true) return { ok: false, reason: "FULL_RECALC_CANCELLED" };
+                try {
+                    console.log("[card-snapshot][save-callsite]", {
+                        reason: "manual_full_recalc_save_post_recalc_snapshot_enter",
+                        caller: "abonent_card.savePostRecalcSnapshot",
+                        runId: recalcRunId,
+                        abonentId: String(currentAbonentId || ""),
+                        uid: String(snapshot && snapshot.uid || fullRecalcState.uid || ""),
+                        summaryStatus: String(snapshot && (snapshot.summary_status || snapshot.snapshot_status || "") || ""),
+                        summaryReason: String(snapshot && (snapshot.summary_reason || snapshot.snapshot_reason || "") || ""),
+                        recalculationMode: "manual_full_recalc",
+                        snapshotMode: String(snapshot && (snapshot.snapshot_mode || snapshot.mode || snapshot.scope || "canonical_full") || ""),
+                        invocationReason: "post-successful-manual-full-recalc"
+                    });
+                } catch(eSnapshotCallsiteEnterLog) {}
+                if (fullRecalcState.abortRequested === true) {
+                    try {
+                        console.warn("[card-snapshot][save-callsite-skip]", {
+                            reason: "FULL_RECALC_CANCELLED",
+                            caller: "abonent_card.savePostRecalcSnapshot",
+                            runId: recalcRunId,
+                            abonentId: String(currentAbonentId || ""),
+                            uid: String(snapshot && snapshot.uid || fullRecalcState.uid || ""),
+                            summaryStatus: String(snapshot && (snapshot.summary_status || snapshot.snapshot_status || "") || ""),
+                            summaryReason: String(snapshot && (snapshot.summary_reason || snapshot.snapshot_reason || "") || ""),
+                            recalculationMode: "manual_full_recalc",
+                            snapshotMode: String(snapshot && (snapshot.snapshot_mode || snapshot.mode || snapshot.scope || "canonical_full") || ""),
+                            invocationReason: "save-skipped-abort-requested"
+                        });
+                    } catch(eSnapshotCallsiteAbortLog) {}
+                    return { ok: false, reason: "FULL_RECALC_CANCELLED" };
+                }
                 try { console.log("[full-recalc][step]", { runId: recalcRunId, step: "save-card-snapshot" }); } catch(eStepLog) {}
                 const snapshotSaveStartedAt = Date.now();
+                try {
+                    console.log("[card-snapshot][save-callsite]", {
+                        reason: "before_saveCardSnapshotAndWait",
+                        caller: "abonent_card.savePostRecalcSnapshot",
+                        runId: recalcRunId,
+                        abonentId: String(currentAbonentId || ""),
+                        uid: String(snapshot && snapshot.uid || fullRecalcState.uid || ""),
+                        summaryStatus: String(snapshot && (snapshot.summary_status || snapshot.snapshot_status || "") || ""),
+                        summaryReason: String(snapshot && (snapshot.summary_reason || snapshot.snapshot_reason || "") || ""),
+                        recalculationMode: "manual_full_recalc",
+                        snapshotMode: String(snapshot && (snapshot.snapshot_mode || snapshot.mode || snapshot.scope || "canonical_full") || ""),
+                        invocationReason: "calling-saveCardSnapshotAndWait"
+                    });
+                } catch(eSnapshotCallsiteBeforeLog) {}
                 snapshotSaveResult = await Data.saveCardSnapshotAndWait(currentAbonentId, snapshot, { runId: recalcRunId });
                 setRecalcReportStage("snapshotSaveMs", Date.now() - snapshotSaveStartedAt);
                 const saveOk = !!(snapshotSaveResult && snapshotSaveResult.ok === true && snapshotSaveResult.backendSnapshotOk === true && snapshotSaveResult.backendReadbackOk === true);
@@ -4976,8 +5020,38 @@ function bindCalcButtons(){
                 const summaryStatus = recalcResult && (recalcResult.summary_status || recalcResult.status) || summary && (summary.summary_status || summary.status) || "";
                 const summaryReason = recalcResult && (recalcResult.summary_reason || recalcResult.reason) || summary && (summary.summary_reason || summary.reason) || "";
                 if (__normalizeSummaryStatus(summaryStatus) === "fresh") {
-                    if (finishFullRecalcAbortFromUi("abort-before-snapshot")) return;
+                    if (finishFullRecalcAbortFromUi("abort-before-snapshot")) {
+                        try {
+                            console.warn("[card-snapshot][save-callsite-skip]", {
+                                reason: "FULL_RECALC_ABORT_BEFORE_SNAPSHOT",
+                                caller: "abonent_card.manualFullRecalc",
+                                runId: recalcRunId,
+                                abonentId: String(currentAbonentId || ""),
+                                uid: String(fullRecalcState.uid || ""),
+                                summaryStatus: String(summaryStatus || ""),
+                                summaryReason: String(summaryReason || ""),
+                                recalculationMode: "manual_full_recalc",
+                                snapshotMode: "canonical_full",
+                                invocationReason: "save-not-called-abort-before-snapshot"
+                            });
+                        } catch(eSnapshotAbortBeforeLog) {}
+                        return;
+                    }
                     if (!window.Data || typeof Data.buildCardSnapshotFromCurrentResult !== "function" || typeof Data.saveCardSnapshotAndWait !== "function") {
+                        try {
+                            console.warn("[card-snapshot][save-callsite-skip]", {
+                                reason: "CARD_SNAPSHOT_API_UNAVAILABLE",
+                                caller: "abonent_card.manualFullRecalc",
+                                runId: recalcRunId,
+                                abonentId: String(currentAbonentId || ""),
+                                uid: String(fullRecalcState.uid || ""),
+                                summaryStatus: String(summaryStatus || ""),
+                                summaryReason: String(summaryReason || ""),
+                                recalculationMode: "manual_full_recalc",
+                                snapshotMode: "canonical_full",
+                                invocationReason: "save-not-called-api-unavailable"
+                            });
+                        } catch(eSnapshotApiUnavailableLog) {}
                         rememberExplicitFullRecalcFinal("error", "CARD_SNAPSHOT_API_UNAVAILABLE", recalcResult);
                         renderExplicitFullRecalcFinal("snapshot-api-unavailable");
                         try { console.log("[full-recalc][ui-status-final]", { abonentId: String(currentAbonentId || ""), status: "error", reason: "CARD_SNAPSHOT_API_UNAVAILABLE" }); } catch(eUiFinalApiLog) {}
@@ -4989,9 +5063,39 @@ function bindCalcButtons(){
                     const snapshot = Data.buildCardSnapshotFromCurrentResult(currentAbonentId, recalcResult);
                     try { console.log("[full-recalc][step-done]", { runId: recalcRunId, step: "build-card-snapshot" }); } catch(eStepDoneLog) {}
                     await __fullRecalcUiYield();
-                    if (finishFullRecalcAbortFromUi("abort-after-snapshot-build")) return;
+                    if (finishFullRecalcAbortFromUi("abort-after-snapshot-build")) {
+                        try {
+                            console.warn("[card-snapshot][save-callsite-skip]", {
+                                reason: "FULL_RECALC_ABORT_AFTER_SNAPSHOT_BUILD",
+                                caller: "abonent_card.manualFullRecalc",
+                                runId: recalcRunId,
+                                abonentId: String(currentAbonentId || ""),
+                                uid: String(snapshot && snapshot.uid || fullRecalcState.uid || ""),
+                                summaryStatus: String(summaryStatus || ""),
+                                summaryReason: String(summaryReason || ""),
+                                recalculationMode: "manual_full_recalc",
+                                snapshotMode: String(snapshot && (snapshot.snapshot_mode || snapshot.mode || snapshot.scope || "canonical_full") || "canonical_full"),
+                                invocationReason: "save-not-called-abort-after-snapshot-build"
+                            });
+                        } catch(eSnapshotAbortAfterBuildLog) {}
+                        return;
+                    }
                     const snapshotRowsById = snapshot && snapshot.rowsById && typeof snapshot.rowsById === "object" && !Array.isArray(snapshot.rowsById) ? snapshot.rowsById : null;
                     if (!snapshot || !snapshotRowsById || !Object.keys(snapshotRowsById).length) {
+                        try {
+                            console.warn("[card-snapshot][save-callsite-skip]", {
+                                reason: "EMPTY_ROWS_BY_ID",
+                                caller: "abonent_card.manualFullRecalc",
+                                runId: recalcRunId,
+                                abonentId: String(currentAbonentId || ""),
+                                uid: String(snapshot && snapshot.uid || fullRecalcState.uid || ""),
+                                summaryStatus: String(summaryStatus || ""),
+                                summaryReason: String(summaryReason || ""),
+                                recalculationMode: "manual_full_recalc",
+                                snapshotMode: String(snapshot && (snapshot.snapshot_mode || snapshot.mode || snapshot.scope || "canonical_full") || "canonical_full"),
+                                invocationReason: "save-not-called-empty-rows-by-id"
+                            });
+                        } catch(eSnapshotEmptyRowsCallsiteLog) {}
                         rememberExplicitFullRecalcFinal("error", "EMPTY_ROWS_BY_ID", recalcResult);
                         renderExplicitFullRecalcFinal("snapshot-empty-rows");
                         try { console.log("[full-recalc][ui-status-final]", { abonentId: String(currentAbonentId || ""), status: "error", reason: "EMPTY_ROWS_BY_ID" }); } catch(eUiFinalEmptyRowsLog) {}
@@ -5014,6 +5118,21 @@ function bindCalcButtons(){
                         return;
                     }
                     __skipCardAutoRecalcFreshSnapshot(fullRecalcState.uid || currentAbonentId);
+                } else {
+                    try {
+                        console.warn("[card-snapshot][save-callsite-skip]", {
+                            reason: "SUMMARY_NOT_FRESH",
+                            caller: "abonent_card.manualFullRecalc",
+                            runId: recalcRunId,
+                            abonentId: String(currentAbonentId || ""),
+                            uid: String(fullRecalcState.uid || ""),
+                            summaryStatus: String(summaryStatus || ""),
+                            summaryReason: String(summaryReason || ""),
+                            recalculationMode: "manual_full_recalc",
+                            snapshotMode: "canonical_full",
+                            invocationReason: "save-not-called-summary-not-fresh"
+                        });
+                    } catch(eSnapshotSummaryNotFreshLog) {}
                 }
                 if (finishFullRecalcAbortFromUi("abort-before-final-render")) return;
                 rememberExplicitFullRecalcFinal("fresh", "OK", recalcResult);
