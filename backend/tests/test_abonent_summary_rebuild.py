@@ -2031,6 +2031,61 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         calc_after = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
         self.assertEqual(calc_before, calc_after)
 
+    def test_card_snapshot_kv_readback_404_diagnostics_contract(self):
+        data_path = self._find_repo_file("web", "data.js")
+        backend_path = self._find_repo_file("backend", "app.py")
+        calc_engine_path = self._find_repo_file("web", "calc_engine.js")
+        self.assertIsNotNone(data_path)
+        self.assertIsNotNone(backend_path)
+        self.assertIsNotNone(calc_engine_path)
+        data_source = data_path.read_text(encoding="utf-8")
+        backend_source = backend_path.read_text(encoding="utf-8")
+        calc_before = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
+
+        for marker in (
+            "card_snapshot_kv_set_request",
+            "card_snapshot_kv_set_response",
+            "card_snapshot_kv_save_result",
+            "card_snapshot_kv_readback_request",
+            "card_snapshot_kv_readback_response",
+            "card_snapshot_kv_save_skipped",
+            "card_snapshot_canonical_save_result",
+        ):
+            self.assertIn(marker, data_source)
+
+        for marker in (
+            "[diagnose][card-snapshot-kv-get]",
+            "[diagnose][card-snapshot-kv-set]",
+            "[diagnose][card-snapshot-canonical-put]",
+            "card_snapshot_kv_get",
+            "card_snapshot_kv_set",
+            "card_snapshot_canonical_put",
+            "resolved_owner",
+            "client_owner_hint",
+        ):
+            self.assertIn(marker, backend_source)
+
+        save_body = data_source.split("async function saveCardSnapshotAndWait", 1)[1].split("async function debugCardSnapshotLifecycle", 1)[0]
+        kv_save_idx = save_body.index("var serverResult = await _serverStoreSet(ownerId, key, serialized)")
+        kv_result_idx = save_body.index("card_snapshot_kv_save_result")
+        canonical_save_idx = save_body.index("saveCardSnapshotToBackend(abonentOrId, normalized)")
+        readback_idx = save_body.index("var readback = await _serverStoreGet(ownerId, key)")
+        self.assertLess(kv_save_idx, kv_result_idx)
+        self.assertLess(kv_result_idx, canonical_save_idx)
+        self.assertLess(canonical_save_idx, readback_idx)
+
+        store_get_body = backend_source.split("@app.get(\"/api/store\")", 1)[1].split("@app.post(\"/api/store\")", 1)[0]
+        store_set_body = backend_source.split("@app.post(\"/api/store\")", 1)[1].split("@app.delete(\"/api/store\")", 1)[0]
+        canonical_put_body = backend_source.split("def card_snapshot_put(account_uid: str):", 1)[1].split("@app.post(\"/api/recalc_lock", 1)[0]
+        self.assertIn("owner_eff = _effective_owner_for_key(owner, key)", store_get_body)
+        self.assertIn("KVStore.query.filter_by(owner=owner_eff, k=key).first()", store_get_body)
+        self.assertIn("owner_eff = _effective_owner_for_key(owner, key)", store_set_body)
+        self.assertIn("KVStore.query.filter_by(owner=owner_eff, k=key).first()", store_set_body)
+        self.assertIn("CardSnapshot.query.filter_by(owner_id=owner, abonent_uid=uid).first()", canonical_put_body)
+
+        calc_after = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
+        self.assertEqual(calc_before, calc_after)
+
     def test_manual_card_recalc_zero_overwrite_block_is_nonfatal_contract(self):
         payment_path = self._find_repo_file("web", "payment_table.js")
         index_path = self._find_repo_file("web", "index.html")

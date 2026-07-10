@@ -3869,6 +3869,22 @@ def card_snapshot_put(account_uid: str):
     row.computed_at = datetime.utcnow() if status == "fresh" else row.computed_at
     row.snapshot_json = json.dumps(snapshot, ensure_ascii=False, sort_keys=True)
     db.session.commit()
+    app.logger.info(
+        "[diagnose][card-snapshot-canonical-put] %s",
+        json.dumps(
+            {
+                "reason": "card_snapshot_canonical_put",
+                "owner_id": owner,
+                "account_uid": uid,
+                "abonent_id": row.abonent_id,
+                "snapshot_status": row.snapshot_status,
+                "snapshot_reason": row.snapshot_reason,
+                "ledger_version": row.ledger_version,
+                "rowsByIdCount": _snapshot_rows_by_id_count(snapshot),
+            },
+            ensure_ascii=False,
+        ),
+    )
     return jsonify(ok=True, **_card_snapshot_payload(row))
 
 
@@ -5041,6 +5057,23 @@ def store_get():
 
     owner_eff = _effective_owner_for_key(owner, key)
     row = KVStore.query.filter_by(owner=owner_eff, k=key).first()
+    if key.startswith("card_snapshot_"):
+        app.logger.info(
+            "[diagnose][card-snapshot-kv-get] %s",
+            json.dumps(
+                {
+                    "reason": "card_snapshot_kv_get",
+                    "server_owner": owner,
+                    "client_owner_hint": client_owner_hint,
+                    "resolved_owner": owner_eff,
+                    "key": key,
+                    "value_exists": bool(row and (row.v or "") != ""),
+                    "value_length": len(row.v or "") if row else 0,
+                    "status": "ok" if row else "not_found",
+                },
+                ensure_ascii=False,
+            ),
+        )
     if key.startswith("tariffs_"):
         app.logger.info(
             "[diagnose][tariff-server-read] %s",
@@ -5100,11 +5133,29 @@ def store_set():
 
     owner_eff = _effective_owner_for_key(owner, key)
     row = KVStore.query.filter_by(owner=owner_eff, k=key).first()
+    existed = bool(row)
     if row:
         row.v = value
     else:
         db.session.add(KVStore(owner=owner_eff, k=key, v=value))
     db.session.commit()
+    if key.startswith("card_snapshot_"):
+        app.logger.info(
+            "[diagnose][card-snapshot-kv-set] %s",
+            json.dumps(
+                {
+                    "reason": "card_snapshot_kv_set",
+                    "server_owner": owner,
+                    "client_owner_hint": client_owner_hint,
+                    "resolved_owner": owner_eff,
+                    "key": key,
+                    "value_length": len(value or ""),
+                    "existed": existed,
+                    "status": "ok",
+                },
+                ensure_ascii=False,
+            ),
+        )
     _sync_log("save", owner_eff, server_owner=owner, client_owner_hint=client_owner_hint, key=key, size=len(value or ""), status="ok")
     return jsonify(ok=True, owner=owner_eff)
 

@@ -703,25 +703,95 @@
     return { ok: !!(res.ok && data && data.ok === true), status: res.status, data: data, text: txt, key: key };
   }
 
+  function _isCardSnapshotStorageKey(key) {
+    return String(key || "").indexOf("card_snapshot_") === 0;
+  }
+
+  function _cardSnapshotUidFromStorageKey(key) {
+    return _isCardSnapshotStorageKey(key) ? String(key || "").slice("card_snapshot_".length) : "";
+  }
+
   async function _serverStoreSet(ownerId, key, value) {
+    var valueText = String(value == null ? "" : value);
+    if (_isCardSnapshotStorageKey(key)) {
+      try {
+        console.log("[card-snapshot][kv-set-request]", {
+          reason: "card_snapshot_kv_set_request",
+          snapshotKey: String(key || ""),
+          key: String(key || ""),
+          ownerId: String(ownerId || ""),
+          uid: _cardSnapshotUidFromStorageKey(key),
+          serializedSize: valueText.length,
+          requestUrl: "/api/store"
+        });
+      } catch(eKvSetReqLog) {}
+    }
     var res = await fetch("/api/store", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       credentials: "include",
-      body: JSON.stringify({ client_owner_hint: ownerId, key: key, value: String(value == null ? "" : value) })
+      body: JSON.stringify({ client_owner_hint: ownerId, key: key, value: valueText })
     });
     var txt = await res.text();
     var data = null;
     try { data = JSON.parse(txt); } catch (e) {}
+    if (_isCardSnapshotStorageKey(key)) {
+      try {
+        console.log("[card-snapshot][kv-set-response]", {
+          reason: "card_snapshot_kv_set_response",
+          snapshotKey: String(key || ""),
+          key: String(key || ""),
+          ownerId: String(ownerId || ""),
+          uid: _cardSnapshotUidFromStorageKey(key),
+          serializedSize: valueText.length,
+          ok: !!(res.ok && data && data.ok === true),
+          httpStatus: res.status,
+          backendOwner: String(data && data.owner || ""),
+          backendKey: String(data && (data.key || data.k) || key || ""),
+          responseError: String(data && data.error || "")
+        });
+      } catch(eKvSetRespLog) {}
+    }
     return { ok: !!(res.ok && data && data.ok === true), status: res.status, data: data, text: txt, key: key };
   }
 
   async function _serverStoreGet(ownerId, key) {
     var url = "/api/store?key=" + encodeURIComponent(key) + "&client_owner_hint=" + encodeURIComponent(ownerId);
+    if (_isCardSnapshotStorageKey(key)) {
+      try {
+        console.log("[card-snapshot][kv-readback-request]", {
+          reason: "card_snapshot_kv_readback_request",
+          snapshotKey: String(key || ""),
+          key: String(key || ""),
+          ownerId: String(ownerId || ""),
+          uid: _cardSnapshotUidFromStorageKey(key),
+          requestUrl: url
+        });
+      } catch(eKvReadReqLog) {}
+    }
     var res = await fetch(url, { method: "GET", credentials: "include" });
     var txt = await res.text();
     var data = null;
     try { data = JSON.parse(txt); } catch (e) {}
+    if (_isCardSnapshotStorageKey(key)) {
+      try {
+        var rawValue = data && data.value !== null && data.value !== undefined ? String(data.value) : "";
+        console.log("[card-snapshot][kv-readback-response]", {
+          reason: "card_snapshot_kv_readback_response",
+          snapshotKey: String(key || ""),
+          key: String(key || ""),
+          ownerId: String(ownerId || ""),
+          uid: _cardSnapshotUidFromStorageKey(key),
+          ok: !!(res.ok && data && data.ok === true),
+          missing: res.status === 404,
+          httpStatus: res.status,
+          backendOwner: String(data && data.owner || ""),
+          backendKey: String(data && (data.key || data.k) || key || ""),
+          returnedSize: rawValue.length,
+          responseError: String(data && data.error || "")
+        });
+      } catch(eKvReadRespLog) {}
+    }
     return { ok: !!(res.ok && data && data.ok === true), missing: res.status === 404, status: res.status, data: data, text: txt, key: key, raw: data && data.value };
   }
 
@@ -1366,6 +1436,7 @@
       await _dataUiYield();
       if (!ownerId || ownerId === "guest" || ownerId === "ALL") {
         result.reason = "OWNER_SCOPE_UNAVAILABLE";
+        try { console.warn("[card-snapshot][kv-save-skipped]", { reason: "card_snapshot_kv_save_skipped", skipReason: result.reason, runId: runId, ownerId: ownerId, snapshotKey: key, key: key, uid: _cardSnapshotUidFromStorageKey(key), serializedSize: String(serialized || "").length }); } catch (eSkipKvLog) {}
         try { console.warn("[card-snapshot][server-save-failed]", { ownerId: ownerId, key: key, reason: result.reason }); } catch (eOwnerLog) {}
         try { console.warn("[card-snapshot][save-and-wait-failed]", result); } catch (eOwnerWaitLog) {}
         return result;
@@ -1374,6 +1445,21 @@
       result.status = Number(serverResult && serverResult.status || 0);
       result.backendKvOk = !!(serverResult && serverResult.ok === true);
       result.serverOk = result.backendKvOk;
+      try {
+        console.log("[card-snapshot][kv-save-result]", {
+          reason: "card_snapshot_kv_save_result",
+          runId: runId,
+          ownerId: ownerId,
+          snapshotKey: key,
+          key: key,
+          uid: _cardSnapshotUidFromStorageKey(key),
+          ok: result.backendKvOk,
+          httpStatus: result.status,
+          backendOwner: String(serverResult && serverResult.data && serverResult.data.owner || ""),
+          backendKey: String(serverResult && serverResult.data && (serverResult.data.key || serverResult.data.k) || key || ""),
+          responseError: String(serverResult && serverResult.data && serverResult.data.error || "")
+        });
+      } catch (eKvSaveResultLog) {}
       await _dataUiYield();
       if (!result.backendKvOk) {
         result.reason = serverResult && (serverResult.text || serverResult.data && serverResult.data.error) || "SERVER_STORE_FAILED";
@@ -1384,6 +1470,20 @@
       try {
         var backendSnapshotResult = await saveCardSnapshotToBackend(abonentOrId, normalized);
         result.backendSnapshotOk = !!(backendSnapshotResult && backendSnapshotResult.ok === true);
+        try {
+          console.log("[card-snapshot][canonical-save-result]", {
+            reason: "card_snapshot_canonical_save_result",
+            runId: runId,
+            ownerId: ownerId,
+            snapshotKey: key,
+            key: key,
+            uid: _cardSnapshotUidFromStorageKey(key),
+            ok: result.backendSnapshotOk,
+            backendOwner: String(backendSnapshotResult && backendSnapshotResult.owner_id || ""),
+            backendUid: String(backendSnapshotResult && backendSnapshotResult.abonent_uid || ""),
+            snapshotStatus: String(backendSnapshotResult && backendSnapshotResult.snapshot_status || "")
+          });
+        } catch(eCanonicalLog) {}
       } catch (eTable) {
         result.ok = false;
         result.reason = "CARD_SNAPSHOT_TABLE_SAVE_FAILED:" + String(eTable && eTable.message || eTable);
