@@ -2409,6 +2409,46 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         self.assertNotIn("JKH_UI_STATE.data.status = 'ready'", payment_source)
         self.assertNotIn("window.JKH_DATA_READY = true", payment_source)
 
+    def test_ui_state_offline_transition_diagnostics_contract(self):
+        storage_path = self._find_repo_file("web", "storage.js")
+        auth_path = self._find_repo_file("web", "auth.js")
+        payment_path = self._find_repo_file("web", "payment_table.js")
+        calc_engine_path = self._find_repo_file("web", "calc_engine.js")
+        self.assertIsNotNone(storage_path)
+        self.assertIsNotNone(auth_path)
+        self.assertIsNotNone(payment_path)
+        self.assertIsNotNone(calc_engine_path)
+        storage_source = storage_path.read_text(encoding="utf-8")
+        auth_source = auth_path.read_text(encoding="utf-8")
+        payment_source = payment_path.read_text(encoding="utf-8")
+        calc_before = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
+
+        for source in (storage_source, auth_source):
+            self.assertIn("function _traceUIStateChange(moduleName, before, after, patch, stack)", source)
+            self.assertIn("function _uiStateTraceFrame(stack)", source)
+            self.assertIn("[ui-state][transition]", source)
+            self.assertIn("ui_state_offline_transition", source)
+            self.assertIn("serverBefore", source)
+            self.assertIn("serverAfter", source)
+            self.assertIn("dataBefore", source)
+            self.assertIn("dataAfter", source)
+            self.assertIn("patchDataStatus", source)
+            self.assertIn("caller: _uiStateTraceFrame(stack)", source)
+            self.assertIn("stack: stackLines", source)
+
+        storage_set_body = storage_source.split("function _setUIState(patch)", 1)[1].split("function _cacheGet", 1)[0]
+        auth_set_body = auth_source.split("function _setUIState(patch)", 1)[1].split("function _userToAuthState", 1)[0]
+        self.assertIn('_traceUIStateChange("storage", before, st, patch, stack)', storage_set_body)
+        self.assertIn('_traceUIStateChange("auth", before, st, patch, stack)', auth_set_body)
+
+        wait_body = payment_source.split("async function waitForManualRecalcDataReady", 1)[1].split("function excludePeriodsKey", 1)[0]
+        self.assertIn('reason: "manual_recalc_data_ready_blockers"', wait_body)
+        self.assertNotIn('uiStatus === "offline"', wait_body)
+        self.assertNotIn('status === "offline"', wait_body)
+
+        calc_after = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
+        self.assertEqual(calc_before, calc_after)
+
     def test_backend_global_refinancing_rates_are_read_for_active_owner(self):
         normal_rates = json.dumps([{"from": "2020-01-01", "rate": 7.5}], ensure_ascii=False)
         moratorium_rates = json.dumps([{"from": "2020-01-01", "rate": 0}], ensure_ascii=False)

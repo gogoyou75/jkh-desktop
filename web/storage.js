@@ -639,12 +639,68 @@
     } catch (e) {}
   }
 
+  function _uiStateTraceFrame(stack) {
+    var lines = String(stack || "").split("\n");
+    for (var i = 1; i < lines.length; i++) {
+      var line = String(lines[i] || "").trim();
+      if (!line) continue;
+      if (line.indexOf("_uiStateTraceFrame") >= 0) continue;
+      if (line.indexOf("_traceUIStateChange") >= 0) continue;
+      if (line.indexOf("_setUIState") >= 0) continue;
+      return line;
+    }
+    return "";
+  }
+
+  function _traceUIStateChange(moduleName, before, after, patch, stack) {
+    try {
+      before = before || {};
+      after = after || {};
+      var beforeServer = before.server || {};
+      var beforeData = before.data || {};
+      var afterServer = after.server || {};
+      var afterData = after.data || {};
+      var patchServer = patch && patch.server && typeof patch.server === "object" ? patch.server : {};
+      var patchData = patch && patch.data && typeof patch.data === "object" ? patch.data : {};
+      var serverChanged = String(beforeServer.status || "") !== String(afterServer.status || "");
+      var dataChanged = String(beforeData.status || "") !== String(afterData.status || "");
+      var sourceChanged = String(beforeData.source || "") !== String(afterData.source || "");
+      var messageChanged = String(beforeData.message || "") !== String(afterData.message || "");
+      var setsOffline = String(afterServer.status || "") === "offline" || String(afterData.status || "") === "offline";
+      if (!serverChanged && !dataChanged && !sourceChanged && !messageChanged && !setsOffline) return;
+      var stackLines = String(stack || "").split("\n").slice(1, 9).map(function(line) { return String(line || "").trim(); }).filter(Boolean);
+      console.log("[ui-state][transition]", {
+        reason: setsOffline ? "ui_state_offline_transition" : "ui_state_transition",
+        module: moduleName,
+        caller: _uiStateTraceFrame(stack),
+        serverBefore: String(beforeServer.status || ""),
+        serverAfter: String(afterServer.status || ""),
+        dataBefore: String(beforeData.status || ""),
+        dataAfter: String(afterData.status || ""),
+        sourceBefore: String(beforeData.source || ""),
+        sourceAfter: String(afterData.source || ""),
+        patchServerStatus: String(patchServer.status || ""),
+        patchDataStatus: String(patchData.status || ""),
+        patchDataSource: String(patchData.source || ""),
+        message: String((patchData.message || patchServer.message || afterData.message || afterServer.message || "")).slice(0, 240),
+        stack: stackLines
+      });
+    } catch (eTrace) {}
+  }
+
   function _setUIState(patch) {
     patch = patch || {};
     var st = _ensureUIState();
+    var before = {
+      server: Object.assign({}, st.server || {}),
+      data: Object.assign({}, st.data || {})
+    };
+    var stack = "";
+    try { stack = (new Error()).stack || ""; } catch (eStack) {}
     if (patch.auth && typeof patch.auth === "object") st.auth = Object.assign({}, st.auth, patch.auth);
     if (patch.server && typeof patch.server === "object") st.server = Object.assign({}, st.server, patch.server);
     if (patch.data && typeof patch.data === "object") st.data = Object.assign({}, st.data, patch.data);
+    _traceUIStateChange("storage", before, st, patch, stack);
     _emitUIStateChanged(st);
     return st;
   }
