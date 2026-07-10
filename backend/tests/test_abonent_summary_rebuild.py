@@ -2469,6 +2469,52 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         calc_after = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
         self.assertEqual(calc_before, calc_after)
 
+    def test_server_offline_preserves_hydrated_data_readiness_contract(self):
+        storage_path = self._find_repo_file("web", "storage.js")
+        auth_path = self._find_repo_file("web", "auth.js")
+        payment_path = self._find_repo_file("web", "payment_table.js")
+        calc_engine_path = self._find_repo_file("web", "calc_engine.js")
+        self.assertIsNotNone(storage_path)
+        self.assertIsNotNone(auth_path)
+        self.assertIsNotNone(payment_path)
+        self.assertIsNotNone(calc_engine_path)
+        storage_source = storage_path.read_text(encoding="utf-8")
+        auth_source = auth_path.read_text(encoding="utf-8")
+        payment_source = payment_path.read_text(encoding="utf-8")
+        calc_before = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
+
+        for source in (storage_source, auth_source):
+            self.assertIn("function _isPreservedServerDataState(dataState)", source)
+            self.assertIn('source === "server" && (status === "ready" || status === "empty")', source)
+            self.assertIn("server_offline_data_state_preserved", source)
+            self.assertIn("initial_server_load_failed_no_hydrated_data", source)
+            self.assertIn("[ui-state][data-preserved]", source)
+
+        storage_load_body = storage_source.split("async function _loadFromServerServerFirst", 1)[1].split("window.JKHDataLoader", 1)[0]
+        self.assertIn("var preservedDataStateBeforeLoad = _serverDataStateSnapshotIfPreserved()", storage_load_body)
+        self.assertIn("_serverConnectivityFailureUIStatePatch", storage_load_body)
+        self.assertIn('"connectivity_offline_without_data_downgrade"', storage_load_body)
+        self.assertIn('"server_offline_data_state_preserved"', storage_load_body)
+        self.assertIn('{ status: "offline", source: "server"', storage_load_body)
+
+        auth_autoload_body = auth_source.split("async function runAutoLoadAfterLoginOnce", 1)[1].split("function isLoggedIn", 1)[0]
+        self.assertIn("var preservedDataStateBeforeAutoload = _serverDataStateSnapshotIfPreserved()", auth_autoload_body)
+        self.assertIn("_authDataPatchForConnectivityFailure", auth_autoload_body)
+        self.assertIn('"server_offline_data_state_preserved"', auth_autoload_body)
+        self.assertIn('status: nextDataStatus, source: "server"', auth_autoload_body)
+
+        ping_body = storage_source.split("async function pingServer()", 1)[1].split("async function upload", 1)[0]
+        self.assertIn('_setUIState({ server: { status: "offline"', ping_body)
+        self.assertNotIn('data: { status: "offline"', ping_body)
+
+        wait_body = payment_source.split("function serverFirstReadableState()", 1)[1].split("function isDataReady()", 1)[0]
+        self.assertIn('out.uiStatus === "ready"', wait_body)
+        self.assertIn('out.uiStatus === "empty" && out.uiSource === "server"', wait_body)
+        self.assertNotIn('out.uiStatus === "offline"', wait_body)
+
+        calc_after = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
+        self.assertEqual(calc_before, calc_after)
+
     def test_backend_global_refinancing_rates_are_read_for_active_owner(self):
         normal_rates = json.dumps([{"from": "2020-01-01", "rate": 7.5}], ensure_ascii=False)
         moratorium_rates = json.dumps([{"from": "2020-01-01", "rate": 0}], ensure_ascii=False)

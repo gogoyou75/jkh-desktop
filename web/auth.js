@@ -109,6 +109,7 @@
 
     gate.inFlight = (async function () {
       console.info("[auth] autoload gate start source=%s userId=%s", tag, uid);
+      var preservedDataStateBeforeAutoload = _serverDataStateSnapshotIfPreserved();
       try {
         _setUIState({
           server: { status: "online", checkedAt: _nowISO(), message: "" },
@@ -129,9 +130,10 @@
           if (!typedServerStatus) {
             typedServerStatus = (typedStatus === "offline") ? "offline" : "online";
           }
+          var failedDataPatch = { status: typedStatus, source: "server", message: String(result && result.message || "Не удалось автоматически загрузить данные") };
           _setUIState({
             server: { status: typedServerStatus, checkedAt: _nowISO(), message: String(result && result.message || "") },
-            data: { status: typedStatus, source: "server", message: String(result && result.message || "Не удалось автоматически загрузить данные") }
+            data: _authDataPatchForConnectivityFailure(failedDataPatch, preservedDataStateBeforeAutoload, "server_offline_data_state_preserved")
           });
           console.warn("[auth] autoload failed but login allowed source=%s userId=%s", tag, uid);
           return false;
@@ -162,9 +164,10 @@
         if (!nextServerStatus || nextServerStatus === "unknown") {
           nextServerStatus = _isNetworkOrTimeoutError(e) ? "offline" : "online";
         }
+        var exceptionDataPatch = { status: nextDataStatus, source: "server", message: String(e && e.message ? e.message : e || "") };
         _setUIState({
           server: { status: nextServerStatus, checkedAt: _nowISO(), message: String(e && e.message ? e.message : e || "") },
-          data: { status: nextDataStatus, source: "server", message: String(e && e.message ? e.message : e || "") }
+          data: _authDataPatchForConnectivityFailure(exceptionDataPatch, preservedDataStateBeforeAutoload, "server_offline_data_state_preserved")
         });
         console.warn("[auth] autoload exception but login allowed source=%s userId=%s:", tag, uid, e);
         return false;
@@ -283,6 +286,43 @@ function _traceUIStateChange(moduleName, before, after, patch, stack) {
       stack: stackLines
     });
   } catch (eTrace) {}
+}
+
+function _isPreservedServerDataState(dataState) {
+  var status = String(dataState && dataState.status || "");
+  var source = String(dataState && dataState.source || "");
+  return source === "server" && (status === "ready" || status === "empty");
+}
+
+function _serverDataStateSnapshotIfPreserved() {
+  var st = _ensureUIState();
+  return _isPreservedServerDataState(st && st.data) ? Object.assign({}, st.data) : null;
+}
+
+function _authDataPatchForConnectivityFailure(nextDataPatch, preservedDataState, diagnosticReason) {
+  var preserved = preservedDataState && _isPreservedServerDataState(preservedDataState) ? Object.assign({}, preservedDataState) : _serverDataStateSnapshotIfPreserved();
+  if (preserved && String(nextDataPatch && nextDataPatch.status || "") === "offline") {
+    try {
+      console.warn("[ui-state][data-preserved]", {
+        reason: diagnosticReason || "server_offline_data_state_preserved",
+        dataStatus: String(preserved.status || ""),
+        dataSource: String(preserved.source || ""),
+        message: String(nextDataPatch && nextDataPatch.message || "")
+      });
+    } catch (ePreserveLog) {}
+    return preserved;
+  }
+  if (String(nextDataPatch && nextDataPatch.status || "") === "offline") {
+    try {
+      console.warn("[ui-state][data-preserved]", {
+        reason: "initial_server_load_failed_no_hydrated_data",
+        dataStatus: String(nextDataPatch && nextDataPatch.status || ""),
+        dataSource: String(nextDataPatch && nextDataPatch.source || ""),
+        message: String(nextDataPatch && nextDataPatch.message || "")
+      });
+    } catch (eInitialFailLog) {}
+  }
+  return nextDataPatch;
 }
 
 function _setUIState(patch) {

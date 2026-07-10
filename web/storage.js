@@ -688,6 +688,43 @@
     } catch (eTrace) {}
   }
 
+  function _isPreservedServerDataState(dataState) {
+    var status = String(dataState && dataState.status || "");
+    var source = String(dataState && dataState.source || "");
+    return source === "server" && (status === "ready" || status === "empty");
+  }
+
+  function _serverDataStateSnapshotIfPreserved() {
+    var st = _ensureUIState();
+    return _isPreservedServerDataState(st && st.data) ? Object.assign({}, st.data) : null;
+  }
+
+  function _serverConnectivityFailureUIStatePatch(serverPatch, offlineDataPatch, preservedDataState, diagnosticReason) {
+    var preserved = preservedDataState && _isPreservedServerDataState(preservedDataState) ? Object.assign({}, preservedDataState) : _serverDataStateSnapshotIfPreserved();
+    if (preserved) {
+      try {
+        console.warn("[ui-state][data-preserved]", {
+          reason: diagnosticReason || "server_offline_data_state_preserved",
+          serverStatus: String(serverPatch && serverPatch.status || ""),
+          dataStatus: String(preserved.status || ""),
+          dataSource: String(preserved.source || ""),
+          message: String(serverPatch && serverPatch.message || "")
+        });
+      } catch (ePreserveLog) {}
+      return { server: serverPatch, data: preserved };
+    }
+    try {
+      console.warn("[ui-state][data-preserved]", {
+        reason: "initial_server_load_failed_no_hydrated_data",
+        serverStatus: String(serverPatch && serverPatch.status || ""),
+        dataStatus: String(offlineDataPatch && offlineDataPatch.status || ""),
+        dataSource: String(offlineDataPatch && offlineDataPatch.source || ""),
+        message: String(serverPatch && serverPatch.message || "")
+      });
+    } catch (eInitialFailLog) {}
+    return { server: serverPatch, data: offlineDataPatch };
+  }
+
   function _setUIState(patch) {
     patch = patch || {};
     var st = _ensureUIState();
@@ -1855,12 +1892,15 @@
     window.__JKH_DATA_LOADER_IN_FLIGHT = (async function () {
       var ownerId = _ownerId();
       var checkedAt = _nowISO();
+      var preservedDataStateBeforeLoad = _serverDataStateSnapshotIfPreserved();
 
       if (!isOnlineMode()) {
-        _setUIState({
-          server: { status: "offline", checkedAt: checkedAt, message: "OFFLINE mode" },
-          data: { status: "offline", source: "server", message: "OFFLINE mode" }
-        });
+        _setUIState(_serverConnectivityFailureUIStatePatch(
+          { status: "offline", checkedAt: checkedAt, message: "OFFLINE mode" },
+          { status: "offline", source: "server", message: "OFFLINE mode" },
+          preservedDataStateBeforeLoad,
+          "connectivity_offline_without_data_downgrade"
+        ));
         return { ok: false, status: "offline", serverStatus: "offline", message: "OFFLINE mode" };
       }
 
@@ -1891,10 +1931,19 @@
           var httpErr = (resDump.data && resDump.data.error) ? resDump.data.error : ("HTTP " + resDump.status);
           var serverStatus = (resDump.status === 401) ? "unauthorized" : ((resDump.status === 403) ? "forbidden" : "offline");
           var dataStatus = (resDump.status === 401) ? "unauthorized" : ((resDump.status === 403) ? "forbidden" : "offline");
-          _setUIState({
-            server: { status: serverStatus, checkedAt: _nowISO(), message: (serverStatus === "offline" ? httpErr : "") },
-            data: { status: dataStatus, source: "server", message: (dataStatus === "unauthorized" ? "Требуется вход" : httpErr) }
-          });
+          if (serverStatus === "offline") {
+            _setUIState(_serverConnectivityFailureUIStatePatch(
+              { status: serverStatus, checkedAt: _nowISO(), message: httpErr },
+              { status: dataStatus, source: "server", message: httpErr },
+              preservedDataStateBeforeLoad,
+              "server_offline_data_state_preserved"
+            ));
+          } else {
+            _setUIState({
+              server: { status: serverStatus, checkedAt: _nowISO(), message: "" },
+              data: { status: dataStatus, source: "server", message: (dataStatus === "unauthorized" ? "Требуется вход" : httpErr) }
+            });
+          }
           return { ok: false, status: dataStatus, serverStatus: serverStatus, message: httpErr };
         }
 
@@ -2023,10 +2072,12 @@
         return { ok: true, status: status, loadedAt: loadedAt, serverStatus: "online", message: "" };
       } catch (e) {
         var msg = String(e && e.message ? e.message : e);
-        _setUIState({
-          server: { status: "offline", checkedAt: _nowISO(), message: msg },
-          data: { status: "offline", source: "server", message: "Ошибка сети: " + msg }
-        });
+        _setUIState(_serverConnectivityFailureUIStatePatch(
+          { status: "offline", checkedAt: _nowISO(), message: msg },
+          { status: "offline", source: "server", message: "Ошибка сети: " + msg },
+          preservedDataStateBeforeLoad,
+          "server_offline_data_state_preserved"
+        ));
         _setStatus({ lastAction: "Ошибка загрузки", lastError: msg });
         return { ok: false, status: "offline", serverStatus: "offline", message: msg };
       } finally {
