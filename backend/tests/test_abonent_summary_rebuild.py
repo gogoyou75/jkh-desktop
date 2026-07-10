@@ -2198,20 +2198,61 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         self.assertIn("hasMoratorium", direct_body)
         self.assertIn("envType", direct_body)
         self.assertIn("uiStatus", direct_body)
+        self.assertIn("uiSource", direct_body)
+        self.assertIn("legacyDataReady", direct_body)
         self.assertIn("jkhDataReady", direct_body)
+        self.assertIn("normalRateReadable", direct_body)
+        self.assertIn("moratoriumRateReadable", direct_body)
+        self.assertIn("hydratedDatabaseState", direct_body)
+        self.assertIn("envPrefixStable", direct_body)
 
         wait_body = payment_source.split("async function waitForManualRecalcDataReady", 1)[1].split("function excludePeriodsKey", 1)[0]
-        self.assertIn("manualRecalcDataReadyForSync() && state.hasNormal && state.hasMoratorium", wait_body)
+        self.assertIn("manualRecalcDataReadyForSync(state, expectedEnvType)", wait_body)
+        self.assertIn("expectedEnvType", wait_body)
+        self.assertIn("state.envPrefixStable", wait_body)
         self.assertIn("Data.waitForServerFirstDataReady", wait_body)
         self.assertIn("JKHDataLoader.loadFromServer", wait_body)
+        self.assertIn("state.acceptedStateReason", wait_body)
         self.assertIn('reason: "manual_recalc_data_ready_timeout"', wait_body)
         self.assertIn('return { ok: false, reason: "DATA_READY_TIMEOUT"', wait_body)
 
-        ready_body = payment_source.split("function manualRecalcDataReadyForSync()", 1)[1].split("async function waitForManualRecalcDataReady", 1)[0]
-        self.assertIn('String(st.status || "") === "ready"', ready_body)
+        ready_body = payment_source.split("function manualRecalcDataReadyForSync", 1)[1].split("async function waitForManualRecalcDataReady", 1)[0]
+        self.assertIn("serverFirstReadableState()", ready_body)
+        self.assertIn("observed.hasNormal === true", ready_body)
+        self.assertIn("observed.hasMoratorium === true", ready_body)
+        self.assertIn("hydrated.hydrated === true", ready_body)
+        self.assertIn("envStable === true", ready_body)
 
         calc_after = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
         self.assertEqual(calc_before, calc_after)
+
+    def test_payment_table_manual_recalc_readiness_matches_server_first_contract(self):
+        payment_path = self._find_repo_file("web", "payment_table.js")
+        self.assertIsNotNone(payment_path)
+        payment_source = payment_path.read_text(encoding="utf-8")
+
+        self.assertIn("function serverFirstReadableState()", payment_source)
+        helper_body = payment_source.split("function serverFirstReadableState()", 1)[1].split("function isDataReady()", 1)[0]
+        self.assertIn('out.uiStatus === "ready"', helper_body)
+        self.assertIn('out.acceptedReason = "manual_recalc_data_ready_server_ready"', helper_body)
+        self.assertIn('out.uiStatus === "empty" && out.uiSource === "server"', helper_body)
+        self.assertIn('out.acceptedReason = "manual_recalc_data_ready_server_empty"', helper_body)
+        self.assertIn("window.JKH_DATA_READY === true", helper_body)
+        self.assertIn('out.acceptedReason = "manual_recalc_data_ready_legacy"', helper_body)
+        self.assertNotIn('out.uiStatus === "loading"', helper_body)
+        self.assertNotIn('out.uiStatus === "error"', helper_body)
+
+        is_ready_body = payment_source.split("function isDataReady()", 1)[1].split("function storeGetRaw", 1)[0]
+        self.assertIn("serverFirstReadableState().ok === true", is_ready_body)
+
+        wait_body = payment_source.split("async function waitForManualRecalcDataReady", 1)[1].split("function excludePeriodsKey", 1)[0]
+        self.assertIn("Data.waitForServerFirstDataReady", wait_body)
+        self.assertIn("JKHDataLoader.loadFromServer", wait_body)
+        self.assertIn("manual_recalc_data_ready_timeout", wait_body)
+
+        self.assertNotIn('JKH_UI_STATE.data.status = "ready"', payment_source)
+        self.assertNotIn("JKH_UI_STATE.data.status = 'ready'", payment_source)
+        self.assertNotIn("window.JKH_DATA_READY = true", payment_source)
 
     def test_backend_global_refinancing_rates_are_read_for_active_owner(self):
         normal_rates = json.dumps([{"from": "2020-01-01", "rate": 7.5}], ensure_ascii=False)

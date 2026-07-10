@@ -32,13 +32,40 @@
   function qs(sel, root = document) { return root.querySelector(sel); }
   function qsa(sel, root = document) { return Array.from(root.querySelectorAll(sel)); }
   function pad2(n) { return String(n).padStart(2, "0"); }
-  function isDataReady(){
-  try {
-    return window.JKH_UI_STATE?.data?.status === "ready";
-  } catch {
-    return false;
+  function serverFirstReadableState(){
+    const out = {
+      ok: false,
+      acceptedReason: "",
+      uiStatus: "",
+      uiSource: "",
+      legacyDataReady: false
+    };
+    try {
+      const st = window.JKH_UI_STATE && window.JKH_UI_STATE.data || {};
+      out.uiStatus = String(st.status || "");
+      out.uiSource = String(st.source || "");
+      out.legacyDataReady = window.JKH_DATA_READY === true;
+      if (out.uiStatus === "ready") {
+        out.ok = true;
+        out.acceptedReason = "manual_recalc_data_ready_server_ready";
+        return out;
+      }
+      if (out.uiStatus === "empty" && out.uiSource === "server") {
+        out.ok = true;
+        out.acceptedReason = "manual_recalc_data_ready_server_empty";
+        return out;
+      }
+      if (out.legacyDataReady) {
+        out.ok = true;
+        out.acceptedReason = "manual_recalc_data_ready_legacy";
+        return out;
+      }
+    } catch(e) {}
+    return out;
   }
-}
+  function isDataReady(){
+    return serverFirstReadableState().ok === true;
+  }
   function storeGetRaw(key){
     if (!isDataReady()) return null;
     if (!(window.JKHStore && typeof window.JKHStore.getRaw === "function")) return null;
@@ -4248,25 +4275,28 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
 
   function directGlobalRateReadState(source){
     const keys = [REFI_KEY_NORMAL, REFI_KEY_MORA];
+    const readable = serverFirstReadableState();
+    const hydrated = manualRecalcHydratedDatabaseState();
     const out = {
       source: String(source || ""),
       envType: "",
-      uiStatus: "",
-      uiSource: "",
+      uiStatus: readable.uiStatus,
+      uiSource: readable.uiSource,
+      legacyDataReady: readable.legacyDataReady === true,
       jkhDataReady: window.JKH_DATA_READY === true,
+      acceptedStateReason: readable.acceptedReason,
+      hydratedDatabaseState: hydrated,
+      envPrefixStable: true,
       hasNormal: false,
       hasMoratorium: false,
+      normalRateReadable: false,
+      moratoriumRateReadable: false,
       normalLength: 0,
       moratoriumLength: 0
     };
     try {
       out.envType = window.JKHStore && typeof JKHStore.getEnvType === "function" ? String(JKHStore.getEnvType() || "") : "";
     } catch(eEnv) {}
-    try {
-      const st = window.JKH_UI_STATE && window.JKH_UI_STATE.data || {};
-      out.uiStatus = String(st.status || "");
-      out.uiSource = String(st.source || "");
-    } catch(eState) {}
     for (let i = 0; i < keys.length; i += 1) {
       const key = keys[i];
       let raw = null;
@@ -4276,19 +4306,42 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
       const exists = raw !== null && raw !== undefined && String(raw) !== "";
       if (key === REFI_KEY_NORMAL) {
         out.hasNormal = exists;
+        out.normalRateReadable = exists;
         out.normalLength = exists ? String(raw).length : 0;
       } else if (key === REFI_KEY_MORA) {
         out.hasMoratorium = exists;
+        out.moratoriumRateReadable = exists;
         out.moratoriumLength = exists ? String(raw).length : 0;
       }
     }
     return out;
   }
 
-  function manualRecalcDataReadyForSync(){
+  function manualRecalcHydratedDatabaseState(){
+    const counts = getHydratedDbCountsForPaymentTable();
+    return {
+      hydrated: counts.abonentsCount > 0,
+      abonentsCount: counts.abonentsCount,
+      premisesCount: counts.premisesCount,
+      linksCount: counts.linksCount
+    };
+  }
+
+  function manualRecalcDataReadyForSync(state, expectedEnvType){
     try {
-      const st = window.JKH_UI_STATE && window.JKH_UI_STATE.data;
-      return !!(st && String(st.status || "") === "ready");
+      const readable = serverFirstReadableState();
+      const observed = state || directGlobalRateReadState("manualRecalcDataReadyForSync");
+      const hydrated = observed.hydratedDatabaseState || manualRecalcHydratedDatabaseState();
+      const expectedEnv = String(expectedEnvType || "");
+      const currentEnv = String(observed.envType || "");
+      const envStable = !expectedEnv || !currentEnv || currentEnv === expectedEnv;
+      return !!(
+        readable.ok === true
+        && observed.hasNormal === true
+        && observed.hasMoratorium === true
+        && hydrated.hydrated === true
+        && envStable === true
+      );
     } catch(e) {
       return false;
     }
@@ -4303,10 +4356,18 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
       console.log("[manual-recalc][data-ready]", Object.assign({}, startState, { reason: "manual_recalc_direct_rate_read_after_hydrate" }));
       console.log("[manual-recalc][data-ready]", Object.assign({}, startState, { reason: "manual_recalc_env_prefix_check" }));
     } catch(eStartLog) {}
+    const expectedEnvType = String(directGlobalRateReadState(source).envType || "");
     while ((Date.now() - startedAt) <= timeoutMs) {
       const state = directGlobalRateReadState(source);
-      if (manualRecalcDataReadyForSync() && state.hasNormal && state.hasMoratorium) {
+      state.envPrefixStable = !expectedEnvType || !state.envType || String(state.envType || "") === expectedEnvType;
+      if (manualRecalcDataReadyForSync(state, expectedEnvType)) {
         try {
+          if (state.acceptedStateReason) {
+            console.log("[manual-recalc][data-ready]", Object.assign({}, state, {
+              reason: state.acceptedStateReason,
+              elapsedMs: Date.now() - startedAt
+            }));
+          }
           console.log("[manual-recalc][data-ready]", Object.assign({}, state, {
             reason: "manual_recalc_data_ready_wait_done",
             elapsedMs: Date.now() - startedAt
