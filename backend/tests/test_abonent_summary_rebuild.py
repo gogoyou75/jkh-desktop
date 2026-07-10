@@ -2263,17 +2263,68 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         self.assertIn("JKHDataLoader.loadFromServer", wait_body)
         self.assertIn("state.acceptedStateReason", wait_body)
         self.assertIn('reason: "manual_recalc_data_ready_timeout"', wait_body)
+        self.assertIn("manual_recalc_data_ready_gate_passed", wait_body)
+        self.assertIn("manual_recalc_data_ready_blockers", wait_body)
+        self.assertIn("preciseReason: blockerReason", wait_body)
         self.assertIn('return { ok: false, reason: "DATA_READY_TIMEOUT"', wait_body)
 
         ready_body = payment_source.split("function manualRecalcDataReadyForSync", 1)[1].split("async function waitForManualRecalcDataReady", 1)[0]
         self.assertIn("serverFirstReadableState()", ready_body)
+        self.assertIn("ok: false", ready_body)
+        self.assertIn("readable: readable.ok === true", ready_body)
         self.assertIn("observed.hasNormal === true", ready_body)
         self.assertIn("observed.hasMoratorium === true", ready_body)
         self.assertIn("hydrated.hydrated === true", ready_body)
         self.assertIn("envStable === true", ready_body)
+        self.assertIn("normalKey: REFI_KEY_NORMAL", ready_body)
+        self.assertIn("moratoriumKey: REFI_KEY_MORA", ready_body)
 
         calc_after = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
         self.assertEqual(calc_before, calc_after)
+
+    def test_manual_full_recalc_data_ready_timeout_reports_exact_blockers(self):
+        payment_path = self._find_repo_file("web", "payment_table.js")
+        self.assertIsNotNone(payment_path)
+        payment_source = payment_path.read_text(encoding="utf-8")
+
+        self.assertIn("function manualRecalcDataReadyBlockerReason(gate)", payment_source)
+        blocker_body = payment_source.split("function manualRecalcDataReadyBlockerReason(gate)", 1)[1].split("function compactManualRecalcDataReadyGate", 1)[0]
+        self.assertIn('blockers.push("READABLE")', blocker_body)
+        self.assertIn('blockers.push("NORMAL_RATE")', blocker_body)
+        self.assertIn('blockers.push("MORATORIUM_RATE")', blocker_body)
+        self.assertIn('blockers.push("DB_HYDRATION")', blocker_body)
+        self.assertIn('blockers.push("ENV_UNSTABLE")', blocker_body)
+        self.assertIn('"DATA_READY_TIMEOUT_" + blockers[0]', blocker_body)
+        self.assertIn('"DATA_READY_TIMEOUT_MULTIPLE"', blocker_body)
+
+        compact_body = payment_source.split("function compactManualRecalcDataReadyGate", 1)[1].split("function manualRecalcDataReadyForSync", 1)[0]
+        for field in (
+            "readableOk",
+            "readableReason",
+            "uiStatus",
+            "uiSource",
+            "legacyDataReady",
+            "hasNormal",
+            "hasMoratorium",
+            "hydrated",
+            "hydratedReason",
+            "envStable",
+            "envBefore",
+            "envAfter",
+            "elapsedMs",
+            "attempts",
+            "blockerReason",
+        ):
+            self.assertIn(field, compact_body)
+
+        wait_body = payment_source.split("async function waitForManualRecalcDataReady", 1)[1].split("function excludePeriodsKey", 1)[0]
+        self.assertIn("let attempts = 0", wait_body)
+        self.assertIn("let latestGate = null", wait_body)
+        self.assertIn("attempts += 1", wait_body)
+        self.assertIn("latestGate = gate", wait_body)
+        self.assertIn("manual_recalc_data_ready_gate_passed", wait_body)
+        self.assertIn("manual_recalc_data_ready_blockers", wait_body)
+        self.assertIn('return { ok: false, reason: "DATA_READY_TIMEOUT", preciseReason: blockerReason', wait_body)
 
     def test_payment_table_manual_recalc_readiness_matches_server_first_contract(self):
         payment_path = self._find_repo_file("web", "payment_table.js")

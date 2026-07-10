@@ -4327,6 +4327,40 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
     };
   }
 
+  function manualRecalcDataReadyBlockerReason(gate){
+    const blockers = [];
+    if (!gate || gate.readable !== true) blockers.push("READABLE");
+    if (!gate || gate.hasNormal !== true) blockers.push("NORMAL_RATE");
+    if (!gate || gate.hasMoratorium !== true) blockers.push("MORATORIUM_RATE");
+    if (!gate || gate.hydrated !== true) blockers.push("DB_HYDRATION");
+    if (!gate || gate.envStable !== true) blockers.push("ENV_UNSTABLE");
+    if (!blockers.length) return "OK";
+    return blockers.length === 1 ? ("DATA_READY_TIMEOUT_" + blockers[0]) : "DATA_READY_TIMEOUT_MULTIPLE";
+  }
+
+  function compactManualRecalcDataReadyGate(gate, elapsedMs, attempts){
+    const out = gate && typeof gate === "object" ? gate : {};
+    return {
+      readableOk: out.readable === true,
+      readableReason: String(out.readableReason || ""),
+      uiStatus: String(out.uiStatus || ""),
+      uiSource: String(out.uiSource || ""),
+      legacyDataReady: out.legacyDataReady === true,
+      hasNormal: out.hasNormal === true,
+      hasMoratorium: out.hasMoratorium === true,
+      hydrated: out.hydrated === true,
+      hydratedReason: String(out.hydratedReason || ""),
+      envStable: out.envStable === true,
+      envBefore: String(out.envBefore || ""),
+      envAfter: String(out.envAfter || ""),
+      normalKey: String(out.normalKey || REFI_KEY_NORMAL),
+      moratoriumKey: String(out.moratoriumKey || REFI_KEY_MORA),
+      elapsedMs: Number(elapsedMs || 0),
+      attempts: Number(attempts || 0),
+      blockerReason: manualRecalcDataReadyBlockerReason(out)
+    };
+  }
+
   function manualRecalcDataReadyForSync(state, expectedEnvType){
     try {
       const readable = serverFirstReadableState();
@@ -4335,21 +4369,59 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
       const expectedEnv = String(expectedEnvType || "");
       const currentEnv = String(observed.envType || "");
       const envStable = !expectedEnv || !currentEnv || currentEnv === expectedEnv;
-      return !!(
+      const gate = {
+        ok: false,
+        readable: readable.ok === true,
+        readableReason: String(readable.acceptedReason || "SERVER_FIRST_STATE_NOT_READABLE"),
+        hasNormal: observed.hasNormal === true,
+        hasMoratorium: observed.hasMoratorium === true,
+        hydrated: hydrated.hydrated === true,
+        hydratedReason: hydrated.hydrated === true ? "OK" : "DB_NOT_HYDRATED",
+        envStable: envStable === true,
+        envBefore: expectedEnv,
+        envAfter: currentEnv,
+        uiStatus: String(readable.uiStatus || observed.uiStatus || ""),
+        uiSource: String(readable.uiSource || observed.uiSource || ""),
+        legacyDataReady: readable.legacyDataReady === true,
+        normalKey: REFI_KEY_NORMAL,
+        moratoriumKey: REFI_KEY_MORA
+      };
+      gate.ok = !!(
         readable.ok === true
         && observed.hasNormal === true
         && observed.hasMoratorium === true
         && hydrated.hydrated === true
         && envStable === true
       );
+      gate.reason = gate.ok ? "OK" : manualRecalcDataReadyBlockerReason(gate);
+      return gate;
     } catch(e) {
-      return false;
+      return {
+        ok: false,
+        readable: false,
+        readableReason: "DATA_READY_GATE_EXCEPTION",
+        hasNormal: false,
+        hasMoratorium: false,
+        hydrated: false,
+        hydratedReason: "DATA_READY_GATE_EXCEPTION",
+        envStable: false,
+        envBefore: String(expectedEnvType || ""),
+        envAfter: "",
+        uiStatus: "",
+        uiSource: "",
+        legacyDataReady: false,
+        normalKey: REFI_KEY_NORMAL,
+        moratoriumKey: REFI_KEY_MORA,
+        reason: "DATA_READY_TIMEOUT_MULTIPLE"
+      };
     }
   }
 
   async function waitForManualRecalcDataReady(source){
     const timeoutMs = 5000;
     const startedAt = Date.now();
+    let attempts = 0;
+    let latestGate = null;
     try {
       const startState = directGlobalRateReadState(source);
       console.log("[manual-recalc][data-ready]", Object.assign({}, startState, { reason: "manual_recalc_data_ready_wait_start" }));
@@ -4358,9 +4430,12 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
     } catch(eStartLog) {}
     const expectedEnvType = String(directGlobalRateReadState(source).envType || "");
     while ((Date.now() - startedAt) <= timeoutMs) {
+      attempts += 1;
       const state = directGlobalRateReadState(source);
       state.envPrefixStable = !expectedEnvType || !state.envType || String(state.envType || "") === expectedEnvType;
-      if (manualRecalcDataReadyForSync(state, expectedEnvType)) {
+      const gate = manualRecalcDataReadyForSync(state, expectedEnvType);
+      latestGate = gate;
+      if (gate && gate.ok === true) {
         try {
           if (state.acceptedStateReason) {
             console.log("[manual-recalc][data-ready]", Object.assign({}, state, {
@@ -4368,12 +4443,15 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
               elapsedMs: Date.now() - startedAt
             }));
           }
+          console.log("[manual-recalc][data-ready]", Object.assign(compactManualRecalcDataReadyGate(gate, Date.now() - startedAt, attempts), {
+            reason: "manual_recalc_data_ready_gate_passed"
+          }));
           console.log("[manual-recalc][data-ready]", Object.assign({}, state, {
             reason: "manual_recalc_data_ready_wait_done",
             elapsedMs: Date.now() - startedAt
           }));
         } catch(eDoneLog) {}
-        return { ok: true, state };
+        return { ok: true, state, gate: gate };
       }
       try {
         if (window.Data && typeof Data.waitForServerFirstDataReady === "function") {
@@ -4385,13 +4463,20 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
       await new Promise(resolve => setTimeout(resolve, 100));
     }
     const finalState = directGlobalRateReadState(source);
+    finalState.envPrefixStable = !expectedEnvType || !finalState.envType || String(finalState.envType || "") === expectedEnvType;
+    const finalGate = manualRecalcDataReadyForSync(finalState, expectedEnvType);
+    latestGate = finalGate || latestGate;
+    const blockerReason = manualRecalcDataReadyBlockerReason(latestGate);
     try {
+      console.warn("[manual-recalc][data-ready]", Object.assign(compactManualRecalcDataReadyGate(latestGate, Date.now() - startedAt, attempts), {
+        reason: "manual_recalc_data_ready_blockers"
+      }));
       console.warn("[manual-recalc][data-ready]", Object.assign({}, finalState, {
         reason: "manual_recalc_data_ready_timeout",
         elapsedMs: Date.now() - startedAt
       }));
     } catch(eTimeoutLog) {}
-    return { ok: false, reason: "DATA_READY_TIMEOUT", state: finalState };
+    return { ok: false, reason: "DATA_READY_TIMEOUT", preciseReason: blockerReason, state: finalState, gate: latestGate };
   }
 
   function excludePeriodsKey() { return "exclude_periods_" + getAbonentTechnicalId(); }
