@@ -226,6 +226,30 @@
     return false;
   }
 
+  function _setProjectRawDetailed(key, value) {
+    var details = {
+      ok: false,
+      key: String(key || ""),
+      payloadLength: String(value == null ? "" : value).length,
+      errorName: "",
+      errorMessage: ""
+    };
+    try {
+      if (window.JKHStore && typeof JKHStore.setRaw === "function") {
+        var result = JKHStore.setRaw(key, value);
+        details.ok = result !== false;
+        if (!details.ok) details.errorMessage = "JKHStore.setRaw returned false";
+        return details;
+      }
+      details.errorMessage = "JKHStore.setRaw unavailable";
+    } catch (e) {
+      details.errorName = String(e && e.name || "");
+      details.errorMessage = String(e && e.message || e || "LOCAL_CACHE_SAVE_FAILED");
+      _logManualRecalcProjectRaw({ stage:"JKHStore.setRaw.exception", requestPayloadSize:details.payloadLength, storageKey:details.key, uid:_projectRawDiagnosticUid(key), exception:e });
+    }
+    return details;
+  }
+
   function _removeProjectRaw(key) {
     try {
       if (window.JKHStore && typeof JKHStore.removeRaw === "function") return JKHStore.removeRaw(key);
@@ -1276,7 +1300,25 @@
 
   async function saveCardSnapshotAndWait(abonentOrId, snapshot, options) {
     var opts = options && typeof options === "object" ? options : {};
-    var result = { ok: false, localOk: false, serverOk: false, serverReadbackOk: false, key: "", ownerId: "", status: 0, reason: "", rowsByIdCount: 0, ledgerVersion: "" };
+    var result = {
+      ok: false,
+      localOk: false,
+      localCacheOk: false,
+      localCacheReason: "",
+      localCacheError: null,
+      serverOk: false,
+      backendKvOk: false,
+      backendSnapshotOk: false,
+      serverReadbackOk: false,
+      backendReadbackOk: false,
+      key: "",
+      ownerId: "",
+      status: 0,
+      reason: "",
+      warning: "",
+      rowsByIdCount: 0,
+      ledgerVersion: ""
+    };
     var runId = String(opts.runId || _fullRecalcRunId({}) || "");
     var skipReadback = opts.skipReadback === true;
     try {
@@ -1299,15 +1341,29 @@
       var serialized = prepared.serialized;
       result.rowsByIdCount = _cardSnapshotRowsByIdCount(normalized.rowsById);
       result.ledgerVersion = String(normalized.ledgerVersion || "");
-      var localOk = _setProjectRaw(key, serialized);
-      result.localOk = localOk !== false;
+      var localWrite = _setProjectRawDetailed(key, serialized);
+      result.localOk = !!(localWrite && localWrite.ok === true);
+      result.localCacheOk = result.localOk;
+      if (!result.localCacheOk) {
+        result.localCacheReason = "LOCAL_CACHE_SAVE_FAILED";
+        result.warning = "LOCAL_CACHE_SAVE_FAILED";
+        result.localCacheError = {
+          key: key,
+          payloadLength: String(serialized || "").length,
+          errorName: String(localWrite && localWrite.errorName || ""),
+          errorMessage: String(localWrite && localWrite.errorMessage || "LOCAL_CACHE_SAVE_FAILED")
+        };
+        try {
+          console.warn("[card-snapshot][local-cache-save-failed]", Object.assign({
+            reason: "card_snapshot_local_cache_save_failed",
+            runId: runId,
+            ownerId: ownerId
+          }, result.localCacheError));
+        } catch (eLocalCacheLog) {}
+        try { console.warn("[card-snapshot][backend-save-continued]", { reason: "card_snapshot_backend_save_continued", runId: runId, ownerId: ownerId, key: key, payloadLength: String(serialized || "").length }); } catch (eContinueLog) {}
+      }
       try { console.log("[card-snapshot][save]", { runId: runId, key: key, ok: result.localOk, rows: normalized.rows.length, ledgerVersion: normalized.ledgerVersion }); } catch (eSaveLog) {}
       await _dataUiYield();
-      if (!result.localOk) {
-        result.reason = "LOCAL_SAVE_FAILED";
-        try { console.warn("[card-snapshot][save-and-wait-failed]", result); } catch (eLocalLog) {}
-        return result;
-      }
       if (!ownerId || ownerId === "guest" || ownerId === "ALL") {
         result.reason = "OWNER_SCOPE_UNAVAILABLE";
         try { console.warn("[card-snapshot][server-save-failed]", { ownerId: ownerId, key: key, reason: result.reason }); } catch (eOwnerLog) {}
@@ -1316,35 +1372,42 @@
       }
       var serverResult = await _serverStoreSet(ownerId, key, serialized);
       result.status = Number(serverResult && serverResult.status || 0);
-      result.serverOk = !!(serverResult && serverResult.ok === true);
+      result.backendKvOk = !!(serverResult && serverResult.ok === true);
+      result.serverOk = result.backendKvOk;
       await _dataUiYield();
-      if (!result.serverOk) {
+      if (!result.backendKvOk) {
         result.reason = serverResult && (serverResult.text || serverResult.data && serverResult.data.error) || "SERVER_STORE_FAILED";
-        try { console.warn("[card-snapshot][server-save-failed]", { ownerId: ownerId, key: key, status: result.status, reason: result.reason }); } catch (eServerFailLog) {}
+        try { console.warn("[card-snapshot][server-save-failed]", { reason: "card_snapshot_backend_save_failed", ownerId: ownerId, key: key, status: result.status, failure: result.reason }); } catch (eServerFailLog) {}
         try { console.warn("[card-snapshot][save-and-wait-failed]", result); } catch (eWaitFailLog) {}
         return result;
       }
       try {
-        await saveCardSnapshotToBackend(abonentOrId, normalized);
+        var backendSnapshotResult = await saveCardSnapshotToBackend(abonentOrId, normalized);
+        result.backendSnapshotOk = !!(backendSnapshotResult && backendSnapshotResult.ok === true);
       } catch (eTable) {
         result.ok = false;
         result.reason = "CARD_SNAPSHOT_TABLE_SAVE_FAILED:" + String(eTable && eTable.message || eTable);
-        try { console.warn("[card-snapshot][table-save-failed]", { ownerId: ownerId, key: key, reason: result.reason }); } catch (eTableLog) {}
+        try { console.warn("[card-snapshot][table-save-failed]", { reason: "card_snapshot_backend_save_failed", ownerId: ownerId, key: key, failure: result.reason }); } catch (eTableLog) {}
         return result;
       }
-      result.ok = true;
-      result.reason = "";
       try { console.log("[card-snapshot][server-save-ok]", { ownerId: ownerId, key: key, status: result.status }); } catch (eServerOkLog) {}
       await _dataUiYield();
       if (skipReadback) {
         result.serverReadbackOk = true;
+        result.backendReadbackOk = true;
+        result.ok = result.backendSnapshotOk === true;
+        result.reason = result.ok ? "" : "CARD_SNAPSHOT_TABLE_SAVE_FAILED";
         try { console.log("[card-snapshot][server-readback-skipped]", { runId: runId, ownerId: ownerId, key: key, reason: "post-recalc-save-ok" }); } catch (eReadbackSkipLog) {}
+        if (result.ok && result.localCacheOk === false) {
+          try { console.warn("[card-snapshot][backend-save-ok-local-cache-failed]", { reason: "card_snapshot_backend_save_succeeded_local_cache_failed", runId: runId, ownerId: ownerId, key: key, warning: result.warning }); } catch (eWarnOkLog) {}
+        }
         try { console.log("[card-snapshot][save-and-wait-ok]", result); } catch (eWaitSkipOkLog) {}
         return result;
       }
       var readback = await _serverStoreGet(ownerId, key);
       var readbackParsed = _parseCardSnapshotRawForDiagnostics(readback && readback.raw);
       result.serverReadbackOk = !!(readback && readback.ok === true && readbackParsed.ok === true && readbackParsed.ledgerVersion === result.ledgerVersion);
+      result.backendReadbackOk = result.serverReadbackOk;
       if (!result.serverReadbackOk) {
         result.ok = false;
         result.reason = "CARD_SNAPSHOT_SERVER_READBACK_FAILED";
@@ -1357,13 +1420,19 @@
             parseReason: readbackParsed.reason,
             rowsByIdCount: readbackParsed.rowsByIdCount,
             readbackLedgerVersion: readbackParsed.ledgerVersion,
-            ledgerVersion: result.ledgerVersion
+            ledgerVersion: result.ledgerVersion,
+            reason: "card_snapshot_backend_readback_failed"
           });
         } catch (eReadbackFailLog) {}
         try { console.warn("[card-snapshot][save-and-wait-failed]", result); } catch (eReadbackWaitLog) {}
         return result;
       }
+      result.ok = result.backendSnapshotOk === true;
+      result.reason = result.ok ? "" : "CARD_SNAPSHOT_TABLE_SAVE_FAILED";
       try { console.log("[card-snapshot][server-readback-ok]", { ownerId: ownerId, key: key, status: readback && readback.status, rowsByIdCount: readbackParsed.rowsByIdCount, ledgerVersion: readbackParsed.ledgerVersion }); } catch (eReadbackOkLog) {}
+      if (result.ok && result.localCacheOk === false) {
+        try { console.warn("[card-snapshot][backend-save-ok-local-cache-failed]", { reason: "card_snapshot_backend_save_succeeded_local_cache_failed", runId: runId, ownerId: ownerId, key: key, warning: result.warning }); } catch (eWarnOkLog2) {}
+      }
       try { console.log("[card-snapshot][save-and-wait-ok]", result); } catch (eWaitOkLog) {}
       return result;
     } catch (e) {

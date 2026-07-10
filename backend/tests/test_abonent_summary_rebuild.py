@@ -1973,11 +1973,60 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         self.assertIn('renderAbonentSummaryStatus("error", snapshotReason)', success_body)
         self.assertIn("__skipCardAutoRecalcFreshSnapshot(fullRecalcState.uid || currentAbonentId)", success_body)
 
-        self.assertIn("serverReadbackOk === true", card_source.split("async function savePostRecalcSnapshot(snapshot)", 1)[1].split("async function ensureCurrentAbonentUidForCalcPeriod", 1)[0])
+        save_post_body = card_source.split("async function savePostRecalcSnapshot(snapshot)", 1)[1].split("async function ensureCurrentAbonentUidForCalcPeriod", 1)[0]
+        self.assertIn("snapshotSaveResult.ok === true", save_post_body)
+        self.assertIn("snapshotSaveResult.backendSnapshotOk === true", save_post_body)
+        self.assertIn("snapshotSaveResult.backendReadbackOk === true", save_post_body)
+        self.assertNotIn("snapshotSaveResult.localOk === true && snapshotSaveResult.serverOk === true", save_post_body)
+        self.assertIn("card_snapshot_backend_save_succeeded_local_cache_failed", save_post_body)
 
         final_render_idx = card_source.index('renderExplicitFullRecalcFinal("recalc-success")')
         snapshot_save_idx = card_source.index("const snapshotSave = await savePostRecalcSnapshot(snapshot);")
         self.assertLess(snapshot_save_idx, final_render_idx)
+
+        calc_after = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
+        self.assertEqual(calc_before, calc_after)
+
+    def test_card_snapshot_save_continues_backend_after_local_cache_failure_contract(self):
+        data_path = self._find_repo_file("web", "data.js")
+        card_path = self._find_repo_file("web", "abonent_card.html")
+        calc_engine_path = self._find_repo_file("web", "calc_engine.js")
+        self.assertIsNotNone(data_path)
+        self.assertIsNotNone(card_path)
+        self.assertIsNotNone(calc_engine_path)
+        data_source = data_path.read_text(encoding="utf-8")
+        card_source = card_path.read_text(encoding="utf-8")
+        calc_before = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
+
+        self.assertIn("function _setProjectRawDetailed(key, value)", data_source)
+        save_body = data_source.split("async function saveCardSnapshotAndWait", 1)[1].split("async function debugCardSnapshotLifecycle", 1)[0]
+        self.assertIn("localCacheOk", save_body)
+        self.assertIn("localCacheReason", save_body)
+        self.assertIn("localCacheError", save_body)
+        self.assertIn("backendKvOk", save_body)
+        self.assertIn("backendSnapshotOk", save_body)
+        self.assertIn("backendReadbackOk", save_body)
+        self.assertIn('result.warning = "LOCAL_CACHE_SAVE_FAILED"', save_body)
+        self.assertIn("card_snapshot_local_cache_save_failed", save_body)
+        self.assertIn("card_snapshot_backend_save_continued", save_body)
+        self.assertIn("card_snapshot_backend_save_succeeded_local_cache_failed", save_body)
+        self.assertIn("card_snapshot_backend_save_failed", save_body)
+        self.assertIn("card_snapshot_backend_readback_failed", save_body)
+        self.assertNotIn('result.reason = "LOCAL_SAVE_FAILED"', save_body)
+
+        local_failure_idx = save_body.index('result.warning = "LOCAL_CACHE_SAVE_FAILED"')
+        kv_save_idx = save_body.index("var serverResult = await _serverStoreSet(ownerId, key, serialized)")
+        canonical_save_idx = save_body.index("saveCardSnapshotToBackend(abonentOrId, normalized)")
+        readback_idx = save_body.index("var readback = await _serverStoreGet(ownerId, key)")
+        self.assertLess(local_failure_idx, kv_save_idx)
+        self.assertLess(kv_save_idx, canonical_save_idx)
+        self.assertLess(canonical_save_idx, readback_idx)
+
+        card_save_body = card_source.split("async function savePostRecalcSnapshot(snapshot)", 1)[1].split("async function ensureCurrentAbonentUidForCalcPeriod", 1)[0]
+        self.assertIn("snapshotSaveResult.ok === true", card_save_body)
+        self.assertIn("snapshotSaveResult.backendSnapshotOk === true", card_save_body)
+        self.assertIn("snapshotSaveResult.backendReadbackOk === true", card_save_body)
+        self.assertNotIn("snapshotSaveResult.localCacheOk === true", card_save_body.split("const saveOk =", 1)[1].split(";", 1)[0])
 
         calc_after = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
         self.assertEqual(calc_before, calc_after)

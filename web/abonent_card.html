@@ -4771,7 +4771,7 @@ function bindCalcButtons(){
                 const snapshotSaveStartedAt = Date.now();
                 snapshotSaveResult = await Data.saveCardSnapshotAndWait(currentAbonentId, snapshot, { runId: recalcRunId });
                 setRecalcReportStage("snapshotSaveMs", Date.now() - snapshotSaveStartedAt);
-                const saveOk = !!(snapshotSaveResult && snapshotSaveResult.localOk === true && snapshotSaveResult.serverOk === true && snapshotSaveResult.serverReadbackOk === true);
+                const saveOk = !!(snapshotSaveResult && snapshotSaveResult.ok === true && snapshotSaveResult.backendSnapshotOk === true && snapshotSaveResult.backendReadbackOk === true);
                 if (typeof window.__setPostRecalcSnapshotSaveResult === "function") window.__setPostRecalcSnapshotSaveResult(recalcRunId, saveOk);
                 try {
                     console.log("[full-recalc][step-done]", { runId: recalcRunId, step: "save-card-snapshot", ok: saveOk });
@@ -4783,9 +4783,21 @@ function bindCalcButtons(){
                         localOk: !!(snapshotSaveResult && snapshotSaveResult.localOk === true),
                         serverOk: !!(snapshotSaveResult && snapshotSaveResult.serverOk === true),
                         serverReadbackOk: !!(snapshotSaveResult && snapshotSaveResult.serverReadbackOk === true),
+                        localCacheOk: !!(snapshotSaveResult && snapshotSaveResult.localCacheOk === true),
+                        backendSnapshotOk: !!(snapshotSaveResult && snapshotSaveResult.backendSnapshotOk === true),
+                        backendReadbackOk: !!(snapshotSaveResult && snapshotSaveResult.backendReadbackOk === true),
+                        warning: String(snapshotSaveResult && snapshotSaveResult.warning || ""),
                         ledgerVersion: String(snapshot && snapshot.ledgerVersion || ""),
                         snapshotLedgerVersion: String(snapshotSaveResult && snapshotSaveResult.ledgerVersion || "")
                     });
+                    if (saveOk && snapshotSaveResult && snapshotSaveResult.localCacheOk === false) {
+                        console.warn("[full-recalc][save-snapshot-warning]", {
+                            runId: recalcRunId,
+                            reason: "card_snapshot_backend_save_succeeded_local_cache_failed",
+                            key: String(snapshotSaveResult.key || ""),
+                            warning: String(snapshotSaveResult.warning || "LOCAL_CACHE_SAVE_FAILED")
+                        });
+                    }
                 } catch(eSnapshotSaveLog) {}
                 heartbeatPostRecalcStage(saveOk ? "snapshot-save-done" : "snapshot-save-failed");
                 return saveOk ? { ok: true, result: snapshotSaveResult } : { ok: false, reason: String(snapshotSaveResult && snapshotSaveResult.reason || "CARD_SNAPSHOT_SAVE_FAILED"), result: snapshotSaveResult };
