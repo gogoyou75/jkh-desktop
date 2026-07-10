@@ -4391,7 +4391,10 @@ function bindCalcButtons(){
         let to   = String(toEl.value || "").trim();
         let hasAnyPeriodInput = !!(from || to);
         let hasValidPeriodInput = isValidPeriod(from, to);
-        const recalcForReportPeriod = hasAnyPeriodInput;
+        const recalcMode = window.JKH_CARD_PERIOD_MODE_ACTIVE === true
+            ? "temporary_report_period"
+            : "full_summary";
+        const recalcForReportPeriod = recalcMode === "temporary_report_period";
         const prevText = runBtn.textContent;
         const fullSummaryUiBeforeRecalc = captureFullSummaryStatusUi();
         const clickMeta = getCalcPeriodStorageMeta();

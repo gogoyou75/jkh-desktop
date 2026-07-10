@@ -1258,9 +1258,25 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         self.assertIn("CANONICAL_READBACK_FAILED", source)
         self.assertIn("confirmCalcPeriodSaved()) return", source)
         body = source.split("window.fullRecalcForCurrentAbonent", 1)[1].split("if (!recalcHandled)", 1)[0]
+        click_handler = source.split('runBtn.addEventListener("click"', 1)[1].split("function restoreCalcPeriodInputValues", 1)[0]
+        temporary_branch = click_handler.split("if (recalcForReportPeriod && hasValidPeriodInput)", 1)[1].split("let recalcHandled = false", 1)[0]
 
+        self.assertIn('const recalcMode = window.JKH_CARD_PERIOD_MODE_ACTIVE === true', click_handler)
+        self.assertIn('? "temporary_report_period"', click_handler)
+        self.assertIn(': "full_summary"', click_handler)
+        self.assertIn('const recalcForReportPeriod = recalcMode === "temporary_report_period"', click_handler)
+        self.assertNotIn("const recalcForReportPeriod = hasAnyPeriodInput", click_handler)
+        self.assertNotIn("recalcForReportPeriod = hasAnyPeriodInput", click_handler)
+        self.assertIn('autofillFullCardPeriodUI("full-summary-recalc-before-run")', click_handler)
+        self.assertLess(click_handler.index('const recalcForReportPeriod = recalcMode === "temporary_report_period"'), click_handler.index('autofillFullCardPeriodUI("full-summary-recalc-before-run")'))
+        self.assertIn("window.runTemporaryPeriodCalculation", temporary_branch)
+        self.assertIn("return;", temporary_branch)
+        self.assertNotIn("window.fullRecalcForCurrentAbonent", temporary_branch)
+        self.assertNotIn("Data.saveCardSnapshotAndWait", temporary_branch)
         self.assertIn("applyAutoAccrual: true", body)
         self.assertIn("period: { from: from, to: to }", body)
+        self.assertIn('recalcMode: "FULL_SUMMARY_REBUILD"', body)
+        self.assertIn('summaryScope: "full"', body)
         self.assertIn("saveSummary: false", source)
         self.assertIn('summaryScope: "period"', source)
         self.assertIn("recalcResult.summary", body)
