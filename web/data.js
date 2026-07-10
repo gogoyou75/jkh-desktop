@@ -1354,17 +1354,80 @@
     var found = _findAbonentByIdOrUid(abonentOrId);
     var abonent = found && found.abonent ? found.abonent : null;
     var uid = String(abonent && abonent.uid || snapshot && snapshot.uid || "").trim();
-    if (!isValidUid(uid)) return { ok: false, reason: "UID_REQUIRED" };
-    var res = await fetch("/api/card_snapshot/" + encodeURIComponent(uid), {
+    if (!isValidUid(uid)) {
+      try {
+        console.warn("[card-snapshot][canonical-post-skipped]", {
+          reason: "card_snapshot_backend_post_invalid_uid",
+          uid: uid,
+          abonentId: String(abonentOrId && typeof abonentOrId === "object" ? (abonentOrId.id || abonentOrId.uid || "") : (abonentOrId || ""))
+        });
+      } catch (eInvalidUidLog) {}
+      return { ok: false, reason: "UID_REQUIRED" };
+    }
+    var postUrl = "/api/card_snapshot/" + encodeURIComponent(uid);
+    var requestBody = JSON.stringify({ snapshot: snapshot });
+    try {
+      console.log("[card-snapshot][canonical-post-request]", {
+        reason: "card_snapshot_backend_post_request",
+        uid: uid,
+        requestUrl: postUrl,
+        method: "POST",
+        payloadLength: requestBody.length,
+        snapshotStatus: String(snapshot && (snapshot.snapshot_status || snapshot.summary_status || "") || ""),
+        ledgerVersion: String(snapshot && (snapshot.ledgerVersion || snapshot.ledger_version || "") || ""),
+        rowsByIdCount: _cardSnapshotRowsByIdCount(snapshot && snapshot.rowsById)
+      });
+    } catch (ePostRequestLog) {}
+    var res = await fetch(postUrl, {
       method: "POST",
       credentials: "include",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ snapshot: snapshot })
+      body: requestBody
     });
     var text = await res.text();
     var data = null;
     try { data = text ? JSON.parse(text) : null; } catch (e) { data = null; }
-    if (!res.ok || !data || data.ok === false) throw new Error((data && data.error) || ("HTTP_" + res.status));
+    var backendSnapshotOk = !!(res.ok && data && data.ok === true);
+    var falseReason = backendSnapshotOk ? "" : String((data && data.error) || (!data ? "RESPONSE_JSON_INVALID_OR_EMPTY" : ("HTTP_" + res.status)));
+    try {
+      console.log("[card-snapshot][canonical-post-response]", {
+        reason: "card_snapshot_backend_post_response",
+        uid: uid,
+        requestUrl: postUrl,
+        httpStatus: res.status,
+        okHttp: res.ok,
+        backendSnapshotOk: backendSnapshotOk,
+        backendSnapshotOkFalseReason: falseReason,
+        responseBody: text,
+        responseBodyLength: String(text || "").length,
+        parsedOk: !!(data && data.ok === true),
+        responseError: String(data && data.error || ""),
+        backendOwner: String(data && data.owner_id || ""),
+        backendUid: String(data && data.abonent_uid || ""),
+        snapshotStatus: String(data && data.snapshot_status || "")
+      });
+    } catch (ePostResponseLog) {}
+    if (!backendSnapshotOk) {
+      try {
+        console.warn("[card-snapshot][canonical-post-not-ok]", {
+          reason: "card_snapshot_backend_snapshot_ok_false",
+          uid: uid,
+          requestUrl: postUrl,
+          httpStatus: res.status,
+          okHttp: res.ok,
+          backendSnapshotOk: false,
+          backendSnapshotOkFalseReason: falseReason,
+          responseBody: text
+        });
+      } catch (ePostNotOkLog) {}
+      var err = new Error(falseReason || ("HTTP_" + res.status));
+      try {
+        err.cardSnapshotHttpStatus = res.status;
+        err.cardSnapshotResponseBody = text;
+        err.cardSnapshotBackendOkFalseReason = falseReason;
+      } catch (eErrMeta) {}
+      throw err;
+    }
     return data;
   }
 
@@ -1487,7 +1550,18 @@
       } catch (eTable) {
         result.ok = false;
         result.reason = "CARD_SNAPSHOT_TABLE_SAVE_FAILED:" + String(eTable && eTable.message || eTable);
-        try { console.warn("[card-snapshot][table-save-failed]", { reason: "card_snapshot_backend_save_failed", ownerId: ownerId, key: key, failure: result.reason }); } catch (eTableLog) {}
+        try {
+          console.warn("[card-snapshot][table-save-failed]", {
+            reason: "card_snapshot_backend_save_failed",
+            ownerId: ownerId,
+            key: key,
+            failure: result.reason,
+            backendSnapshotOk: false,
+            backendSnapshotOkFalseReason: String(eTable && (eTable.cardSnapshotBackendOkFalseReason || eTable.message) || eTable || ""),
+            httpStatus: Number(eTable && eTable.cardSnapshotHttpStatus || 0),
+            responseBody: String(eTable && eTable.cardSnapshotResponseBody || "")
+          });
+        } catch (eTableLog) {}
         return result;
       }
       try { console.log("[card-snapshot][server-save-ok]", { ownerId: ownerId, key: key, status: result.status }); } catch (eServerOkLog) {}

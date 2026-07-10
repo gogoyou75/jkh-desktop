@@ -2049,6 +2049,10 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
             "card_snapshot_kv_readback_request",
             "card_snapshot_kv_readback_response",
             "card_snapshot_kv_save_skipped",
+            "card_snapshot_backend_post_request",
+            "card_snapshot_backend_post_response",
+            "card_snapshot_backend_snapshot_ok_false",
+            "card_snapshot_backend_post_invalid_uid",
             "card_snapshot_canonical_save_result",
         ):
             self.assertIn(marker, data_source)
@@ -2073,6 +2077,22 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         self.assertLess(kv_save_idx, kv_result_idx)
         self.assertLess(kv_result_idx, canonical_save_idx)
         self.assertLess(canonical_save_idx, readback_idx)
+
+        canonical_post_body = data_source.split("async function saveCardSnapshotToBackend", 1)[1].split("async function saveCardSnapshotAndWait", 1)[0]
+        self.assertIn('requestUrl: postUrl', canonical_post_body)
+        self.assertIn('method: "POST"', canonical_post_body)
+        self.assertIn("httpStatus: res.status", canonical_post_body)
+        self.assertIn("responseBody: text", canonical_post_body)
+        self.assertIn("backendSnapshotOkFalseReason", canonical_post_body)
+        self.assertIn("err.cardSnapshotHttpStatus = res.status", canonical_post_body)
+        self.assertIn("err.cardSnapshotResponseBody = text", canonical_post_body)
+        self.assertIn("err.cardSnapshotBackendOkFalseReason = falseReason", canonical_post_body)
+
+        table_catch_body = save_body.split("} catch (eTable) {", 1)[1].split("return result;", 1)[0]
+        self.assertIn("backendSnapshotOk: false", table_catch_body)
+        self.assertIn("backendSnapshotOkFalseReason", table_catch_body)
+        self.assertIn("httpStatus", table_catch_body)
+        self.assertIn("responseBody", table_catch_body)
 
         store_get_body = backend_source.split("@app.get(\"/api/store\")", 1)[1].split("@app.post(\"/api/store\")", 1)[0]
         store_set_body = backend_source.split("@app.post(\"/api/store\")", 1)[1].split("@app.delete(\"/api/store\")", 1)[0]
