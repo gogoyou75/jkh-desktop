@@ -198,6 +198,7 @@
     try {
       return Storage.prototype.setItem.call(localStorage, fullKey, value);
     } catch (e) {
+      try { if (e && typeof e === "object" && !e.jkhStorageKey) e.jkhStorageKey = String(fullKey || ""); } catch (_) {}
       try { if (typeof window.__offlineOriginMarkLocalStorageError === "function") window.__offlineOriginMarkLocalStorageError(e, "storage._lsSetDirect"); } catch (_) {}
       throw e;
     }
@@ -1582,10 +1583,39 @@
           } catch (eTariffWriteLog) {}
         }
       } catch (eWrite) {
-        throw eWrite;
+        return {
+          removed: removed,
+          written: written,
+          invalidAbonentsDb: invalidAbonentsDb,
+          serverDbEmpty: serverDbEmpty,
+          cacheError: eWrite,
+          failedStorageKey: String(eWrite && eWrite.jkhStorageKey || kx || "")
+        };
       }
     }
     return { removed: removed, written: written, invalidAbonentsDb: invalidAbonentsDb, serverDbEmpty: serverDbEmpty };
+  }
+
+  function _isQuotaExceededError(error) {
+    var name = String(error && error.name || "");
+    var message = String(error && error.message || error || "");
+    var code = Number(error && error.code || 0);
+    return name === "QuotaExceededError" || name === "NS_ERROR_DOM_QUOTA_REACHED" || code === 22 || code === 1014 || /quota/i.test(message);
+  }
+
+  function _serverLoadCacheWarning(error, details) {
+    var input = details && typeof details === "object" ? details : {};
+    return {
+      status: "error",
+      errorName: String(error && error.name || "Error"),
+      errorMessage: String(error && error.message || error || "LOCAL_CACHE_WRITE_FAILED"),
+      quotaExceeded: _isQuotaExceededError(error),
+      ownerId: String(input.ownerId || ""),
+      envType: String(input.envType || ""),
+      dumpLoaded: input.dumpLoaded === true,
+      dumpItemCount: Number(input.dumpItemCount || 0),
+      failedStorageKey: String(input.failedStorageKey || error && error.jkhStorageKey || "")
+    };
   }
 
   function _isDbEffectivelyEmpty(rawDb) {
@@ -2020,6 +2050,19 @@
           return { ok: false, status: "invalid", serverStatus: "online", message: "INVALID_PAYLOAD_STORE_DUMP" };
         }
 
+        var dumpItemCount = Object.keys(data).length;
+        var hasServerRuntimeDb = Object.prototype.hasOwnProperty.call(data, KEY_DB);
+        var serverRuntimeRaw = hasServerRuntimeDb ? _serializeServerDumpValue(data[KEY_DB]) : "";
+        if (hasServerRuntimeDb && !_validateAbonentsDbRaw(serverRuntimeRaw)) {
+          _setUIState({
+            server: { status: "online", checkedAt: _nowISO(), message: "" },
+            data: { status: "invalid", source: "server", message: "Некорректная структура abonents_db_v1 в dump" }
+          });
+          _setStatus({ lastAction: "Ошибка загрузки", lastError: "INVALID_ABONENTS_DB_SCHEMA_FROM_SERVER" });
+          return { ok: false, status: "invalid", serverStatus: "online", message: "INVALID_ABONENTS_DB_SCHEMA_FROM_SERVER" };
+        }
+        var serverRuntimeDb = null;
+        try { serverRuntimeDb = serverRuntimeRaw ? JSON.parse(serverRuntimeRaw) : null; } catch (eServerRuntimeParse) { serverRuntimeDb = null; }
         var replaced = _replaceOwnerProjectScopeFromDump(ownerId, data);
         if (replaced.invalidAbonentsDb) {
           _setUIState({
@@ -2029,11 +2072,20 @@
           _setStatus({ lastAction: "Ошибка загрузки", lastError: "INVALID_ABONENTS_DB_SCHEMA_FROM_SERVER" });
           return { ok: false, status: "invalid", serverStatus: "online", message: "INVALID_ABONENTS_DB_SCHEMA_FROM_SERVER" };
         }
+        var cacheWarning = replaced.cacheError ? _serverLoadCacheWarning(replaced.cacheError, {
+          ownerId: ownerId,
+          envType: responseEnv,
+          dumpLoaded: true,
+          dumpItemCount: dumpItemCount,
+          failedStorageKey: replaced.failedStorageKey
+        }) : null;
 
         var applied = replaced.written;
         var runtimeBefore = window.AbonentsDB || null;
         var rawRuntimeDb = _readLocalCompat(KEY_DB, ownerId);
-        var parsedRuntimeDb = window.unwrapRuntimeDb ? window.unwrapRuntimeDb(rawRuntimeDb) : safeJsonParse(rawRuntimeDb, null);
+        var parsedRuntimeDb = cacheWarning
+          ? serverRuntimeDb
+          : (window.unwrapRuntimeDb ? window.unwrapRuntimeDb(rawRuntimeDb) : safeJsonParse(rawRuntimeDb, null));
         var runtimeCounts = {
           abonents: runtimeBefore && runtimeBefore.abonents && typeof runtimeBefore.abonents === "object" ? Object.keys(runtimeBefore.abonents).length : 0,
           premises: runtimeBefore && runtimeBefore.premises && typeof runtimeBefore.premises === "object" ? Object.keys(runtimeBefore.premises).length : 0,
@@ -2101,10 +2153,35 @@
         }
         var status = (!replaced.serverDbEmpty || runtimeHadContent || parsedHasContent) ? "ready" : "empty";
         var loadedAt = _nowISO();
+        var cacheWarningMessage = cacheWarning ? ("Данные загружены с сервера; локальный cache не сохранён: " + cacheWarning.errorMessage) : "";
         _setUIState({
           server: { status: "online", checkedAt: _nowISO(), message: "" },
-          data: { status: status, loadedAt: loadedAt, source: "server", message: (status === "empty" ? "Серверный dump пуст" : "") }
+          data: {
+            status: status,
+            loadedAt: loadedAt,
+            source: "server",
+            message: cacheWarningMessage || (status === "empty" ? "Серверный dump пуст" : ""),
+            cacheWarning: cacheWarning
+          }
         });
+
+        if (cacheWarning) {
+          try {
+            console.warn("[server-load][local-cache-failed]", Object.assign({}, cacheWarning, {
+              serverStatus: "online",
+              dataStatus: status,
+              preservedReadableState: status === "ready" || status === "empty"
+            }));
+            console.warn("[server-load][ready-with-cache-warning]", {
+              ownerId: ownerId,
+              envType: responseEnv,
+              serverStatus: "online",
+              dataStatus: status,
+              dataSource: "server",
+              cacheWarning: cacheWarning
+            });
+          } catch (eCacheWarningLog) {}
+        }
 
         _setStatus({
           lastAction: "✅ Загружено с сервера",
@@ -2114,7 +2191,15 @@
           lastReadAt: loadedAt
         });
 
-        return { ok: true, status: status, loadedAt: loadedAt, serverStatus: "online", message: "" };
+        return {
+          ok: true,
+          status: status,
+          loadedAt: loadedAt,
+          serverStatus: "online",
+          message: cacheWarningMessage,
+          cacheWarning: cacheWarning,
+          warning: cacheWarning ? "LOCAL_CACHE_WRITE_FAILED" : ""
+        };
       } catch (e) {
         var msg = String(e && e.message ? e.message : e);
         _setUIState(_serverConnectivityFailureUIStatePatch(
@@ -2135,6 +2220,11 @@
 
   window.JKHDataLoader = {
     loadFromServer: _loadFromServerServerFirst,
+    __testHooks: {
+      isQuotaExceededError: _isQuotaExceededError,
+      serverLoadCacheWarning: _serverLoadCacheWarning,
+      replaceOwnerProjectScopeFromDump: _replaceOwnerProjectScopeFromDump
+    },
     resetLocalProjectScope: function (ownerId) {
       var targetOwner = String(ownerId || _ownerId());
       var removed = _clearOwnerProjectScope(targetOwner);

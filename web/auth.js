@@ -87,6 +87,17 @@
     });
   }
 
+  function _authAutoloadSuccessDataPatch(result, status) {
+    var cacheWarning = result && result.cacheWarning && typeof result.cacheWarning === "object" ? result.cacheWarning : null;
+    return {
+      status: String(status || ""),
+      loadedAt: String(result && result.loadedAt || _nowISO()),
+      source: "server",
+      message: cacheWarning ? String(result && result.message || "LOCAL_CACHE_WRITE_FAILED") : "",
+      cacheWarning: cacheWarning
+    };
+  }
+
   async function runAutoLoadAfterLoginOnce(sourceTag) {
     var tag = String(sourceTag || "unknown");
     if (!window.JKHDataLoader || typeof window.JKHDataLoader.loadFromServer !== "function") {
@@ -143,10 +154,23 @@
         gate.failed = false;
         gate.lastResult = true;
         gate.doneForUserId = uid;
+        var cacheWarning = result && result.cacheWarning && typeof result.cacheWarning === "object" ? result.cacheWarning : null;
         _setUIState({
           server: { status: "online", checkedAt: _nowISO(), message: "" },
-          data: { status: status, loadedAt: String(result && result.loadedAt || _nowISO()), source: "server", message: "" }
+          data: _authAutoloadSuccessDataPatch(result, status)
         });
+        if (cacheWarning) {
+          try {
+            console.warn("[server-load][ready-with-cache-warning]", {
+              source: "auth.runAutoLoadAfterLoginOnce",
+              userId: uid,
+              serverStatus: "online",
+              dataStatus: status,
+              dataSource: "server",
+              cacheWarning: cacheWarning
+            });
+          } catch (eCacheWarningLog) {}
+        }
         console.info("[auth] autoload gate done source=%s userId=%s status=%s", tag, uid, status);
         return true;
       } catch (e) {
@@ -1029,7 +1053,8 @@ function _isNetworkOrTimeoutError(err) {
             status: (st.data.status === "empty" ? "empty" : "ready"),
             loadedAt: st.data.loadedAt || "",
             source: "server",
-            message: ""
+            message: st.data.message || "",
+            cacheWarning: st.data.cacheWarning || null
           }
         });
       } else {
@@ -1124,7 +1149,10 @@ function _isNetworkOrTimeoutError(err) {
     getLastEmail: getLastEmail,
 
     syncSessionFromServer: syncSessionFromServer,
-    runAutoLoadAfterLoginOnce: runAutoLoadAfterLoginOnce
+    runAutoLoadAfterLoginOnce: runAutoLoadAfterLoginOnce,
+    __testHooks: {
+      authAutoloadSuccessDataPatch: _authAutoloadSuccessDataPatch
+    }
   };
 
   _markAuthModuleLoaded();
