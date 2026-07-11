@@ -3815,8 +3815,12 @@ def card_snapshot_get(account_uid: str):
     owner = _environment_owner_id(user.id)
     row = CardSnapshot.query.filter_by(owner_id=owner, abonent_uid=uid).first()
     if not row:
+        app.logger.info("[reload-chain][canonical-read] %s", json.dumps({"found": False, "owner": owner, "uid": uid}, ensure_ascii=False))
         return jsonify(ok=True, snapshot_status="missing", snapshot_reason="SNAPSHOT_NOT_BUILT", snapshot=None)
-    return jsonify(ok=True, **_card_snapshot_payload(row))
+    payload = _card_snapshot_payload(row)
+    snapshot = payload.get("snapshot") if isinstance(payload.get("snapshot"), dict) else {}
+    app.logger.info("[reload-chain][canonical-read] %s", json.dumps({"found": True, "owner": owner, "uid": uid, "status": row.snapshot_status, "rowsByIdCount": _snapshot_rows_by_id_count(snapshot), "totals": snapshot.get("totals"), "input_hash": row.input_hash, "ledgerVersion": row.ledger_version, "storedPayloadSize": len(row.snapshot_json or "")}, ensure_ascii=False))
+    return jsonify(ok=True, **payload)
 
 
 @app.post("/api/card_snapshot/<account_uid>")
@@ -3837,6 +3841,7 @@ def card_snapshot_put(account_uid: str):
     if snapshot_uid and snapshot_uid != uid:
         return jsonify(ok=False, error="uid_mismatch"), 400
     owner = _environment_owner_id(user.id)
+    app.logger.info("[reload-chain][canonical-save-request] %s", json.dumps({"routeUid": uid, "snapshotUid": _snapshot_uid_from_payload(snapshot), "abonentId": _norm_text(snapshot.get("abonentId") or snapshot.get("abonent_id")), "resolvedOwner": owner, "status": _norm_text(snapshot.get("snapshot_status") or snapshot.get("summary_status")), "snapshotMode": _norm_text(snapshot.get("snapshotMode") or snapshot.get("snapshot_mode")), "rowsByIdCount": _snapshot_rows_by_id_count(snapshot), "totals": snapshot.get("totals"), "input_hash": _norm_text(snapshot.get("input_hash")), "ledgerVersion": _norm_text(snapshot.get("ledgerVersion") or snapshot.get("ledger_version")), "payloadSize": len(json.dumps(body, ensure_ascii=False))}, ensure_ascii=False))
     target = _snapshot_target_for_owner(owner, uid)
     if not target:
         return jsonify(ok=False, error="uid_not_found"), 404
@@ -3869,6 +3874,7 @@ def card_snapshot_put(account_uid: str):
     row.computed_at = datetime.utcnow() if status == "fresh" else row.computed_at
     row.snapshot_json = json.dumps(snapshot, ensure_ascii=False, sort_keys=True)
     db.session.commit()
+    app.logger.info("[reload-chain][canonical-save-response] %s", json.dumps({"routeUid": uid, "resolvedOwner": owner, "httpStatus": 200, "status": row.snapshot_status, "rowsByIdCount": _snapshot_rows_by_id_count(snapshot), "totals": snapshot.get("totals"), "storedPayloadSize": len(row.snapshot_json or "")}, ensure_ascii=False))
     app.logger.info(
         "[diagnose][card-snapshot-canonical-put] %s",
         json.dumps(

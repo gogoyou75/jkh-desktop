@@ -4126,6 +4126,17 @@ function __isFreshCardSnapshotUsable(uid, snapshot){
 }
 
 function __renderFreshCardSnapshot(uid, snapshot, sourceReason){
+    const reloadRowsById = snapshot && snapshot.rowsById && typeof snapshot.rowsById === "object" && !Array.isArray(snapshot.rowsById) ? snapshot.rowsById : {};
+    try {
+        console.log("[reload-chain][card-snapshot-accepted]", {
+            uid: String(uid || ""),
+            source: String(sourceReason || "local_card_snapshot"),
+            status: String(snapshot && snapshot.summary_status || ""),
+            rowsByIdCount: Object.keys(reloadRowsById).length,
+            totals: snapshot && snapshot.totals || null,
+            ledgerVersion: String(snapshot && snapshot.ledgerVersion || "")
+        });
+    } catch(eReloadAcceptedLog) {}
     const summary = __summaryFromCardSnapshot(snapshot, snapshot.summary_status || "fresh", snapshot.summary_reason || "");
     window.__lastCardSummaryForDebug = summary;
     __cardSnapshotFreshValidated = true;
@@ -4151,6 +4162,7 @@ async function __tryUseBackendFreshSnapshot(uid, reason){
     try {
         const result = await Data.readFreshBackendCardSnapshotForCard(normalizedUid, { hydrateLocal: true, validateLocalInputs: false });
         if (result && result.ok === true && result.snapshot) {
+            try { console.log("[reload-chain][card-open-source]", { uid: normalizedUid, source: "backend_canonical_snapshot", accepted: true, reason: String(result.reason || "OK"), rowsByIdCount: Number(result.rowsByIdCount || 0) }); } catch(eReloadSourceLog) {}
             try {
                 console.log("[abonent_card][backend-snapshot]", {
                     reason: result.hydratedLocal ? "card_backend_snapshot_hydrated_local" : "card_backend_snapshot_used",
@@ -4163,6 +4175,7 @@ async function __tryUseBackendFreshSnapshot(uid, reason){
             return true;
         }
         try {
+            console.warn("[reload-chain][card-snapshot-rejected]", { uid: normalizedUid, source: "backend_canonical_snapshot", accepted: false, reason: String(result && (result.detail || result.reason) || "BACKEND_SNAPSHOT_UNAVAILABLE"), rowsByIdCount: Number(result && result.rowsByIdCount || 0) });
             console.warn("[abonent_card][backend-snapshot]", {
                 reason: result && result.reason === "card_auto_recalc_backend_snapshot_missing" ? "card_auto_recalc_backend_snapshot_missing" : "card_auto_recalc_backend_snapshot_incompatible",
                 detail: result && (result.detail || result.reason) || "BACKEND_SNAPSHOT_UNAVAILABLE",
@@ -4172,6 +4185,7 @@ async function __tryUseBackendFreshSnapshot(uid, reason){
         } catch(eMissLog) {}
     } catch(e) {
         try {
+            console.warn("[reload-chain][card-snapshot-rejected]", { uid: normalizedUid, source: "backend_canonical_snapshot", accepted: false, reason: String(e && e.message || e || "BACKEND_SNAPSHOT_READ_FAILED"), rowsByIdCount: 0 });
             console.warn("[abonent_card][backend-snapshot]", {
                 reason: "card_auto_recalc_backend_snapshot_missing",
                 detail: String(e && e.message || e || "BACKEND_SNAPSHOT_READ_FAILED"),
@@ -5219,6 +5233,26 @@ function bindCalcButtons(){
                         logFullRecalcExit("EMPTY_ROWS_BY_ID", "early-return", "snapshot-empty-rows", { ok: false, reason: "EMPTY_ROWS_BY_ID" }, null);
                         return;
                     }
+                    try {
+                        const snapshotRowIds = Object.keys(snapshotRowsById);
+                        console.log("[reload-chain][full-result-before-save]", {
+                            abonentId: String(currentAbonentId || ""),
+                            uid: String(snapshot.uid || fullRecalcState.uid || ""),
+                            ownerId: String(getCalcPeriodStorageMeta().ownerId || ""),
+                            summary_status: String(snapshot.summary_status || summaryStatus || ""),
+                            summary_reason: String(snapshot.summary_reason || summaryReason || ""),
+                            snapshotStatus: String(snapshot.snapshot_status || snapshot.summary_status || ""),
+                            snapshotMode: String(snapshot.snapshotMode || ""),
+                            summaryScope: String(snapshot.summaryScope || snapshot.summary_scope || "full"),
+                            rowsByIdCount: snapshotRowIds.length,
+                            firstRowId: snapshotRowIds[0] || "",
+                            lastRowId: snapshotRowIds.length ? snapshotRowIds[snapshotRowIds.length - 1] : "",
+                            totals: snapshot.totals || null,
+                            input_hash: String(snapshot.input_hash || ""),
+                            ledgerVersion: String(snapshot.ledgerVersion || ""),
+                            serializedSnapshotSize: JSON.stringify(snapshot).length
+                        });
+                    } catch(eReloadBeforeSaveLog) {}
                     __cardSnapshotFreshValidated = true;
                     __lastCardSnapshotValidation = { valid: true, reason: "", detail: { runId: recalcRunId, source: "post-recalc-memory" } };
                     __runtimeCacheFreshBlocked = false;

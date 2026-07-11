@@ -1028,6 +1028,26 @@ function buildIndexRowFromSummaryItem(item){
         accrued: summaryNumberToDisplay(accruedValue.value),
         paid: summaryNumberToDisplay(paidValue.value)
     };
+    try {
+        console.log("[reload-chain][index-summary-raw]", { sourceEndpoint: "/api/abonents", uid: String(item && (item.uid || item.account_uid) || ""), item: item, summary_status: status, summary_reason: rawReason, rawTotals: summary && summary.totals || null, rowsByIdExists: !!(summary && summary.rowsById), canonicalSnapshotTotalsPresent: false });
+        console.log("[reload-chain][index-totals-normalized]", { uid: String(item && (item.uid || item.account_uid) || ""), debt: renderedValues.debt, penalty: renderedValues.penalty, accrued: renderedValues.accrued, paid: renderedValues.paid, sources: { debt: debtValue.source, penalty: penaltyValue.source, accrued: accruedValue.source, paid: paidValue.source } });
+        try {
+            const comparisonUid = String(item && (item.uid || item.account_uid) || "");
+            const comparisonRaw = sessionStorage.getItem("jkh_reload_chain_diag:" + comparisonUid);
+            const comparison = comparisonRaw ? JSON.parse(comparisonRaw) : { uid: comparisonUid };
+            comparison.indexDebt = debtValue.value;
+            comparison.indexPenalty = penaltyValue.value;
+            comparison.indexAccrued = accruedValue.value;
+            comparison.indexPaid = paidValue.value;
+            comparison.indexStatus = status;
+            const savedValues = [comparison.savedDebt, comparison.savedPenalty, comparison.savedAccrued, comparison.savedPaid];
+            const indexValues = [debtValue.value, penaltyValue.value, accruedValue.value, paidValue.value];
+            const indexDivergedToZero = status === "fresh" && indexValues.some(function(v, i){ return Number(v) === 0 && Number(savedValues[i]) !== 0; });
+            comparison.divergenceStage = indexDivergedToZero ? "INDEX_SUMMARY_MISSING_TOTALS" : (comparison.divergenceStage || "UNKNOWN");
+            if (indexDivergedToZero) console.warn("[reload-chain][index-zero-fallback]", { uid: comparisonUid, reason: "SUMMARY_ENDPOINT_ZERO_DIFFERS_FROM_SAVED_SNAPSHOT", rawTotals: summary && summary.totals || null, savedTotals: { debt: comparison.savedDebt, penalty: comparison.savedPenalty, accrued: comparison.savedAccrued, paid: comparison.savedPaid }, canonicalSnapshotTotalsIgnoredByEndpoint: true });
+            console.log("[reload-chain][comparison]", comparison);
+        } catch(eReloadIndexComparisonLog) {}
+    } catch(eReloadIndexLog) {}
 
     return {
         id: String(item && (item.abonent_id || item.account_number || item.uid || item.account_uid || item.id) || abonent.id || abonent.abonent_id || abonent.account_number || abonent.account_uid || ""),

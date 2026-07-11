@@ -128,6 +128,40 @@ class CardSnapshotSaveTest(unittest.TestCase):
         self.assertEqual(body["snapshot_reason"], "OK")
         self.assertEqual(body["snapshot"]["summary_status"], "fresh")
 
+    def test_canonical_snapshot_post_get_preserves_rows_and_totals(self):
+        self._login("owner1")
+        snapshot = dict(
+            self._snapshot(),
+            snapshot_status="fresh",
+            summary_status="fresh",
+            summary_scope="full",
+            snapshotMode="full",
+            summary_reason="OK",
+        )
+        posted = self._post_snapshot(snapshot)
+        self.assertEqual(posted.status_code, 200)
+        posted_snapshot = posted.get_json()["snapshot"]
+        self.assertEqual(posted_snapshot["rowsById"], snapshot["rowsById"])
+        self.assertEqual(posted_snapshot["totals"], snapshot["totals"])
+
+        loaded = self.client.get("/api/card_snapshot/uid-1")
+        self.assertEqual(loaded.status_code, 200)
+        loaded_snapshot = loaded.get_json()["snapshot"]
+        self.assertEqual(len(loaded_snapshot["rowsById"]), len(snapshot["rowsById"]))
+        self.assertEqual(loaded_snapshot["rowsById"], snapshot["rowsById"])
+        self.assertEqual(loaded_snapshot["totals"], snapshot["totals"])
+
+        index_response = self.client.get("/api/abonents?limit=10")
+        self.assertEqual(index_response.status_code, 200)
+        index_item = next(item for item in index_response.get_json()["items"] if item.get("uid", item.get("account_uid")) == "uid-1")
+        if isinstance(index_item.get("summary"), dict):
+            index_item = index_item["summary"]
+        self.assertEqual(index_item["summary_status"], "fresh")
+        self.assertEqual(index_item["totals"]["debt"], 12)
+        self.assertEqual(index_item["totals"]["accrued"], 15)
+        self.assertEqual(index_item["totals"]["paid"], 3)
+        self.assertEqual(index_item["totals"]["penalty"], 2)
+
     def test_snapshot_save_rejects_period_or_report_snapshot(self):
         self._login("owner1")
         for payload in (

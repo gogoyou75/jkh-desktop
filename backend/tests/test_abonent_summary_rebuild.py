@@ -1334,6 +1334,42 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         self.assertIn("window.JKH_CARD_PERIOD_MODE_ACTIVE = true", temporary_calc)
         self.assertIn('await loadPaymentTable("temporary_court_period")', temporary_calc)
         self.assertLess(temporary_calc.index("window.JKH_CARD_PERIOD_MODE_ACTIVE = true"), temporary_calc.index('await loadPaymentTable("temporary_court_period")'))
+
+    def test_reload_chain_diagnostics_cover_snapshot_card_runtime_and_index(self):
+        data_source = self._find_repo_file("web", "data.js").read_text(encoding="utf-8")
+        card_source = self._find_repo_file("web", "abonent_card.html").read_text(encoding="utf-8")
+        payment_source = self._find_repo_file("web", "payment_table.js").read_text(encoding="utf-8")
+        index_source = self._find_repo_file("web", "index.html").read_text(encoding="utf-8")
+        backend_source = self._find_repo_file("backend", "app.py").read_text(encoding="utf-8")
+
+        for marker in (
+            "[reload-chain][full-result-before-save]",
+            "[reload-chain][canonical-save-request]",
+            "[reload-chain][canonical-save-response]",
+            "[reload-chain][canonical-readback-after-save]",
+            "[reload-chain][card-open-source]",
+            "[reload-chain][card-snapshot-accepted]",
+            "[reload-chain][card-snapshot-rejected]",
+            "[reload-chain][rows-apply-result]",
+            "[reload-chain][runtime-after-reload]",
+            "[reload-chain][index-summary-raw]",
+            "[reload-chain][index-totals-normalized]",
+            "[reload-chain][index-zero-fallback]",
+            "[reload-chain][comparison]",
+        ):
+            self.assertTrue(any(marker in source for source in (data_source, card_source, payment_source, index_source, backend_source)), marker)
+
+        fresh_render = card_source.split("function __renderFreshCardSnapshot", 1)[1].split("async function __tryUseBackendFreshSnapshot", 1)[0]
+        self.assertNotIn("fullRecalcForCurrentAbonent", fresh_render)
+        self.assertNotIn("saveCardSnapshotAndWait", fresh_render)
+        load_impl = payment_source.split("async function loadPaymentTableImpl()", 1)[1].split("async function loadPaymentTable(reason)", 1)[0]
+        self.assertIn('reason: Array.isArray(view) && !view.length ? "RUNTIME_HYDRATION_EMPTY"', load_impl)
+        self.assertIn("tryApplyCardSnapshotToRows(view", load_impl)
+        self.assertIn("applyRuntimeCacheToRows(view", load_impl)
+        index_build = index_source.split("function buildIndexRowFromSummaryItem", 1)[1].split("function writeIndexTotalsCell", 1)[0]
+        self.assertIn('sourceEndpoint: "/api/abonents"', index_build)
+        self.assertIn("canonicalSnapshotTotalsIgnoredByEndpoint: true", index_build)
+        self.assertNotIn("/api/card_snapshot/", index_build)
     def test_stage_13_2a_ledger_canonical_diagnostics_and_race_guards(self):
         data_path = self._find_repo_file("web", "data.js")
         payment_path = self._find_repo_file("web", "payment_table.js")

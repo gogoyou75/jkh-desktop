@@ -5040,6 +5040,19 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
       try {
         arr = getPayments();
         draftRows = getPaymentDraftRows();
+        try {
+          const runtimeDb = window.AbonentsDB && typeof window.AbonentsDB === "object" ? window.AbonentsDB : {};
+          console.log("[reload-chain][runtime-after-reload]", {
+            abonentId: String(getAbonentId() || ""),
+            abonentsCount: runtimeDb.abonents && typeof runtimeDb.abonents === "object" ? Object.keys(runtimeDb.abonents).length : 0,
+            premisesCount: runtimeDb.premises && typeof runtimeDb.premises === "object" ? Object.keys(runtimeDb.premises).length : 0,
+            linksCount: Array.isArray(runtimeDb.links) ? runtimeDb.links.length : 0,
+            ledgerRowsCount: Array.isArray(arr) ? arr.length : 0,
+            rowsWithComputedFields: Array.isArray(arr) ? arr.filter(ledgerRowHasComputedFields).length : 0,
+            hydrationSource: "getPayments",
+            hydrationReason: Array.isArray(arr) && arr.length ? "LEDGER_AVAILABLE" : "LEDGER_EMPTY"
+          });
+        } catch(eReloadRuntimeLog) {}
       } catch (e) {
         if (e && e.code === "LEDGER_JSON_INVALID") {
           tbody.innerHTML = '<tr><td colspan="20" style="color:#b00020;font-weight:700;">' + LEDGER_FATAL_MESSAGE + '</td></tr>';
@@ -5297,6 +5310,30 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
       }
       if (renderSource === "raw_ledger") renderSource = "raw_payments_ledger";
       logPaymentTableRenderSource(renderSource, view, renderRowsById);
+      try {
+        console.log("[reload-chain][rows-apply-result]", {
+          uid: String(getAbonentId() || ""),
+          source: renderSource,
+          snapshotAttemptReason: String(normalSnapshotState && normalSnapshotState.reason || ""),
+          rowsBeforeRender: Array.isArray(arr) ? arr.length : 0,
+          rowsAfterFilter: Array.isArray(view) ? view.length : 0,
+          rowsByIdApplied: renderRowsById && typeof renderRowsById === "object" ? Object.keys(renderRowsById).length : 0,
+          rowsWithComputedFields: Array.isArray(view) ? view.filter(ledgerRowHasComputedFields).length : 0,
+          reason: Array.isArray(view) && !view.length ? "RUNTIME_HYDRATION_EMPTY" : (restoredFromCardSnapshot ? "SNAPSHOT_ROWS_APPLIED" : String(__runtimeCacheState && __runtimeCacheState.reason || "ROWS_NOT_APPLIED"))
+        });
+        try {
+          const comparisonSnapshot = window.Data && typeof Data.readCardSnapshot === "function" ? Data.readCardSnapshot(getAbonentId()) : null;
+          const comparisonUid = String(comparisonSnapshot && comparisonSnapshot.uid || getAbonentId() || "");
+          const comparisonKey = "jkh_reload_chain_diag:" + comparisonUid;
+          const comparisonRaw = sessionStorage.getItem(comparisonKey);
+          const comparisonState = comparisonRaw ? JSON.parse(comparisonRaw) : { uid: comparisonUid };
+          comparisonState.renderedRows = Array.isArray(view) ? view.length : 0;
+          comparisonState.cardStatus = window.__lastCardSummaryForDebug && (window.__lastCardSummaryForDebug.summary_status || window.__lastCardSummaryForDebug.status) || "";
+          comparisonState.divergenceStage = !Array.isArray(arr) || !arr.length ? "RUNTIME_HYDRATION_EMPTY" : (!restoredFromCardSnapshot && !Object.keys(renderRowsById || {}).length ? "CARD_ROWS_NOT_APPLIED" : "UNKNOWN");
+          sessionStorage.setItem(comparisonKey, JSON.stringify(comparisonState));
+          console.log("[reload-chain][comparison]", comparisonState);
+        } catch(eReloadComparisonLog) {}
+      } catch(eReloadApplyLog) {}
       try {
         if (isReadonlyNoRecalcMode()) {
           console.log("[payment-table][readonly-no-recalc]", {

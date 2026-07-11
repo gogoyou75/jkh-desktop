@@ -1366,6 +1366,37 @@
     }
     var postUrl = "/api/card_snapshot/" + encodeURIComponent(uid);
     var requestBody = JSON.stringify({ snapshot: snapshot });
+    var requestRowsById = snapshot && snapshot.rowsById && typeof snapshot.rowsById === "object" && !Array.isArray(snapshot.rowsById) ? snapshot.rowsById : {};
+    var requestRowIds = Object.keys(requestRowsById);
+    var requestTotals = snapshot && snapshot.totals && typeof snapshot.totals === "object" ? snapshot.totals : {};
+    try {
+      sessionStorage.setItem("jkh_reload_chain_diag:" + uid, JSON.stringify({
+        uid: uid,
+        savedSnapshotRows: requestRowIds.length,
+        savedDebt: requestTotals.debt !== undefined ? requestTotals.debt : requestTotals.total,
+        savedPenalty: requestTotals.penalty,
+        savedAccrued: requestTotals.accrued,
+        savedPaid: requestTotals.paid,
+        snapshotStatus: String(snapshot && (snapshot.snapshot_status || snapshot.summary_status || "") || "")
+      }));
+    } catch(eReloadDiagStore) {}
+    try {
+      console.log("[reload-chain][canonical-save-request]", {
+        routeUid: uid,
+        snapshotUid: String(snapshot && snapshot.uid || ""),
+        abonentId: String(found && found.id || ""),
+        ownerId: String(window.JKHStore && typeof JKHStore.getOwnerId === "function" ? JKHStore.getOwnerId() || "" : ""),
+        status: String(snapshot && (snapshot.snapshot_status || snapshot.summary_status || "") || ""),
+        snapshotMode: String(snapshot && snapshot.snapshotMode || ""),
+        rowsByIdCount: requestRowIds.length,
+        firstRowId: requestRowIds[0] || "",
+        lastRowId: requestRowIds.length ? requestRowIds[requestRowIds.length - 1] : "",
+        totals: requestTotals,
+        input_hash: String(snapshot && snapshot.input_hash || ""),
+        ledgerVersion: String(snapshot && snapshot.ledgerVersion || ""),
+        payloadSize: requestBody.length
+      });
+    } catch(eReloadSaveRequestLog) {}
     try {
       console.log("[card-snapshot][canonical-post-request]", {
         reason: "card_snapshot_backend_post_request",
@@ -1390,6 +1421,15 @@
     var backendSnapshotOk = !!(res.ok && data && data.ok === true);
     var falseReason = backendSnapshotOk ? "" : String((data && data.error) || (!data ? "RESPONSE_JSON_INVALID_OR_EMPTY" : ("HTTP_" + res.status)));
     try {
+      console.log("[reload-chain][canonical-save-response]", {
+        routeUid: uid,
+        httpStatus: res.status,
+        ok: backendSnapshotOk,
+        responseBody: text,
+        responseBodySize: String(text || "").length,
+        persistedRowsByIdCount: data && data.snapshot && data.snapshot.rowsById && typeof data.snapshot.rowsById === "object" ? Object.keys(data.snapshot.rowsById).length : 0,
+        persistedTotals: data && data.snapshot && data.snapshot.totals || null
+      });
       console.log("[card-snapshot][canonical-post-response]", {
         reason: "card_snapshot_backend_post_response",
         uid: uid,
@@ -1427,6 +1467,39 @@
         err.cardSnapshotBackendOkFalseReason = falseReason;
       } catch (eErrMeta) {}
       throw err;
+    }
+    try {
+      var readbackRes = await fetch(postUrl, { method: "GET", credentials: "include" });
+      var readbackText = await readbackRes.text();
+      var readbackData = null;
+      try { readbackData = readbackText ? JSON.parse(readbackText) : null; } catch(eReadbackJson) { readbackData = null; }
+      var readbackSnapshot = readbackData && readbackData.snapshot && typeof readbackData.snapshot === "object" ? readbackData.snapshot : null;
+      var readbackRowsById = readbackSnapshot && readbackSnapshot.rowsById && typeof readbackSnapshot.rowsById === "object" ? readbackSnapshot.rowsById : {};
+      try {
+        var comparisonRaw = sessionStorage.getItem("jkh_reload_chain_diag:" + uid);
+        var comparisonState = comparisonRaw ? JSON.parse(comparisonRaw) : { uid: uid };
+        var readbackTotals = readbackSnapshot && readbackSnapshot.totals && typeof readbackSnapshot.totals === "object" ? readbackSnapshot.totals : {};
+        comparisonState.loadedSnapshotRows = Object.keys(readbackRowsById).length;
+        comparisonState.loadedDebt = readbackTotals.debt !== undefined ? readbackTotals.debt : readbackTotals.total;
+        comparisonState.loadedPenalty = readbackTotals.penalty;
+        comparisonState.loadedAccrued = readbackTotals.accrued;
+        comparisonState.loadedPaid = readbackTotals.paid;
+        sessionStorage.setItem("jkh_reload_chain_diag:" + uid, JSON.stringify(comparisonState));
+      } catch(eReloadDiagReadbackStore) {}
+      console.log("[reload-chain][canonical-readback-after-save]", {
+        found: !!readbackSnapshot,
+        httpStatus: readbackRes.status,
+        ownerId: String(readbackData && readbackData.owner_id || ""),
+        uid: String(readbackData && readbackData.abonent_uid || uid),
+        status: String(readbackData && readbackData.snapshot_status || ""),
+        rowsByIdCount: Object.keys(readbackRowsById).length,
+        totals: readbackSnapshot && readbackSnapshot.totals || null,
+        input_hash: String(readbackData && readbackData.input_hash || readbackSnapshot && readbackSnapshot.input_hash || ""),
+        ledgerVersion: String(readbackData && readbackData.ledger_version || readbackSnapshot && readbackSnapshot.ledgerVersion || ""),
+        storedPayloadSize: readbackSnapshot ? JSON.stringify(readbackSnapshot).length : 0
+      });
+    } catch(eCanonicalReadbackDiag) {
+      try { console.warn("[reload-chain][canonical-readback-after-save]", { found: false, uid: uid, reason: String(eCanonicalReadbackDiag && eCanonicalReadbackDiag.message || eCanonicalReadbackDiag) }); } catch(_) {}
     }
     return data;
   }
