@@ -48,20 +48,148 @@
       if (out.uiStatus === "ready") {
         out.ok = true;
         out.acceptedReason = "manual_recalc_data_ready_server_ready";
+        diagnoseServerFirstReadable(out, "uiStatus === ready", "web/payment_table.js:49");
         return out;
       }
       if (out.uiStatus === "empty" && out.uiSource === "server") {
         out.ok = true;
         out.acceptedReason = "manual_recalc_data_ready_server_empty";
+        diagnoseServerFirstReadable(out, "uiStatus === empty && uiSource === server", "web/payment_table.js:55");
         return out;
       }
       if (out.legacyDataReady) {
         out.ok = true;
         out.acceptedReason = "manual_recalc_data_ready_legacy";
+        diagnoseServerFirstReadable(out, "legacyDataReady === true", "web/payment_table.js:61");
         return out;
       }
     } catch(e) {}
+    diagnoseServerFirstReadable(out, "no readable branch matched", "web/payment_table.js:37");
     return out;
+  }
+
+  let __readableDiagnosticNextId = 0;
+  let __readableDiagnosticLatest = null;
+  let __readableDiagnosticLatestTrue = null;
+  const __readableDiagnosticMeta = typeof WeakMap === "function" ? new WeakMap() : null;
+
+  function readableDiagnosticContext(){
+    const value = window.__JKH_READABLE_DIAGNOSTIC;
+    return value && value.active === true ? value : null;
+  }
+
+  function beginReadableDiagnostic(runId){
+    __readableDiagnosticLatest = null;
+    __readableDiagnosticLatestTrue = null;
+    window.__JKH_READABLE_DIAGNOSTIC = {
+      active: true,
+      runId: String(runId || ""),
+      startedAt: Date.now()
+    };
+  }
+
+  function finishReadableDiagnostic(){
+    const context = window.__JKH_READABLE_DIAGNOSTIC;
+    if (context) context.active = false;
+  }
+
+  function diagnoseServerFirstReadable(readable, matchedBranch, assignmentSite){
+    const context = readableDiagnosticContext();
+    if (!context) return;
+    const objectId = "readable-" + (++__readableDiagnosticNextId);
+    const createdAt = Date.now();
+    const stack = String((new Error()).stack || "").split("\n").slice(2, 7).map(function(line){ return String(line || "").trim(); });
+    const creator = "serverFirstReadableState";
+    const allocationSite = "web/payment_table.js:36";
+    const operands = [
+      { operandName: "uiStatus === ready", currentValue: readable.uiStatus, expectedValue: "ready", expressionResult: readable.uiStatus === "ready", sourceFunction: creator, sourceFile: "web/payment_table.js", sourceLine: 48 },
+      { operandName: "uiStatus === empty", currentValue: readable.uiStatus, expectedValue: "empty", expressionResult: readable.uiStatus === "empty", sourceFunction: creator, sourceFile: "web/payment_table.js", sourceLine: 54 },
+      { operandName: "uiSource === server", currentValue: readable.uiSource, expectedValue: "server", expressionResult: readable.uiSource === "server", sourceFunction: creator, sourceFile: "web/payment_table.js", sourceLine: 54 },
+      { operandName: "legacyDataReady === true", currentValue: readable.legacyDataReady, expectedValue: true, expressionResult: readable.legacyDataReady === true, sourceFunction: creator, sourceFile: "web/payment_table.js", sourceLine: 60 }
+    ];
+    operands.forEach(function(operand){
+      try { console.log("[readable-operand]", Object.assign({}, operand, { objectIdentity: objectId, runId: context.runId })); } catch(eOperandLog) {}
+    });
+    const meta = {
+      objectIdentity: objectId,
+      creator: creator,
+      allocationSite: allocationSite,
+      createdAt: createdAt,
+      allocationNumber: __readableDiagnosticNextId,
+      runId: context.runId,
+      ok: readable.ok === true,
+      matchedBranch: String(matchedBranch || ""),
+      assignmentSite: String(assignmentSite || ""),
+      stack: stack
+    };
+    if (__readableDiagnosticMeta) __readableDiagnosticMeta.set(readable, meta);
+    __readableDiagnosticLatest = meta;
+    if (meta.ok) __readableDiagnosticLatestTrue = meta;
+    try {
+      console.log("[readable-expression]", {
+        expression: '(uiStatus === "ready") || (uiStatus === "empty" && uiSource === "server") || (legacyDataReady === true)',
+        evaluatedExpression: "(" + String(readable.uiStatus === "ready") + ") || (" + String(readable.uiStatus === "empty") + " && " + String(readable.uiSource === "server") + ") || (" + String(readable.legacyDataReady === true) + ")",
+        result: readable.ok === true,
+        matchedBranch: meta.matchedBranch,
+        firstFalseAssignmentSite: readable.ok === true ? "" : "web/payment_table.js:37",
+        objectIdentity: objectId,
+        creator: creator,
+        allocationSite: allocationSite,
+        runId: context.runId
+      });
+    } catch(eExpressionLog) {}
+  }
+
+  function diagnoseReadableConsumer(readable, consumer){
+    const context = readableDiagnosticContext();
+    if (!context) return;
+    const meta = __readableDiagnosticMeta && readable && typeof readable === "object" ? __readableDiagnosticMeta.get(readable) : null;
+    const latest = __readableDiagnosticLatest;
+    const stale = !!(meta && latest && meta.objectIdentity !== latest.objectIdentity);
+    const payload = {
+      creator: meta && meta.creator || "unknown",
+      allocationSite: meta && meta.allocationSite || "unknown",
+      consumer: String(consumer || ""),
+      objectIdentity: meta && meta.objectIdentity || "unknown",
+      createdAt: meta && meta.createdAt || null,
+      consumedAt: Date.now(),
+      runId: context.runId,
+      ok: !!(readable && readable.ok === true),
+      stale: stale,
+      latestObjectIdentity: latest && latest.objectIdentity || "",
+      newerReadableAlreadyTrue: !!(__readableDiagnosticLatestTrue && meta && __readableDiagnosticLatestTrue.allocationNumber > meta.allocationNumber),
+      newerTrueObjectIdentity: __readableDiagnosticLatestTrue && __readableDiagnosticLatestTrue.objectIdentity || "",
+      dependencyChain: [
+        String(consumer || ""),
+        "serverFirstReadableState",
+        "window.JKH_UI_STATE.data.status/source + window.JKH_DATA_READY",
+        '(uiStatus === "ready") || (uiStatus === "empty" && uiSource === "server") || (legacyDataReady === true)'
+      ]
+    };
+    try { console.log("[readable-consumer]", payload); } catch(eConsumerLog) {}
+    if (stale) {
+      try { console.warn("STALE_READABLE_REFERENCE", payload); } catch(eStaleLog) {}
+    }
+  }
+
+  function diagnoseReadableWrapper(readable, gate){
+    const context = readableDiagnosticContext();
+    if (!context) return;
+    const meta = __readableDiagnosticMeta && readable && typeof readable === "object" ? __readableDiagnosticMeta.get(readable) : null;
+    const wrapperStack = String((new Error()).stack || "").split("\n").slice(2, 5).map(function(line){ return String(line || "").trim(); });
+    try {
+      console.log("[readable-wrapper]", {
+        sourceExpression: "gate.readable = readable.ok === true",
+        sourceFunction: "manualRecalcDataReadyForSync",
+        sourceFile: "web/payment_table.js",
+        sourceLine: wrapperStack[0] || "",
+        readableOk: !!(readable && readable.ok === true),
+        wrapperReadable: !!(gate && gate.readable === true),
+        wrapperReplacedResult: !!(readable && gate && (readable.ok === true) !== (gate.readable === true)),
+        objectIdentity: meta && meta.objectIdentity || "unknown",
+        runId: context.runId
+      });
+    } catch(eWrapperLog) {}
   }
   function isDataReady(){
     return serverFirstReadableState().ok === true;
@@ -4316,6 +4444,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
   function directGlobalRateReadState(source){
     const keys = [REFI_KEY_NORMAL, REFI_KEY_MORA];
     const readable = serverFirstReadableState();
+    diagnoseReadableConsumer(readable, "directGlobalRateReadState");
     const hydrated = manualRecalcHydratedDatabaseState();
     const out = {
       source: String(source || ""),
@@ -4488,7 +4617,10 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
         logReadinessRegressionBeforeManualRecalc: logReadinessRegressionBeforeManualRecalc,
         startReadinessWriteSequence: startReadinessWriteSequence,
         finishReadinessWriteSequence: finishReadinessWriteSequence,
-        manualRecalcReadinessEvaluation: manualRecalcReadinessEvaluation
+        manualRecalcReadinessEvaluation: manualRecalcReadinessEvaluation,
+        serverFirstReadableState: serverFirstReadableState,
+        beginReadableDiagnostic: beginReadableDiagnostic,
+        finishReadableDiagnostic: finishReadableDiagnostic
       });
     }
   } catch(e) {}
@@ -4530,6 +4662,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
   function manualRecalcDataReadyForSync(state, expectedEnvType){
     try {
       const readable = serverFirstReadableState();
+      diagnoseReadableConsumer(readable, "manualRecalcDataReadyForSync");
       const observed = state || directGlobalRateReadState("manualRecalcDataReadyForSync");
       const hydrated = observed.hydratedDatabaseState || manualRecalcHydratedDatabaseState();
       const expectedEnv = String(expectedEnvType || "");
@@ -4552,6 +4685,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
         normalKey: REFI_KEY_NORMAL,
         moratoriumKey: REFI_KEY_MORA
       };
+      diagnoseReadableWrapper(readable, gate);
       gate.ok = !!(
         readable.ok === true
         && observed.hasNormal === true
@@ -4613,6 +4747,8 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
   async function waitForManualRecalcDataReady(source){
     const timeoutMs = 5000;
     const startedAt = Date.now();
+    const readableRun = currentFullRecalcRunState();
+    beginReadableDiagnostic(readableRun && readableRun.runId || "");
     let attempts = 0;
     let latestGate = null;
     let lastEvaluation = null;
@@ -4665,6 +4801,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
             elapsedMs: Date.now() - startedAt
           }));
         } catch(eDoneLog) {}
+        finishReadableDiagnostic();
         return { ok: true, state, gate: gate };
       }
       try {
@@ -4709,6 +4846,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
         elapsedMs: Date.now() - startedAt
       }));
     } catch(eTimeoutLog) {}
+    finishReadableDiagnostic();
     return { ok: false, reason: "DATA_READY_TIMEOUT", preciseReason: blockerReason, state: finalState, gate: latestGate };
   }
 

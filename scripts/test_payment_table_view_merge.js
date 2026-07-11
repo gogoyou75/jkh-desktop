@@ -58,13 +58,19 @@ const {
   logReadinessRegressionBeforeManualRecalc,
   startReadinessWriteSequence,
   finishReadinessWriteSequence,
-  manualRecalcReadinessEvaluation
+  manualRecalcReadinessEvaluation,
+  serverFirstReadableState,
+  beginReadableDiagnostic,
+  finishReadableDiagnostic
 } = context.window.__paymentTableTestHooks;
 assert.strictEqual(typeof readinessRegressionState, "function");
 assert.strictEqual(typeof readinessRegressionReadable, "function");
 assert.strictEqual(typeof startReadinessWriteSequence, "function");
 assert.strictEqual(typeof finishReadinessWriteSequence, "function");
 assert.strictEqual(typeof manualRecalcReadinessEvaluation, "function");
+assert.strictEqual(typeof serverFirstReadableState, "function");
+assert.strictEqual(typeof beginReadableDiagnostic, "function");
+assert.strictEqual(typeof finishReadableDiagnostic, "function");
 
 startReadinessWriteSequence("test-run-id");
 context.window.__recordReadinessWrite({
@@ -89,6 +95,17 @@ context.window.JKH_UI_STATE = {
   data: { status: "ready", source: "server" }
 };
 context.window.JKH_DATA_READY = false;
+beginReadableDiagnostic("readable-test-run");
+const readyReadable = serverFirstReadableState();
+assert.strictEqual(readyReadable.ok, true);
+assert.strictEqual(readyReadable.acceptedReason, "manual_recalc_data_ready_server_ready");
+context.window.JKH_UI_STATE.data.status = "offline";
+const offlineReadable = serverFirstReadableState();
+assert.strictEqual(offlineReadable.ok, false);
+assert.strictEqual(offlineReadable.uiStatus, "offline");
+assert.strictEqual(offlineReadable.legacyDataReady, false);
+finishReadableDiagnostic();
+context.window.JKH_UI_STATE.data.status = "ready";
 context.window.AbonentsDB = { abonents: { "test-uid": {} }, premises: {}, links: [] };
 context.window.JKHStore = {
   getEnvType: () => "production",
