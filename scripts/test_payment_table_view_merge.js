@@ -51,6 +51,42 @@ assert.strictEqual(typeof materializeCanonicalSnapshotRowsForEmptyLedger, "funct
 const { setPaymentTableCalculatedRenderState, applyFreshCalculatedRowsForRender } = context.window.__paymentTableTestHooks;
 assert.strictEqual(typeof setPaymentTableCalculatedRenderState, "function");
 assert.strictEqual(typeof applyFreshCalculatedRowsForRender, "function");
+const {
+  readinessRegressionState,
+  readinessRegressionReadable,
+  logReadinessRegressionAfterPassiveRestore,
+  logReadinessRegressionBeforeManualRecalc
+} = context.window.__paymentTableTestHooks;
+assert.strictEqual(typeof readinessRegressionState, "function");
+assert.strictEqual(typeof readinessRegressionReadable, "function");
+
+context.window.JKH_UI_STATE = {
+  server: { status: "online" },
+  data: { status: "ready", source: "server" }
+};
+context.window.AbonentsDB = { abonents: { "test-uid": {} }, premises: {}, links: [] };
+context.window.JKHStore = {
+  getEnvType: () => "production",
+  getRaw: () => "[{\"date\":\"2026-01-01\",\"rate\":21}]"
+};
+context.JKHStore = context.window.JKHStore;
+const passiveReadiness = logReadinessRegressionAfterPassiveRestore(230);
+assert.deepStrictEqual(JSON.parse(JSON.stringify(passiveReadiness)), {
+  uiStatus: "ready",
+  uiSource: "server",
+  serverStatus: "online",
+  runtimeHydrated: true,
+  restoredRowsCount: 230,
+  normalRateReadable: true,
+  moratoriumRateReadable: true,
+  envType: "production"
+});
+assert.strictEqual(readinessRegressionReadable(passiveReadiness), true);
+context.window.JKH_UI_STATE.data.status = "offline";
+const manualReadiness = logReadinessRegressionBeforeManualRecalc("test", "before-wait");
+assert.strictEqual(manualReadiness.uiStatus, "offline");
+assert.strictEqual(manualReadiness.restoredRowsCount, 230);
+assert.strictEqual(readinessRegressionReadable(manualReadiness), false);
 
 const rawRows = [{
   id: "row-1",

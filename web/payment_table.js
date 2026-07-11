@@ -4367,6 +4367,83 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
     };
   }
 
+  let __readinessRegressionPassiveRestoreState = null;
+
+  function readinessRegressionState(restoredRowsCount){
+    const rates = directGlobalRateReadState("readiness-regression");
+    const hydrated = rates.hydratedDatabaseState || manualRecalcHydratedDatabaseState();
+    const uiState = window.JKH_UI_STATE && typeof window.JKH_UI_STATE === "object" ? window.JKH_UI_STATE : {};
+    const serverState = uiState.server && typeof uiState.server === "object" ? uiState.server : {};
+    return {
+      uiStatus: String(rates.uiStatus || ""),
+      uiSource: String(rates.uiSource || ""),
+      serverStatus: String(serverState.status || ""),
+      runtimeHydrated: hydrated.hydrated === true,
+      restoredRowsCount: Number(restoredRowsCount || 0),
+      normalRateReadable: rates.normalRateReadable === true,
+      moratoriumRateReadable: rates.moratoriumRateReadable === true,
+      envType: String(rates.envType || "")
+    };
+  }
+
+  function readinessRegressionReadable(state){
+    const value = state && typeof state === "object" ? state : {};
+    const uiReadable = value.uiStatus === "ready" || (value.uiStatus === "empty" && value.uiSource === "server");
+    return uiReadable
+      && value.runtimeHydrated === true
+      && value.normalRateReadable === true
+      && value.moratoriumRateReadable === true;
+  }
+
+  function logReadinessRegressionAfterPassiveRestore(restoredRowsCount){
+    const state = readinessRegressionState(restoredRowsCount);
+    __readinessRegressionPassiveRestoreState = state;
+    try { console.log("[readiness-regression][after-passive-restore]", state); } catch(e) {}
+    return state;
+  }
+
+  function logReadinessRegressionBeforeManualRecalc(transitionCaller, transitionReason){
+    const passive = __readinessRegressionPassiveRestoreState;
+    const restoredRowsCount = passive ? passive.restoredRowsCount : 0;
+    const current = readinessRegressionState(restoredRowsCount);
+    try { console.log("[readiness-regression][before-manual-recalc]", current); } catch(e) {}
+    const changedFields = [];
+    if (passive) {
+      Object.keys(current).forEach(function(key){
+        if (passive[key] !== current[key]) changedFields.push(key);
+      });
+    }
+    const passiveRestoreReadable = readinessRegressionReadable(passive);
+    const manualRecalcReadable = readinessRegressionReadable(current);
+    const divergenceStage = !passive
+      ? "PASSIVE_RESTORE_BASELINE_MISSING"
+      : (passiveRestoreReadable && !manualRecalcReadable
+        ? "BEFORE_MANUAL_RECALC_READINESS"
+        : (changedFields.length ? "STATE_CHANGED_WITHOUT_READABILITY_DIVERGENCE" : "NO_DIVERGENCE_BEFORE_READINESS"));
+    try {
+      console.log("[readiness-regression][state-delta]", {
+        changedFields: changedFields,
+        transitionCaller: String(transitionCaller || ""),
+        transitionReason: String(transitionReason || ""),
+        passiveRestoreReadable: passiveRestoreReadable,
+        manualRecalcReadable: manualRecalcReadable,
+        divergenceStage: divergenceStage
+      });
+    } catch(e) {}
+    return current;
+  }
+
+  try {
+    if (window.__JKH_PAYMENT_TABLE_TEST_HOOKS === true) {
+      window.__paymentTableTestHooks = Object.assign(window.__paymentTableTestHooks || {}, {
+        readinessRegressionState: readinessRegressionState,
+        readinessRegressionReadable: readinessRegressionReadable,
+        logReadinessRegressionAfterPassiveRestore: logReadinessRegressionAfterPassiveRestore,
+        logReadinessRegressionBeforeManualRecalc: logReadinessRegressionBeforeManualRecalc
+      });
+    }
+  } catch(e) {}
+
   function manualRecalcDataReadyBlockerReason(gate){
     const blockers = [];
     if (!gate || gate.readable !== true) blockers.push("READABLE");
@@ -5038,6 +5115,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
     });
     const rendered = await renderCalculatedRowsDirect("canonical-snapshot-empty-ledger");
     const result = Object.assign({}, materialized, { ok: rendered === true, renderedRowsCount: rendered === true ? materialized.rows.length : 0, reason: rendered === true ? "OK" : "CARD_ROWS_NOT_RESTORED" });
+    if (result.ok) logReadinessRegressionAfterPassiveRestore(result.renderedRowsCount);
     try {
       const eventName = result.ok ? "card_rows_materialized_from_snapshot" : "card_rows_materialization_failed";
       console.log("[card-reload][" + eventName + "]", { uid: String(snapshot && snapshot.uid || getAbonentId() || ""), snapshotRowsCount: materialized.snapshotRowsCount, ledgerRowsCount: materialized.ledgerRowsCount, renderedRowsCount: result.renderedRowsCount, source: "canonical_backend_snapshot", reason: result.reason });
@@ -5285,6 +5363,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
               selectedPeriod: selectedPeriod || null
             });
           } catch(eSnapshotRestoredLog) {}
+          logReadinessRegressionAfterPassiveRestore(Array.isArray(view) ? view.length : Object.keys(normalSnapshotState.dataById || {}).length);
         } else {
           const displayOnlySnapshotState = tryApplyDisplayOnlyCardSnapshotRows(view, normalSnapshotState && normalSnapshotState.reason || "CARD_SNAPSHOT_DISPLAY_ONLY", periodActive, selectedPeriod, runtimeLedgerVersion, expectedRuntimeSignature);
           if (displayOnlySnapshotState && displayOnlySnapshotState.dataById && Object.keys(displayOnlySnapshotState.dataById).length) {
@@ -6423,6 +6502,10 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
       return { ok:false, reason:"DB_NOT_HYDRATED", summary_status:"error", summary_reason:"DB_NOT_HYDRATED" };
     }
     await ensureGlobalRefinancingRatesHydrated("payment_table.fullRecalcForCurrentAbonent.before-sync-calc");
+    logReadinessRegressionBeforeManualRecalc(
+      "payment_table.fullRecalcForCurrentAbonent",
+      "before_waitForManualRecalcDataReady"
+    );
     const dataReady = await waitForManualRecalcDataReady("payment_table.fullRecalcForCurrentAbonent.before-sync-calc");
     if (!dataReady || dataReady.ok !== true) {
       endRecalcTotalTimer();
