@@ -737,6 +737,28 @@
     if (patch.auth && typeof patch.auth === "object") st.auth = Object.assign({}, st.auth, patch.auth);
     if (patch.server && typeof patch.server === "object") st.server = Object.assign({}, st.server, patch.server);
     if (patch.data && typeof patch.data === "object") st.data = Object.assign({}, st.data, patch.data);
+    try {
+      if (typeof window.__recordReadinessWrite === "function") {
+        var readinessStack = String(stack || "").split("\n").slice(1, 6).map(function(line){ return String(line || "").trim(); });
+        var readinessCallerFrame = readinessStack.filter(function(line){ return line.indexOf("_setUIState") < 0; })[0] || "";
+        var readinessLocation = readinessCallerFrame.match(/(?:\(|@)([^()]+:\d+:\d+)\)?$/) || readinessCallerFrame.match(/([^ ]+:\d+:\d+)$/);
+        var readinessCaller = readinessCallerFrame.replace(/^at\s+/, "").split(/\s+\(|@/)[0] || "";
+        window.__recordReadinessWrite({
+          previousUiStatus: String(before.data && before.data.status || ""),
+          newUiStatus: String(st.data && st.data.status || ""),
+          previousServerStatus: String(before.server && before.server.status || ""),
+          newServerStatus: String(st.server && st.server.status || ""),
+          caller: readinessCaller,
+          function: "storage._setUIState",
+          line: readinessLocation ? String(readinessLocation[1] || "") : "",
+          reason: String(patch.reason || patch.data && patch.data.message || patch.server && patch.server.message || (
+            "ui:" + String(before.data && before.data.status || "") + "->" + String(st.data && st.data.status || "")
+            + ";server:" + String(before.server && before.server.status || "") + "->" + String(st.server && st.server.status || "")
+          )),
+          stack: readinessStack
+        });
+      }
+    } catch(eReadinessWrite) {}
     _traceUIStateChange("storage", before, st, patch, stack);
     _emitUIStateChanged(st);
     return st;

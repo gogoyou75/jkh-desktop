@@ -4369,6 +4369,52 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
 
   let __readinessRegressionPassiveRestoreState = null;
 
+  function startReadinessWriteSequence(runId){
+    window.__JKH_READINESS_WRITE_SEQUENCE = {
+      active: true,
+      runId: String(runId || ""),
+      startedAt: Date.now(),
+      writes: []
+    };
+  }
+
+  window.__recordReadinessWrite = function(meta){
+    const sequence = window.__JKH_READINESS_WRITE_SEQUENCE;
+    if (!sequence || sequence.active !== true) return;
+    const input = meta && typeof meta === "object" ? meta : {};
+    const previousUiStatus = String(input.previousUiStatus || "");
+    const newUiStatus = String(input.newUiStatus || "");
+    const previousServerStatus = String(input.previousServerStatus || "");
+    const newServerStatus = String(input.newServerStatus || "");
+    if (previousUiStatus === newUiStatus && previousServerStatus === newServerStatus) return;
+    const entry = {
+      previousUiStatus: previousUiStatus,
+      newUiStatus: newUiStatus,
+      previousServerStatus: previousServerStatus,
+      newServerStatus: newServerStatus,
+      caller: String(input.caller || ""),
+      function: String(input.function || ""),
+      line: String(input.line || ""),
+      reason: String(input.reason || ""),
+      stack: Array.isArray(input.stack) ? input.stack.slice(0, 5) : [],
+      runId: String(sequence.runId || "")
+    };
+    sequence.writes.push(entry);
+    try { console.log("[readiness-write]", entry); } catch(e) {}
+  };
+
+  function finishReadinessWriteSequence(){
+    const sequence = window.__JKH_READINESS_WRITE_SEQUENCE;
+    if (!sequence) return;
+    sequence.active = false;
+    try {
+      console.log("[readiness-write-sequence]", {
+        runId: String(sequence.runId || ""),
+        writes: Array.isArray(sequence.writes) ? sequence.writes.slice() : []
+      });
+    } catch(e) {}
+  }
+
   function readinessRegressionState(restoredRowsCount){
     const rates = directGlobalRateReadState("readiness-regression");
     const hydrated = rates.hydratedDatabaseState || manualRecalcHydratedDatabaseState();
@@ -4439,7 +4485,9 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
         readinessRegressionState: readinessRegressionState,
         readinessRegressionReadable: readinessRegressionReadable,
         logReadinessRegressionAfterPassiveRestore: logReadinessRegressionAfterPassiveRestore,
-        logReadinessRegressionBeforeManualRecalc: logReadinessRegressionBeforeManualRecalc
+        logReadinessRegressionBeforeManualRecalc: logReadinessRegressionBeforeManualRecalc,
+        startReadinessWriteSequence: startReadinessWriteSequence,
+        finishReadinessWriteSequence: finishReadinessWriteSequence
       });
     }
   } catch(e) {}
@@ -6464,6 +6512,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
     const opts = options && typeof options === "object" ? options : {};
     const id = String(getAbonentId() || "");
     const runId = fullRecalcRunIdFromOptions(opts);
+    startReadinessWriteSequence(runId);
     const runningFullRecalc = currentFullRecalcRunState();
     if (runningFullRecalc && runningFullRecalc.paymentTableFullActive === true) {
       try {
@@ -6475,6 +6524,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
         });
       } catch(eDupSameRunLog) {}
       endRecalcTotalTimer();
+      finishReadinessWriteSequence();
       try { console.log("[manual-recalc][return] ALREADY_RUNNING"); } catch(eManualRecalcReturnLog) {}
       return { ok:false, reason:"RECALC_ALREADY_RUNNING", summary_status:"already_running", summary_reason:"RECALC_ALREADY_RUNNING", status:"already_running", duplicateIgnored:true, runId:runningFullRecalc.runId || runId };
     }
@@ -6488,16 +6538,19 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
         });
       } catch(eDupLog) {}
       endRecalcTotalTimer();
+      finishReadinessWriteSequence();
       try { console.log("[manual-recalc][return] ALREADY_RUNNING"); } catch(eManualRecalcReturnLog) {}
       return { ok:false, reason:"RECALC_ALREADY_RUNNING", summary_status:"already_running", summary_reason:"RECALC_ALREADY_RUNNING", status:"already_running", duplicateIgnored:true, runId:runningFullRecalc.runId || runId };
     }
     if (!id) {
       endRecalcTotalTimer();
+      finishReadinessWriteSequence();
       try { console.log("[manual-recalc][return] ABONENT_REQUIRED"); } catch(eManualRecalcReturnLog) {}
       return { ok:false, reason:"ABONENT_REQUIRED" };
     }
     if (!await waitPaymentTableHydratedDatabase("FULL_SUMMARY_REBUILD")) {
       endRecalcTotalTimer();
+      finishReadinessWriteSequence();
       try { console.log("[manual-recalc][return] DB_NOT_HYDRATED"); } catch(eManualRecalcReturnLog) {}
       return { ok:false, reason:"DB_NOT_HYDRATED", summary_status:"error", summary_reason:"DB_NOT_HYDRATED" };
     }
@@ -6506,6 +6559,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
       "payment_table.fullRecalcForCurrentAbonent",
       "before_waitForManualRecalcDataReady"
     );
+    finishReadinessWriteSequence();
     const dataReady = await waitForManualRecalcDataReady("payment_table.fullRecalcForCurrentAbonent.before-sync-calc");
     if (!dataReady || dataReady.ok !== true) {
       endRecalcTotalTimer();

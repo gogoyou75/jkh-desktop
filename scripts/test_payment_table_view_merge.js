@@ -55,10 +55,32 @@ const {
   readinessRegressionState,
   readinessRegressionReadable,
   logReadinessRegressionAfterPassiveRestore,
-  logReadinessRegressionBeforeManualRecalc
+  logReadinessRegressionBeforeManualRecalc,
+  startReadinessWriteSequence,
+  finishReadinessWriteSequence
 } = context.window.__paymentTableTestHooks;
 assert.strictEqual(typeof readinessRegressionState, "function");
 assert.strictEqual(typeof readinessRegressionReadable, "function");
+assert.strictEqual(typeof startReadinessWriteSequence, "function");
+assert.strictEqual(typeof finishReadinessWriteSequence, "function");
+
+startReadinessWriteSequence("test-run-id");
+context.window.__recordReadinessWrite({
+  previousUiStatus: "ready",
+  newUiStatus: "offline",
+  previousServerStatus: "online",
+  newServerStatus: "offline",
+  caller: "loadFromServer",
+  function: "storage._setUIState",
+  line: "storage.js:2075:9",
+  reason: "network failed",
+  stack: ["loadFromServer (storage.js:2075:9)"]
+});
+finishReadinessWriteSequence();
+assert.strictEqual(context.window.__JKH_READINESS_WRITE_SEQUENCE.active, false);
+assert.strictEqual(context.window.__JKH_READINESS_WRITE_SEQUENCE.writes.length, 1);
+assert.strictEqual(context.window.__JKH_READINESS_WRITE_SEQUENCE.writes[0].runId, "test-run-id");
+assert.strictEqual(context.window.__JKH_READINESS_WRITE_SEQUENCE.writes[0].newUiStatus, "offline");
 
 context.window.JKH_UI_STATE = {
   server: { status: "online" },
