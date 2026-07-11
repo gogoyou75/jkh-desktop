@@ -4487,7 +4487,8 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
         logReadinessRegressionAfterPassiveRestore: logReadinessRegressionAfterPassiveRestore,
         logReadinessRegressionBeforeManualRecalc: logReadinessRegressionBeforeManualRecalc,
         startReadinessWriteSequence: startReadinessWriteSequence,
-        finishReadinessWriteSequence: finishReadinessWriteSequence
+        finishReadinessWriteSequence: finishReadinessWriteSequence,
+        manualRecalcReadinessEvaluation: manualRecalcReadinessEvaluation
       });
     }
   } catch(e) {}
@@ -4582,26 +4583,74 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
     }
   }
 
+  function manualRecalcReadinessEvaluation(iteration, elapsedMs, state, gate){
+    const observed = state && typeof state === "object" ? state : {};
+    const evaluated = gate && typeof gate === "object" ? gate : {};
+    const uiState = window.JKH_UI_STATE && typeof window.JKH_UI_STATE === "object" ? window.JKH_UI_STATE : {};
+    const serverState = uiState.server && typeof uiState.server === "object" ? uiState.server : {};
+    const passive = __readinessRegressionPassiveRestoreState;
+    const failedConditions = [];
+    if (evaluated.readable !== true) failedConditions.push("readable.ok === true");
+    if (evaluated.hasNormal !== true) failedConditions.push("observed.hasNormal === true");
+    if (evaluated.hasMoratorium !== true) failedConditions.push("observed.hasMoratorium === true");
+    if (evaluated.hydrated !== true) failedConditions.push("hydrated.hydrated === true");
+    if (evaluated.envStable !== true) failedConditions.push("envStable === true");
+    return {
+      iteration: Number(iteration || 0),
+      elapsedMs: Number(elapsedMs || 0),
+      uiStatus: String(evaluated.uiStatus || observed.uiStatus || ""),
+      serverStatus: String(serverState.status || ""),
+      runtimeHydrated: evaluated.hydrated === true,
+      normalRateReadable: evaluated.hasNormal === true,
+      moratoriumRateReadable: evaluated.hasMoratorium === true,
+      restoredRowsCount: Number(passive && passive.restoredRowsCount || 0),
+      dataReady: window.JKH_DATA_READY === true,
+      failedCondition: failedConditions.length ? failedConditions.join(" && ") : "",
+      readyExpressionResult: evaluated.ok === true
+    };
+  }
+
   async function waitForManualRecalcDataReady(source){
     const timeoutMs = 5000;
     const startedAt = Date.now();
     let attempts = 0;
     let latestGate = null;
+    let lastEvaluation = null;
+    const failedConditionsSeen = [];
+    const firstFailureIterationByCondition = {};
+    let startState = null;
     try {
-      const startState = directGlobalRateReadState(source);
+      startState = directGlobalRateReadState(source);
       console.log("[manual-recalc][data-ready]", Object.assign({}, startState, { reason: "manual_recalc_data_ready_wait_start" }));
       console.log("[manual-recalc][data-ready]", Object.assign({}, startState, { reason: "manual_recalc_direct_rate_read_after_hydrate" }));
       console.log("[manual-recalc][data-ready]", Object.assign({}, startState, { reason: "manual_recalc_env_prefix_check" }));
     } catch(eStartLog) {}
     const expectedEnvType = String(directGlobalRateReadState(source).envType || "");
+    try {
+      const enterState = startState || directGlobalRateReadState(source);
+      enterState.envPrefixStable = !expectedEnvType || !enterState.envType || String(enterState.envType || "") === expectedEnvType;
+      const enterGate = manualRecalcDataReadyForSync(enterState, expectedEnvType);
+      console.log("[readiness-enter]", manualRecalcReadinessEvaluation(0, Date.now() - startedAt, enterState, enterGate));
+    } catch(eEnterLog) {}
     while ((Date.now() - startedAt) <= timeoutMs) {
       attempts += 1;
       const state = directGlobalRateReadState(source);
       state.envPrefixStable = !expectedEnvType || !state.envType || String(state.envType || "") === expectedEnvType;
       const gate = manualRecalcDataReadyForSync(state, expectedEnvType);
       latestGate = gate;
+      const evaluation = manualRecalcReadinessEvaluation(attempts, Date.now() - startedAt, state, gate);
+      lastEvaluation = evaluation;
+      const iterationFailures = evaluation.failedCondition ? evaluation.failedCondition.split(" && ") : [];
+      iterationFailures.forEach(function(condition){
+        if (failedConditionsSeen.indexOf(condition) < 0) failedConditionsSeen.push(condition);
+        if (!Object.prototype.hasOwnProperty.call(firstFailureIterationByCondition, condition)) {
+          firstFailureIterationByCondition[condition] = attempts;
+        }
+      });
+      try { console.log("[readiness-eval]", evaluation); } catch(eEvalLog) {}
       if (gate && gate.ok === true) {
         try {
+          console.log("[readiness-success]", evaluation);
           if (state.acceptedStateReason) {
             console.log("[manual-recalc][data-ready]", Object.assign({}, state, {
               reason: state.acceptedStateReason,
@@ -4631,8 +4680,27 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
     finalState.envPrefixStable = !expectedEnvType || !finalState.envType || String(finalState.envType || "") === expectedEnvType;
     const finalGate = manualRecalcDataReadyForSync(finalState, expectedEnvType);
     latestGate = finalGate || latestGate;
+    const finalEvaluation = manualRecalcReadinessEvaluation(attempts, Date.now() - startedAt, finalState, latestGate);
+    lastEvaluation = finalEvaluation;
+    const finalFailures = finalEvaluation.failedCondition ? finalEvaluation.failedCondition.split(" && ") : [];
+    finalFailures.forEach(function(condition){
+      if (failedConditionsSeen.indexOf(condition) < 0) failedConditionsSeen.push(condition);
+      if (!Object.prototype.hasOwnProperty.call(firstFailureIterationByCondition, condition)) {
+        firstFailureIterationByCondition[condition] = attempts;
+      }
+    });
     const blockerReason = manualRecalcDataReadyBlockerReason(latestGate);
     try {
+      console.warn("[readiness-timeout-summary]", {
+        totalIterations: attempts,
+        lastEvaluation: lastEvaluation,
+        everyFailedCondition: failedConditionsSeen,
+        exactBooleanExpressionPreventingReadiness: "readable.ok === true && observed.hasNormal === true && observed.hasMoratorium === true && hydrated.hydrated === true && envStable === true",
+        firstIterationWhereFailureAppeared: Object.keys(firstFailureIterationByCondition).length
+          ? Math.min.apply(null, Object.keys(firstFailureIterationByCondition).map(function(condition){ return firstFailureIterationByCondition[condition]; }))
+          : null,
+        firstFailureIterationByCondition: firstFailureIterationByCondition
+      });
       console.warn("[manual-recalc][data-ready]", Object.assign(compactManualRecalcDataReadyGate(latestGate, Date.now() - startedAt, attempts), {
         reason: "manual_recalc_data_ready_blockers"
       }));

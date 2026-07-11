@@ -57,12 +57,14 @@ const {
   logReadinessRegressionAfterPassiveRestore,
   logReadinessRegressionBeforeManualRecalc,
   startReadinessWriteSequence,
-  finishReadinessWriteSequence
+  finishReadinessWriteSequence,
+  manualRecalcReadinessEvaluation
 } = context.window.__paymentTableTestHooks;
 assert.strictEqual(typeof readinessRegressionState, "function");
 assert.strictEqual(typeof readinessRegressionReadable, "function");
 assert.strictEqual(typeof startReadinessWriteSequence, "function");
 assert.strictEqual(typeof finishReadinessWriteSequence, "function");
+assert.strictEqual(typeof manualRecalcReadinessEvaluation, "function");
 
 startReadinessWriteSequence("test-run-id");
 context.window.__recordReadinessWrite({
@@ -86,6 +88,7 @@ context.window.JKH_UI_STATE = {
   server: { status: "online" },
   data: { status: "ready", source: "server" }
 };
+context.window.JKH_DATA_READY = false;
 context.window.AbonentsDB = { abonents: { "test-uid": {} }, premises: {}, links: [] };
 context.window.JKHStore = {
   getEnvType: () => "production",
@@ -104,6 +107,23 @@ assert.deepStrictEqual(JSON.parse(JSON.stringify(passiveReadiness)), {
   envType: "production"
 });
 assert.strictEqual(readinessRegressionReadable(passiveReadiness), true);
+const failedEvaluation = manualRecalcReadinessEvaluation(3, 250, {
+  uiStatus: "offline"
+}, {
+  ok: false,
+  readable: false,
+  hasNormal: true,
+  hasMoratorium: true,
+  hydrated: true,
+  envStable: true,
+  uiStatus: "offline"
+});
+assert.strictEqual(failedEvaluation.iteration, 3);
+assert.strictEqual(failedEvaluation.uiStatus, "offline");
+assert.strictEqual(failedEvaluation.serverStatus, "online");
+assert.strictEqual(failedEvaluation.restoredRowsCount, 230);
+assert.strictEqual(failedEvaluation.failedCondition, "readable.ok === true");
+assert.strictEqual(failedEvaluation.readyExpressionResult, false);
 context.window.JKH_UI_STATE.data.status = "offline";
 const manualReadiness = logReadinessRegressionBeforeManualRecalc("test", "before-wait");
 assert.strictEqual(manualReadiness.uiStatus, "offline");
