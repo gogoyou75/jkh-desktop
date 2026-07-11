@@ -48,6 +48,14 @@ const { mergeComputedRowsIntoViewRows } = context.window.__paymentTableTestHooks
 assert.strictEqual(typeof mergeComputedRowsIntoViewRows, "function");
 const { materializeCanonicalSnapshotRowsForEmptyLedger } = context.window.__paymentTableTestHooks;
 assert.strictEqual(typeof materializeCanonicalSnapshotRowsForEmptyLedger, "function");
+const { recordPaymentRenderRegression } = context.window.__paymentTableTestHooks;
+assert.strictEqual(typeof recordPaymentRenderRegression, "function");
+recordPaymentRenderRegression("snapshot-restore-start", { snapshotRowsCount: 230, ledgerRowsCount: 0, reason: "test" });
+recordPaymentRenderRegression("snapshot-restore-rendered", { snapshotRowsCount: 230, rowCount: 230, reason: "OK" });
+recordPaymentRenderRegression("render", { rowCount: 0, ledgerRowsCount: 0, reason: "late-test-load", caller: "test-late-caller" });
+const renderRegression = context.window.__getPaymentRenderRegressionSequence();
+assert.strictEqual(renderRegression.firstZeroReported, true);
+assert.strictEqual(renderRegression.events[renderRegression.events.length - 1].caller, "test-late-caller");
 const { setPaymentTableCalculatedRenderState, applyFreshCalculatedRowsForRender } = context.window.__paymentTableTestHooks;
 assert.strictEqual(typeof setPaymentTableCalculatedRenderState, "function");
 assert.strictEqual(typeof applyFreshCalculatedRowsForRender, "function");

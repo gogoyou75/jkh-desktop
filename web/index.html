@@ -997,6 +997,43 @@ function summaryStatusHtml(row){
     return '<span class="summary-status-badge summary-status-' + status + '">' + escapeHtml(summaryStatusText(status)) + '</span>' + reasonHtml;
 }
 
+function recordIndexTotalsChain(uid, stage, totals, extra){
+    const normalizedUid = String(uid || "");
+    const key = "jkh_summary_totals_chain:" + normalizedUid;
+    let chain = { uid: normalizedUid, sequence: 0, stages: [], firstZeroStage: null };
+    try {
+        const raw = sessionStorage.getItem(key);
+        if (raw) chain = JSON.parse(raw) || chain;
+    } catch(eRead) {}
+    if (!Array.isArray(chain.stages)) chain.stages = [];
+    chain.sequence = Number(chain.sequence || 0) + 1;
+    const values = totals && typeof totals === "object" ? totals : {};
+    const entry = Object.assign({
+        sequence: chain.sequence,
+        timestamp: new Date().toISOString(),
+        stage: String(stage || ""),
+        totals: {
+            debt: values.debt,
+            penalty: values.penalty,
+            accrued: values.accrued,
+            paid: values.paid
+        }
+    }, extra || {});
+    const priorNonZero = chain.stages.some(function(item){
+        const t = item && item.totals || {};
+        return [t.debt, t.penalty, t.accrued, t.paid].some(function(v){ return Number(v) !== 0; });
+    });
+    const nowAllZero = [entry.totals.debt, entry.totals.penalty, entry.totals.accrued, entry.totals.paid].every(function(v){ return Number(v) === 0; });
+    if (!chain.firstZeroStage && priorNonZero && nowAllZero) chain.firstZeroStage = entry;
+    chain.stages.push(entry);
+    try { sessionStorage.setItem(key, JSON.stringify(chain)); } catch(eWrite) {}
+    try {
+        console.log("[index-totals-chain][stage]", entry);
+        if (chain.firstZeroStage === entry) console.warn("[index-totals-chain][first-zero]", { firstZeroStage: entry, stages: chain.stages.slice() });
+    } catch(eLog) {}
+    return entry;
+}
+
 function buildIndexRowFromSummaryItem(item){
     const summary = (item && item.summary && typeof item.summary === "object")
         ? item.summary
@@ -1005,6 +1042,13 @@ function buildIndexRowFromSummaryItem(item){
     const status = normalizeSummaryStatus(summary.summary_status || summary.status || item && item.summary_status);
     const rawReason = String(summary.summary_reason || summary.reason || "").trim();
     const totalsValidation = validateIndexSummaryTotals(summary, status);
+    const chainUid = String(item && (item.uid || item.account_uid) || summary.account_uid || summary.uid || "");
+    recordIndexTotalsChain(chainUid, "api-abonents-response", {
+        debt: firstPresentValue(item && item.total_debt, pickSummaryValue(summary, INDEX_SUMMARY_TOTAL_KEYS.debt)),
+        penalty: firstPresentValue(item && item.penalty_debt, item && item.total_penalty, pickSummaryValue(summary, INDEX_SUMMARY_TOTAL_KEYS.penalty)),
+        accrued: firstPresentValue(item && item.total_accrued, pickSummaryValue(summary, INDEX_SUMMARY_TOTAL_KEYS.accrued)),
+        paid: firstPresentValue(item && item.total_paid, pickSummaryValue(summary, INDEX_SUMMARY_TOTAL_KEYS.paid))
+    }, { summaryStatus: status, rawItem: item });
     const viewOnlyLegacyReason = status === "dirty" && rawReason === "CALC_PERIOD_CHANGED";
     const displayStatus = viewOnlyLegacyReason ? "legacy" : totalsValidation.displayStatus;
     const reason = viewOnlyLegacyReason ? "CALC_PERIOD_CHANGED_VIEW_ONLY_LEGACY" : (totalsValidation.displayReason || rawReason);
@@ -1028,6 +1072,17 @@ function buildIndexRowFromSummaryItem(item){
         accrued: summaryNumberToDisplay(accruedValue.value),
         paid: summaryNumberToDisplay(paidValue.value)
     };
+    recordIndexTotalsChain(chainUid, "buildIndexRowFromSummaryItem", {
+        debt: debtValue.value,
+        penalty: penaltyValue.value,
+        accrued: accruedValue.value,
+        paid: paidValue.value
+    }, {
+        summaryStatus: status,
+        displayStatus: displayStatus,
+        validFreshTotals: totalsValidation.validFreshTotals,
+        sources: { debt: debtValue.source, penalty: penaltyValue.source, accrued: accruedValue.source, paid: paidValue.source }
+    });
     try {
         console.log("[reload-chain][index-summary-raw]", { sourceEndpoint: "/api/abonents", uid: String(item && (item.uid || item.account_uid) || ""), item: item, summary_status: status, summary_reason: rawReason, rawTotals: summary && summary.totals || null, rowsByIdExists: !!(summary && summary.rowsById), canonicalSnapshotTotalsPresent: false });
         console.log("[reload-chain][index-totals-normalized]", { uid: String(item && (item.uid || item.account_uid) || ""), debt: renderedValues.debt, penalty: renderedValues.penalty, accrued: renderedValues.accrued, paid: renderedValues.paid, sources: { debt: debtValue.source, penalty: penaltyValue.source, accrued: accruedValue.source, paid: paidValue.source } });

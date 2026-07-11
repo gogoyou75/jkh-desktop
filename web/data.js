@@ -3936,6 +3936,10 @@
         account_number: String(abonent && (abonent.account_number || abonent.accountNumber || abonent.ls || abonent.id) || abonentId || ""),
         summary: summaryPayload
       };
+      _recordSummaryTotalsChain(uid, "summary-save-payload", summaryPayload, {
+        endpoint: "/api/abonent_summary/rebuild",
+        abonentId: abonentId
+      });
       try {
         console.log("[summary][build-payload]", {
           uid: uid,
@@ -3971,6 +3975,11 @@
           totalsKeys: summaryTotalsKeys
         });
       } catch (eOkLog) {}
+      _recordSummaryTotalsChain(uid, "summary-save-response", data && data.summary, {
+        endpoint: "/api/abonent_summary/rebuild",
+        responseTotals: data && data.totals || null,
+        summaryStatus: String(data && data.summary_status || "")
+      });
       return data;
     } catch (e) {
       try { console.warn("[summary][save-failed]", { uid: saveLogCtx.uid, status: saveLogCtx.status, reason: String(e && e.message || e), totalsKeys: saveLogCtx.totalsKeys }); } catch (eLog) {}
@@ -4014,6 +4023,57 @@
     };
   }
 
+  function _summaryTotalsChainValues(summary){
+    var value = summary && typeof summary === "object" ? summary : {};
+    var totals = value.totals && typeof value.totals === "object" ? value.totals : {};
+    function pick(){
+      for (var i = 0; i < arguments.length; i += 1) {
+        var candidate = arguments[i];
+        if (candidate !== null && candidate !== undefined && candidate !== "") return candidate;
+      }
+      return null;
+    }
+    return {
+      debt: pick(totals.debt, totals.total, totals.total_debt, value.total_debt, value.total),
+      penalty: pick(totals.penalty, totals.total_penalty, value.total_penalty, value.penalty_debt, value.penalty),
+      accrued: pick(totals.accrued, totals.total_accrued, value.total_accrued, value.accrued),
+      paid: pick(totals.paid, totals.total_paid, value.total_paid, value.paid)
+    };
+  }
+
+  function _recordSummaryTotalsChain(uid, stage, summary, extra){
+    var normalizedUid = String(uid || "");
+    var key = "jkh_summary_totals_chain:" + normalizedUid;
+    var chain = { uid: normalizedUid, sequence: 0, stages: [], firstZeroStage: null };
+    try {
+      var raw = sessionStorage.getItem(key);
+      if (raw) chain = JSON.parse(raw) || chain;
+    } catch(eRead) {}
+    if (!Array.isArray(chain.stages)) chain.stages = [];
+    chain.sequence = Number(chain.sequence || 0) + 1;
+    var totals = _summaryTotalsChainValues(summary);
+    var entry = Object.assign({
+      sequence: chain.sequence,
+      timestamp: new Date().toISOString(),
+      stage: String(stage || ""),
+      totals: totals,
+      summaryStatus: String(summary && (summary.summary_status || summary.status) || "")
+    }, extra || {});
+    var priorNonZero = chain.stages.some(function(item){
+      var t = item && item.totals || {};
+      return [t.debt, t.penalty, t.accrued, t.paid].some(function(v){ return Number(v) !== 0; });
+    });
+    var nowAllZero = [totals.debt, totals.penalty, totals.accrued, totals.paid].every(function(v){ return Number(v) === 0; });
+    if (!chain.firstZeroStage && priorNonZero && nowAllZero) chain.firstZeroStage = entry;
+    chain.stages.push(entry);
+    try { sessionStorage.setItem(key, JSON.stringify(chain)); } catch(eWrite) {}
+    try {
+      console.log("[index-totals-chain][stage]", entry);
+      if (chain.firstZeroStage === entry) console.warn("[index-totals-chain][first-zero]", { firstZeroStage: entry, stages: chain.stages.slice() });
+    } catch(eLog) {}
+    return entry;
+  }
+
   async function saveCanonicalSnapshotTotalsToAbonentSummary(abonentOrId, snapshot, baseSummary){
     var mode = String(snapshot && (snapshot.snapshotMode || snapshot.snapshot_mode) || "").trim().toLowerCase();
     var status = String(snapshot && (snapshot.summary_status || snapshot.snapshot_status || snapshot.status) || "").trim().toLowerCase();
@@ -4022,6 +4082,10 @@
     }
     var canonical = _canonicalSnapshotSummaryTotals(snapshot);
     if (!canonical.ok) return canonical;
+    _recordSummaryTotalsChain(snapshot && snapshot.uid, "canonical-snapshot-totals", { totals: canonical.totals }, {
+      snapshotMode: mode,
+      snapshotStatus: status
+    });
     var summary = baseSummary && typeof baseSummary === "object" && !Array.isArray(baseSummary) ? deepClone(baseSummary) : {};
     var snapshotPeriod = snapshot.period && typeof snapshot.period === "object" ? snapshot.period : {};
     var period = summary.period && typeof summary.period === "object" ? summary.period : snapshotPeriod;
@@ -4047,6 +4111,7 @@
     summary.ledger_version = String(snapshot.ledgerVersion || snapshot.ledger_version || summary.ledger_version || "");
     summary.ledgerVersion = summary.ledger_version;
     try { console.log("[canonical_totals_before_summary_save]", { uid: String(snapshot.uid || ""), totals: canonical.totals, input_hash: summary.input_hash, ledgerVersion: summary.ledger_version, period: summary.period }); } catch(eBeforeLog) {}
+    _recordSummaryTotalsChain(snapshot && snapshot.uid, "canonical-summary-payload", summary, { summaryScope: summary.summary_scope });
     try { console.log("[abonent_summary_save_payload]", { uid: String(snapshot.uid || ""), summary_status: summary.summary_status, summary_reason: summary.summary_reason, summary_scope: summary.summary_scope, totals: summary.totals }); } catch(ePayloadLog) {}
     var saved = await saveAbonentSummaryAfterRecalc(abonentOrId, summary);
     try { console.log("[abonent_summary_save_response]", saved); } catch(eResponseLog) {}

@@ -518,6 +518,16 @@ def _summary_value(summary: dict, *keys):
     return None
 
 
+def _summary_totals_diagnostic(summary: dict | None):
+    value = summary if isinstance(summary, dict) else {}
+    return {
+        "debt": _summary_value(value, "total_debt", "total", "totals.debt", "totals.total", "totals.total_debt"),
+        "penalty": _summary_value(value, "total_penalty", "penalty_debt", "penalty", "totals.penalty", "totals.total_penalty"),
+        "accrued": _summary_value(value, "total_accrued", "accrued", "totals.accrued", "totals.total_accrued"),
+        "paid": _summary_value(value, "total_paid", "paid", "totals.paid", "totals.total_paid"),
+    }
+
+
 def _apply_abonent_summary_columns(row: AbonentSummary, target: dict, summary: dict):
     identity = target.get("identity") if isinstance(target, dict) and isinstance(target.get("identity"), dict) else {}
     summary = summary if isinstance(summary, dict) else {}
@@ -2771,6 +2781,20 @@ def _abonents_api_row_payload(row):
     for key, value in data.items():
         if key.startswith("address_"):
             payload[key] = _norm_text(value)
+    try:
+        app.logger.info("[index-totals-chain][api-abonents-row] %s", json.dumps({
+            "uid": payload.get("uid"),
+            "summary_row_id": data.get("summary_row_id"),
+            "summary_status": payload.get("summary_status"),
+            "totals": {
+                "debt": payload.get("total_debt"),
+                "penalty": payload.get("total_penalty"),
+                "accrued": payload.get("total_accrued"),
+                "paid": payload.get("total_paid"),
+            },
+        }, ensure_ascii=False))
+    except Exception:
+        pass
     return payload
 
 
@@ -3361,6 +3385,11 @@ def abonent_summary_rebuild():
             if not isinstance(summary, dict):
                 return jsonify(ok=False, error="summary_invalid", counters=counters), 400
             incoming_status = _summary_status_from_payload(summary)
+            app.logger.info("[index-totals-chain][backend-rebuild-input] %s", json.dumps({
+                "uid": account_uid,
+                "summary_status": incoming_status,
+                "totals": _summary_totals_diagnostic(summary),
+            }, ensure_ascii=False))
             incoming_totals_error = _fresh_totals_validation_reason(summary) if incoming_status == "fresh" else ""
             if incoming_totals_error:
                 return jsonify(ok=False, error=incoming_totals_error, counters=counters), 400
@@ -3373,6 +3402,11 @@ def abonent_summary_rebuild():
             if not target:
                 return jsonify(ok=False, error="uid_not_found", counters=counters), 404
             summary = _summary_without_stale_totals(summary, target, owner)
+            app.logger.info("[index-totals-chain][backend-rebuild-normalized] %s", json.dumps({
+                "uid": account_uid,
+                "summary_status": _summary_status_from_payload(summary),
+                "totals": _summary_totals_diagnostic(summary),
+            }, ensure_ascii=False))
 
             abonent_id = _norm_text(body.get("abonent_id")) or _norm_text(target.get("abonent_id"))
             account_number = _norm_text(body.get("account_number")) or _norm_text(target.get("account_number"))
@@ -3395,6 +3429,18 @@ def abonent_summary_rebuild():
 
             db.session.commit()
             persisted_summary = json.loads(row.summary_json or "{}")
+            app.logger.info("[index-totals-chain][backend-summary-row] %s", json.dumps({
+                "uid": account_uid,
+                "summary_row_id": row.id,
+                "summary_status": row.summary_status,
+                "summary_json_totals": _summary_totals_diagnostic(persisted_summary),
+                "column_totals": {
+                    "debt": _decimal_json_or_none(row.total_debt),
+                    "penalty": _decimal_json_or_none(row.penalty_debt),
+                    "accrued": _decimal_json_or_none(row.total_accrued),
+                    "paid": _decimal_json_or_none(row.total_paid),
+                },
+            }, ensure_ascii=False))
             app.logger.info("[abonent_summary_save_response] %s", json.dumps({"owner": owner, "uid": account_uid, "summary_status": row.summary_status, "summary_reason": row.summary_reason, "total_debt": _decimal_json_or_none(row.total_debt), "total_penalty": _decimal_json_or_none(row.penalty_debt), "total_accrued": _decimal_json_or_none(row.total_accrued), "total_paid": _decimal_json_or_none(row.total_paid)}, ensure_ascii=False))
             return jsonify(
                 ok=True,

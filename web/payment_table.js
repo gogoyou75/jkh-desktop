@@ -32,6 +32,52 @@
   function qs(sel, root = document) { return root.querySelector(sel); }
   function qsa(sel, root = document) { return Array.from(root.querySelectorAll(sel)); }
   function pad2(n) { return String(n).padStart(2, "0"); }
+  const __paymentRenderRegression = { sequence: 0, events: [], snapshotRestoreSeen: false, firstZeroReported: false };
+  let __paymentTableCurrentLoadMeta = null;
+
+  function paymentRenderCaller(stack){
+    const frames = String(stack || "").split("\n").slice(1, 8).map(function(line){ return String(line || "").trim(); }).filter(Boolean);
+    const caller = frames.filter(function(line){
+      return line.indexOf("recordPaymentRenderRegression") < 0 && line.indexOf("requestLoadPaymentTable") < 0 && line.indexOf("loadPaymentTable (") < 0;
+    })[0] || "";
+    return { caller: caller, stack: frames };
+  }
+
+  function recordPaymentRenderRegression(stage, detail){
+    const input = detail && typeof detail === "object" ? detail : {};
+    const suppliedFrames = Array.isArray(input.stack) ? input.stack : (Array.isArray(input.stackFrames) ? input.stackFrames : null);
+    const trace = suppliedFrames ? { caller: "", stack: suppliedFrames } : paymentRenderCaller(input.stack || "");
+    const entry = {
+      sequence: ++__paymentRenderRegression.sequence,
+      timestamp: new Date().toISOString(),
+      stage: String(stage || ""),
+      reason: String(input.reason || ""),
+      renderSource: String(input.renderSource || ""),
+      rowCount: Number(input.rowCount || 0),
+      ledgerRowsCount: Number(input.ledgerRowsCount || 0),
+      snapshotRowsCount: Number(input.snapshotRowsCount || 0),
+      caller: String(input.caller || trace.caller || ""),
+      stack: suppliedFrames || trace.stack
+    };
+    __paymentRenderRegression.events.push(entry);
+    if (stage === "snapshot-restore-start" || stage === "snapshot-restore-rendered") __paymentRenderRegression.snapshotRestoreSeen = true;
+    try { console.log("[render-regression][event]", entry); } catch(e) {}
+    if (__paymentRenderRegression.snapshotRestoreSeen && stage === "render" && entry.rowCount === 0 && !__paymentRenderRegression.firstZeroReported) {
+      __paymentRenderRegression.firstZeroReported = true;
+      try {
+        console.warn("[render-regression][first-zero]", entry);
+        console.warn("[render-regression][sequence]", {
+          events: __paymentRenderRegression.events.slice(),
+          firstZeroRender: entry
+        });
+      } catch(eZeroLog) {}
+    }
+    return entry;
+  }
+
+  window.__getPaymentRenderRegressionSequence = function(){
+    return { events: __paymentRenderRegression.events.slice(), firstZeroReported: __paymentRenderRegression.firstZeroReported };
+  };
   function serverFirstReadableState(){
     const out = {
       ok: false,
@@ -433,7 +479,8 @@
     if (window.__JKH_PAYMENT_TABLE_TEST_HOOKS === true) {
       window.__paymentTableTestHooks = Object.assign(window.__paymentTableTestHooks || {}, {
         mergeComputedRowsIntoViewRows: mergeComputedRowsIntoViewRows,
-        materializeCanonicalSnapshotRowsForEmptyLedger: materializeCanonicalSnapshotRowsForEmptyLedger
+        materializeCanonicalSnapshotRowsForEmptyLedger: materializeCanonicalSnapshotRowsForEmptyLedger,
+        recordPaymentRenderRegression: recordPaymentRenderRegression
       });
     }
   } catch(e) {}
@@ -5345,6 +5392,14 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
         rowsByIdCount: Object.keys(rowsById).length
       });
     } catch(e) {}
+    recordPaymentRenderRegression("render", {
+      reason: String(reason || ""),
+      renderSource: "calculated_rows_direct",
+      rowCount: rows.length,
+      ledgerRowsCount: 0,
+      snapshotRowsCount: Object.keys(rowsById).length,
+      stack: (new Error()).stack || ""
+    });
     await renderRowsChunked(tbody, rows, 50);
     return true;
   }
@@ -5355,6 +5410,12 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
       try { console.warn("[card-reload][card_rows_materialization_failed]", { uid: String(getAbonentId() || ""), snapshotRowsCount: snapshot && snapshot.rowsById && typeof snapshot.rowsById === "object" ? Object.keys(snapshot.rowsById).length : 0, ledgerRowsCount: 0, renderedRowsCount: 0, source: "canonical_backend_snapshot", reason: String(eLedger && (eLedger.code || eLedger.message) || eLedger || "LEDGER_READ_FAILED") }); } catch(_) {}
       return { ok: false, reason: "LEDGER_READ_FAILED", rows: [] };
     }
+    recordPaymentRenderRegression("snapshot-restore-start", {
+      reason: "canonical_backend_snapshot",
+      snapshotRowsCount: snapshot && snapshot.rowsById && typeof snapshot.rowsById === "object" ? Object.keys(snapshot.rowsById).length : 0,
+      ledgerRowsCount: ledgerRows.length,
+      stack: (new Error()).stack || ""
+    });
     const materialized = materializeCanonicalSnapshotRowsForEmptyLedger(snapshot, ledgerRows);
     if (!materialized.ok) {
       const eventName = materialized.reason === "EXISTING_LEDGER_USED" ? "card_rows_materialization_skipped" : "card_rows_materialization_failed";
@@ -5369,6 +5430,14 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
     });
     const rendered = await renderCalculatedRowsDirect("canonical-snapshot-empty-ledger");
     const result = Object.assign({}, materialized, { ok: rendered === true, renderedRowsCount: rendered === true ? materialized.rows.length : 0, reason: rendered === true ? "OK" : "CARD_ROWS_NOT_RESTORED" });
+    recordPaymentRenderRegression("snapshot-restore-rendered", {
+      reason: result.reason,
+      renderSource: "canonical_backend_snapshot",
+      rowCount: result.renderedRowsCount,
+      ledgerRowsCount: materialized.ledgerRowsCount,
+      snapshotRowsCount: materialized.snapshotRowsCount,
+      stack: (new Error()).stack || ""
+    });
     if (result.ok) logReadinessRegressionAfterPassiveRestore(result.renderedRowsCount);
     try {
       const eventName = result.ok ? "card_rows_materialized_from_snapshot" : "card_rows_materialization_failed";
@@ -5797,6 +5866,15 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
       });
 
       const renderStartedAt = perfNow();
+      recordPaymentRenderRegression("render", {
+        reason: __paymentTableCurrentLoadMeta && __paymentTableCurrentLoadMeta.reason || "",
+        renderSource: renderSource,
+        rowCount: Array.isArray(view) ? view.length : 0,
+        ledgerRowsCount: Array.isArray(arr) ? arr.length : 0,
+        snapshotRowsCount: renderRowsById && typeof renderRowsById === "object" ? Object.keys(renderRowsById).length : 0,
+        caller: __paymentTableCurrentLoadMeta && __paymentTableCurrentLoadMeta.caller || "",
+        stackFrames: __paymentTableCurrentLoadMeta && __paymentTableCurrentLoadMeta.stack || []
+      });
       try { console.time('[payment-table] render'); } catch(e) {}
       try {
         await renderRowsChunked(tbody, view, 50);
@@ -5837,6 +5915,9 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
     if (opts.mode) __paymentTableMode = String(opts.mode);
     if (opts.force) __paymentTableRenderedSignature = "";
     const reason = String(opts.reason || opts.mode || "scheduled");
+    const requestTrace = paymentRenderCaller((new Error()).stack || "");
+    const requestMeta = { reason: reason, caller: requestTrace.caller, stack: requestTrace.stack };
+    recordPaymentRenderRegression("load-request", requestMeta);
     const runningFullRecalc = currentFullRecalcRunState();
     const allowDuringFullRecalc = reason === "full_recalc_completed" || reason === "manual-full-recalc" || reason === "temporary_court_period";
     if (runningFullRecalc && !allowDuringFullRecalc) {
@@ -5867,7 +5948,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
       __paymentTableLoadScheduled = false;
       let settledError = null;
       try {
-        await loadPaymentTable(reason || 'scheduled');
+        await loadPaymentTable(reason || 'scheduled', requestMeta);
       } catch(e) {
         settledError = e;
         console.error(e);
@@ -5880,18 +5961,26 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
     }, 0);
   }
 
-  async function loadPaymentTable(reason) {
+  async function loadPaymentTable(reason, requestMeta) {
     if (__paymentTableLoadRunning) {
       try { console.log("[payment-table][init-skipped-inflight]", { reason: String(reason || ""), phase: "running" }); } catch(e) {}
       return;
     }
     __paymentTableLoadRunning = true;
+    const directTrace = requestMeta || paymentRenderCaller((new Error()).stack || "");
+    __paymentTableCurrentLoadMeta = {
+      reason: String(reason || ""),
+      caller: String(directTrace && directTrace.caller || ""),
+      stack: directTrace && directTrace.stack || []
+    };
+    recordPaymentRenderRegression("load-start", __paymentTableCurrentLoadMeta);
     try {
       console.log("[payment-table][init-start]", { reason: String(reason || "") });
       await loadPaymentTableImpl();
       console.log("[payment-table][init-done]", { reason: String(reason || "") });
     } finally {
       __paymentTableLoadRunning = false;
+      __paymentTableCurrentLoadMeta = null;
     }
   }
 
