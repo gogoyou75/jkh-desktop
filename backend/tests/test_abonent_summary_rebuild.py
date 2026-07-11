@@ -139,7 +139,10 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         })
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.get_json()["counters"], {"created": 1, "updated": 0, "skipped": 0, "errors": 0})
+        response_body = response.get_json()
+        self.assertEqual(response_body["counters"], {"created": 1, "updated": 0, "skipped": 0, "errors": 0})
+        self.assertEqual(response_body["totals"], {"debt": "12.00", "penalty": "2.00", "accrued": "10.00", "paid": "0.00", "total": "12.00"})
+        self.assertEqual(response_body["summary"]["totals"]["debt"], 12)
         with app_module.app.app_context():
             row = app_module.AbonentSummary.query.one()
             self.assertEqual(row.owner_id, "owner-single-create")
@@ -153,6 +156,44 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
             self.assertEqual(payload["totals"]["total"], 12)
             self.assertEqual(payload["totals"]["accrued"], 10)
             self.assertEqual(payload["totals"]["paid"], 0)
+
+    def test_fresh_missing_totals_is_rejected_without_overwriting_previous_success(self):
+        with app_module.app.app_context():
+            self._add_user("owner-preserve-canonical-totals")
+            self._put_abonents("owner-preserve-canonical-totals", {
+                "1001": {"uid": "uid_preserve_canonical_totals_1001", "id": "1001"},
+            })
+            target = app_module._owner_abonent_summary_targets("owner-preserve-canonical-totals")[0]
+            row = app_module.AbonentSummary(
+                owner_id="owner-preserve-canonical-totals",
+                abonent_id="1001",
+                account_uid="uid_preserve_canonical_totals_1001",
+                account_number="1001",
+            )
+            app_module._set_abonent_summary_json(row, target, self._fresh_summary(80, 9, 89))
+            app_module.db.session.add(row)
+            app_module.db.session.commit()
+        self._login("owner-preserve-canonical-totals")
+
+        response = self.client.post("/api/abonent_summary/rebuild", json={
+            "account_uid": "uid_preserve_canonical_totals_1001",
+            "summary": {
+                "summary_status": "fresh",
+                "summary_reason": "OK",
+                "summary_scope": "full",
+                "totals": {"debt": 0},
+            },
+        })
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json()["error"], "FRESH_TOTALS_MISSING")
+        with app_module.app.app_context():
+            row = app_module.AbonentSummary.query.one()
+            stored = json.loads(row.summary_json)
+            self.assertEqual(stored["totals"]["debt"], 89)
+            self.assertEqual(stored["totals"]["penalty"], 9)
+            self.assertEqual(float(row.total_debt), 89.0)
+            self.assertEqual(float(row.penalty_debt), 9.0)
 
     def test_single_upsert_preserves_fresh_summary_metadata_fields(self):
         with app_module.app.app_context():
@@ -1395,6 +1436,34 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
             self.assertNotIn(forbidden, helper)
             self.assertNotIn(forbidden, restore)
         self.assertIn("JKH_restoreCanonicalSnapshotRowsForPassiveDisplay(snapshot)", fresh_render)
+
+    def test_canonical_snapshot_totals_are_resaved_to_summary_after_snapshot_success(self):
+        data_source = self._find_repo_file("web", "data.js").read_text(encoding="utf-8")
+        card_source = self._find_repo_file("web", "abonent_card.html").read_text(encoding="utf-8")
+        index_source = self._find_repo_file("web", "index.html").read_text(encoding="utf-8")
+        backend_source = self._find_repo_file("backend", "app.py").read_text(encoding="utf-8")
+
+        mapper = data_source.split("function _canonicalSnapshotSummaryTotals", 1)[1].split("async function saveCanonicalSnapshotTotalsToAbonentSummary", 1)[0]
+        saver = data_source.split("async function saveCanonicalSnapshotTotalsToAbonentSummary", 1)[1].split("async function validateAbonentSummaryRecalcBatch", 1)[0]
+        recalc = data_source.split("async function recalcAbonentSummaryExplicit", 1)[1].split("function _recalcLockAgeFromServer", 1)[0]
+        post_snapshot = card_source.split("const snapshotSave = await savePostRecalcSnapshot(snapshot)", 1)[1].split("__skipCardAutoRecalcFreshSnapshot", 1)[0]
+
+        for field in ("debt", "penalty", "accrued", "paid", "total_debt", "total_penalty", "total_accrued", "total_paid"):
+            self.assertIn(field, mapper + saver)
+        self.assertIn('summary.summary_status = "fresh"', saver)
+        self.assertIn('summary.summary_scope = "full"', saver)
+        self.assertIn('summary.calculation_mode = "FULL_SUMMARY_REBUILD"', saver)
+        self.assertIn("summary.input_hash", saver)
+        self.assertIn("summary.ledger_version", saver)
+        self.assertIn("canonical_totals_before_summary_save", saver)
+        self.assertIn("abonent_summary_save_payload", saver)
+        self.assertIn("abonent_summary_save_response", saver)
+        self.assertIn("canonical_vs_summary_totals", saver)
+        self.assertIn("saveCanonicalSnapshotTotalsToAbonentSummary(currentAbonentId, snapshot", post_snapshot)
+        self.assertLess(post_snapshot.index("saveCanonicalSnapshotTotalsToAbonentSummary"), post_snapshot.index("__skipCardAutoRecalcFreshSnapshot") if "__skipCardAutoRecalcFreshSnapshot" in post_snapshot else len(post_snapshot))
+        self.assertIn("FAILED_FULL_SUMMARY_NOT_SAVED", recalc)
+        self.assertIn("index_summary_totals_loaded", index_source)
+        self.assertIn("incoming_totals_error", backend_source)
     def test_stage_13_2a_ledger_canonical_diagnostics_and_race_guards(self):
         data_path = self._find_repo_file("web", "data.js")
         payment_path = self._find_repo_file("web", "payment_table.js")

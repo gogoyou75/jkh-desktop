@@ -3360,6 +3360,10 @@ def abonent_summary_rebuild():
             summary = body.get("summary")
             if not isinstance(summary, dict):
                 return jsonify(ok=False, error="summary_invalid", counters=counters), 400
+            incoming_status = _summary_status_from_payload(summary)
+            incoming_totals_error = _fresh_totals_validation_reason(summary) if incoming_status == "fresh" else ""
+            if incoming_totals_error:
+                return jsonify(ok=False, error=incoming_totals_error, counters=counters), 400
             summary_scope = _norm_text(summary.get("summary_scope") or summary.get("report_scope")).lower()
             if summary_scope in {"period", "report"}:
                 return jsonify(ok=False, error="period_summary_not_allowed", counters=counters), 400
@@ -3390,11 +3394,21 @@ def abonent_summary_rebuild():
                 counters["created"] += 1
 
             db.session.commit()
+            persisted_summary = json.loads(row.summary_json or "{}")
+            app.logger.info("[abonent_summary_save_response] %s", json.dumps({"owner": owner, "uid": account_uid, "summary_status": row.summary_status, "summary_reason": row.summary_reason, "total_debt": _decimal_json_or_none(row.total_debt), "total_penalty": _decimal_json_or_none(row.penalty_debt), "total_accrued": _decimal_json_or_none(row.total_accrued), "total_paid": _decimal_json_or_none(row.total_paid)}, ensure_ascii=False))
             return jsonify(
                 ok=True,
                 counters=counters,
                 summary_status=_summary_status_from_payload(summary),
                 summary_reason=_norm_text(summary.get("summary_reason") or summary.get("reason")),
+                summary=persisted_summary,
+                totals={
+                    "debt": _decimal_json_or_none(row.total_debt),
+                    "penalty": _decimal_json_or_none(row.penalty_debt),
+                    "accrued": _decimal_json_or_none(row.total_accrued),
+                    "paid": _decimal_json_or_none(row.total_paid),
+                    "total": _decimal_json_or_none(row.total_debt),
+                },
             )
 
         targets = _owner_abonent_summary_targets(owner)

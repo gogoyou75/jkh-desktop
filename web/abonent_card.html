@@ -5275,6 +5275,25 @@ function bindCalcButtons(){
                         logFullRecalcExit(snapshotReason, "early-return", "snapshot-save-failed", snapshotSave || null, null);
                         return;
                     }
+                    if (!window.Data || typeof Data.saveCanonicalSnapshotTotalsToAbonentSummary !== "function") {
+                        const totalsSyncReason = "CANONICAL_SUMMARY_TOTALS_API_UNAVAILABLE";
+                        rememberExplicitFullRecalcFinal("error", totalsSyncReason, recalcResult);
+                        renderExplicitFullRecalcFinal("canonical-summary-totals-api-unavailable");
+                        renderAbonentSummaryStatus("error", totalsSyncReason);
+                        logFullRecalcExit(totalsSyncReason, "early-return", "canonical-summary-totals-api-unavailable", { ok: false, reason: totalsSyncReason }, null);
+                        return;
+                    }
+                    const canonicalSummarySave = await Data.saveCanonicalSnapshotTotalsToAbonentSummary(currentAbonentId, snapshot, summary || recalcResult && recalcResult.summary || null);
+                    logFullRecalcAfterAwait("saveCanonicalSnapshotTotalsToAbonentSummary", canonicalSummarySave);
+                    if (!canonicalSummarySave || canonicalSummarySave.ok !== true) {
+                        const totalsSyncReason = String(canonicalSummarySave && canonicalSummarySave.reason || "ABONENT_SUMMARY_CANONICAL_TOTALS_SAVE_FAILED");
+                        rememberExplicitFullRecalcFinal("error", totalsSyncReason, recalcResult);
+                        renderExplicitFullRecalcFinal("canonical-summary-totals-save-failed");
+                        renderAbonentSummaryStatus("error", totalsSyncReason);
+                        alert("Canonical snapshot сохранён, но totals для списка не подтверждены: " + totalsSyncReason);
+                        logFullRecalcExit(totalsSyncReason, "early-return", "canonical-summary-totals-save-failed", canonicalSummarySave || null, null);
+                        return;
+                    }
                     __skipCardAutoRecalcFreshSnapshot(fullRecalcState.uid || currentAbonentId);
                 } else {
                     try {

@@ -3978,6 +3978,88 @@
     }
   }
 
+  function _canonicalSnapshotSummaryTotals(snapshot){
+    var totals = snapshot && snapshot.totals && typeof snapshot.totals === "object" && !Array.isArray(snapshot.totals) ? snapshot.totals : {};
+    function finite(name, aliases){
+      var keys = [name].concat(aliases || []);
+      for (var i = 0; i < keys.length; i++) {
+        var value = totals[keys[i]];
+        if (value === null || value === undefined || value === "") continue;
+        var number = Number(String(value).replace(",", "."));
+        if (Number.isFinite(number)) return { ok: true, value: number, source: "totals." + keys[i] };
+        return { ok: false, reason: "CANONICAL_TOTAL_" + String(name || "").toUpperCase() + "_INVALID" };
+      }
+      return { ok: false, reason: "CANONICAL_TOTAL_" + String(name || "").toUpperCase() + "_MISSING" };
+    }
+    var debt = finite("debt", ["total", "total_debt"]);
+    var penalty = finite("penalty", ["total_penalty"]);
+    var accrued = finite("accrued", ["total_accrued"]);
+    var paid = finite("paid", ["total_paid"]);
+    var invalid = [debt, penalty, accrued, paid].find(function(item){ return !item.ok; });
+    if (invalid) return { ok: false, reason: invalid.reason, totals: null };
+    return {
+      ok: true,
+      reason: "OK",
+      totals: {
+        debt: debt.value,
+        penalty: penalty.value,
+        accrued: accrued.value,
+        paid: paid.value,
+        total: debt.value,
+        total_debt: debt.value,
+        total_penalty: penalty.value,
+        total_accrued: accrued.value,
+        total_paid: paid.value
+      }
+    };
+  }
+
+  async function saveCanonicalSnapshotTotalsToAbonentSummary(abonentOrId, snapshot, baseSummary){
+    var mode = String(snapshot && (snapshot.snapshotMode || snapshot.snapshot_mode) || "").trim().toLowerCase();
+    var status = String(snapshot && (snapshot.summary_status || snapshot.snapshot_status || snapshot.status) || "").trim().toLowerCase();
+    if (!snapshot || status !== "fresh" || (mode !== "full" && mode !== "canonical" && mode !== "canonical_full") || snapshot.periodActive === true) {
+      return { ok: false, reason: "CANONICAL_FULL_SNAPSHOT_REQUIRED" };
+    }
+    var canonical = _canonicalSnapshotSummaryTotals(snapshot);
+    if (!canonical.ok) return canonical;
+    var summary = baseSummary && typeof baseSummary === "object" && !Array.isArray(baseSummary) ? deepClone(baseSummary) : {};
+    var snapshotPeriod = snapshot.period && typeof snapshot.period === "object" ? snapshot.period : {};
+    var period = summary.period && typeof summary.period === "object" ? summary.period : snapshotPeriod;
+    summary.summary_status = "fresh";
+    summary.status = "fresh";
+    summary.summary_reason = "OK";
+    summary.reason = "OK";
+    summary.summary_scope = "full";
+    summary.calculation_mode = "FULL_SUMMARY_REBUILD";
+    summary.period = { from: String(period && period.from || summary.start_date || summary.period_start || ""), to: String(period && period.to || summary.end_date || summary.period_end || "") };
+    summary.start_date = summary.period.from;
+    summary.end_date = summary.period.to;
+    summary.period_start = summary.period.from;
+    summary.period_end = summary.period.to;
+    summary.total_debt = canonical.totals.debt;
+    summary.total_penalty = canonical.totals.penalty;
+    summary.penalty_debt = canonical.totals.penalty;
+    summary.total_accrued = canonical.totals.accrued;
+    summary.total_paid = canonical.totals.paid;
+    summary.total = canonical.totals.total;
+    summary.totals = Object.assign({}, summary.totals && typeof summary.totals === "object" ? summary.totals : {}, canonical.totals);
+    summary.input_hash = String(snapshot.input_hash || summary.input_hash || "");
+    summary.ledger_version = String(snapshot.ledgerVersion || snapshot.ledger_version || summary.ledger_version || "");
+    summary.ledgerVersion = summary.ledger_version;
+    try { console.log("[canonical_totals_before_summary_save]", { uid: String(snapshot.uid || ""), totals: canonical.totals, input_hash: summary.input_hash, ledgerVersion: summary.ledger_version, period: summary.period }); } catch(eBeforeLog) {}
+    try { console.log("[abonent_summary_save_payload]", { uid: String(snapshot.uid || ""), summary_status: summary.summary_status, summary_reason: summary.summary_reason, summary_scope: summary.summary_scope, totals: summary.totals }); } catch(ePayloadLog) {}
+    var saved = await saveAbonentSummaryAfterRecalc(abonentOrId, summary);
+    try { console.log("[abonent_summary_save_response]", saved); } catch(eResponseLog) {}
+    if (!saved || saved.ok !== true || !saved.summary || typeof saved.summary !== "object") {
+      return { ok: false, reason: String(saved && (saved.error || saved.reason) || "ABONENT_SUMMARY_CANONICAL_TOTALS_SAVE_FAILED"), save: saved || null };
+    }
+    var persisted = _canonicalSnapshotSummaryTotals({ totals: saved.totals && typeof saved.totals === "object" ? saved.totals : {} });
+    var matches = persisted.ok === true && ["debt", "penalty", "accrued", "paid", "total"].every(function(key){ return Number(persisted.totals[key]) === Number(canonical.totals[key]); });
+    var comparison = { uid: String(snapshot.uid || ""), matches: matches, canonicalTotals: canonical.totals, summaryTotals: persisted.totals, summaryStatus: String(saved.summary.summary_status || saved.summary.status || "") };
+    try { console.log("[canonical_vs_summary_totals]", comparison); } catch(eComparisonLog) {}
+    return { ok: matches, reason: matches ? "OK" : "CANONICAL_SUMMARY_TOTALS_MISMATCH", comparison: comparison, summary: saved.summary, save: saved };
+  }
+
 
   async function validateAbonentSummaryRecalcBatch(uids) {
     var list = Array.isArray(uids) ? uids : [];
@@ -5956,7 +6038,11 @@
     }
 
     var saveResult = null;
-    if (periodActive || opts.saveSummary === false) {
+    var summaryIsFresh = String(summary && (summary.summary_status || summary.status) || "").toLowerCase() === "fresh";
+    if (!summaryIsFresh && !periodActive) {
+      saveResult = { ok: false, skipped: true, reason: "FAILED_FULL_SUMMARY_NOT_SAVED", summary_status: summary.summary_status || summary.status || "error", summary_reason: summary.summary_reason || summary.reason || "CALC_FAILED", summary_scope: "full" };
+      try { console.warn("[summary][failed-full-save-skipped]", { uid: String(summary.account_uid || summary.uid || ""), reason: saveResult.summary_reason }); } catch(eFailedSkipLog) {}
+    } else if (periodActive || opts.saveSummary === false) {
       saveResult = {
         ok: true,
         skipped: true,
@@ -6695,6 +6781,7 @@
     waitForServerFirstDataReady: waitForServerFirstDataReady,
     waitForHydratedDatabase: waitForHydratedDatabase,
     saveAbonentSummaryAfterRecalc: saveAbonentSummaryAfterRecalc,
+    saveCanonicalSnapshotTotalsToAbonentSummary: saveCanonicalSnapshotTotalsToAbonentSummary,
     markAbonentSummaryDirty: markAbonentSummaryDirty,
     writePaymentLedger: writePaymentLedger,
     writePaymentLedgerServerBacked: writePaymentLedgerServerBacked,

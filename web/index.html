@@ -1031,6 +1031,7 @@ function buildIndexRowFromSummaryItem(item){
     try {
         console.log("[reload-chain][index-summary-raw]", { sourceEndpoint: "/api/abonents", uid: String(item && (item.uid || item.account_uid) || ""), item: item, summary_status: status, summary_reason: rawReason, rawTotals: summary && summary.totals || null, rowsByIdExists: !!(summary && summary.rowsById), canonicalSnapshotTotalsPresent: false });
         console.log("[reload-chain][index-totals-normalized]", { uid: String(item && (item.uid || item.account_uid) || ""), debt: renderedValues.debt, penalty: renderedValues.penalty, accrued: renderedValues.accrued, paid: renderedValues.paid, sources: { debt: debtValue.source, penalty: penaltyValue.source, accrued: accruedValue.source, paid: paidValue.source } });
+        console.log("[index_summary_totals_loaded]", { uid: String(item && (item.uid || item.account_uid) || ""), summary_status: status, summary_reason: rawReason, totals: { debt: debtValue.value, penalty: penaltyValue.value, accrued: accruedValue.value, paid: paidValue.value }, rendered: renderedValues });
         try {
             const comparisonUid = String(item && (item.uid || item.account_uid) || "");
             const comparisonRaw = sessionStorage.getItem("jkh_reload_chain_diag:" + comparisonUid);
