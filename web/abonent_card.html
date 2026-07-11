@@ -1529,7 +1529,17 @@ function __safeLoadPaymentTableOnce(reason, options){
         __paymentTableLoading = true;
         try {
             const loadMode = opts.mode || ((reason === "calc-period-bootstrap-url" || reason === "calc-period-bootstrap-session") && window.JKH_CARD_PERIOD_MODE_ACTIVE === true ? "temporary_court_period" : "readonly_no_recalc");
-            window.__loadPaymentTable({ mode: loadMode, reason: reason || 'abonent-card', force: !!opts.force });
+            window.__loadPaymentTable({
+                mode: loadMode,
+                reason: reason || 'abonent-card',
+                force: !!opts.force,
+                onSettled: opts.endTemporaryModeAfterRender === true ? function(){
+                    endTemporaryCardPeriodMode({
+                        abonentId: opts.abonentId || getAbonentIdFromURL(),
+                        source: "card_period_mode_end_after_bootstrap"
+                    });
+                } : null
+            });
             __hideExcludesFatalBox();
         } catch(e) {
             if (__isExcludesFatalError(e)) __showExcludesFatalBox(e);
@@ -1574,6 +1584,38 @@ function __readTemporaryPeriodState(abonentId){
     } catch(e) {
         return null;
     }
+}
+
+function endTemporaryCardPeriodMode(options){
+    const opts = options && typeof options === "object" ? options : {};
+    const abonentId = String(opts.abonentId || getAbonentIdFromURL() || "").trim();
+    const source = String(opts.source || "temporary-period-consumed");
+    const sessionKey = __periodSessionKey(abonentId);
+    const flagBefore = window.JKH_CARD_PERIOD_MODE_ACTIVE === true;
+    const fromEl = document.getElementById("calcFrom");
+    const toEl = document.getElementById("calcTo");
+    let sessionRemoved = false;
+    window.JKH_CARD_PERIOD_MODE_ACTIVE = false;
+    try {
+        if (abonentId) {
+            sessionRemoved = sessionStorage.getItem(sessionKey) !== null;
+            sessionStorage.removeItem(sessionKey);
+        }
+    } catch(eSessionConsume) {}
+    const details = {
+        abonentId: abonentId,
+        source: source,
+        flagBefore: flagBefore,
+        flagAfter: window.JKH_CARD_PERIOD_MODE_ACTIVE === true,
+        sessionKey: sessionKey,
+        sessionRemoved: sessionRemoved,
+        visibleFrom: fromEl ? String(fromEl.value || "") : "",
+        visibleTo: toEl ? String(toEl.value || "") : ""
+    };
+    try { console.log("[card_period_mode_end]", details); } catch(eEndLog) {}
+    try { console.log("[card_period_mode_session_consumed]", details); } catch(eSessionLog) {}
+    try { console.log("[" + source + "]", details); } catch(eSourceLog) {}
+    return details;
 }
 
 function __isCardReturnFromSpravkaUrl(){
@@ -3302,7 +3344,7 @@ function loadCalcPeriodUI(){
                 try { console.log("[card-return][from-spravka]", { from: urlFrom, to: urlTo, requestedId: meta.requestedId, uid: meta.resolvedUid, ownerId: meta.ownerId, writes: false }); } catch(eReturnLog) {}
                 try { console.log("[period][restore-source]", { source: "url", key: "location.search", raw: window.location.search || "", from: urlFrom, to: urlTo, requestedId: meta.requestedId, uid: meta.resolvedUid, ownerId: meta.ownerId }); } catch (eRestoreUrlLog) {}
                 try { console.log("[period-recalc][return-state-restored]", { source: "url", periodFrom: urlFrom, periodTo: urlTo, mode: "temporary_court_period" }); } catch(eReturnStateUrl) {}
-                __safeLoadPaymentTableOnce("calc-period-bootstrap-url", { force: true });
+                __safeLoadPaymentTableOnce("calc-period-bootstrap-url", { force: true, endTemporaryModeAfterRender: true, abonentId: meta.requestedId });
                 try {
                     console.log("[card-period][bootstrap-inputs-from-url]", {
                         requestedId: meta.requestedId,
@@ -3335,7 +3377,7 @@ function loadCalcPeriodUI(){
                 toEl.value = sessionPeriod.period_to || "";
                 window.JKH_CARD_PERIOD_MODE_ACTIVE = true;
                 try { console.log("[period-recalc][return-state-restored]", { source: "session", periodFrom: fromEl.value || "", periodTo: toEl.value || "", mode: "temporary_court_period" }); } catch(eSessionRestoreLog) {}
-                __safeLoadPaymentTableOnce("calc-period-bootstrap-session", { force: true });
+                __safeLoadPaymentTableOnce("calc-period-bootstrap-session", { force: true, endTemporaryModeAfterRender: true, abonentId: meta.requestedId });
                 return;
             }
             fromEl.value = "";
@@ -4957,6 +4999,7 @@ function bindCalcButtons(){
                     renderAbonentSummaryStatus("error", "TEMPORARY_PERIOD_API_UNAVAILABLE");
                     alert("Временный расчёт периода недоступен.");
                     logFullRecalcExit("TEMPORARY_PERIOD_API_UNAVAILABLE", "early-return", "temporary-period-api", { ok: false, reason: "TEMPORARY_PERIOD_API_UNAVAILABLE" }, null);
+                    endTemporaryCardPeriodMode({ abonentId: currentAbonentId, source: "card_period_mode_end_after_temporary_failure" });
                     return;
                 }
                 const fullStatusBeforePeriod = String(fullSummaryUiBeforeRecalc.status || __lastRenderedSummaryStatusLocal || "");
@@ -4973,6 +5016,7 @@ function bindCalcButtons(){
                     renderAbonentSummaryStatus("error", reason);
                     alert("Расчёт периода не выполнен: " + reason);
                     logFullRecalcExit(reason, "early-return", "temporary-period-calculation", periodResult || null, null);
+                    endTemporaryCardPeriodMode({ abonentId: currentAbonentId, source: "card_period_mode_end_after_temporary_failure" });
                     return;
                 }
                 __saveTemporaryPeriodState({ from: from, to: to }, { abonentId: currentAbonentId, source: "temporary-recalc-done", renderedPeriodRows: periodResult.renderedPeriodRows || 0 });
@@ -4987,6 +5031,7 @@ function bindCalcButtons(){
                 });
                 try { console.log("[period-recalc][loading-cleared]", { fullStatusBefore: fullStatusBeforePeriod, fullStatusAfter: fullStatusAfterPeriod, periodStatus: periodStatusMessage }); } catch(eLoadingCleared) {}
                 logFullRecalcExit("TEMPORARY_PERIOD_CALC_DONE", "normal-return", "temporary-period-render", { ok: true, reason: "TEMPORARY_PERIOD_CALC_DONE" }, null);
+                endTemporaryCardPeriodMode({ abonentId: currentAbonentId, source: "card_period_mode_end_after_temporary_success" });
                 return;
             }
 
@@ -5249,6 +5294,9 @@ function bindCalcButtons(){
             }
         } catch (eRecalcHandler) {
             const reason = String(eRecalcHandler && (eRecalcHandler.message || eRecalcHandler.reason) || eRecalcHandler || "RECALC_EXCEPTION");
+            if (recalcForReportPeriod && window.JKH_CARD_PERIOD_MODE_ACTIVE === true) {
+                endTemporaryCardPeriodMode({ abonentId: currentAbonentId, source: "card_period_mode_end_after_temporary_failure" });
+            }
             if (reason === "FULL_RECALC_CANCELLED" || reason === "FULL_RECALC_TIMEOUT") {
                 const finalStatus = reason === "FULL_RECALC_TIMEOUT" ? "timeout" : "cancelled";
                 const finalReason = finalStatus === "timeout" ? "Пересчёт остановлен по таймауту" : "Пересчёт остановлен пользователем";
@@ -5286,6 +5334,9 @@ function bindCalcButtons(){
             alert("Пересчёт не завершён: " + reason);
             logFullRecalcExit(reason, "catch", "exception", { ok: false, reason: reason }, eRecalcHandler);
         } finally {
+            if (recalcForReportPeriod && window.JKH_CARD_PERIOD_MODE_ACTIVE === true) {
+                endTemporaryCardPeriodMode({ abonentId: currentAbonentId, source: "card_period_mode_end_after_temporary_failure" });
+            }
             try { console.log("[full-recalc][finally]", { runId: recalcRunId, abonentId: String(currentAbonentId || ""), timedOut: !!(watchdogFired || fullRecalcState.timedOut) }); } catch(eFinallyLog) {}
             if (!watchdogFired && explicitFullRecalcStarted && __lastRenderedSummaryStatusLocal === "calculating") {
                 renderExplicitFullRecalcFinal("finally-running-safety");

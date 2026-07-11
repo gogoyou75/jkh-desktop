@@ -1287,6 +1287,53 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         self.assertNotIn("CALC_PERIOD_CHANGED", body)
         self.assertNotIn("recalc_batch", body)
 
+    def test_temporary_card_period_mode_is_consumed_after_render(self):
+        card_path = self._find_repo_file("web", "abonent_card.html")
+        payment_path = self._find_repo_file("web", "payment_table.js")
+        self.assertIsNotNone(card_path)
+        self.assertIsNotNone(payment_path)
+        card_source = card_path.read_text(encoding="utf-8")
+        payment_source = payment_path.read_text(encoding="utf-8")
+
+        finalizer = card_source.split("function endTemporaryCardPeriodMode(options)", 1)[1].split("function __isCardReturnFromSpravkaUrl", 1)[0]
+        self.assertIn("window.JKH_CARD_PERIOD_MODE_ACTIVE = false", finalizer)
+        self.assertIn("sessionStorage.removeItem(sessionKey)", finalizer)
+        self.assertIn("__periodSessionKey(abonentId)", finalizer)
+        self.assertIn("card_period_mode_end", finalizer)
+        self.assertIn("card_period_mode_session_consumed", finalizer)
+        self.assertIn("visibleFrom", finalizer)
+        self.assertIn("visibleTo", finalizer)
+        self.assertNotIn("storeRemove(", finalizer)
+        self.assertNotIn("storeSet(", finalizer)
+        self.assertNotIn(".value =", finalizer)
+        self.assertNotIn("fullRecalcForCurrentAbonent", finalizer)
+
+        safe_load = card_source.split("function __safeLoadPaymentTableOnce", 1)[1].split("function __periodSessionKey", 1)[0]
+        self.assertIn("onSettled:", safe_load)
+        self.assertIn('source: "card_period_mode_end_after_bootstrap"', safe_load)
+        load_ui = card_source.split("function loadCalcPeriodUI()", 1)[1].split("function saveCalcPeriod", 1)[0]
+        self.assertEqual(load_ui.count("endTemporaryModeAfterRender: true"), 2)
+
+        click_handler = card_source.split('runBtn.addEventListener("click"', 1)[1].split("function restoreCalcPeriodInputValues", 1)[0]
+        temporary_branch = click_handler.split("if (recalcForReportPeriod && hasValidPeriodInput)", 1)[1].split("let recalcHandled = false", 1)[0]
+        self.assertIn('source: "card_period_mode_end_after_temporary_success"', temporary_branch)
+        self.assertGreaterEqual(temporary_branch.count('source: "card_period_mode_end_after_temporary_failure"'), 2)
+        self.assertLess(temporary_branch.index("renderPeriodCalculationStatus(periodStatusMessage"), temporary_branch.index('source: "card_period_mode_end_after_temporary_success"'))
+        self.assertIn("if (recalcForReportPeriod && window.JKH_CARD_PERIOD_MODE_ACTIVE === true)", click_handler)
+        self.assertGreaterEqual(click_handler.count('source: "card_period_mode_end_after_temporary_failure"'), 4)
+        self.assertIn('recalcMode: "FULL_SUMMARY_REBUILD"', click_handler)
+        self.assertIn("window.fullRecalcForCurrentAbonent", click_handler)
+        self.assertIn("Data.saveCardSnapshotAndWait", click_handler)
+
+        request_load = payment_source.split("function requestLoadPaymentTable(options)", 1)[1].split("async function loadPaymentTable", 1)[0]
+        self.assertIn('typeof opts.onSettled === "function"', request_load)
+        self.assertIn("__paymentTableSettledCallbacks.push(onSettled)", request_load)
+        self.assertIn("await loadPaymentTable", request_load)
+        self.assertIn("__paymentTableSettledCallbacks.splice(0)", request_load)
+        temporary_calc = payment_source.split("window.runTemporaryPeriodCalculation", 1)[1].split("function isPaymentLocked", 1)[0]
+        self.assertIn("window.JKH_CARD_PERIOD_MODE_ACTIVE = true", temporary_calc)
+        self.assertIn('await loadPaymentTable("temporary_court_period")', temporary_calc)
+        self.assertLess(temporary_calc.index("window.JKH_CARD_PERIOD_MODE_ACTIVE = true"), temporary_calc.index('await loadPaymentTable("temporary_court_period")'))
     def test_stage_13_2a_ledger_canonical_diagnostics_and_race_guards(self):
         data_path = self._find_repo_file("web", "data.js")
         payment_path = self._find_repo_file("web", "payment_table.js")
@@ -2712,7 +2759,7 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         self.assertIn("searchParams.delete(\"to\")", card_source)
         self.assertIn("JKH_resetPaymentTablePeriodRuntime", card_source)
         self.assertIn("function bootstrapActiveCalcPeriod", card_source)
-        self.assertIn("__safeLoadPaymentTableOnce(\"calc-period-bootstrap-url\", { force: true })", card_source)
+        self.assertIn("__safeLoadPaymentTableOnce(\"calc-period-bootstrap-url\", { force: true, endTemporaryModeAfterRender: true, abonentId: meta.requestedId })", card_source)
         self.assertIn("[report-period][default-created]", card_source)
         self.assertIn("function buildDefaultReportPeriodForCard", card_source)
         self.assertIn("responsibility.dateFrom", card_source)

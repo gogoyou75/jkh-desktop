@@ -5392,8 +5392,11 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
 
   let __paymentTableLoadRunning = false;
   let __paymentTableLoadScheduled = false;
+  let __paymentTableSettledCallbacks = [];
   function requestLoadPaymentTable(options){
     const opts = (options && typeof options === "object") ? options : { reason: options };
+    const onSettled = typeof opts.onSettled === "function" ? opts.onSettled : null;
+    if (onSettled) __paymentTableSettledCallbacks.push(onSettled);
     if (opts.mode) __paymentTableMode = String(opts.mode);
     if (opts.force) __paymentTableRenderedSignature = "";
     const reason = String(opts.reason || opts.mode || "scheduled");
@@ -5423,9 +5426,20 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
       return;
     }
     __paymentTableLoadScheduled = true;
-    setTimeout(function(){
+    setTimeout(async function(){
       __paymentTableLoadScheduled = false;
-      try { loadPaymentTable(reason || 'scheduled'); } catch(e) { console.error(e); throw e; }
+      let settledError = null;
+      try {
+        await loadPaymentTable(reason || 'scheduled');
+      } catch(e) {
+        settledError = e;
+        console.error(e);
+      } finally {
+        const settledCallbacks = __paymentTableSettledCallbacks.splice(0);
+        for (let i = 0; i < settledCallbacks.length; i += 1) {
+          try { settledCallbacks[i]({ ok: !settledError, reason: reason, error: settledError }); } catch(eSettled) { console.error(eSettled); }
+        }
+      }
     }, 0);
   }
 
