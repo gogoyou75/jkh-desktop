@@ -262,10 +262,50 @@
     });
   }
 
+  function materializeCanonicalSnapshotRowsForEmptyLedger(snapshot, ledgerRows){
+    const source = snapshot && typeof snapshot === "object" ? snapshot : null;
+    const existingLedger = Array.isArray(ledgerRows) ? ledgerRows : [];
+    const out = { ok: false, reason: "CARD_ROWS_NOT_RESTORED", rows: [], rowsById: {}, snapshotRowsCount: 0, ledgerRowsCount: existingLedger.length };
+    if (existingLedger.length) { out.reason = "EXISTING_LEDGER_USED"; return out; }
+    if (!source) { out.reason = "CARD_SNAPSHOT_INVALID"; return out; }
+    const status = String(source.summary_status || source.snapshot_status || source.status || "").trim().toLowerCase();
+    if (status !== "fresh") { out.reason = "CARD_SNAPSHOT_NOT_FRESH"; return out; }
+    const mode = String(source.snapshotMode || source.snapshot_mode || source.validationScope || source.validation_scope || "").trim().toLowerCase();
+    const scope = String(source.summaryScope || source.summary_scope || source.reportScope || source.report_scope || source.scope || "").trim().toLowerCase();
+    const forbidden = [mode, scope].some(function(value){ return value === "period" || value === "report" || value === "temporary" || value === "temporary_court_period" || value === "report_period_calculation"; });
+    if (forbidden || source.periodActive === true || source.period_active === true || source.temporary === true || source.temporaryCalculation === true || source.temporary_calculation === true) {
+      out.reason = "CARD_SNAPSHOT_PERIOD_NOT_ALLOWED";
+      return out;
+    }
+    if (mode !== "full" && mode !== "canonical" && mode !== "canonical_full") { out.reason = "CARD_SNAPSHOT_FULL_MODE_REQUIRED"; return out; }
+    const map = source.rowsById && typeof source.rowsById === "object" && !Array.isArray(source.rowsById) ? source.rowsById : {};
+    const mapKeys = Object.keys(map);
+    out.snapshotRowsCount = mapKeys.length;
+    if (!mapKeys.length) { out.reason = "CARD_SNAPSHOT_ROWS_MISSING"; return out; }
+    const structuralRows = Array.isArray(source.rows) ? source.rows : [];
+    if (!structuralRows.length) { out.reason = "CARD_SNAPSHOT_STRUCTURAL_ROWS_MISSING"; return out; }
+    const seen = {};
+    for (let i = 0; i < structuralRows.length; i += 1) {
+      const id = String(structuralRows[i] && structuralRows[i].id || "").trim();
+      if (!id || seen[id] || !map[id] || typeof map[id] !== "object") {
+        out.reason = !id ? "CARD_SNAPSHOT_ROW_ID_MISSING" : (seen[id] ? "CARD_SNAPSHOT_ROW_ID_DUPLICATE" : "CARD_SNAPSHOT_ROWS_NOT_APPLIED");
+        return out;
+      }
+      seen[id] = true;
+    }
+    if (Object.keys(seen).length !== mapKeys.length) { out.reason = "CARD_SNAPSHOT_ROWS_NOT_APPLIED"; return out; }
+    out.rows = mergeComputedRowsIntoViewRows(structuralRows, map);
+    out.rowsById = Object.assign({}, map);
+    out.ok = out.rows.length === structuralRows.length && out.rows.length === mapKeys.length;
+    out.reason = out.ok ? "OK" : "CARD_ROWS_NOT_RESTORED";
+    return out;
+  }
+
   try {
     if (window.__JKH_PAYMENT_TABLE_TEST_HOOKS === true) {
       window.__paymentTableTestHooks = Object.assign(window.__paymentTableTestHooks || {}, {
-        mergeComputedRowsIntoViewRows: mergeComputedRowsIntoViewRows
+        mergeComputedRowsIntoViewRows: mergeComputedRowsIntoViewRows,
+        materializeCanonicalSnapshotRowsForEmptyLedger: materializeCanonicalSnapshotRowsForEmptyLedger
       });
     }
   } catch(e) {}
@@ -4977,6 +5017,33 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
     await renderRowsChunked(tbody, rows, 50);
     return true;
   }
+
+  window.JKH_restoreCanonicalSnapshotRowsForPassiveDisplay = async function(snapshot){
+    let ledgerRows = [];
+    try { ledgerRows = getPayments(); } catch(eLedger) {
+      try { console.warn("[card-reload][card_rows_materialization_failed]", { uid: String(getAbonentId() || ""), snapshotRowsCount: snapshot && snapshot.rowsById && typeof snapshot.rowsById === "object" ? Object.keys(snapshot.rowsById).length : 0, ledgerRowsCount: 0, renderedRowsCount: 0, source: "canonical_backend_snapshot", reason: String(eLedger && (eLedger.code || eLedger.message) || eLedger || "LEDGER_READ_FAILED") }); } catch(_) {}
+      return { ok: false, reason: "LEDGER_READ_FAILED", rows: [] };
+    }
+    const materialized = materializeCanonicalSnapshotRowsForEmptyLedger(snapshot, ledgerRows);
+    if (!materialized.ok) {
+      const eventName = materialized.reason === "EXISTING_LEDGER_USED" ? "card_rows_materialization_skipped" : "card_rows_materialization_failed";
+      try { console.warn("[card-reload][" + eventName + "]", { uid: String(snapshot && snapshot.uid || getAbonentId() || ""), snapshotRowsCount: materialized.snapshotRowsCount, ledgerRowsCount: materialized.ledgerRowsCount, renderedRowsCount: 0, source: "canonical_backend_snapshot", reason: materialized.reason }); } catch(eSkippedLog) {}
+      return materialized;
+    }
+    setPaymentTableCalculatedRenderState(materialized.rows, materialized.rowsById, {
+      uid: String(snapshot && snapshot.uid || getAbonentId() || ""),
+      ledgerVersion: String(snapshot && (snapshot.ledgerVersion || snapshot.ledger_version) || ""),
+      runtimeSignature: String(snapshot && snapshot.runtimeSignature || ""),
+      periodActive: false
+    });
+    const rendered = await renderCalculatedRowsDirect("canonical-snapshot-empty-ledger");
+    const result = Object.assign({}, materialized, { ok: rendered === true, renderedRowsCount: rendered === true ? materialized.rows.length : 0, reason: rendered === true ? "OK" : "CARD_ROWS_NOT_RESTORED" });
+    try {
+      const eventName = result.ok ? "card_rows_materialized_from_snapshot" : "card_rows_materialization_failed";
+      console.log("[card-reload][" + eventName + "]", { uid: String(snapshot && snapshot.uid || getAbonentId() || ""), snapshotRowsCount: materialized.snapshotRowsCount, ledgerRowsCount: materialized.ledgerRowsCount, renderedRowsCount: result.renderedRowsCount, source: "canonical_backend_snapshot", reason: result.reason });
+    } catch(eMaterializedLog) {}
+    return result;
+  };
 
   async function loadPaymentTableImpl() {
     const totalStartedAt = perfNow();

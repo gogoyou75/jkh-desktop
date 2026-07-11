@@ -46,6 +46,8 @@ vm.runInNewContext(source, context, { filename: "payment_table.js" });
 assert(context.window.__paymentTableTestHooks, "payment table test hooks were not installed");
 const { mergeComputedRowsIntoViewRows } = context.window.__paymentTableTestHooks;
 assert.strictEqual(typeof mergeComputedRowsIntoViewRows, "function");
+const { materializeCanonicalSnapshotRowsForEmptyLedger } = context.window.__paymentTableTestHooks;
+assert.strictEqual(typeof materializeCanonicalSnapshotRowsForEmptyLedger, "function");
 const { setPaymentTableCalculatedRenderState, applyFreshCalculatedRowsForRender } = context.window.__paymentTableTestHooks;
 assert.strictEqual(typeof setPaymentTableCalculatedRenderState, "function");
 assert.strictEqual(typeof applyFreshCalculatedRowsForRender, "function");
@@ -125,5 +127,60 @@ assert.strictEqual(relaxed.matchedCount, 1);
 assert.strictEqual(mismatchedView[0].debt, 222);
 assert.strictEqual(mismatchedView[0].penalty, 33);
 assert.strictEqual(mismatchedView[0].total, 255);
+
+const snapshotRows = Array.from({ length: 230 }, (_, index) => ({
+  id: `snapshot-row-${index + 1}`,
+  year: 2026 - Math.floor(index / 12),
+  month: 12 - (index % 12),
+  accrued: 100 + index,
+  paid: index,
+  paid_date: `2026-01-${String((index % 28) + 1).padStart(2, "0")}`,
+  source: "snapshot-source",
+  note: `row-${index + 1}`
+}));
+const snapshotRowsById = Object.fromEntries(snapshotRows.map((row, index) => [row.id, {
+  pay_main: 1000 + index,
+  pay_penalty: 100 + index,
+  total: 1100 + index
+}]));
+const canonicalSnapshot = {
+  uid: "test-uid",
+  summary_status: "fresh",
+  snapshotMode: "full",
+  periodActive: false,
+  rows: snapshotRows,
+  rowsById: snapshotRowsById
+};
+const materialized = materializeCanonicalSnapshotRowsForEmptyLedger(canonicalSnapshot, []);
+assert.strictEqual(materialized.ok, true);
+assert.strictEqual(materialized.rows.length, 230);
+assert.strictEqual(Object.keys(materialized.rowsById).length, 230);
+assert.strictEqual(materialized.rows[0].id, "snapshot-row-1");
+assert.strictEqual(materialized.rows[0].debt, 1000);
+assert.strictEqual(materialized.rows[0].penalty, 100);
+assert.strictEqual(materialized.rows[0].total, 1100);
+assert.strictEqual(materialized.rows[0].accrued, 100);
+assert.strictEqual(materialized.rows[0].paid, 0);
+assert.strictEqual(materialized.rows[0].source, "snapshot-source");
+assert.strictEqual(materialized.rows[0].note, "row-1");
+
+const existingLedger = [{ id: "ledger-row", accrued: 50 }];
+const skippedExisting = materializeCanonicalSnapshotRowsForEmptyLedger(canonicalSnapshot, existingLedger);
+assert.strictEqual(skippedExisting.ok, false);
+assert.strictEqual(skippedExisting.reason, "EXISTING_LEDGER_USED");
+assert.strictEqual(existingLedger.length, 1, "existing ledger must not be duplicated or mutated");
+
+const temporarySnapshot = Object.assign({}, canonicalSnapshot, { snapshotMode: "period", periodActive: true });
+const rejectedTemporary = materializeCanonicalSnapshotRowsForEmptyLedger(temporarySnapshot, []);
+assert.strictEqual(rejectedTemporary.ok, false);
+assert.strictEqual(rejectedTemporary.reason, "CARD_SNAPSHOT_PERIOD_NOT_ALLOWED");
+
+const rejectedEmpty = materializeCanonicalSnapshotRowsForEmptyLedger(Object.assign({}, canonicalSnapshot, { rowsById: {} }), []);
+assert.strictEqual(rejectedEmpty.ok, false);
+assert.strictEqual(rejectedEmpty.reason, "CARD_SNAPSHOT_ROWS_MISSING");
+
+const rejectedMissingStructure = materializeCanonicalSnapshotRowsForEmptyLedger(Object.assign({}, canonicalSnapshot, { rows: [] }), []);
+assert.strictEqual(rejectedMissingStructure.ok, false);
+assert.strictEqual(rejectedMissingStructure.reason, "CARD_SNAPSHOT_STRUCTURAL_ROWS_MISSING");
 
 console.log("payment_table view merge test passed");

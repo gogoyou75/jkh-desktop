@@ -1370,6 +1370,31 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         self.assertIn('sourceEndpoint: "/api/abonents"', index_build)
         self.assertIn("canonicalSnapshotTotalsIgnoredByEndpoint: true", index_build)
         self.assertNotIn("/api/card_snapshot/", index_build)
+
+    def test_fresh_canonical_snapshot_materializes_passive_rows_only_for_empty_ledger(self):
+        payment_source = self._find_repo_file("web", "payment_table.js").read_text(encoding="utf-8")
+        card_source = self._find_repo_file("web", "abonent_card.html").read_text(encoding="utf-8")
+        helper = payment_source.split("function materializeCanonicalSnapshotRowsForEmptyLedger", 1)[1].split("try {\n    if (window.__JKH_PAYMENT_TABLE_TEST_HOOKS", 1)[0]
+        restore = payment_source.split("window.JKH_restoreCanonicalSnapshotRowsForPassiveDisplay", 1)[1].split("async function loadPaymentTableImpl", 1)[0]
+        fresh_render = card_source.split("function __renderFreshCardSnapshot", 1)[1].split("async function __tryUseBackendFreshSnapshot", 1)[0]
+
+        self.assertIn('if (existingLedger.length) { out.reason = "EXISTING_LEDGER_USED"', helper)
+        self.assertIn('status !== "fresh"', helper)
+        self.assertIn('mode !== "full" && mode !== "canonical" && mode !== "canonical_full"', helper)
+        self.assertIn("source.periodActive === true", helper)
+        self.assertIn("CARD_SNAPSHOT_PERIOD_NOT_ALLOWED", helper)
+        self.assertIn("CARD_SNAPSHOT_ROWS_MISSING", helper)
+        self.assertIn("CARD_SNAPSHOT_STRUCTURAL_ROWS_MISSING", helper)
+        self.assertIn("mergeComputedRowsIntoViewRows(structuralRows, map)", helper)
+        self.assertIn("getPayments()", restore)
+        self.assertIn('renderCalculatedRowsDirect("canonical-snapshot-empty-ledger")', restore)
+        self.assertIn("card_rows_materialized_from_snapshot", restore)
+        self.assertIn("card_rows_materialization_skipped", restore)
+        self.assertIn("card_rows_materialization_failed", restore)
+        for forbidden in ("fullRecalcForCurrentAbonent", "recalculateAbonentCard", "writePaymentLedger", "markAbonentSummaryDirty", "saveCardSnapshotAndWait"):
+            self.assertNotIn(forbidden, helper)
+            self.assertNotIn(forbidden, restore)
+        self.assertIn("JKH_restoreCanonicalSnapshotRowsForPassiveDisplay(snapshot)", fresh_render)
     def test_stage_13_2a_ledger_canonical_diagnostics_and_race_guards(self):
         data_path = self._find_repo_file("web", "data.js")
         payment_path = self._find_repo_file("web", "payment_table.js")

@@ -4154,6 +4154,11 @@ function __renderFreshCardSnapshot(uid, snapshot, sourceReason){
     renderAbonentSummaryStatus("fresh", "OK");
     __skipCardAutoRecalcFreshSnapshot(uid);
     __renderAbonentTotalsFromFreshSummary(summary);
+    if (typeof window.JKH_restoreCanonicalSnapshotRowsForPassiveDisplay === "function") {
+        Promise.resolve(window.JKH_restoreCanonicalSnapshotRowsForPassiveDisplay(snapshot)).catch(function(eRestoreRows){
+            try { console.warn("[card-reload][card_rows_materialization_failed]", { uid: String(uid || ""), snapshotRowsCount: Object.keys(reloadRowsById).length, ledgerRowsCount: 0, renderedRowsCount: 0, source: String(sourceReason || "canonical_backend_snapshot"), reason: String(eRestoreRows && eRestoreRows.message || eRestoreRows || "CARD_ROWS_NOT_RESTORED") }); } catch(_) {}
+        });
+    }
 }
 
 async function __tryUseBackendFreshSnapshot(uid, reason){
