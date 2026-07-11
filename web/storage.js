@@ -195,7 +195,12 @@
     return Storage.prototype.getItem.call(localStorage, fullKey);
   }
   function _lsSetDirect(fullKey, value) {
-    return Storage.prototype.setItem.call(localStorage, fullKey, value);
+    try {
+      return Storage.prototype.setItem.call(localStorage, fullKey, value);
+    } catch (e) {
+      try { if (typeof window.__offlineOriginMarkLocalStorageError === "function") window.__offlineOriginMarkLocalStorageError(e, "storage._lsSetDirect"); } catch (_) {}
+      throw e;
+    }
   }
   function _lsRemoveDirect(fullKey) {
     return Storage.prototype.removeItem.call(localStorage, fullKey);
@@ -738,6 +743,22 @@
     if (patch.server && typeof patch.server === "object") st.server = Object.assign({}, st.server, patch.server);
     if (patch.data && typeof patch.data === "object") st.data = Object.assign({}, st.data, patch.data);
     try {
+      if (typeof window.__offlineOriginRecordTransition === "function") {
+        window.__offlineOriginRecordTransition({
+          module: "storage",
+          setter: "storage._setUIState",
+          stack: stack,
+          reason: String(patch.reason || patch.data && patch.data.message || patch.server && patch.server.message || ""),
+          previousDataStatus: String(before.data && before.data.status || ""),
+          newDataStatus: String(st.data && st.data.status || ""),
+          previousDataSource: String(before.data && before.data.source || ""),
+          newDataSource: String(st.data && st.data.source || ""),
+          previousServerStatus: String(before.server && before.server.status || ""),
+          newServerStatus: String(st.server && st.server.status || "")
+        });
+      }
+    } catch(eOfflineOrigin) {}
+    try {
       if (typeof window.__recordReadinessWrite === "function") {
         var readinessStack = String(stack || "").split("\n").slice(1, 6).map(function(line){ return String(line || "").trim(); });
         var readinessCallerFrame = readinessStack.filter(function(line){ return line.indexOf("_setUIState") < 0; })[0] || "";
@@ -1020,7 +1041,9 @@
   }
 
   function _lsSet(key, val) {
-    try { Storage.prototype.setItem.call(localStorage, key, String(val)); } catch (e) {}
+    try { Storage.prototype.setItem.call(localStorage, key, String(val)); } catch (e) {
+      try { if (typeof window.__offlineOriginMarkLocalStorageError === "function") window.__offlineOriginMarkLocalStorageError(e, "storage._lsSet"); } catch (_) {}
+    }
   }
 
   function _getMode() {

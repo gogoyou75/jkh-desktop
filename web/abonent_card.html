@@ -13,6 +13,7 @@ Doc: docs/LOGIC_SPEC_v1.5.3.md
 <html lang="ru">
 <head>
     <meta charset="UTF-8">
+    <script src="offline_origin_diag.js"></script>
     <script src="auth.js"></script>
     <script src="storage.js"></script>
     <script src="critical_guard.js" defer></script>
@@ -4128,6 +4129,16 @@ function __isFreshCardSnapshotUsable(uid, snapshot){
 function __renderFreshCardSnapshot(uid, snapshot, sourceReason){
     const reloadRowsById = snapshot && snapshot.rowsById && typeof snapshot.rowsById === "object" && !Array.isArray(snapshot.rowsById) ? snapshot.rowsById : {};
     try {
+        if (typeof window.__offlineOriginMarkPassiveRestore === "function") {
+            window.__offlineOriginMarkPassiveRestore({
+                snapshotFresh: true,
+                backendSucceeded: String(sourceReason || "").indexOf("backend") >= 0,
+                restoredRows: 0,
+                source: String(sourceReason || "")
+            });
+        }
+    } catch(eOfflineOriginSnapshot) {}
+    try {
         console.log("[reload-chain][card-snapshot-accepted]", {
             uid: String(uid || ""),
             source: String(sourceReason || "local_card_snapshot"),
@@ -4155,7 +4166,19 @@ function __renderFreshCardSnapshot(uid, snapshot, sourceReason){
     __skipCardAutoRecalcFreshSnapshot(uid);
     __renderAbonentTotalsFromFreshSummary(summary);
     if (typeof window.JKH_restoreCanonicalSnapshotRowsForPassiveDisplay === "function") {
-        Promise.resolve(window.JKH_restoreCanonicalSnapshotRowsForPassiveDisplay(snapshot)).catch(function(eRestoreRows){
+        Promise.resolve(window.JKH_restoreCanonicalSnapshotRowsForPassiveDisplay(snapshot)).then(function(result){
+            try {
+                if (typeof window.__offlineOriginMarkPassiveRestore === "function") {
+                    window.__offlineOriginMarkPassiveRestore({
+                        snapshotFresh: true,
+                        backendSucceeded: String(sourceReason || "").indexOf("backend") >= 0,
+                        restoredRows: Number(result && result.renderedRowsCount || 0),
+                        rowsRestoreOk: !!(result && result.ok === true),
+                        source: String(sourceReason || "")
+                    });
+                }
+            } catch(eOfflineOriginRows) {}
+        }).catch(function(eRestoreRows){
             try { console.warn("[card-reload][card_rows_materialization_failed]", { uid: String(uid || ""), snapshotRowsCount: Object.keys(reloadRowsById).length, ledgerRowsCount: 0, renderedRowsCount: 0, source: String(sourceReason || "canonical_backend_snapshot"), reason: String(eRestoreRows && eRestoreRows.message || eRestoreRows || "CARD_ROWS_NOT_RESTORED") }); } catch(_) {}
         });
     }
@@ -5060,6 +5083,7 @@ function bindCalcButtons(){
                 heartbeatFullRecalc("fullRecalcForCurrentAbonent");
                 try { console.log("[full-recalc][step]", { runId: recalcRunId, step: "fullRecalcForCurrentAbonent" }); } catch(eStepLog) {}
                 hydrateCardRuntimeDbFromStore();
+                try { if (typeof window.__offlineOriginReportBeforeManualRecalc === "function") window.__offlineOriginReportBeforeManualRecalc(); } catch(eOfflineOriginReport) {}
                 const recalcResult = await window.fullRecalcForCurrentAbonent({ applyAutoAccrual: true, period: { from: from, to: to }, recalcMode: "FULL_SUMMARY_REBUILD", summaryScope: "full", recalcRunId: recalcRunId });
                 logFullRecalcAfterAwait("fullRecalcForCurrentAbonent", recalcResult);
                 fullRecalcState.resultReceived = true;
