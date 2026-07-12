@@ -233,6 +233,7 @@ assert.strictEqual(mismatchedView[0].total, 255);
 
 const lateRenderSnapshotRows = [{
   id: "snapshot-row-late-render",
+  year: 2026,
   month: 2,
   type: "accrual",
   accrued: 100,
