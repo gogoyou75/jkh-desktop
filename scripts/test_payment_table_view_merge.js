@@ -231,6 +231,34 @@ assert.strictEqual(mismatchedView[0].debt, 222);
 assert.strictEqual(mismatchedView[0].penalty, 33);
 assert.strictEqual(mismatchedView[0].total, 255);
 
+const lateRenderSnapshotRows = [{
+  id: "snapshot-row-late-render",
+  month: 2,
+  type: "accrual",
+  accrued: 100,
+  paid: 0
+}];
+const lateRenderSnapshotRowsById = {
+  "snapshot-row-late-render": { pay_main: 300, pay_penalty: 40, total: 340 }
+};
+assert.strictEqual(setPaymentTableCalculatedRenderState(lateRenderSnapshotRows, lateRenderSnapshotRowsById, {
+  uid: "test-uid",
+  ledgerVersion: "empty-ledger-version",
+  runtimeSignature: "empty-ledger-signature",
+  periodActive: false
+}), true);
+const emptyLateLoadView = [];
+const preservedLateRender = applyFreshCalculatedRowsForRender(emptyLateLoadView, {
+  ledgerVersion: "empty-ledger-version",
+  runtimeSignature: "empty-ledger-signature",
+  periodActive: false
+});
+assert.strictEqual(preservedLateRender.applied, true, "a late empty-ledger load must retain accepted snapshot rows");
+assert.strictEqual(preservedLateRender.mismatchReason, "fresh_calculated_rows_empty_ledger");
+assert.strictEqual(emptyLateLoadView.length, 1);
+assert.strictEqual(emptyLateLoadView[0].id, "snapshot-row-late-render");
+assert.strictEqual(emptyLateLoadView[0].total, 340);
+
 const snapshotRows = Array.from({ length: 230 }, (_, index) => ({
   id: `snapshot-row-${index + 1}`,
   year: 2026 - Math.floor(index / 12),

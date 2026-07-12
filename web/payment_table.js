@@ -641,6 +641,24 @@
         ctx.runtimeSignature
       );
       if (strictRowsById) {
+        // A canonical snapshot can be rendered before the ordinary table load
+        // completes.  If that later load sees an empty hydrated ledger, retain
+        // the already accepted snapshot rows instead of treating an empty view
+        // as a successful in-place rowsById application.
+        if (!arr.length) {
+          const freshStats = computedRowsStats(freshRows, freshRowsById);
+          if (freshRows.length && freshStats.rowsWithTotals > 0) {
+            const renderRows = mergeComputedRowsIntoViewRows(freshRows, freshRowsById);
+            arr.splice.apply(arr, [0, 0].concat(renderRows));
+            out.applied = true;
+            out.dataById = strictRowsById;
+            out.sourceRows = renderRows;
+            out.matchedCount = renderRows.length;
+            out.mismatchReason = "fresh_calculated_rows_empty_ledger";
+            out.fallbackAllowed = false;
+            return out;
+          }
+        }
         applyRuntimeRowsById(arr, strictRowsById);
         out.applied = true;
         out.dataById = strictRowsById;
