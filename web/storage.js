@@ -1596,6 +1596,32 @@
     return { removed: removed, written: written, invalidAbonentsDb: invalidAbonentsDb, serverDbEmpty: serverDbEmpty };
   }
 
+  var __serverDumpRuntime = null;
+
+  function _replaceServerDumpRuntime(ownerId, envType, dumpObj, cacheWarning) {
+    __serverDumpRuntime = null;
+    if (!cacheWarning || !dumpObj || typeof dumpObj !== "object" || Array.isArray(dumpObj)) return;
+    __serverDumpRuntime = {
+      ownerId: String(ownerId || ""),
+      envType: String(envType || ""),
+      data: dumpObj
+    };
+  }
+
+  function _readServerDumpRuntimeValue(key, ownerId) {
+    var entry = __serverDumpRuntime;
+    if (!entry) return { active: false, present: false, raw: null };
+    if (String(entry.ownerId || "") !== String(ownerId || _ownerId() || "")) return { active: false, present: false, raw: null };
+    if (String(entry.envType || "") !== String(getEnvType() || "")) return { active: false, present: false, raw: null };
+    var baseKey = String(key || "");
+    if (!Object.prototype.hasOwnProperty.call(entry.data, baseKey)) return { active: true, present: false, raw: null };
+    return { active: true, present: true, raw: _serializeServerDumpValue(entry.data[baseKey]) };
+  }
+
+  function _clearServerDumpRuntime() {
+    __serverDumpRuntime = null;
+  }
+
   function _isQuotaExceededError(error) {
     var name = String(error && error.name || "");
     var message = String(error && error.message || error || "");
@@ -2079,6 +2105,7 @@
           dumpItemCount: dumpItemCount,
           failedStorageKey: replaced.failedStorageKey
         }) : null;
+        _replaceServerDumpRuntime(ownerId, responseEnv, data, cacheWarning);
 
         var applied = replaced.written;
         var runtimeBefore = window.AbonentsDB || null;
@@ -2223,14 +2250,18 @@
     __testHooks: {
       isQuotaExceededError: _isQuotaExceededError,
       serverLoadCacheWarning: _serverLoadCacheWarning,
-      replaceOwnerProjectScopeFromDump: _replaceOwnerProjectScopeFromDump
+      replaceOwnerProjectScopeFromDump: _replaceOwnerProjectScopeFromDump,
+      readServerDumpRuntimeValue: _readServerDumpRuntimeValue
     },
+    readServerDumpRuntimeValue: _readServerDumpRuntimeValue,
     resetLocalProjectScope: function (ownerId) {
       var targetOwner = String(ownerId || _ownerId());
+      if (__serverDumpRuntime && String(__serverDumpRuntime.ownerId || "") === targetOwner) _clearServerDumpRuntime();
       var removed = _clearOwnerProjectScope(targetOwner);
       return { ok: true, ownerId: targetOwner, removed: removed };
     },
     resetAllLocalProjectScopes: function () {
+      _clearServerDumpRuntime();
       return { ok: true, removed: _clearAllProjectScopes() };
     }
   };

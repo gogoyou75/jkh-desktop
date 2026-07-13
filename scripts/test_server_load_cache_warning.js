@@ -5,6 +5,7 @@ const vm = require("vm");
 
 const repoRoot = path.resolve(__dirname, "..");
 const storageSource = fs.readFileSync(path.join(repoRoot, "web", "storage.js"), "utf8");
+const dataSource = fs.readFileSync(path.join(repoRoot, "web", "data.js"), "utf8");
 const authSource = fs.readFileSync(path.join(repoRoot, "web", "auth.js"), "utf8");
 const paymentSource = fs.readFileSync(path.join(repoRoot, "web", "payment_table.js"), "utf8");
 
@@ -17,7 +18,10 @@ class MemoryStorage {
   key(index) { return Array.from(this.values.keys())[index] || null; }
   getItem(key) { return this.values.has(String(key)) ? this.values.get(String(key)) : null; }
   setItem(key, value) {
-    if (this.failureFactory && String(key).includes("abonents_db_v1")) throw this.failureFactory(String(key));
+    if (this.failureFactory) {
+      const error = this.failureFactory(String(key));
+      if (error) throw error;
+    }
     this.values.set(String(key), String(value));
   }
   removeItem(key) { this.values.delete(String(key)); }
@@ -51,7 +55,11 @@ function createStorageContext({ failureFactory, fetchImpl } = {}) {
   };
   const windowStub = {
     location: { protocol: "http:", pathname: "/abonent_card.html", search: "?abonent=1" },
-    Auth: { getCurrentUser: () => ({ id: "owner-1", role: "user" }), isGuest: () => false },
+    Auth: {
+      getCurrentUser: () => ({ id: "owner-1", role: "user" }),
+      getActiveDbOwnerId: () => "owner-1",
+      isGuest: () => false
+    },
     addEventListener: () => {},
     dispatchEvent: () => {},
     JKHBoot: { markReady: () => {} },
@@ -102,6 +110,16 @@ function genericCacheError(key) {
   const error = new Error("Cache device rejected " + key);
   error.name = "InvalidStateError";
   return error;
+}
+
+function quotaOnKey(fragment) {
+  return (key) => String(key).includes(fragment) ? quotaError(key) : null;
+}
+
+function loadData(context) {
+  vm.runInNewContext(dataSource, context, { filename: "data.js" });
+  context.window.AbonentsDB = JSON.parse(JSON.stringify(populatedDb));
+  return context.window.Data;
 }
 
 function assertReadableSuccess(outcome, warningExpected) {
@@ -169,13 +187,13 @@ function paymentReadableFor(uiState) {
   assert.strictEqual(empty.ui.data.source, "server");
   assert.strictEqual(empty.result.cacheWarning, null);
 
-  const quota = await loadWith({ failureFactory: quotaError });
+  const quota = await loadWith({ failureFactory: () => quotaError("abonents_db_v1") });
   assertReadableSuccess(quota, true);
   assert.strictEqual(quota.result.cacheWarning.quotaExceeded, true);
   assert.strictEqual(quota.result.warning, "LOCAL_CACHE_WRITE_FAILED");
   assert.ok(quota.result.cacheWarning.failedStorageKey.includes("abonents_db_v1"));
 
-  const generic = await loadWith({ failureFactory: genericCacheError });
+  const generic = await loadWith({ failureFactory: () => genericCacheError("abonents_db_v1") });
   assertReadableSuccess(generic, true);
   assert.strictEqual(generic.result.cacheWarning.quotaExceeded, false);
   assert.strictEqual(generic.result.cacheWarning.errorName, "InvalidStateError");
@@ -205,6 +223,40 @@ function paymentReadableFor(uiState) {
 
   const manualReadable = paymentReadableFor(quota.ui);
   assert.strictEqual(manualReadable.ok, true, "quota warning must not cause DATA_READY_TIMEOUT_READABLE");
+
+  const paymentRows = Array.from({ length: 230 }, (_, index) => ({ id: `row-${index + 1}`, accrued: 100, paid: 0 }));
+  const paymentRaw = JSON.stringify(paymentRows);
+  const dumpWithLedger = {
+    abonents_db_v1: JSON.stringify(populatedDb),
+    card_snapshot_uid_test: JSON.stringify({ uid: "uid_test" }),
+    payments_uid_test: paymentRaw
+  };
+  const quotaBeforePayments = await loadWith({
+    failureFactory: quotaOnKey("card_snapshot_uid_test"),
+    fetchImpl: async () => response({ ok: true, owner: "owner-1", env_type: "LAB", data: dumpWithLedger })
+  });
+  assertReadableSuccess(quotaBeforePayments, true);
+  assert.strictEqual(quotaBeforePayments.context.window.JKHDataLoader.readServerDumpRuntimeValue("payments_uid_test", "owner-1").present, true);
+  assert.strictEqual(loadData(quotaBeforePayments.context).readPaymentLedger("1").length, 230, "quota before payments key must read the server dump ledger");
+
+  const quotaAfterPayments = await loadWith({
+    failureFactory: quotaOnKey("tariffs_owner-1"),
+    fetchImpl: async () => response({ ok: true, owner: "owner-1", env_type: "LAB", data: Object.assign({}, dumpWithLedger, { "tariffs_owner-1": "[]" }) })
+  });
+  assertReadableSuccess(quotaAfterPayments, true);
+  assert.strictEqual(loadData(quotaAfterPayments.context).readPaymentLedger("1").length, 230, "quota after payments key must preserve the ledger");
+
+  const emptyServer = createStorageContext({ fetchImpl: async () => response({ ok: true, owner: "owner-1", env_type: "LAB", data: { abonents_db_v1: JSON.stringify(populatedDb) } }) });
+  emptyServer.window.JKHStore.setRaw("payments_uid_test", paymentRaw);
+  await emptyServer.window.JKHDataLoader.loadFromServer({ reason: "empty-server-ledger", force: true });
+  assert.strictEqual(loadData(emptyServer).readPaymentLedger("1").length, 0, "fresh dump absence must not return stale local ledger rows");
+
+  const ownerIsolation = quotaBeforePayments.context.window.JKHDataLoader.readServerDumpRuntimeValue("payments_uid_test", "owner-2");
+  assert.strictEqual(ownerIsolation.active, false, "owner B must not read owner A runtime dump");
+  quotaBeforePayments.context.window.JKHDataLoader.resetLocalProjectScope("owner-1");
+  assert.strictEqual(quotaBeforePayments.context.window.JKHDataLoader.readServerDumpRuntimeValue("payments_uid_test", "owner-1").active, false, "owner reset must clear its runtime dump");
+  const projectRawBody = dataSource.split("function _getProjectRaw")[1].split("function _setProjectRawRuntimeOverride")[0];
+  assert.ok(projectRawBody.indexOf("__projectRawRuntimeOverrides") < projectRawBody.indexOf("readServerDumpRuntimeValue"), "current runtime override must precede server dump read-through");
 
   console.log("server load cache warning tests passed");
 })().catch((error) => {

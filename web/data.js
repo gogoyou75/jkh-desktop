@@ -177,6 +177,12 @@
       return __projectRawRuntimeOverrides[overrideKey];
     }
     try {
+      if (window.JKHDataLoader && typeof window.JKHDataLoader.readServerDumpRuntimeValue === "function") {
+        var serverRuntime = window.JKHDataLoader.readServerDumpRuntimeValue(key, _ownerId());
+        if (serverRuntime && serverRuntime.active === true) return serverRuntime.present === true ? serverRuntime.raw : null;
+      }
+    } catch (eRuntime) { }
+    try {
       if (window.JKHStore && typeof JKHStore.getRaw === "function") return JKHStore.getRaw(key);
     } catch (e) { }
     return null;
