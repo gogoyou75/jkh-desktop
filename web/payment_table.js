@@ -500,8 +500,9 @@
   function setPaymentTableCalculatedRenderState(rows, rowsById, meta){
     const map = normalizeComputedRowsByIdForSnapshot(rows, rowsById);
     if (!Object.keys(map).length) return false;
+    const resolvedCanonicalUid = resolveCanonicalAccountUidForCalculatedRender();
     __paymentTableCalculatedRenderState = {
-      uid: String(meta && meta.uid || getAbonentId() || ""),
+      uid: String(meta && meta.uid || resolvedCanonicalUid.uid || ""),
       rows: clonePaymentRowsForSnapshot(rows, map),
       rowsById: map,
       ledgerVersion: String(meta && meta.ledgerVersion || ""),
@@ -551,6 +552,17 @@
     if (!matchedRows.length) return null;
     const stats = computedRowsStats(matchedRows, map);
     return stats.rowsWithTotals > 0 ? map : null;
+  }
+
+  function resolveCanonicalAccountUidForCalculatedRender(){
+    const abonentId = String(getAbonentId() || "").trim();
+    if (!abonentId) return { ok: false, uid: "", reason: "canonical_uid_unavailable" };
+    if (typeof window.getAbonentTechId !== "function") {
+      return { ok: false, uid: "", reason: "canonical_uid_resolver_unavailable" };
+    }
+    const uid = String(window.getAbonentTechId(abonentId) || "").trim();
+    if (!uid) return { ok: false, uid: "", reason: "canonical_uid_unavailable" };
+    return { ok: true, uid: uid, reason: "" };
   }
 
   function paymentRowStableKeys(row){
@@ -627,12 +639,46 @@
         out.fallbackAllowed = true;
         return out;
       }
-      if (state.uid && String(state.uid || "") !== String(getAbonentId() || "")) {
+      const canonicalUid = resolveCanonicalAccountUidForCalculatedRender();
+      if (!canonicalUid.ok) {
+        out.mismatchReason = canonicalUid.reason;
+        out.fallbackAllowed = true;
+        return out;
+      }
+      if (!state.uid || String(state.uid || "") !== canonicalUid.uid) {
         out.mismatchReason = "uid_mismatch";
         out.fallbackAllowed = true;
         return out;
       }
       if (!freshRowsCount && !freshRowsByIdCount) return out;
+
+      if (String(state.ledgerVersion || "") !== String(ctx.ledgerVersion || "")) {
+        out.mismatchReason = "ledger_version_mismatch";
+        out.fallbackAllowed = true;
+        return out;
+      }
+      if (!!state.periodActive !== !!ctx.periodActive) {
+        out.mismatchReason = "period_active_mismatch";
+        out.fallbackAllowed = true;
+        return out;
+      }
+      const statePeriod = state.period && typeof state.period === "object" ? state.period : null;
+      const selectedPeriod = ctx.selectedPeriod && typeof ctx.selectedPeriod === "object" ? ctx.selectedPeriod : null;
+      if (state.periodActive && (!statePeriod || !selectedPeriod || String(statePeriod.from || "") !== String(selectedPeriod.from || "") || String(statePeriod.to || "") !== String(selectedPeriod.to || ""))) {
+        out.mismatchReason = "period_mismatch";
+        out.fallbackAllowed = true;
+        return out;
+      }
+      if (ctx.runtimeSignature && state.runtimeSignature && String(state.runtimeSignature) !== String(ctx.runtimeSignature)) {
+        out.mismatchReason = "runtime_signature_mismatch";
+        out.fallbackAllowed = true;
+        return out;
+      }
+      if (!freshRowsCount || !freshRowsByIdCount || computedRowsStats(freshRows, freshRowsById).rowsWithTotals <= 0) {
+        out.mismatchReason = "calculated_rows_not_renderable";
+        out.fallbackAllowed = true;
+        return out;
+      }
 
       const strictRowsById = getMatchingCalculatedRenderRows(
         ctx.ledgerVersion,
@@ -725,7 +771,13 @@
     if (window.__JKH_PAYMENT_TABLE_TEST_HOOKS === true) {
       window.__paymentTableTestHooks = Object.assign(window.__paymentTableTestHooks || {}, {
         setPaymentTableCalculatedRenderState: setPaymentTableCalculatedRenderState,
-        applyFreshCalculatedRowsForRender: applyFreshCalculatedRowsForRender
+        applyFreshCalculatedRowsForRender: applyFreshCalculatedRowsForRender,
+        expireCalculatedRenderState: function(){
+          if (__paymentTableCalculatedRenderState) __paymentTableCalculatedRenderState.createdAt = 0;
+        },
+        setCalculatedRenderStateForTest: function(state){
+          __paymentTableCalculatedRenderState = state && typeof state === "object" ? state : null;
+        }
       });
     }
   } catch(e) {}

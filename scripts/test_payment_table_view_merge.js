@@ -21,6 +21,10 @@ const windowStub = {
   __JKH_PAYMENT_TABLE_TEST_HOOKS: true,
   JKH_UI_STATE: { data: { status: "loading" } },
   location: { search: "?abonent=test-uid" },
+  getAbonentTechId: (abonentId) => ({
+    "test-uid": "uid_test_current",
+    "1009": "uid_test_1009"
+  })[String(abonentId)] || null,
   addEventListener: () => {},
   removeEventListener: () => {},
   setTimeout,
@@ -201,7 +205,7 @@ const freshRowsById = {
   }
 };
 assert.strictEqual(setPaymentTableCalculatedRenderState(freshRows, freshRowsById, {
-  uid: "test-uid",
+  uid: "uid_test_current",
   ledgerVersion: "old-ledger-version",
   runtimeSignature: "old-signature",
   periodActive: false
@@ -223,13 +227,9 @@ const relaxed = applyFreshCalculatedRowsForRender(mismatchedView, {
   runtimeSignature: "new-signature",
   periodActive: false
 });
-assert.strictEqual(relaxed.applied, true, "fresh calculated rows must render despite id/signature mismatch");
-assert.strictEqual(relaxed.mismatchReason, "relaxed_stable_fields");
-assert.strictEqual(relaxed.fallbackAllowed, false);
-assert.strictEqual(relaxed.matchedCount, 1);
-assert.strictEqual(mismatchedView[0].debt, 222);
-assert.strictEqual(mismatchedView[0].penalty, 33);
-assert.strictEqual(mismatchedView[0].total, 255);
+assert.strictEqual(relaxed.applied, false, "ledger-version mismatch must reject calculated rows");
+assert.strictEqual(relaxed.mismatchReason, "ledger_version_mismatch");
+assert.strictEqual(mismatchedView[0].total, 0);
 
 const lateRenderSnapshotRows = [{
   id: "snapshot-row-late-render",
@@ -243,7 +243,7 @@ const lateRenderSnapshotRowsById = {
   "snapshot-row-late-render": { pay_main: 300, pay_penalty: 40, total: 340 }
 };
 assert.strictEqual(setPaymentTableCalculatedRenderState(lateRenderSnapshotRows, lateRenderSnapshotRowsById, {
-  uid: "test-uid",
+  uid: "uid_test_current",
   ledgerVersion: "empty-ledger-version",
   runtimeSignature: "empty-ledger-signature",
   periodActive: false
@@ -259,6 +259,69 @@ assert.strictEqual(preservedLateRender.mismatchReason, "fresh_calculated_rows_em
 assert.strictEqual(emptyLateLoadView.length, 1);
 assert.strictEqual(emptyLateLoadView[0].id, "snapshot-row-late-render");
 assert.strictEqual(emptyLateLoadView[0].total, 340);
+
+// The URL contains an abonent_id, but calculated state is scoped by canonical
+// account_uid. A late empty-ledger load must retain the accepted snapshot.
+context.window.location.search = "?abonent=1009";
+const canonicalUidRows = [{ id: "uid-row", year: 2026, month: 3, type: "accrual", accrued: 100, paid: 0 }];
+const canonicalUidRowsById = { "uid-row": { pay_main: 400, pay_penalty: 50, total: 450 } };
+assert.strictEqual(setPaymentTableCalculatedRenderState(canonicalUidRows, canonicalUidRowsById, {
+  uid: "uid_test_1009", ledgerVersion: "uid-ledger", runtimeSignature: "uid-signature", periodActive: false
+}), true);
+const canonicalUidLateView = [];
+const canonicalUidLateResult = applyFreshCalculatedRowsForRender(canonicalUidLateView, {
+  ledgerVersion: "uid-ledger", runtimeSignature: "uid-signature", periodActive: false
+});
+assert.strictEqual(canonicalUidLateResult.applied, true);
+assert.strictEqual(canonicalUidLateResult.mismatchReason, "fresh_calculated_rows_empty_ledger");
+assert.strictEqual(canonicalUidLateView.length, 1);
+assert.strictEqual(canonicalUidLateView[0].total, 450);
+
+const rejectCalculatedState = (meta, contextMeta, expectedReason) => {
+  assert.strictEqual(setPaymentTableCalculatedRenderState(canonicalUidRows, canonicalUidRowsById, Object.assign({
+    uid: "uid_test_1009", ledgerVersion: "uid-ledger", runtimeSignature: "uid-signature", periodActive: false
+  }, meta)), true);
+  const view = [];
+  const result = applyFreshCalculatedRowsForRender(view, Object.assign({
+    ledgerVersion: "uid-ledger", runtimeSignature: "uid-signature", periodActive: false
+  }, contextMeta));
+  assert.strictEqual(result.applied, false, expectedReason);
+  assert.strictEqual(result.mismatchReason, expectedReason);
+  assert.strictEqual(view.length, 0);
+};
+rejectCalculatedState({ uid: "uid_other" }, {}, "uid_mismatch");
+rejectCalculatedState({ ledgerVersion: "changed-ledger" }, {}, "ledger_version_mismatch");
+rejectCalculatedState({ periodActive: true, period: { from: "2026-01-01", to: "2026-01-31" } }, { periodActive: true, selectedPeriod: { from: "2026-02-01", to: "2026-02-28" } }, "period_mismatch");
+rejectCalculatedState({ runtimeSignature: "changed-signature" }, {}, "runtime_signature_mismatch");
+
+assert.strictEqual(setPaymentTableCalculatedRenderState(canonicalUidRows, canonicalUidRowsById, {
+  uid: "uid_test_1009", ledgerVersion: "uid-ledger", runtimeSignature: "uid-signature", periodActive: false
+}), true);
+context.window.__paymentTableTestHooks.expireCalculatedRenderState();
+const expiredView = [];
+assert.strictEqual(applyFreshCalculatedRowsForRender(expiredView, { ledgerVersion: "uid-ledger", runtimeSignature: "uid-signature", periodActive: false }).mismatchReason, "calculated_rows_expired");
+
+context.window.__paymentTableTestHooks.setCalculatedRenderStateForTest({
+  uid: "uid_test_1009", rows: [], rowsById: canonicalUidRowsById,
+  ledgerVersion: "uid-ledger", runtimeSignature: "uid-signature", periodActive: false, createdAt: Date.now()
+});
+const structuralMissingView = [];
+assert.strictEqual(applyFreshCalculatedRowsForRender(structuralMissingView, {
+  ledgerVersion: "uid-ledger", runtimeSignature: "uid-signature", periodActive: false
+}).mismatchReason, "calculated_rows_not_renderable");
+assert.strictEqual(structuralMissingView.length, 0);
+
+assert.strictEqual(setPaymentTableCalculatedRenderState(canonicalUidRows, canonicalUidRowsById, {
+  uid: "uid_test_1009", ledgerVersion: "uid-ledger", runtimeSignature: "uid-signature", periodActive: false
+}), true);
+const canonicalResolver = context.window.getAbonentTechId;
+context.window.getAbonentTechId = () => null;
+const unresolvedUidView = [];
+assert.strictEqual(applyFreshCalculatedRowsForRender(unresolvedUidView, {
+  ledgerVersion: "uid-ledger", runtimeSignature: "uid-signature", periodActive: false
+}).mismatchReason, "canonical_uid_unavailable");
+assert.strictEqual(unresolvedUidView.length, 0);
+context.window.getAbonentTechId = canonicalResolver;
 
 const snapshotRows = Array.from({ length: 230 }, (_, index) => ({
   id: `snapshot-row-${index + 1}`,
