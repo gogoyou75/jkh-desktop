@@ -1597,182 +1597,25 @@
   }
 
   var __serverDumpRuntime = null;
-  var __serverDumpRuntimeTrace = {
-    events: [],
-    createdAt: _nowISO()
-  };
-  var __serverDumpRuntimeTraceSequence = 0;
-  var __serverDumpRuntimeTraceExactKey = "payments_uid_mqmevxsl_wlr604";
-
-  function _serverDumpRuntimeTraceValueInfo(data, key) {
-    var hasKey = !!(data && typeof data === "object" && !Array.isArray(data) && Object.prototype.hasOwnProperty.call(data, key));
-    var raw = hasKey ? _serializeServerDumpValue(data[key]) : null;
-    var rowsCount = null;
-    if (raw !== null) {
-      try {
-        var parsed = JSON.parse(raw);
-        rowsCount = Array.isArray(parsed) ? parsed.length : null;
-      } catch (eTraceParse) {}
-    }
-    return { hasKey: hasKey, rawLength: raw === null ? 0 : String(raw).length, rowsCount: rowsCount };
-  }
-
-  function _serverDumpRuntimeTraceRuntimeInfo(entry) {
-    var info = _serverDumpRuntimeTraceValueInfo(entry && entry.data, __serverDumpRuntimeTraceExactKey);
-    return {
-      exists: !!entry,
-      ownerId: entry ? String(entry.ownerId || "") : "",
-      envType: entry ? String(entry.envType || "") : "",
-      hasExactKey: info.hasKey,
-      rowsCount: info.rowsCount
-    };
-  }
-
-  function _recordServerDumpRuntimeTrace(event) {
-    try {
-      var safeEvent = Object.assign({
-        sequence: ++__serverDumpRuntimeTraceSequence,
-        timestamp: _nowISO()
-      }, event || {});
-      __serverDumpRuntimeTrace.events.push(safeEvent);
-      console.log("[server-dump-runtime-trace]", safeEvent);
-      return safeEvent;
-    } catch (eTraceRecord) {
-      return null;
-    }
-  }
-
-  function _getServerDumpRuntimeTraceCopy() {
-    return {
-      createdAt: __serverDumpRuntimeTrace.createdAt,
-      events: __serverDumpRuntimeTrace.events.map(function (event) { return Object.assign({}, event); })
-    };
-  }
-
-  function _logServerDumpRuntimeFinal() {
-    try {
-      var events = __serverDumpRuntimeTrace.events;
-      var lastRuntimeRead = null;
-      for (var i = events.length - 1; i >= 0; i--) {
-        if (events[i].stage === "runtime-read") {
-          lastRuntimeRead = Object.assign({}, events[i]);
-          break;
-        }
-      }
-      var runtime = _serverDumpRuntimeTraceRuntimeInfo(__serverDumpRuntime);
-      console.log("[server-dump-runtime-final]", {
-        eventsCount: events.length,
-        replaceCalls: events.filter(function (event) { return event.stage === "replace-before"; }).length,
-        exactKey: __serverDumpRuntimeTraceExactKey,
-        lastRuntimeRead: lastRuntimeRead,
-        currentRuntimeStatus: runtime
-      });
-    } catch (eTraceFinal) {}
-  }
 
   function _replaceServerDumpRuntime(ownerId, envType, dumpObj, cacheWarning) {
-    try {
-      var dumpInfo = _serverDumpRuntimeTraceValueInfo(dumpObj, __serverDumpRuntimeTraceExactKey);
-      var runtimeBeforeTrace = _serverDumpRuntimeTraceRuntimeInfo(__serverDumpRuntime);
-      _recordServerDumpRuntimeTrace({
-        stage: "replace-before",
-        ownerId: String(ownerId || ""),
-        envType: String(envType || ""),
-        cacheWarning: !!cacheWarning,
-        cacheWarningErrorName: String(cacheWarning && cacheWarning.errorName || ""),
-        failedStorageKey: String(cacheWarning && cacheWarning.failedStorageKey || ""),
-        dumpKeysCount: dumpObj && typeof dumpObj === "object" && !Array.isArray(dumpObj) ? Object.keys(dumpObj).length : 0,
-        exactKey: __serverDumpRuntimeTraceExactKey,
-        dumpHasExactKey: dumpInfo.hasKey,
-        dumpRawLength: dumpInfo.rawLength,
-        dumpRowsCount: dumpInfo.rowsCount,
-        runtimeExistsBefore: runtimeBeforeTrace.exists,
-        runtimeOwnerBefore: runtimeBeforeTrace.ownerId,
-        runtimeEnvBefore: runtimeBeforeTrace.envType,
-        runtimeHasExactKeyBefore: runtimeBeforeTrace.hasExactKey,
-        runtimeRowsCountBefore: runtimeBeforeTrace.rowsCount
-      });
-    } catch (eTraceReplaceBefore) {}
     __serverDumpRuntime = null;
-    if (!cacheWarning || !dumpObj || typeof dumpObj !== "object" || Array.isArray(dumpObj)) {
-      try {
-        _recordServerDumpRuntimeTrace({
-          stage: "replace-after",
-          runtimeExistsAfter: false,
-          runtimeOwnerAfter: "",
-          runtimeEnvAfter: "",
-          runtimeHasExactKeyAfter: false,
-          runtimeRowsCountAfter: null
-        });
-      } catch (eTraceReplaceAfterEmpty) {}
-      return;
-    }
+    if (!cacheWarning || !dumpObj || typeof dumpObj !== "object" || Array.isArray(dumpObj)) return;
     __serverDumpRuntime = {
       ownerId: String(ownerId || ""),
       envType: String(envType || ""),
       data: dumpObj
     };
-    try {
-      var runtimeAfterTrace = _serverDumpRuntimeTraceRuntimeInfo(__serverDumpRuntime);
-      _recordServerDumpRuntimeTrace({
-        stage: "replace-after",
-        runtimeExistsAfter: runtimeAfterTrace.exists,
-        runtimeOwnerAfter: runtimeAfterTrace.ownerId,
-        runtimeEnvAfter: runtimeAfterTrace.envType,
-        runtimeHasExactKeyAfter: runtimeAfterTrace.hasExactKey,
-        runtimeRowsCountAfter: runtimeAfterTrace.rowsCount
-      });
-    } catch (eTraceReplaceAfter) {}
   }
 
   function _readServerDumpRuntimeValue(key, ownerId) {
     var entry = __serverDumpRuntime;
+    if (!entry) return { active: false, present: false, raw: null };
+    if (String(entry.ownerId || "") !== String(ownerId || _ownerId() || "")) return { active: false, present: false, raw: null };
+    if (String(entry.envType || "") !== String(getEnvType() || "")) return { active: false, present: false, raw: null };
     var baseKey = String(key || "");
-    var requestedOwner = String(ownerId || _ownerId() || "");
-    var currentEnvironment = String(getEnvType() || "");
-    var traceRead = baseKey.indexOf("payments_") === 0;
-    var runtimeTrace = traceRead ? _serverDumpRuntimeTraceRuntimeInfo(entry) : null;
-    var ownerMatches = !!entry && String(entry.ownerId || "") === requestedOwner;
-    var environmentMatches = !!entry && String(entry.envType || "") === currentEnvironment;
-    var result;
-    var rejectionReason;
-    if (!entry) {
-      result = { active: false, present: false, raw: null };
-      rejectionReason = "runtime_missing";
-    } else if (!ownerMatches) {
-      result = { active: false, present: false, raw: null };
-      rejectionReason = "owner_mismatch";
-    } else if (!environmentMatches) {
-      result = { active: false, present: false, raw: null };
-      rejectionReason = "environment_mismatch";
-    } else if (!Object.prototype.hasOwnProperty.call(entry.data, baseKey)) {
-      result = { active: true, present: false, raw: null };
-      rejectionReason = "key_missing";
-    } else {
-      result = { active: true, present: true, raw: _serializeServerDumpValue(entry.data[baseKey]) };
-      rejectionReason = "ok";
-    }
-    if (traceRead) {
-      try {
-        _recordServerDumpRuntimeTrace({
-          stage: "runtime-read",
-          requestedKey: baseKey,
-          requestedOwner: requestedOwner,
-          currentEnvironment: currentEnvironment,
-          runtimeExists: runtimeTrace.exists,
-          runtimeOwner: runtimeTrace.ownerId,
-          runtimeEnvironment: runtimeTrace.envType,
-          ownerMatches: ownerMatches,
-          environmentMatches: environmentMatches,
-          runtimeHasExactKey: runtimeTrace.hasExactKey,
-          returnedPresent: result.present,
-          returnedRawLength: result.raw === null ? 0 : String(result.raw).length,
-          returnedRowsCount: result.raw === null ? null : _serverDumpRuntimeTraceValueInfo({ value: result.raw }, "value").rowsCount,
-          rejectionReason: rejectionReason
-        });
-      } catch (eTraceRead) {}
-    }
-    return result;
+    if (!Object.prototype.hasOwnProperty.call(entry.data, baseKey)) return { active: true, present: false, raw: null };
+    return { active: true, present: true, raw: _serializeServerDumpValue(entry.data[baseKey]) };
   }
 
   function _clearServerDumpRuntime() {
@@ -2374,7 +2217,6 @@
           loadSource: "server:first",
           lastReadAt: loadedAt
         });
-        _logServerDumpRuntimeFinal();
 
         return {
           ok: true,
@@ -2402,9 +2244,6 @@
 
     return window.__JKH_DATA_LOADER_IN_FLIGHT;
   }
-
-  window.__JKH_SERVER_DUMP_RUNTIME_TRACE = __serverDumpRuntimeTrace;
-  window.JKH_getServerDumpRuntimeTrace = _getServerDumpRuntimeTraceCopy;
 
   window.JKHDataLoader = {
     loadFromServer: _loadFromServerServerFirst,

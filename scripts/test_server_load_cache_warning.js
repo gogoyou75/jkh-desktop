@@ -229,8 +229,7 @@ function paymentReadableFor(uiState) {
   const dumpWithLedger = {
     abonents_db_v1: JSON.stringify(populatedDb),
     card_snapshot_uid_test: JSON.stringify({ uid: "uid_test" }),
-    payments_uid_test: paymentRaw,
-    payments_uid_mqmevxsl_wlr604: paymentRaw
+    payments_uid_test: paymentRaw
   };
   const quotaBeforePayments = await loadWith({
     failureFactory: quotaOnKey("card_snapshot_uid_test"),
@@ -239,35 +238,6 @@ function paymentReadableFor(uiState) {
   assertReadableSuccess(quotaBeforePayments, true);
   assert.strictEqual(quotaBeforePayments.context.window.JKHDataLoader.readServerDumpRuntimeValue("payments_uid_test", "owner-1").present, true);
   assert.strictEqual(loadData(quotaBeforePayments.context).readPaymentLedger("1").length, 230, "quota before payments key must read the server dump ledger");
-
-  const traceContext = quotaBeforePayments.context;
-  const traceBeforeSecondLoad = traceContext.window.JKH_getServerDumpRuntimeTrace();
-  const firstReplaceBefore = traceBeforeSecondLoad.events.find((event) => event.stage === "replace-before");
-  const firstReplaceAfter = traceBeforeSecondLoad.events.find((event) => event.stage === "replace-after");
-  assert.strictEqual(firstReplaceBefore.runtimeExistsBefore, false);
-  assert.strictEqual(firstReplaceBefore.dumpHasExactKey, true);
-  assert.strictEqual(firstReplaceAfter.runtimeExistsAfter, true);
-
-  traceContext.window.JKHDataLoader.readServerDumpRuntimeValue("payments_uid_test", "owner-2");
-  traceContext.window.JKH_ENV_TYPE = "PROD";
-  traceContext.window.JKHDataLoader.readServerDumpRuntimeValue("payments_uid_test", "owner-1");
-  traceContext.window.JKH_ENV_TYPE = "LAB";
-  traceContext.window.JKHDataLoader.readServerDumpRuntimeValue("payments_missing", "owner-1");
-  const traceBeforeSecondLoadReads = traceContext.window.JKH_getServerDumpRuntimeTrace().events;
-  assert.ok(traceBeforeSecondLoadReads.some((event) => event.stage === "runtime-read" && event.rejectionReason === "owner_mismatch"));
-  assert.ok(traceBeforeSecondLoadReads.some((event) => event.stage === "runtime-read" && event.rejectionReason === "environment_mismatch"));
-  assert.ok(traceBeforeSecondLoadReads.some((event) => event.stage === "runtime-read" && event.rejectionReason === "key_missing"));
-
-  traceContext.localStorage.failureFactory = null;
-  traceContext.fetch = async () => response({ ok: true, owner: "owner-1", env_type: "LAB", data: dumpWithLedger });
-  const secondLoad = await traceContext.window.JKHDataLoader.loadFromServer({ reason: "trace-second-success", force: true });
-  assertReadableSuccess({ result: secondLoad, ui: traceContext.window.JKH_UI_STATE }, false);
-  const traceAfterSecondLoad = traceContext.window.JKH_getServerDumpRuntimeTrace().events;
-  const replaceBeforeEvents = traceAfterSecondLoad.filter((event) => event.stage === "replace-before");
-  const replaceAfterEvents = traceAfterSecondLoad.filter((event) => event.stage === "replace-after");
-  assert.strictEqual(replaceBeforeEvents.length, 2);
-  assert.strictEqual(replaceBeforeEvents[1].runtimeExistsBefore, true, "second load trace must observe the prior runtime");
-  assert.strictEqual(replaceAfterEvents[1].runtimeExistsAfter, false, "diagnostics must record existing lifecycle behavior without changing it");
 
   const quotaAfterPayments = await loadWith({
     failureFactory: quotaOnKey("tariffs_owner-1"),
