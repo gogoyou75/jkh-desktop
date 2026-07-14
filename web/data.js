@@ -1907,6 +1907,36 @@
     return rowsById;
   }
 
+  function _resolveCardSnapshotCanonicalTotals(summary, rows) {
+    var source = summary && summary.totals && typeof summary.totals === "object" && !Array.isArray(summary.totals) ? summary.totals : null;
+    var last = null;
+    (Array.isArray(rows) ? rows : []).forEach(function(row) {
+      var principal = Number(row && row.pay_main);
+      var penalty = Number(row && row.pay_penalty);
+      var total = Number(row && row.total);
+      if (Number.isFinite(principal) && Number.isFinite(penalty) && Number.isFinite(total)) last = { principal: principal, penalty: penalty, total: total };
+    });
+    var sourceTotal = Number(source && source.total);
+    var sourcePrincipal = Number(source && source.principal);
+    var sourcePenalty = Number(source && source.penalty);
+    var sourceAccrued = Number(source && source.accrued);
+    var sourcePaid = Number(source && source.paid);
+    var sourceIsFinite = source && Number.isFinite(sourceTotal) && Number.isFinite(sourcePrincipal) && Number.isFinite(sourcePenalty) && Number.isFinite(sourceAccrued) && Number.isFinite(sourcePaid);
+    var finalNonZero = last && (Math.abs(last.principal) > 0.0000001 || Math.abs(last.penalty) > 0.0000001 || Math.abs(last.total) > 0.0000001);
+    var sourceAllZero = sourceIsFinite && Math.abs(sourceTotal) <= 0.0000001 && Math.abs(sourcePrincipal) <= 0.0000001 && Math.abs(sourcePenalty) <= 0.0000001;
+    if (sourceIsFinite && !(sourceAllZero && finalNonZero)) return { ok: true, totals: deepClone(source), source: "summary.totals" };
+    if (!sourceIsFinite || !last) return { ok: false, reason: "CANONICAL_TOTALS_UNAVAILABLE" };
+    var totals = Object.assign({}, source || {});
+    totals.principal = last.principal;
+    totals.debt = last.total;
+    totals.penalty = last.penalty;
+    totals.total = last.total;
+    totals.balance = last.total;
+    totals.total_debt = last.total;
+    totals.total_penalty = last.penalty;
+    return { ok: true, totals: totals, source: "final_computed_snapshot_row" };
+  }
+
   function buildCardSnapshotFromCurrentResult(abonentOrId, result, options) {
     var found = _findAbonentByIdOrUid(abonentOrId);
     var abonent = found && found.abonent ? found.abonent : null;
@@ -1984,7 +2014,12 @@
       } catch (eBuildLog) {}
       return null;
     }
-    var totals = summary && summary.totals && typeof summary.totals === "object" ? deepClone(summary.totals) : {};
+    var canonicalTotals = _resolveCardSnapshotCanonicalTotals(summary, rows);
+    if (!canonicalTotals.ok) {
+      try { console.warn("[card-snapshot][build-blocked-canonical-totals]", { uid: uid, abonentId: abonentId, reason: canonicalTotals.reason, rowsByIdCount: rowsByIdCount }); } catch (eTotalsLog) {}
+      return null;
+    }
+    var totals = canonicalTotals.totals;
     var snapshotPeriodActive = runtimeCache.periodActive === true;
     var snapshotPeriod = snapshotPeriodActive && runtimeCache.period && typeof runtimeCache.period === "object"
       ? { from: String(runtimeCache.period.from || ""), to: String(runtimeCache.period.to || "") }

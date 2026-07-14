@@ -1294,6 +1294,20 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         data_source = data_path.read_text(encoding="utf-8")
         self.assertIn("opts.summaryDirtyReason !== false", data_source)
 
+    def test_fresh_card_snapshot_uses_final_canonical_row_when_summary_totals_are_zero(self):
+        data_source = self._find_repo_file("web", "data.js").read_text(encoding="utf-8")
+        builder = data_source.split("function buildCardSnapshotFromCurrentResult", 1)[1].split("function diagnoseCardSnapshotBuildFromCurrentResult", 1)[0]
+        self.assertIn("_resolveCardSnapshotCanonicalTotals(summary, rows)", builder)
+        self.assertIn("final_computed_snapshot_row", data_source)
+        self.assertIn("totals.principal = last.principal", data_source)
+        self.assertIn("totals.debt = last.total", data_source)
+        self.assertIn("totals.penalty = last.penalty", data_source)
+        self.assertIn("totals.total = last.total", data_source)
+        self.assertIn("totals.total_debt = last.total", data_source)
+        self.assertIn("sourceAccrued", data_source)
+        self.assertIn("sourcePaid", data_source)
+        self.assertIn("CANONICAL_TOTALS_UNAVAILABLE", data_source)
+
     def test_calc_run_button_renders_summary_returned_by_manual_recalc(self):
         path = self._find_repo_file("web", "abonent_card.html")
         self.assertIsNotNone(path)
