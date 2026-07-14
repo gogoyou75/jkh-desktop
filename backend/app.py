@@ -750,6 +750,68 @@ def _sync_log(action: str, owner: str, **extra):
     app.logger.info("[JKH sync] %s", " ".join(parts))
 
 
+PAYMENTS_SERVER_WRITE_BOUNDARY_KEY = "payments_uid_mqmevxsl_wlr604"
+
+
+def _payments_server_write_metrics(value, present):
+    if not present:
+        return {"present": False, "rawLength": None, "rowsCount": None, "isLiteralEmptyArray": False}
+    try:
+        raw_length = len(value) if isinstance(value, str) else len(json.dumps(value))
+    except Exception:
+        raw_length = -1
+    parsed = value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except Exception:
+            parsed = None
+    return {
+        "present": True,
+        "rawLength": raw_length,
+        "rowsCount": len(parsed) if isinstance(parsed, list) else None,
+        "isLiteralEmptyArray": (isinstance(value, str) and value.strip() == "[]") or (isinstance(value, list) and len(value) == 0),
+    }
+
+
+def _log_payments_server_write_boundary(stage, key, user, effective_owner, client_owner_hint, source_or_action, old_value, old_present, incoming_value, incoming_present, post_commit_value, post_commit_present, request_id):
+    if key != PAYMENTS_SERVER_WRITE_BOUNDARY_KEY:
+        return
+    try:
+        old = _payments_server_write_metrics(old_value, old_present)
+        incoming = _payments_server_write_metrics(incoming_value, incoming_present)
+        post = _payments_server_write_metrics(post_commit_value, post_commit_present)
+        app.logger.warning(
+            "[PAYMENTS_SERVER_WRITE_BOUNDARY] %s",
+            {
+                "stage": stage,
+                "route": request.path,
+                "requestMethod": request.method,
+                "key": key,
+                "authenticatedUserId": str(user.id if user else ""),
+                "effectiveOwner": str(effective_owner or ""),
+                "clientOwnerHint": str(client_owner_hint or ""),
+                "sourceOrAction": str(source_or_action or ""),
+                "oldPresent": old["present"],
+                "oldRawLength": old["rawLength"],
+                "oldRowsCount": old["rowsCount"],
+                "oldIsLiteralEmptyArray": old["isLiteralEmptyArray"],
+                "incomingPresent": incoming["present"],
+                "incomingRawLength": incoming["rawLength"],
+                "incomingRowsCount": incoming["rowsCount"],
+                "incomingIsLiteralEmptyArray": incoming["isLiteralEmptyArray"],
+                "postCommitPresent": post["present"],
+                "postCommitRawLength": post["rawLength"],
+                "postCommitRowsCount": post["rowsCount"],
+                "postCommitIsLiteralEmptyArray": post["isLiteralEmptyArray"],
+                "requestId": request_id,
+                "timestamp": datetime.utcnow().isoformat() + "Z",
+            },
+        )
+    except Exception:
+        pass
+
+
 def _client_owner_hint_from_request(data: dict | None = None) -> str:
     payload = data if isinstance(data, dict) else {}
     return str(
@@ -4717,6 +4779,9 @@ def import_payments_apply(batch_id):
         ), 400
     applied_count = skipped_count = duplicate_count = conflict_count = failed_count = 0
     affected_uids = set()
+    payments_write_boundaries = []
+    payments_request_id = uuid.uuid4().hex[:12]
+    payments_client_owner_hint = _client_owner_hint_from_request()
     sources_map = _load_owner_sources(batch.owner_id)
     current_row_id = None
     try:
@@ -4819,10 +4884,17 @@ def import_payments_apply(batch_id):
                 "fingerprint": fingerprint,
             }
             ledger.append(ledger_item)
+            incoming_ledger_value = json.dumps(ledger, ensure_ascii=False)
+            if key == PAYMENTS_SERVER_WRITE_BOUNDARY_KEY:
+                old_value = kv.v if kv else None
+                old_present = bool(kv)
+                _log_payments_server_write_boundary("write_request_received", key, user, batch.owner_id, payments_client_owner_hint, "import_payments_apply", old_value, old_present, incoming_ledger_value, True, None, False, payments_request_id)
+                _log_payments_server_write_boundary("before_db_write", key, user, batch.owner_id, payments_client_owner_hint, "import_payments_apply", old_value, old_present, incoming_ledger_value, True, None, False, payments_request_id)
+                payments_write_boundaries.append({"key": key, "incoming": incoming_ledger_value})
             if kv:
-                kv.v = json.dumps(ledger, ensure_ascii=False)
+                kv.v = incoming_ledger_value
             else:
-                db.session.add(KVStore(owner=batch.owner_id, k=key, v=json.dumps(ledger, ensure_ascii=False)))
+                db.session.add(KVStore(owner=batch.owner_id, k=key, v=incoming_ledger_value))
 
             payment_id = f"{normalized_account_number}:{next_id}"
             fingerprint_row.payment_id = payment_id
@@ -4858,6 +4930,9 @@ def import_payments_apply(batch_id):
         if batch.uploaded_at and app.config["IMPORT_UPLOAD_BLOB_TTL_DAYS"] <= 0:
             batch.upload_blob = b""
         db.session.commit()
+        for boundary in payments_write_boundaries:
+            post_row = KVStore.query.filter_by(owner=batch.owner_id, k=boundary["key"]).first()
+            _log_payments_server_write_boundary("after_db_commit", boundary["key"], user, batch.owner_id, payments_client_owner_hint, "import_payments_apply", None, False, boundary["incoming"], True, post_row.v if post_row else None, bool(post_row), payments_request_id)
     except LedgerJsonInvalidError as ex:
         db.session.rollback()
         batch = ImportBatch.query.filter_by(id=batch.id).first()
@@ -5199,12 +5274,18 @@ def store_set():
 
     owner_eff = _effective_owner_for_key(owner, key)
     row = KVStore.query.filter_by(owner=owner_eff, k=key).first()
+    request_id = uuid.uuid4().hex[:12]
+    source_or_action = data.get("source") or data.get("action") or data.get("mode") or "store_set"
+    _log_payments_server_write_boundary("write_request_received", key, user, owner_eff, client_owner_hint, source_or_action, row.v if row else None, bool(row), value, True, None, False, request_id)
+    _log_payments_server_write_boundary("before_db_write", key, user, owner_eff, client_owner_hint, source_or_action, row.v if row else None, bool(row), value, True, None, False, request_id)
     existed = bool(row)
     if row:
         row.v = value
     else:
         db.session.add(KVStore(owner=owner_eff, k=key, v=value))
     db.session.commit()
+    post_row = KVStore.query.filter_by(owner=owner_eff, k=key).first()
+    _log_payments_server_write_boundary("after_db_commit", key, user, owner_eff, client_owner_hint, source_or_action, None, False, value, True, post_row.v if post_row else None, bool(post_row), request_id)
     if key.startswith("card_snapshot_"):
         app.logger.info(
             "[diagnose][card-snapshot-kv-set] %s",
@@ -5244,12 +5325,18 @@ def store_delete():
 
     owner_eff = _effective_owner_for_key(owner, key)
     row = KVStore.query.filter_by(owner=owner_eff, k=key).first()
+    request_id = uuid.uuid4().hex[:12]
+    source_or_action = data.get("source") or data.get("action") or data.get("mode") or "store_delete"
+    _log_payments_server_write_boundary("write_request_received", key, user, owner_eff, client_owner_hint, source_or_action, row.v if row else None, bool(row), None, False, None, False, request_id)
     if not row:
         _sync_log("delete", owner_eff, server_owner=owner, client_owner_hint=client_owner_hint, key=key, status="not_found")
         return jsonify(ok=True, deleted=False)
 
+    _log_payments_server_write_boundary("before_db_write", key, user, owner_eff, client_owner_hint, source_or_action, row.v, True, None, False, None, False, request_id)
     db.session.delete(row)
     db.session.commit()
+    post_row = KVStore.query.filter_by(owner=owner_eff, k=key).first()
+    _log_payments_server_write_boundary("after_db_commit", key, user, owner_eff, client_owner_hint, source_or_action, None, False, None, False, post_row.v if post_row else None, bool(post_row), request_id)
     _sync_log("delete", owner_eff, server_owner=owner, client_owner_hint=client_owner_hint, key=key, status="ok")
     return jsonify(ok=True, deleted=True)
 
