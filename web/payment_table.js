@@ -6784,7 +6784,12 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
         try { console.log("[manual-recalc][autoaccrual]", { stage:"proposedRows", reason:"AUTOACCRUAL_ROWS_MISSING", error:null, result:result }); } catch(eManualRecalcAutoLog) {}
         return { ok:false, changed:true, reason:"AUTOACCRUAL_ROWS_MISSING", autoaccrual:result };
       }
-      if (!hasAccrualInManualRecalcPeriod(proposedRows, opts.period)) {
+      const explicitCompletedEmptyLedger = proposedRows.length === 0 && result.completed === true && result.finalLedgerEmpty === true;
+      if (proposedRows.length === 0 && !explicitCompletedEmptyLedger) {
+        try { console.log("[manual-recalc][autoaccrual]", { stage:"proposedRows", reason:"AUTOACCRUAL_EMPTY_FINAL_NOT_CONFIRMED", error:null, result:result }); } catch(eManualRecalcAutoLog) {}
+        return { ok:false, changed:true, reason:"AUTOACCRUAL_EMPTY_FINAL_NOT_CONFIRMED", autoaccrual:result };
+      }
+      if (!explicitCompletedEmptyLedger && !hasAccrualInManualRecalcPeriod(proposedRows, opts.period)) {
         try { console.log("[manual-recalc][autoaccrual]", { stage:"hasAccrualInManualRecalcPeriod.proposedRows", reason:"ACCRUALS_NOT_CREATED", error:null, result:false }); } catch(eManualRecalcAutoLog) {}
         return { ok:false, changed:true, reason:"ACCRUALS_NOT_CREATED", autoaccrual:result };
       }

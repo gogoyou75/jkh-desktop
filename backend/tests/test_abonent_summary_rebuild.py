@@ -1267,6 +1267,12 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         self.assertIn("Data.writePaymentLedger", source)
         self.assertIn("summaryDirtyReason:false", source)
         self.assertIn("hasAccrualInManualRecalcPeriod", source)
+        self.assertIn("AUTOACCRUAL_EMPTY_FINAL_NOT_CONFIRMED", source)
+        self.assertIn("result.completed === true && result.finalLedgerEmpty === true", source)
+        autoaccrual_body = source.split("async function applyControlledAutoAccrualForManualRecalc", 1)[1].split("window.fullRecalcForCurrentAbonent", 1)[0]
+        empty_guard = autoaccrual_body.index("AUTOACCRUAL_EMPTY_FINAL_NOT_CONFIRMED")
+        server_write = autoaccrual_body.index("Data.writePaymentLedgerServerBacked(abonentId, proposedRows")
+        self.assertLess(empty_guard, server_write)
         self.assertIn("ACCRUALS_NOT_CREATED", source)
         self.assertIn("Data.flushDbToServer", source)
         self.assertIn("Data.writeLedgerRuntimeCache", body)
