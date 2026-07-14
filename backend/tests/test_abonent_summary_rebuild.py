@@ -1461,6 +1461,8 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         self.assertIn("CARD_SNAPSHOT_STRUCTURAL_ROWS_MISSING", helper)
         self.assertIn("mergeComputedRowsIntoViewRows(structuralRows, map)", helper)
         self.assertIn("getPayments()", restore)
+        self.assertIn('source: "canonical_backend_snapshot"', restore)
+        self.assertIn("passiveSnapshotRestore: true", restore)
         self.assertIn('renderCalculatedRowsDirect("canonical-snapshot-empty-ledger")', restore)
         self.assertIn("card_rows_materialized_from_snapshot", restore)
         self.assertIn("card_rows_materialization_skipped", restore)
@@ -1469,6 +1471,22 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
             self.assertNotIn(forbidden, helper)
             self.assertNotIn(forbidden, restore)
         self.assertIn("JKH_restoreCanonicalSnapshotRowsForPassiveDisplay(snapshot)", fresh_render)
+
+    def test_late_empty_ledger_preserves_valid_passive_snapshot_render_state(self):
+        payment_source = self._find_repo_file("web", "payment_table.js").read_text(encoding="utf-8")
+        passive_state = payment_source.split("function getPassiveSnapshotCalculatedRenderStateForEmptyLedger", 1)[1].split("function getMatchingCalculatedRenderRows", 1)[0]
+        load_impl = payment_source.split("async function loadPaymentTableImpl()", 1)[1].split("async function loadPaymentTable(reason)", 1)[0]
+
+        self.assertIn("isReadonlyNoRecalcMode()", passive_state)
+        self.assertIn('state.passiveSnapshotRestore !== true', passive_state)
+        self.assertIn('String(state.source || "") !== "canonical_backend_snapshot"', passive_state)
+        self.assertIn("state.periodActive === true", passive_state)
+        self.assertIn("stats.hasDebtTotals && stats.hasPenaltyTotals && stats.hasTotalTotals", passive_state)
+        self.assertIn("Array.isArray(arr) && arr.length === 0 && getPassiveSnapshotCalculatedRenderStateForEmptyLedger()", load_impl)
+        self.assertIn('renderCalculatedRowsDirect("late-empty-ledger-preserve-snapshot")', load_impl)
+        self.assertIn('snapshotAttemptReason: "PASSIVE_SNAPSHOT_RENDER_STATE"', load_impl)
+        self.assertIn('reason: "late-empty-ledger-preserve-snapshot"', load_impl)
+        self.assertLess(load_impl.index('getPassiveSnapshotCalculatedRenderStateForEmptyLedger()'), load_impl.index("const periodActive = isCalcPeriodActive()"))
 
     def test_canonical_snapshot_totals_are_resaved_to_summary_after_snapshot_success(self):
         data_source = self._find_repo_file("web", "data.js").read_text(encoding="utf-8")

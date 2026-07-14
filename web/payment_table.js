@@ -509,6 +509,8 @@
       runtimeSignature: String(meta && meta.runtimeSignature || ""),
       periodActive: !!(meta && meta.periodActive),
       period: meta && meta.period ? { from: String(meta.period.from || ""), to: String(meta.period.to || "") } : null,
+      source: String(meta && meta.source || ""),
+      passiveSnapshotRestore: meta && meta.passiveSnapshotRestore === true,
       createdAt: Date.now()
     };
     try {
@@ -520,6 +522,21 @@
       });
     } catch(e) {}
     return true;
+  }
+
+  function getPassiveSnapshotCalculatedRenderStateForEmptyLedger(){
+    const state = __paymentTableCalculatedRenderState;
+    if (!isReadonlyNoRecalcMode() || !state || typeof state !== "object") return null;
+    if (state.passiveSnapshotRestore !== true || String(state.source || "") !== "canonical_backend_snapshot") return null;
+    if (Date.now() - Number(state.createdAt || 0) > 10 * 60 * 1000) return null;
+    const canonicalUid = resolveCanonicalAccountUidForCalculatedRender();
+    if (!canonicalUid.ok || (state.uid && String(state.uid || "") !== canonicalUid.uid)) return null;
+    if (state.periodActive === true) return null;
+    const rowsById = state.rowsById && typeof state.rowsById === "object" && !Array.isArray(state.rowsById) ? state.rowsById : {};
+    const rows = mergeComputedRowsIntoViewRows(state.rows, rowsById);
+    const stats = computedRowsStats(rows, null);
+    if (!rows.length || !Object.keys(rowsById).length || !(stats.hasDebtTotals && stats.hasPenaltyTotals && stats.hasTotalTotals)) return null;
+    return state;
   }
 
   function getMatchingCalculatedRenderRows(ledgerVersion, periodActive, selectedPeriod, runtimeSignatureValue){
@@ -772,6 +789,8 @@
       window.__paymentTableTestHooks = Object.assign(window.__paymentTableTestHooks || {}, {
         setPaymentTableCalculatedRenderState: setPaymentTableCalculatedRenderState,
         applyFreshCalculatedRowsForRender: applyFreshCalculatedRowsForRender,
+        getPassiveSnapshotCalculatedRenderStateForEmptyLedger: getPassiveSnapshotCalculatedRenderStateForEmptyLedger,
+        setPaymentTableModeForTest: function(mode){ __paymentTableMode = String(mode || "default"); },
         expireCalculatedRenderState: function(){
           if (__paymentTableCalculatedRenderState) __paymentTableCalculatedRenderState.createdAt = 0;
         },
@@ -5496,7 +5515,9 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
       uid: String(snapshot && snapshot.uid || getAbonentId() || ""),
       ledgerVersion: String(snapshot && (snapshot.ledgerVersion || snapshot.ledger_version) || ""),
       runtimeSignature: String(snapshot && snapshot.runtimeSignature || ""),
-      periodActive: false
+      periodActive: false,
+      source: "canonical_backend_snapshot",
+      passiveSnapshotRestore: true
     });
     const rendered = await renderCalculatedRowsDirect("canonical-snapshot-empty-ledger");
     const result = Object.assign({}, materialized, { ok: rendered === true, renderedRowsCount: rendered === true ? materialized.rows.length : 0, reason: rendered === true ? "OK" : "CARD_ROWS_NOT_RESTORED" });
@@ -5601,6 +5622,22 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
       } finally {
         try { console.timeEnd('[payment-table] load-ledger'); } catch(e) {}
         perfLog('load-ledger', loadStartedAt);
+      }
+
+      if (Array.isArray(arr) && arr.length === 0 && getPassiveSnapshotCalculatedRenderStateForEmptyLedger()) {
+        try {
+          console.log("[reload-chain][rows-apply-result]", {
+            uid: String(getAbonentId() || ""),
+            source: "canonical_backend_snapshot",
+            snapshotAttemptReason: "PASSIVE_SNAPSHOT_RENDER_STATE",
+            rowsBeforeRender: 0,
+            rowsAfterFilter: __paymentTableCalculatedRenderState.rows.length,
+            rowsByIdApplied: Object.keys(__paymentTableCalculatedRenderState.rowsById || {}).length,
+            rowsWithComputedFields: __paymentTableCalculatedRenderState.rows.filter(ledgerRowHasComputedFields).length,
+            reason: "late-empty-ledger-preserve-snapshot"
+          });
+        } catch(ePassiveSnapshotLog) {}
+        if (await renderCalculatedRowsDirect("late-empty-ledger-preserve-snapshot")) return;
       }
 
       const periodActive = isCalcPeriodActive();

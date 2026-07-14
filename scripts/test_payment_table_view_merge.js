@@ -60,9 +60,11 @@ recordPaymentRenderRegression("render", { rowCount: 0, ledgerRowsCount: 0, reaso
 const renderRegression = context.window.__getPaymentRenderRegressionSequence();
 assert.strictEqual(renderRegression.firstZeroReported, true);
 assert.strictEqual(renderRegression.events[renderRegression.events.length - 1].caller, "test-late-caller");
-const { setPaymentTableCalculatedRenderState, applyFreshCalculatedRowsForRender } = context.window.__paymentTableTestHooks;
+const { setPaymentTableCalculatedRenderState, applyFreshCalculatedRowsForRender, getPassiveSnapshotCalculatedRenderStateForEmptyLedger, setPaymentTableModeForTest } = context.window.__paymentTableTestHooks;
 assert.strictEqual(typeof setPaymentTableCalculatedRenderState, "function");
 assert.strictEqual(typeof applyFreshCalculatedRowsForRender, "function");
+assert.strictEqual(typeof getPassiveSnapshotCalculatedRenderStateForEmptyLedger, "function");
+assert.strictEqual(typeof setPaymentTableModeForTest, "function");
 const {
   readinessRegressionState,
   readinessRegressionReadable,
@@ -276,6 +278,19 @@ assert.strictEqual(canonicalUidLateResult.applied, true);
 assert.strictEqual(canonicalUidLateResult.mismatchReason, "fresh_calculated_rows_empty_ledger");
 assert.strictEqual(canonicalUidLateView.length, 1);
 assert.strictEqual(canonicalUidLateView[0].total, 450);
+
+assert.strictEqual(setPaymentTableCalculatedRenderState(canonicalUidRows, canonicalUidRowsById, {
+  uid: "uid_test_1009", ledgerVersion: "snapshot-ledger", runtimeSignature: "snapshot-signature", periodActive: false,
+  source: "canonical_backend_snapshot", passiveSnapshotRestore: true
+}), true);
+setPaymentTableModeForTest("readonly_no_recalc");
+assert.ok(getPassiveSnapshotCalculatedRenderStateForEmptyLedger(), "a passive canonical snapshot state must survive a later empty-ledger load");
+assert.strictEqual(setPaymentTableCalculatedRenderState(canonicalUidRows, canonicalUidRowsById, {
+  uid: "uid_test_1009", ledgerVersion: "new-ledger", runtimeSignature: "new-signature", periodActive: false,
+  source: "manual_full_recalc", passiveSnapshotRestore: false
+}), true);
+assert.strictEqual(getPassiveSnapshotCalculatedRenderStateForEmptyLedger(), null, "a later non-snapshot calculated state must not use the passive-empty-ledger guard");
+setPaymentTableModeForTest("default");
 
 const rejectCalculatedState = (meta, contextMeta, expectedReason) => {
   assert.strictEqual(setPaymentTableCalculatedRenderState(canonicalUidRows, canonicalUidRowsById, Object.assign({
