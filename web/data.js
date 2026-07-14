@@ -2002,7 +2002,17 @@
         try { console.log("[card-snapshot][build-from-payment-table]", { uid: uid, abonentId: abonentId, rowsByIdCount: _cardSnapshotRowsByIdCount(rowsById), ledgerVersion: ledgerVersion }); } catch (eFallbackLog) {}
       }
     }
-    var ledgerRows = fallback && Array.isArray(fallback.rows) && _cardSnapshotRowsByIdCount(rowsById) > 0 ? fallback.rows : readPaymentLedger(abonent || uid);
+    var finalRows = _verifiedFinalFullRecalcRows(abonent || uid, {
+      finalRows: result && result.finalRows,
+      uid: result && result.uid,
+      ledgerVersion: result && result.ledgerVersion,
+      inputHash: result && result.inputHash
+    });
+    if (result && Array.isArray(result.finalRows) && !finalRows.ok) {
+      try { console.warn("[card-snapshot][build-blocked-final-rows]", { uid: uid, reason: finalRows.reason }); } catch (eFinalRowsLog) {}
+      return null;
+    }
+    var ledgerRows = finalRows.ok ? finalRows.rows : (fallback && Array.isArray(fallback.rows) && _cardSnapshotRowsByIdCount(rowsById) > 0 ? fallback.rows : readPaymentLedger(abonent || uid));
     _emitActiveFullRecalcHeartbeat("build-card-snapshot", true);
     var snapshotBuildRowIdx = 0;
     var rows = (Array.isArray(ledgerRows) ? ledgerRows : []).map(function(row) {
@@ -5612,7 +5622,23 @@
     return "";
   }
 
-  function buildAbonentSummaryAfterExplicitRecalc(abonentOrId, from, to) {
+  function _verifiedFinalFullRecalcRows(abonentOrId, options) {
+    var opts = options || {};
+    if (!Array.isArray(opts.finalRows)) return { ok: false, reason: "FINAL_ROWS_NOT_PROVIDED" };
+    var found = _findAbonentByIdOrUid(abonentOrId);
+    var abonent = found && found.abonent ? found.abonent : null;
+    var uid = String(abonent && (abonent.uid || abonent.account_uid || abonent.accountUid) || "").trim();
+    var suppliedUid = String(opts.uid || "").trim();
+    if (!isValidUid(uid) || suppliedUid !== uid) return { ok: false, reason: "FINAL_ROWS_UID_MISMATCH" };
+    var versions = computeFinancialInputVersions(abonent || uid);
+    var suppliedLedgerVersion = String(opts.ledgerVersion || opts.ledger_version || "");
+    var suppliedInputHash = String(opts.inputHash || opts.input_hash || "");
+    if (!suppliedLedgerVersion || suppliedLedgerVersion !== String(versions.ledger_version || "")) return { ok: false, reason: "FINAL_ROWS_LEDGER_VERSION_MISMATCH" };
+    if (!suppliedInputHash || suppliedInputHash !== String(versions.input_hash || "")) return { ok: false, reason: "FINAL_ROWS_INPUT_HASH_MISMATCH" };
+    return { ok: true, rows: _cloneLedgerRows(opts.finalRows), versions: versions };
+  }
+
+  function buildAbonentSummaryAfterExplicitRecalc(abonentOrId, from, to, options) {
     var found = _findAbonentByIdOrUid(abonentOrId);
     var abonent = found && found.abonent ? found.abonent : (abonentOrId && typeof abonentOrId === "object" ? abonentOrId : null);
     var abonentId = String(found && found.id || (typeof abonentOrId === "object" ? abonentOrId && abonentOrId.id : abonentOrId) || "").trim();
@@ -5626,17 +5652,19 @@
     if (!isValidUid(uid)) throw new Error("UID_REQUIRED");
     var ledgerKey = resolvePaymentLedgerKey(abonentOrId);
     if (ledgerKey !== ("payments_" + uid)) throw new Error("UID_LEDGER_PATH_REQUIRED");
+    var finalRows = _verifiedFinalFullRecalcRows(abonentOrId, options);
+    if (options && Array.isArray(options.finalRows) && !finalRows.ok) throw new Error(finalRows.reason);
     console.time("[card-recalc] read ledger");
     try {
       var rawLedger = _getProjectRaw(ledgerKey);
-      if (rawLedger !== null && rawLedger !== undefined) _parseLedgerRows(rawLedger, ledgerKey);
+      if (!finalRows.ok && rawLedger !== null && rawLedger !== undefined) _parseLedgerRows(rawLedger, ledgerKey);
     } finally {
       console.timeEnd("[card-recalc] read ledger");
     }
     console.time("[card-recalc] build rows");
     try {
       _emitActiveFullRecalcHeartbeat("summary-build-rows", true);
-      var rows = window.JKHCalcEngine.loadPaymentsForAbonent(String(abonentId));
+      var rows = finalRows.ok ? finalRows.rows : window.JKHCalcEngine.loadPaymentsForAbonent(String(abonentId));
       _emitActiveFullRecalcHeartbeat("summary-build-rows", true);
     } finally {
       console.timeEnd("[card-recalc] build rows");
@@ -5678,7 +5706,7 @@
       var periodFrom = String(from || "");
       var periodTo = String(to || "");
       var accountUid = String(abonent && (abonent.uid || abonent.account_uid || abonent.accountUid) || "").trim();
-      var versions = computeFinancialInputVersions(abonent || accountUid);
+      var versions = finalRows.ok ? finalRows.versions : computeFinancialInputVersions(abonent || accountUid);
       var accountNumber = String(abonent && (abonent.account_number || abonent.accountNumber || abonent.ls || abonent.id) || abonentId || "").trim();
       var fio = String(abonent && (abonent.fio || abonent.full_name || abonent.fullName || abonent.name_full || abonent.display_name) || "").trim();
       var fioParts = fio ? fio.split(/\s+/) : [];
@@ -6185,7 +6213,12 @@
       if (!period.ok) throw new Error(period.error || "PERIOD_INVALID");
       _logFullRecalcStep(runId, "calc-totals", { mode: mode, periodFrom: String(period.from || ""), periodTo: String(period.to || "") });
       await _dataUiYield();
-      summary = buildAbonentSummaryAfterExplicitRecalc(abonentOrId, period.from, period.to);
+      summary = buildAbonentSummaryAfterExplicitRecalc(abonentOrId, period.from, period.to, {
+        finalRows: opts.finalRows,
+        uid: opts.uid,
+        ledgerVersion: opts.ledgerVersion || opts.ledger_version,
+        inputHash: opts.inputHash || opts.input_hash
+      });
       _logFullRecalcStepDone(runId, "calc-totals", { status: summary && (summary.summary_status || summary.status) || "" });
       await _dataUiYield();
       if (periodActive) {
@@ -6280,7 +6313,9 @@
       summary: summary,
       save: saveResult,
       status: status,
-      reason: reasonOut
+      reason: reasonOut,
+      ledgerVersion: String(summary && (summary.ledger_version || summary.ledgerVersion) || ""),
+      inputHash: String(summary && summary.input_hash || "")
     };
   }
 

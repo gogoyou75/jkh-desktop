@@ -1321,6 +1321,34 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         self.assertNotIn("row.total", aggregation)
         self.assertIn("CANONICAL_TOTALS_UNAVAILABLE", data_source)
 
+    def test_full_recalc_summary_uses_verified_final_rows_not_a_second_raw_ledger_read(self):
+        data_source = self._find_repo_file("web", "data.js").read_text(encoding="utf-8")
+        payment_source = self._find_repo_file("web", "payment_table.js").read_text(encoding="utf-8")
+        card_source = self._find_repo_file("web", "abonent_card.html").read_text(encoding="utf-8")
+        verifier = data_source.split("function _verifiedFinalFullRecalcRows", 1)[1].split("function buildAbonentSummaryAfterExplicitRecalc", 1)[0]
+        summary_builder = data_source.split("function buildAbonentSummaryAfterExplicitRecalc", 1)[1].split("function buildAbonentSummaryErrorAfterExplicitRecalc", 1)[0]
+        explicit_recalc = data_source.split("async function recalcAbonentSummaryExplicit", 1)[1].split("function _recalcLockAgeFromServer", 1)[0]
+        full_recalc = payment_source.split("window.fullRecalcForCurrentAbonent", 1)[1].split("window.__loadPaymentTable", 1)[0]
+        snapshot_builder = data_source.split("function buildCardSnapshotFromCurrentResult", 1)[1].split("function diagnoseCardSnapshotBuildFromCurrentResult", 1)[0]
+
+        self.assertIn("FINAL_ROWS_UID_MISMATCH", verifier)
+        self.assertIn("FINAL_ROWS_LEDGER_VERSION_MISMATCH", verifier)
+        self.assertIn("FINAL_ROWS_INPUT_HASH_MISMATCH", verifier)
+        self.assertIn("finalRows.ok ? finalRows.rows : window.JKHCalcEngine.loadPaymentsForAbonent", summary_builder)
+        self.assertIn("_summaryPeriodTotals(rows, from, to)", summary_builder)
+        self.assertIn("finalRows: opts.finalRows", explicit_recalc)
+        self.assertIn("ledgerVersion: opts.ledgerVersion", explicit_recalc)
+        self.assertIn("inputHash: opts.inputHash", explicit_recalc)
+        self.assertIn("finalRows: runtimeRows", full_recalc)
+        self.assertIn("ledgerVersion: ledgerVersion", full_recalc)
+        self.assertIn("inputHash: String(financialVersions", full_recalc)
+        self.assertIn("finalRows: freshRuntimeRows", full_recalc)
+        self.assertIn("finalRows = _verifiedFinalFullRecalcRows", snapshot_builder)
+        self.assertIn("finalRows.ok ? finalRows.rows", snapshot_builder)
+        self.assertIn("_snapshotRowAccruedPaidTotals(rows)", data_source)
+        self.assertNotIn("row.pay_main", data_source.split("function _snapshotRowAccruedPaidTotals", 1)[1].split("function _resolveCardSnapshotCanonicalTotals", 1)[0])
+        self.assertIn("Data.buildCardSnapshotFromCurrentResult(currentAbonentId, recalcResult)", card_source)
+
     def test_calc_run_button_renders_summary_returned_by_manual_recalc(self):
         path = self._find_repo_file("web", "abonent_card.html")
         self.assertIsNotNone(path)

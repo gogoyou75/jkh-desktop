@@ -7188,12 +7188,17 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
       try { console.log("[manual-recalc] calling Data.recalculateAbonentCard"); } catch(eManualRecalcCallDataLog) {}
       const summaryResult = await measureRecalcStage("summarySaveMs", async function(){
         throwIfFullRecalcAborted("summary-save");
+        const financialVersions = (window.Data && typeof Data.computeFinancialInputVersions === "function") ? Data.computeFinancialInputVersions(id) : {};
         return await Data.recalculateAbonentCard(id, {
           period: periodActive && selectedPeriod ? selectedPeriod : undefined,
           saveSummary: !explicitReportPeriod,
           summaryScope: explicitReportPeriod ? "period" : "full",
           periodActive: !!explicitReportPeriod,
           recalcMode: recalcMode,
+          finalRows: runtimeRows,
+          uid: String((window.Data && typeof Data.getAbonentTechId === "function" && Data.getAbonentTechId(id)) || ""),
+          ledgerVersion: ledgerVersion,
+          inputHash: String(financialVersions && financialVersions.input_hash || ""),
           recalcRunId: runId,
           recalcLockHeld: true,
           recalcLockToken: recalcLock.lock_token || ""
@@ -7307,6 +7312,10 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
         summary_reason: summaryResult && (summaryResult.summary_reason || summaryResult.reason) || "",
         summary: summary,
         summary_save: summaryResult,
+        finalRows: freshRuntimeRows,
+        rowsById: freshRowsById,
+        ledgerVersion: freshLedgerVersion,
+        inputHash: String(summaryResult && summaryResult.inputHash || summary && summary.input_hash || ""),
         runId: runId
       };
     } catch(eFullRecalcAbort) {
