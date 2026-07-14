@@ -5630,12 +5630,19 @@
     var uid = String(abonent && (abonent.uid || abonent.account_uid || abonent.accountUid) || "").trim();
     var suppliedUid = String(opts.uid || "").trim();
     if (!isValidUid(uid) || suppliedUid !== uid) return { ok: false, reason: "FINAL_ROWS_UID_MISMATCH" };
+    var ledgerKey = resolvePaymentLedgerKey(abonent || uid);
+    var overridePresent = Object.prototype.hasOwnProperty.call(__projectRawRuntimeOverrides, ledgerKey);
+    var overrideRaw = overridePresent ? __projectRawRuntimeOverrides[ledgerKey] : null;
+    var serverDumpRuntime = null;
+    try { serverDumpRuntime = window.JKHDataLoader && typeof window.JKHDataLoader.readServerDumpRuntimeValue === "function" ? window.JKHDataLoader.readServerDumpRuntimeValue(ledgerKey, _ownerId()) : null; } catch (eServerDumpVersion) {}
+    var computeLedgerRuntimeVersionBefore = computeLedgerRuntimeVersion(abonent || uid);
     var versions = computeFinancialInputVersions(abonent || uid);
     var expectedLedgerVersion = computeLedgerRuntimeVersion(abonent || uid);
     var suppliedLedgerVersion = String(opts.ledgerVersion || opts.ledger_version || "");
     var suppliedInputHash = String(opts.inputHash || opts.input_hash || "");
+    var computeLedgerRuntimeVersionAfter = computeLedgerRuntimeVersion(abonent || uid);
     if (!suppliedLedgerVersion || suppliedLedgerVersion !== expectedLedgerVersion) {
-      try { console.warn("[summary][final-rows-ledger-version-mismatch]", { expectedLedgerVersion: expectedLedgerVersion, actualLedgerVersion: suppliedLedgerVersion, finalRowsLedgerVersion: suppliedLedgerVersion, canonicalLedgerVersion: expectedLedgerVersion, runtimeLedgerVersion: expectedLedgerVersion, serverDumpLedgerVersion: String(versions.ledger_version || "") }); } catch (eVersionLog) {}
+      try { console.warn("[summary][final-rows-ledger-version-mismatch]", { expectedLedgerVersion: expectedLedgerVersion, actualLedgerVersion: suppliedLedgerVersion, finalRowsLedgerVersion: suppliedLedgerVersion, runtimeLedgerVersion: computeLedgerRuntimeVersionBefore, canonicalLedgerVersion: expectedLedgerVersion, runtimeOverrideLedgerVersion: overridePresent ? _runtimeHashString(overrideRaw) : "", serverDumpLedgerVersion: serverDumpRuntime && serverDumpRuntime.present === true ? _runtimeHashString(serverDumpRuntime.raw) : "", computeLedgerRuntimeVersionBefore: computeLedgerRuntimeVersionBefore, computeLedgerRuntimeVersionAfter: computeLedgerRuntimeVersionAfter, source: { expectedLedgerVersion: "computeLedgerRuntimeVersion.after_computeFinancialInputVersions", actualLedgerVersion: "payment_table.fullRecalcForCurrentAbonent.ledgerVersion", finalRowsLedgerVersion: "payment_table.fullRecalcForCurrentAbonent.ledgerVersion", runtimeLedgerVersion: "computeLedgerRuntimeVersion.before", canonicalLedgerVersion: "computeLedgerRuntimeVersion.after", runtimeOverrideLedgerVersion: "__projectRawRuntimeOverrides[payments_uid]", serverDumpLedgerVersion: "JKHDataLoader.readServerDumpRuntimeValue" }, caller: "_verifiedFinalFullRecalcRows", timestamp: new Date().toISOString() }); } catch (eVersionLog) {}
       return { ok: false, reason: "FINAL_ROWS_LEDGER_VERSION_MISMATCH" };
     }
     if (!suppliedInputHash || suppliedInputHash !== String(versions.input_hash || "")) return { ok: false, reason: "FINAL_ROWS_INPUT_HASH_MISMATCH" };
@@ -6215,6 +6222,20 @@
 
     try {
       if (!period.ok) throw new Error(period.error || "PERIOD_INVALID");
+      try {
+        var modeFound = _findAbonentByIdOrUid(abonentOrId);
+        var modeAbonent = modeFound && modeFound.abonent ? modeFound.abonent : null;
+        console.log("[summary-rebuild-boundary]", {
+          uid: String(modeAbonent && (modeAbonent.uid || modeAbonent.account_uid || modeAbonent.accountUid) || ""),
+          calculationMode: mode,
+          isFullRecalc: mode === SUMMARY_RECALC_MODE_FULL,
+          isPeriodRecalc: periodActive,
+          periodFrom: String(period.from || ""),
+          periodTo: String(period.to || ""),
+          summaryRebuildReason: periodActive ? "PERIOD_SUMMARY_NOT_SAVED" : "FULL_SUMMARY_REBUILD",
+          shouldAffectIndex: !periodActive && opts.saveSummary !== false
+        });
+      } catch (eSummaryRebuildBoundary) {}
       _logFullRecalcStep(runId, "calc-totals", { mode: mode, periodFrom: String(period.from || ""), periodTo: String(period.to || "") });
       await _dataUiYield();
       summary = buildAbonentSummaryAfterExplicitRecalc(abonentOrId, period.from, period.to, {

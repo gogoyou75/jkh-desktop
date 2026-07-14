@@ -4483,6 +4483,25 @@ function bindCalcButtons(){
         const fullSummaryUiBeforeRecalc = captureFullSummaryStatusUi();
         const clickMeta = getCalcPeriodStorageMeta();
         try {
+            console.log("[recalc-mode-boundary]", {
+                uid: String(clickMeta.resolvedUid || ""),
+                account: String(currentAbonentId || ""),
+                buttonAction: "recalculate",
+                hasPeriod: hasValidPeriodInput,
+                periodFrom: from,
+                periodTo: to,
+                recalcForReportPeriod: recalcForReportPeriod,
+                temporaryCourtPeriod: recalcForReportPeriod,
+                cardPeriodModeActive: window.JKH_CARD_PERIOD_MODE_ACTIVE === true,
+                selectedCalculationMode: recalcForReportPeriod ? "temporary_court_period" : "FULL_SUMMARY_REBUILD",
+                willSaveFullSnapshot: !recalcForReportPeriod,
+                willRebuildAbonentSummary: !recalcForReportPeriod,
+                willCallVerifiedFinalRows: !recalcForReportPeriod,
+                caller: "abonent_card.recalculate_button",
+                timestamp: new Date().toISOString()
+            });
+        } catch (eRecalcModeBoundary) {}
+        try {
             console.log("[full-recalc][click]", {
                 runId: recalcRunId,
                 abonentId: String(currentAbonentId || ""),
