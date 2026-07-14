@@ -1308,6 +1308,39 @@
     return String(value);
   }
 
+  var PAYMENTS_DUMP_BOUNDARY_KEY = "payments_uid_mqmevxsl_wlr604";
+
+  function _logPaymentsDumpBoundary(stage, container, ownerId, sameDataObject, sameValueReference) {
+    try {
+      var source = container && typeof container === "object" ? container : {};
+      var present = Object.prototype.hasOwnProperty.call(source, PAYMENTS_DUMP_BOUNDARY_KEY);
+      var value = present ? source[PAYMENTS_DUMP_BOUNDARY_KEY] : null;
+      var valueType = value === null ? "null" : (Array.isArray(value) ? "array" : typeof value);
+      var rawLength = -1;
+      if (typeof value === "string") rawLength = value.length;
+      else {
+        try { rawLength = JSON.stringify(value).length; } catch (eLength) { rawLength = -1; }
+      }
+      var parsed = value;
+      if (typeof value === "string") {
+        try { parsed = JSON.parse(value); } catch (eRows) { parsed = null; }
+      }
+      console.log("[PAYMENTS_DUMP_BOUNDARY]", {
+        stage: stage,
+        key: PAYMENTS_DUMP_BOUNDARY_KEY,
+        present: present,
+        valueType: valueType,
+        rawLength: rawLength,
+        rowsCount: Array.isArray(parsed) ? parsed.length : null,
+        isLiteralEmptyArray: (typeof value === "string" && value.trim() === "[]") || (Array.isArray(value) && value.length === 0),
+        ownerId: String(ownerId || ""),
+        sameDataObject: sameDataObject,
+        sameValueReference: sameValueReference,
+        timestamp: new Date().toISOString()
+      });
+    } catch (eBoundary) {}
+  }
+
   function _writeLocalCompat(baseKey, value, ownerId) {
     var v = (value === null || value === undefined) ? "" : String(value);
     if (window.JKHStore) window.JKHStore.setRaw(baseKey, v, ownerId);
@@ -1322,10 +1355,14 @@
     var v = _serializeServerDumpValue(value);
     if (!window.JKHStore) return;
     if (isGlobalProjectKey(kx)) {
+      if (kx === PAYMENTS_DUMP_BOUNDARY_KEY) _logPaymentsDumpBoundary("inside_local_compat_before_direct_set", (function(){ var o = {}; o[kx] = value; return o; })(), ownerId, null, value === v);
       _lsSetDirect(k(kx, "GLOBAL"), v);
+      if (kx === PAYMENTS_DUMP_BOUNDARY_KEY) { var globalStored = _lsGetDirect(k(kx, "GLOBAL")); var globalContainer = {}; globalContainer[kx] = globalStored; _logPaymentsDumpBoundary("after_direct_local_write", globalContainer, ownerId, null, globalStored === v); }
       return;
     }
+    if (kx === PAYMENTS_DUMP_BOUNDARY_KEY) _logPaymentsDumpBoundary("inside_local_compat_before_direct_set", (function(){ var o = {}; o[kx] = value; return o; })(), ownerId, null, value === v);
     _lsSetDirect(k(kx, ownerId), v);
+    if (kx === PAYMENTS_DUMP_BOUNDARY_KEY) { var stored = _lsGetDirect(k(kx, ownerId)); var storedContainer = {}; storedContainer[kx] = stored; _logPaymentsDumpBoundary("after_direct_local_write", storedContainer, ownerId, null, stored === v); }
   }
 
   function _projectKeysFromDump(dumpObj) {
@@ -1461,7 +1498,11 @@
     if (dumpObj && typeof dumpObj === "object" && !Array.isArray(dumpObj) && Object.prototype.hasOwnProperty.call(dumpObj, KEY_DB)) {
       dumpObj[KEY_DB] = _serializeServerDumpValue(dumpObj[KEY_DB]);
     }
+    var dataBeforeNormalize = dumpObj;
+    var targetValueBeforeNormalize = Object.prototype.hasOwnProperty.call(dumpObj, PAYMENTS_DUMP_BOUNDARY_KEY) ? dumpObj[PAYMENTS_DUMP_BOUNDARY_KEY] : null;
     dumpObj = _normalizeCalcPeriodKeysInDump(dumpObj, ownerId);
+    var targetValueAfterNormalize = Object.prototype.hasOwnProperty.call(dumpObj, PAYMENTS_DUMP_BOUNDARY_KEY) ? dumpObj[PAYMENTS_DUMP_BOUNDARY_KEY] : null;
+    _logPaymentsDumpBoundary("after_calc_period_normalize", dumpObj, ownerId, dataBeforeNormalize === dumpObj, targetValueBeforeNormalize === targetValueAfterNormalize);
     var dumpKeys = _projectKeysFromDump(dumpObj);
     var hasServerDbKey = Object.prototype.hasOwnProperty.call(dumpObj || {}, KEY_DB);
     var serverRawDb = hasServerDbKey ? _serializeServerDumpValue(dumpObj[KEY_DB]) : "";
@@ -1565,6 +1606,7 @@
         }
       }
       try {
+        if (kx === PAYMENTS_DUMP_BOUNDARY_KEY) _logPaymentsDumpBoundary("before_local_compat_write", dumpObj, ownerId, null, val === dumpObj[kx]);
         _writeServerDumpLocalCompat(kx, (val === null || val === undefined) ? "" : String(val), ownerId);
         written++;
         if (String(kx || "").indexOf("tariffs_") === 0) {
@@ -1600,12 +1642,16 @@
 
   function _replaceServerDumpRuntime(ownerId, envType, dumpObj, cacheWarning) {
     __serverDumpRuntime = null;
-    if (!cacheWarning || !dumpObj || typeof dumpObj !== "object" || Array.isArray(dumpObj)) return;
+    if (!cacheWarning || !dumpObj || typeof dumpObj !== "object" || Array.isArray(dumpObj)) {
+      _logPaymentsDumpBoundary("after_runtime_replace", {}, ownerId, false, false);
+      return;
+    }
     __serverDumpRuntime = {
       ownerId: String(ownerId || ""),
       envType: String(envType || ""),
       data: dumpObj
     };
+    _logPaymentsDumpBoundary("after_runtime_replace", __serverDumpRuntime.data, ownerId, __serverDumpRuntime.data === dumpObj, __serverDumpRuntime.data[PAYMENTS_DUMP_BOUNDARY_KEY] === dumpObj[PAYMENTS_DUMP_BOUNDARY_KEY]);
   }
 
   function _readServerDumpRuntimeValue(key, ownerId) {
@@ -1724,6 +1770,10 @@
     var txt = await r.text();
     var data;
     try { data = JSON.parse(txt); } catch (e) { data = null; }
+    if (String(url || "").indexOf("/api/store_dump") === 0) {
+      var parsedResponseData = data && data.data;
+      _logPaymentsDumpBoundary("http_parsed_response", parsedResponseData, data && data.owner, null, null);
+    }
     return { okHttp: r.ok, status: r.status, data: data, text: txt };
   }
 
@@ -2066,7 +2116,9 @@
           });
         }
 
-        var data = (resDump.data && Object.prototype.hasOwnProperty.call(resDump.data, "data")) ? resDump.data.data : null;
+        var parsedResponseData = resDump.data && resDump.data.data;
+        var data = (resDump.data && Object.prototype.hasOwnProperty.call(resDump.data, "data")) ? parsedResponseData : null;
+        _logPaymentsDumpBoundary("assigned_dump_data", data, ownerId, parsedResponseData === data, !!data && data[PAYMENTS_DUMP_BOUNDARY_KEY] === parsedResponseData[PAYMENTS_DUMP_BOUNDARY_KEY]);
         if (!data || typeof data !== "object" || Array.isArray(data)) {
           _setUIState({
             server: { status: "online", checkedAt: _nowISO(), message: "" },
@@ -2105,6 +2157,7 @@
           dumpItemCount: dumpItemCount,
           failedStorageKey: replaced.failedStorageKey
         }) : null;
+        _logPaymentsDumpBoundary("before_runtime_replace", data, ownerId, true, true);
         _replaceServerDumpRuntime(ownerId, responseEnv, data, cacheWarning);
 
         var applied = replaced.written;

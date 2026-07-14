@@ -5272,9 +5272,39 @@ def store_dump():
         ),
         {"owner": GLOBAL_OWNER},
     ).all()
+    diagnostic_key = "payments_uid_mqmevxsl_wlr604"
+
+    def _payments_dump_boundary(stage, container):
+        try:
+            present = diagnostic_key in container
+            value = container.get(diagnostic_key) if present else None
+            raw_length = len(value) if isinstance(value, str) else len(json.dumps(value))
+            parsed = value
+            if isinstance(value, str):
+                try:
+                    parsed = json.loads(value)
+                except Exception:
+                    parsed = None
+            app.logger.info(
+                "[PAYMENTS_DUMP_BOUNDARY] %s",
+                {
+                    "stage": stage,
+                    "key": diagnostic_key,
+                    "present": present,
+                    "rawLength": raw_length,
+                    "rowsCount": len(parsed) if isinstance(parsed, list) else None,
+                    "isLiteralEmptyArray": (isinstance(value, str) and value.strip() == "[]") or (isinstance(value, list) and len(value) == 0),
+                    "ownerId_or_scope": str(owner),
+                },
+            )
+        except Exception:
+            pass
+
     data = {r[0]: r[1] for r in rows_owner}
+    _payments_dump_boundary("backend_kv_before_response", data)
     for r in rows_global:
         data[r[0]] = r[1]
+    _payments_dump_boundary("backend_response_data_before_return", data)
     _sync_log("dump", owner, server_owner=owner, client_owner_hint=client_owner_hint, keys=len(data), status="ok")
     return jsonify(ok=True, owner=owner, env_type=ENV_TYPE, data=data)
 
