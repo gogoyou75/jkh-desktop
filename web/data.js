@@ -2008,6 +2008,22 @@
       ledgerVersion: result && result.ledgerVersion,
       inputHash: result && result.inputHash
     });
+    try {
+      console.log("[card-snapshot][rows-by-id-boundary]", {
+        uid: uid,
+        finalRowsLength: result && Array.isArray(result.finalRows) ? result.finalRows.length : 0,
+        rowsByIdCount: _cardSnapshotRowsByIdCount(rowsById),
+        calculatedRowsByIdCount: _cardSnapshotRowsByIdCount(resultRowsById),
+        runtimeRowsByIdCount: _cardSnapshotRowsByIdCount(runtimeCache && runtimeCache.rowsById),
+        snapshotRowsCount: 0,
+        snapshotRowsByIdCount: 0,
+        rowsByIdSource: rowsByIdSource || "none",
+        finalRowsVerified: finalRows.ok === true,
+        finalRowsReason: String(finalRows.reason || "OK"),
+        caller: "buildCardSnapshotFromCurrentResult",
+        timestamp: new Date().toISOString()
+      });
+    } catch (eRowsByIdBoundary) {}
     if (result && Array.isArray(result.finalRows) && !finalRows.ok) {
       try { console.warn("[card-snapshot][build-blocked-final-rows]", { uid: uid, reason: finalRows.reason }); } catch (eFinalRowsLog) {}
       return null;
@@ -2028,6 +2044,20 @@
       return copy;
     });
     var snapshotRowsById = _cardSnapshotRowsById(rows);
+    try {
+      console.log("[card-snapshot][rows-by-id-materialized]", {
+        uid: uid,
+        finalRowsLength: result && Array.isArray(result.finalRows) ? result.finalRows.length : 0,
+        rowsByIdCount: _cardSnapshotRowsByIdCount(rowsById),
+        calculatedRowsByIdCount: _cardSnapshotRowsByIdCount(resultRowsById),
+        runtimeRowsByIdCount: _cardSnapshotRowsByIdCount(runtimeCache && runtimeCache.rowsById),
+        snapshotRowsCount: rows.length,
+        snapshotRowsByIdCount: _cardSnapshotRowsByIdCount(snapshotRowsById),
+        rowsByIdSource: rowsByIdSource || "none",
+        caller: "buildCardSnapshotFromCurrentResult",
+        timestamp: new Date().toISOString()
+      });
+    } catch (eRowsByIdMaterialized) {}
     _emitActiveFullRecalcHeartbeat("build-card-snapshot", true);
     var stats = _cardSnapshotLedgerStats(rows);
     var rowsByIdCount = _cardSnapshotRowsByIdCount(snapshotRowsById);
