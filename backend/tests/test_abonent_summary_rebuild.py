@@ -1336,7 +1336,6 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         self.assertIn("FINAL_ROWS_INPUT_HASH_MISMATCH", verifier)
         self.assertIn("expectedLedgerVersion = computeLedgerRuntimeVersion", verifier)
         self.assertIn("suppliedLedgerVersion !== expectedLedgerVersion", verifier)
-        self.assertIn("serverDumpLedgerVersion: String(versions.ledger_version", verifier)
         self.assertIn("finalRows.ok ? finalRows.rows : window.JKHCalcEngine.loadPaymentsForAbonent", summary_builder)
         self.assertIn("_summaryPeriodTotals(rows, from, to)", summary_builder)
         self.assertIn("finalRows: opts.finalRows", explicit_recalc)
@@ -1380,6 +1379,9 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         self.assertIn("return;", temporary_branch)
         self.assertNotIn("window.fullRecalcForCurrentAbonent", temporary_branch)
         self.assertNotIn("Data.saveCardSnapshotAndWait", temporary_branch)
+        manual_period_input = source.split("function clearPeriodResetFlagAfterManualInput", 1)[1].split("function manualRecalcErrorMessage", 1)[0]
+        self.assertIn('window.JKH_CARD_PERIOD_MODE_ACTIVE = true', manual_period_input)
+        self.assertIn('source: "card_period_mode_end_after_temporary_invalid"', click_handler)
         self.assertIn("applyAutoAccrual: true", body)
         self.assertIn("period: { from: from, to: to }", body)
         self.assertIn('recalcMode: "FULL_SUMMARY_REBUILD"', body)

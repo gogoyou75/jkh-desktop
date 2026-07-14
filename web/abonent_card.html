@@ -4398,6 +4398,7 @@ function bindCalcButtons(){
     }
 
     function clearPeriodResetFlagAfterManualInput(eventName){
+        window.JKH_CARD_PERIOD_MODE_ACTIVE = true;
         if (window.__periodResetInProgress === true) {
             window.__periodResetInProgress = false;
             try {
@@ -4482,25 +4483,6 @@ function bindCalcButtons(){
         const prevText = runBtn.textContent;
         const fullSummaryUiBeforeRecalc = captureFullSummaryStatusUi();
         const clickMeta = getCalcPeriodStorageMeta();
-        try {
-            console.log("[recalc-mode-boundary]", {
-                uid: String(clickMeta.resolvedUid || ""),
-                account: String(currentAbonentId || ""),
-                buttonAction: "recalculate",
-                hasPeriod: hasValidPeriodInput,
-                periodFrom: from,
-                periodTo: to,
-                recalcForReportPeriod: recalcForReportPeriod,
-                temporaryCourtPeriod: recalcForReportPeriod,
-                cardPeriodModeActive: window.JKH_CARD_PERIOD_MODE_ACTIVE === true,
-                selectedCalculationMode: recalcForReportPeriod ? "temporary_court_period" : "FULL_SUMMARY_REBUILD",
-                willSaveFullSnapshot: !recalcForReportPeriod,
-                willRebuildAbonentSummary: !recalcForReportPeriod,
-                willCallVerifiedFinalRows: !recalcForReportPeriod,
-                caller: "abonent_card.recalculate_button",
-                timestamp: new Date().toISOString()
-            });
-        } catch (eRecalcModeBoundary) {}
         try {
             console.log("[full-recalc][click]", {
                 runId: recalcRunId,
@@ -5093,6 +5075,13 @@ function bindCalcButtons(){
                 try { console.log("[period-recalc][loading-cleared]", { fullStatusBefore: fullStatusBeforePeriod, fullStatusAfter: fullStatusAfterPeriod, periodStatus: periodStatusMessage }); } catch(eLoadingCleared) {}
                 logFullRecalcExit("TEMPORARY_PERIOD_CALC_DONE", "normal-return", "temporary-period-render", { ok: true, reason: "TEMPORARY_PERIOD_CALC_DONE" }, null);
                 endTemporaryCardPeriodMode({ abonentId: currentAbonentId, source: "card_period_mode_end_after_temporary_success" });
+                return;
+            }
+
+            if (recalcForReportPeriod) {
+                alert("Укажите корректную дату начала и окончания периода расчёта.");
+                logFullRecalcExit("PERIOD_INVALID", "early-return", "temporary-period-invalid", { ok: false, reason: "PERIOD_INVALID" }, null);
+                endTemporaryCardPeriodMode({ abonentId: currentAbonentId, source: "card_period_mode_end_after_temporary_invalid" });
                 return;
             }
 
