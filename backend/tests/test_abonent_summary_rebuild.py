@@ -1340,6 +1340,8 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         self.assertIn("ledgerVersion: opts.ledgerVersion", explicit_recalc)
         self.assertIn("inputHash: opts.inputHash", explicit_recalc)
         self.assertIn("finalRows: runtimeRows", full_recalc)
+        self.assertIn('typeof window.getAbonentTechId === "function" && window.getAbonentTechId(id)', full_recalc)
+        self.assertNotIn("Data.getAbonentTechId", full_recalc)
         self.assertIn("ledgerVersion: ledgerVersion", full_recalc)
         self.assertIn("inputHash: String(financialVersions", full_recalc)
         self.assertIn("finalRows: freshRuntimeRows", full_recalc)

@@ -7196,7 +7196,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
           periodActive: !!explicitReportPeriod,
           recalcMode: recalcMode,
           finalRows: runtimeRows,
-          uid: String((window.Data && typeof Data.getAbonentTechId === "function" && Data.getAbonentTechId(id)) || ""),
+          uid: String((typeof window.getAbonentTechId === "function" && window.getAbonentTechId(id)) || ""),
           ledgerVersion: ledgerVersion,
           inputHash: String(financialVersions && financialVersions.input_hash || ""),
           recalcRunId: runId,
