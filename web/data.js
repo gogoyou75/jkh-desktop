@@ -1907,8 +1907,22 @@
     return rowsById;
   }
 
+  function _snapshotRowAccruedPaidTotals(rows) {
+    var accrued = 0;
+    var paid = 0;
+    (Array.isArray(rows) ? rows : []).forEach(function(row) {
+      accrued += _summaryNumber(row && row.accrued);
+      paid += _summaryNumber(row && row.paid);
+    });
+    return {
+      accrued: Math.round(accrued * 100) / 100,
+      paid: Math.round(paid * 100) / 100
+    };
+  }
+
   function _resolveCardSnapshotCanonicalTotals(summary, rows) {
     var source = summary && summary.totals && typeof summary.totals === "object" && !Array.isArray(summary.totals) ? summary.totals : null;
+    var rowTotals = _snapshotRowAccruedPaidTotals(rows);
     var last = null;
     (Array.isArray(rows) ? rows : []).forEach(function(row) {
       var principal = Number(row && row.pay_main);
@@ -1921,20 +1935,27 @@
     var sourcePenalty = Number(source && source.penalty);
     var sourceAccrued = Number(source && source.accrued);
     var sourcePaid = Number(source && source.paid);
-    var sourceIsFinite = source && Number.isFinite(sourceTotal) && Number.isFinite(sourcePrincipal) && Number.isFinite(sourcePenalty) && Number.isFinite(sourceAccrued) && Number.isFinite(sourcePaid);
+    var sourceDebtIsFinite = source && Number.isFinite(sourceTotal) && Number.isFinite(sourcePrincipal) && Number.isFinite(sourcePenalty);
     var finalNonZero = last && (Math.abs(last.principal) > 0.0000001 || Math.abs(last.penalty) > 0.0000001 || Math.abs(last.total) > 0.0000001);
-    var sourceAllZero = sourceIsFinite && Math.abs(sourceTotal) <= 0.0000001 && Math.abs(sourcePrincipal) <= 0.0000001 && Math.abs(sourcePenalty) <= 0.0000001;
-    if (sourceIsFinite && !(sourceAllZero && finalNonZero)) return { ok: true, totals: deepClone(source), source: "summary.totals" };
-    if (!sourceIsFinite || !last) return { ok: false, reason: "CANONICAL_TOTALS_UNAVAILABLE" };
+    var sourceDebtAllZero = sourceDebtIsFinite && Math.abs(sourceTotal) <= 0.0000001 && Math.abs(sourcePrincipal) <= 0.0000001 && Math.abs(sourcePenalty) <= 0.0000001;
+    var sourceAccruedStale = !Number.isFinite(sourceAccrued) || (Math.abs(sourceAccrued) <= 0.0000001 && Math.abs(rowTotals.accrued) > 0.0000001);
+    var sourcePaidStale = !Number.isFinite(sourcePaid) || (Math.abs(sourcePaid) <= 0.0000001 && Math.abs(rowTotals.paid) > 0.0000001);
+    if (!last) return { ok: false, reason: "CANONICAL_TOTALS_UNAVAILABLE" };
     var totals = Object.assign({}, source || {});
-    totals.principal = last.principal;
-    totals.debt = last.total;
-    totals.penalty = last.penalty;
-    totals.total = last.total;
-    totals.balance = last.total;
-    totals.total_debt = last.total;
-    totals.total_penalty = last.penalty;
-    return { ok: true, totals: totals, source: "final_computed_snapshot_row" };
+    if (!sourceDebtIsFinite || (sourceDebtAllZero && finalNonZero)) {
+      totals.principal = last.principal;
+      totals.debt = last.total;
+      totals.penalty = last.penalty;
+      totals.total = last.total;
+      totals.balance = last.total;
+      totals.total_debt = last.total;
+      totals.total_penalty = last.penalty;
+    }
+    if (sourceAccruedStale) totals.accrued = rowTotals.accrued;
+    if (sourcePaidStale) totals.paid = rowTotals.paid;
+    totals.total_accrued = totals.accrued;
+    totals.total_paid = totals.paid;
+    return { ok: true, totals: totals, source: (!sourceDebtIsFinite || (sourceDebtAllZero && finalNonZero) || sourceAccruedStale || sourcePaidStale) ? "computed_snapshot_rows" : "summary.totals" };
   }
 
   function buildCardSnapshotFromCurrentResult(abonentOrId, result, options) {

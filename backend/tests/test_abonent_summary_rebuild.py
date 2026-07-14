@@ -1298,14 +1298,27 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         data_source = self._find_repo_file("web", "data.js").read_text(encoding="utf-8")
         builder = data_source.split("function buildCardSnapshotFromCurrentResult", 1)[1].split("function diagnoseCardSnapshotBuildFromCurrentResult", 1)[0]
         self.assertIn("_resolveCardSnapshotCanonicalTotals(summary, rows)", builder)
-        self.assertIn("final_computed_snapshot_row", data_source)
+        aggregation = data_source.split("function _snapshotRowAccruedPaidTotals", 1)[1].split("function _resolveCardSnapshotCanonicalTotals", 1)[0]
+        resolver = data_source.split("function _resolveCardSnapshotCanonicalTotals", 1)[1].split("function buildCardSnapshotFromCurrentResult", 1)[0]
+        self.assertIn("_snapshotRowAccruedPaidTotals(rows)", resolver)
+        self.assertIn("accrued += _summaryNumber(row && row.accrued)", aggregation)
+        self.assertIn("paid += _summaryNumber(row && row.paid)", aggregation)
+        self.assertIn("Math.round(accrued * 100) / 100", aggregation)
+        self.assertIn("Math.round(paid * 100) / 100", aggregation)
+        self.assertIn("sourceAccruedStale", resolver)
+        self.assertIn("sourcePaidStale", resolver)
+        self.assertIn("totals.accrued = rowTotals.accrued", resolver)
+        self.assertIn("totals.paid = rowTotals.paid", resolver)
+        self.assertIn("totals.total_accrued = totals.accrued", resolver)
+        self.assertIn("totals.total_paid = totals.paid", resolver)
         self.assertIn("totals.principal = last.principal", data_source)
         self.assertIn("totals.debt = last.total", data_source)
         self.assertIn("totals.penalty = last.penalty", data_source)
         self.assertIn("totals.total = last.total", data_source)
         self.assertIn("totals.total_debt = last.total", data_source)
-        self.assertIn("sourceAccrued", data_source)
-        self.assertIn("sourcePaid", data_source)
+        self.assertNotIn("row.pay_main", aggregation)
+        self.assertNotIn("row.pay_penalty", aggregation)
+        self.assertNotIn("row.total", aggregation)
         self.assertIn("CANONICAL_TOTALS_UNAVAILABLE", data_source)
 
     def test_calc_run_button_renders_summary_returned_by_manual_recalc(self):
