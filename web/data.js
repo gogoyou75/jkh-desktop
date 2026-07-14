@@ -5631,9 +5631,13 @@
     var suppliedUid = String(opts.uid || "").trim();
     if (!isValidUid(uid) || suppliedUid !== uid) return { ok: false, reason: "FINAL_ROWS_UID_MISMATCH" };
     var versions = computeFinancialInputVersions(abonent || uid);
+    var expectedLedgerVersion = computeLedgerRuntimeVersion(abonent || uid);
     var suppliedLedgerVersion = String(opts.ledgerVersion || opts.ledger_version || "");
     var suppliedInputHash = String(opts.inputHash || opts.input_hash || "");
-    if (!suppliedLedgerVersion || suppliedLedgerVersion !== String(versions.ledger_version || "")) return { ok: false, reason: "FINAL_ROWS_LEDGER_VERSION_MISMATCH" };
+    if (!suppliedLedgerVersion || suppliedLedgerVersion !== expectedLedgerVersion) {
+      try { console.warn("[summary][final-rows-ledger-version-mismatch]", { expectedLedgerVersion: expectedLedgerVersion, actualLedgerVersion: suppliedLedgerVersion, finalRowsLedgerVersion: suppliedLedgerVersion, canonicalLedgerVersion: expectedLedgerVersion, runtimeLedgerVersion: expectedLedgerVersion, serverDumpLedgerVersion: String(versions.ledger_version || "") }); } catch (eVersionLog) {}
+      return { ok: false, reason: "FINAL_ROWS_LEDGER_VERSION_MISMATCH" };
+    }
     if (!suppliedInputHash || suppliedInputHash !== String(versions.input_hash || "")) return { ok: false, reason: "FINAL_ROWS_INPUT_HASH_MISMATCH" };
     return { ok: true, rows: _cloneLedgerRows(opts.finalRows), versions: versions };
   }
