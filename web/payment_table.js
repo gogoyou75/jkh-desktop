@@ -6918,6 +6918,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
     }
     const opts = options && typeof options === "object" ? options : {};
     const id = String(getAbonentId() || "");
+    const canonicalUid = String((typeof window.getAbonentTechId === "function" && window.getAbonentTechId(id)) || "");
     const runId = fullRecalcRunIdFromOptions(opts);
     startReadinessWriteSequence(runId);
     const runningFullRecalc = currentFullRecalcRunState();
@@ -7196,7 +7197,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
           periodActive: !!explicitReportPeriod,
           recalcMode: recalcMode,
           finalRows: runtimeRows,
-          uid: String((typeof window.getAbonentTechId === "function" && window.getAbonentTechId(id)) || ""),
+          uid: canonicalUid,
           ledgerVersion: ledgerVersion,
           inputHash: String(financialVersions && financialVersions.input_hash || ""),
           recalcRunId: runId,
@@ -7312,6 +7313,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
         summary_reason: summaryResult && (summaryResult.summary_reason || summaryResult.reason) || "",
         summary: summary,
         summary_save: summaryResult,
+        uid: canonicalUid,
         finalRows: freshRuntimeRows,
         rowsById: freshRowsById,
         ledgerVersion: freshLedgerVersion,

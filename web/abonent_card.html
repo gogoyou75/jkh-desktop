@@ -5247,18 +5247,6 @@ function bindCalcButtons(){
                         return;
                     }
                     const snapshotRowsById = snapshot && snapshot.rowsById && typeof snapshot.rowsById === "object" && !Array.isArray(snapshot.rowsById) ? snapshot.rowsById : null;
-                    try {
-                        console.log("[card-snapshot][empty-rows-by-id-boundary]", {
-                            finalRowsLength: recalcResult && Array.isArray(recalcResult.finalRows) ? recalcResult.finalRows.length : 0,
-                            rowsByIdCount: recalcResult && recalcResult.rowsById && typeof recalcResult.rowsById === "object" && !Array.isArray(recalcResult.rowsById) ? Object.keys(recalcResult.rowsById).length : 0,
-                            calculatedRowsByIdCount: recalcResult && recalcResult.rowsById && typeof recalcResult.rowsById === "object" && !Array.isArray(recalcResult.rowsById) ? Object.keys(recalcResult.rowsById).length : 0,
-                            runtimeRowsByIdCount: typeof window.__getPaymentTableComputedRowsSnapshot === "function" && window.__getPaymentTableComputedRowsSnapshot() && window.__getPaymentTableComputedRowsSnapshot().rowsById ? Object.keys(window.__getPaymentTableComputedRowsSnapshot().rowsById).length : 0,
-                            snapshotRowsCount: snapshot && Array.isArray(snapshot.rows) ? snapshot.rows.length : 0,
-                            snapshotRowsByIdCount: snapshotRowsById ? Object.keys(snapshotRowsById).length : 0,
-                            caller: "abonent_card.manualFullRecalc.before_EMPTY_ROWS_BY_ID",
-                            timestamp: new Date().toISOString()
-                        });
-                    } catch (eEmptyRowsBoundary) {}
                     if (!snapshot || !snapshotRowsById || !Object.keys(snapshotRowsById).length) {
                         fullRecalcExitSnapshotReason = "EMPTY_ROWS_BY_ID";
                         try {
