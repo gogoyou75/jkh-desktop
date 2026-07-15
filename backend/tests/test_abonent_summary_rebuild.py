@@ -1516,10 +1516,12 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         load_impl = payment_source.split("async function loadPaymentTableImpl()", 1)[1].split("async function loadPaymentTable(reason)", 1)[0]
 
         self.assertIn("isReadonlyNoRecalcMode()", passive_state)
-        self.assertIn('state.passiveSnapshotRestore !== true', passive_state)
-        self.assertIn('String(state.source || "") !== "canonical_backend_snapshot"', passive_state)
-        self.assertIn("state.periodActive === true", passive_state)
-        self.assertIn("stats.hasDebtTotals && stats.hasPenaltyTotals && stats.hasTotalTotals", passive_state)
+        self.assertIn("getCanonicalSnapshotCalculatedRenderStateForEmptyLedger", passive_state)
+        canonical_state = payment_source.split("function inspectCanonicalSnapshotCalculatedRenderStateForEmptyLedger", 1)[1].split("function getCanonicalSnapshotCalculatedRenderStateForEmptyLedger", 1)[0]
+        self.assertIn('state.passiveSnapshotRestore !== true', canonical_state)
+        self.assertIn('String(state.source || "") !== "canonical_backend_snapshot"', canonical_state)
+        self.assertIn("state.periodActive === true", canonical_state)
+        self.assertIn("stats.hasDebtTotals && stats.hasPenaltyTotals && stats.hasTotalTotals", canonical_state)
         self.assertIn("Array.isArray(arr) && arr.length === 0 && getPassiveSnapshotCalculatedRenderStateForEmptyLedger()", load_impl)
         self.assertIn('renderCalculatedRowsDirect("late-empty-ledger-preserve-snapshot")', load_impl)
         self.assertIn('snapshotAttemptReason: "PASSIVE_SNAPSHOT_RENDER_STATE"', load_impl)

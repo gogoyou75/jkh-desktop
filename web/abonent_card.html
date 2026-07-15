@@ -5520,6 +5520,22 @@ function bindCalcButtons(){
             }
         }
         const meta = getCalcPeriodStorageMeta();
+        let temporarySpravkaPayload = null;
+        if (window.JKH_CARD_PERIOD_MODE_ACTIVE === true && from && to && isValidPeriod(from, to) && meta.resolvedUid && typeof window.__getPaymentTableComputedRowsSnapshot === "function") {
+            try {
+                const runtime = window.__getPaymentTableComputedRowsSnapshot();
+                const rows = runtime && Array.isArray(runtime.rows) ? runtime.rows : [];
+                const rowsById = runtime && runtime.rowsById && typeof runtime.rowsById === "object" ? runtime.rowsById : {};
+                if (runtime && runtime.periodActive === true && runtime.period && String(runtime.period.from || "") === String(from) && String(runtime.period.to || "") === String(to) && rows.length && Object.keys(rowsById).length) {
+                    const payload = { schemaVersion: 1, uid: String(meta.resolvedUid), abonentId: String(id), from: String(from), to: String(to), ledgerVersion: String(runtime.ledgerVersion || ""), runtimeSignature: String(runtime.runtimeSignature || ""), rows: rows, rowsById: rowsById, createdAt: Date.now(), source: "temporary_court_period" };
+                    const raw = JSON.stringify(payload);
+                    let hash = 2166136261; for (let i = 0; i < raw.length; i += 1) { hash ^= raw.charCodeAt(i); hash = Math.imul(hash, 16777619); }
+                    payload.integrity = String(hash >>> 0);
+                    sessionStorage.setItem("temporary_spravka_payload_" + payload.uid, JSON.stringify(payload));
+                    temporarySpravkaPayload = payload;
+                }
+            } catch(eTemporaryPayload) { console.warn("[spravka][temporary-payload-create-failed]", eTemporaryPayload); }
+        }
         // ✅ FIX: forward active db key (if present) to reports page
         // to keep correct data when multiple bases exist in localStorage.
         let dbKey = "";
@@ -5547,7 +5563,7 @@ function bindCalcButtons(){
                 to: to || ""
             });
         } catch (e) {}
-        let href = "reports.html?abonent=" + encodeURIComponent(id);
+        let href = (temporarySpravkaPayload ? "spravka_sud.html?temporary_court_period=1&abonent=" : "reports.html?abonent=") + encodeURIComponent(id);
         if (id) href += "&account=" + encodeURIComponent(id);
         if (meta.resolvedUid) href += "&uid=" + encodeURIComponent(meta.resolvedUid);
         if (from && to && isValidPeriod(from, to)) href += "&from=" + encodeURIComponent(from) + "&to=" + encodeURIComponent(to);
