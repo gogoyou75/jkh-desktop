@@ -524,9 +524,9 @@
     return true;
   }
 
-  function getPassiveSnapshotCalculatedRenderStateForEmptyLedger(){
+  function getCanonicalSnapshotCalculatedRenderStateForEmptyLedger(){
     const state = __paymentTableCalculatedRenderState;
-    if (!isReadonlyNoRecalcMode() || !state || typeof state !== "object") return null;
+    if (!state || typeof state !== "object") return null;
     if (state.passiveSnapshotRestore !== true || String(state.source || "") !== "canonical_backend_snapshot") return null;
     if (Date.now() - Number(state.createdAt || 0) > 10 * 60 * 1000) return null;
     const canonicalUid = resolveCanonicalAccountUidForCalculatedRender();
@@ -537,6 +537,26 @@
     const stats = computedRowsStats(rows, null);
     if (!rows.length || !Object.keys(rowsById).length || !(stats.hasDebtTotals && stats.hasPenaltyTotals && stats.hasTotalTotals)) return null;
     return state;
+  }
+
+  function getPassiveSnapshotCalculatedRenderStateForEmptyLedger(){
+    if (!isReadonlyNoRecalcMode()) return null;
+    return getCanonicalSnapshotCalculatedRenderStateForEmptyLedger();
+  }
+
+  function getTemporaryPeriodCanonicalSnapshotRenderStateForEmptyLedger(){
+    if (!isTemporaryCourtPeriodMode()) return null;
+    return getCanonicalSnapshotCalculatedRenderStateForEmptyLedger();
+  }
+
+  function materializeTemporaryPeriodCanonicalSnapshotRowsForEmptyLedger(state, selectedPeriod){
+    if (!state || typeof state !== "object" || !selectedPeriod) return { rows: [], rowsById: {} };
+    const sourceRows = mergeComputedRowsIntoViewRows(state.rows, state.rowsById);
+    const rows = applyResponsibilityRangeToView(applyCalcFilter(sourceRows, true, selectedPeriod)).slice();
+    return {
+      rows: rows,
+      rowsById: normalizeComputedRowsByIdForSnapshot(rows, state.rowsById)
+    };
   }
 
   function getMatchingCalculatedRenderRows(ledgerVersion, periodActive, selectedPeriod, runtimeSignatureValue){
@@ -790,12 +810,17 @@
         setPaymentTableCalculatedRenderState: setPaymentTableCalculatedRenderState,
         applyFreshCalculatedRowsForRender: applyFreshCalculatedRowsForRender,
         getPassiveSnapshotCalculatedRenderStateForEmptyLedger: getPassiveSnapshotCalculatedRenderStateForEmptyLedger,
+        getTemporaryPeriodCanonicalSnapshotRenderStateForEmptyLedger: getTemporaryPeriodCanonicalSnapshotRenderStateForEmptyLedger,
+        materializeTemporaryPeriodCanonicalSnapshotRowsForEmptyLedger: materializeTemporaryPeriodCanonicalSnapshotRowsForEmptyLedger,
         setPaymentTableModeForTest: function(mode){ __paymentTableMode = String(mode || "default"); },
         expireCalculatedRenderState: function(){
           if (__paymentTableCalculatedRenderState) __paymentTableCalculatedRenderState.createdAt = 0;
         },
         setCalculatedRenderStateForTest: function(state){
           __paymentTableCalculatedRenderState = state && typeof state === "object" ? state : null;
+        },
+        getCalculatedRenderStateForTest: function(){
+          return __paymentTableCalculatedRenderState;
         }
       });
     }
@@ -5624,6 +5649,7 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
         perfLog('load-ledger', loadStartedAt);
       }
 
+      let temporaryCanonicalSnapshotState = null;
       if (Array.isArray(arr) && arr.length === 0 && getPassiveSnapshotCalculatedRenderStateForEmptyLedger()) {
         try {
           console.log("[reload-chain][rows-apply-result]", {
@@ -5638,6 +5664,9 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
           });
         } catch(ePassiveSnapshotLog) {}
         if (await renderCalculatedRowsDirect("late-empty-ledger-preserve-snapshot")) return;
+      }
+      if (Array.isArray(arr) && arr.length === 0) {
+        temporaryCanonicalSnapshotState = getTemporaryPeriodCanonicalSnapshotRenderStateForEmptyLedger();
       }
 
       const periodActive = isCalcPeriodActive();
@@ -5665,8 +5694,31 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
         perfLog('normalize', normalizeStartedAt);
       }
 
-      const displayRows = arr.concat(draftRows);
-      const view = applyResponsibilityRangeToView(applyCalcFilter(displayRows, periodActive, selectedPeriod)).slice();
+      // A temporary court-period render must not discard a valid canonical
+      // snapshot merely because the runtime ledger has not been hydrated.
+      // This is display-only: the canonical calculated state is never replaced.
+      const temporaryCanonicalRows = temporaryCanonicalSnapshotState
+        ? materializeTemporaryPeriodCanonicalSnapshotRowsForEmptyLedger(temporaryCanonicalSnapshotState, selectedPeriod)
+        : null;
+      const displayRows = temporaryCanonicalRows
+        ? temporaryCanonicalRows.rows
+        : arr.concat(draftRows);
+      const view = temporaryCanonicalRows
+        ? temporaryCanonicalRows.rows.slice()
+        : applyResponsibilityRangeToView(applyCalcFilter(displayRows, periodActive, selectedPeriod)).slice();
+      if (temporaryCanonicalSnapshotState && isTemporaryCourtPeriodMode() && periodActive && selectedPeriod && view.length === 0) {
+        const statusBox = qs("#paymentTableStatus") || qs("#paymentStatus") || qs("#paymentsStatus");
+        if (statusBox) statusBox.textContent = "За выбранный период нет строк; показана предыдущая таблица.";
+        try {
+          console.log("[period-recalc][empty-period-preserve-canonical-table]", {
+            abonentId: String(getAbonentId() || ""),
+            from: String(selectedPeriod.from || ""),
+            to: String(selectedPeriod.to || ""),
+            source: "canonical_backend_snapshot"
+          });
+        } catch(eTemporaryEmptyLog) {}
+        return;
+      }
       if (periodActive && selectedPeriod) {
         try {
           console.log("[payment-table][period-filter-applied-on-load]", {

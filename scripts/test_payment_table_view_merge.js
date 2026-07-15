@@ -60,10 +60,13 @@ recordPaymentRenderRegression("render", { rowCount: 0, ledgerRowsCount: 0, reaso
 const renderRegression = context.window.__getPaymentRenderRegressionSequence();
 assert.strictEqual(renderRegression.firstZeroReported, true);
 assert.strictEqual(renderRegression.events[renderRegression.events.length - 1].caller, "test-late-caller");
-const { setPaymentTableCalculatedRenderState, applyFreshCalculatedRowsForRender, getPassiveSnapshotCalculatedRenderStateForEmptyLedger, setPaymentTableModeForTest } = context.window.__paymentTableTestHooks;
+const { setPaymentTableCalculatedRenderState, applyFreshCalculatedRowsForRender, getPassiveSnapshotCalculatedRenderStateForEmptyLedger, getTemporaryPeriodCanonicalSnapshotRenderStateForEmptyLedger, materializeTemporaryPeriodCanonicalSnapshotRowsForEmptyLedger, getCalculatedRenderStateForTest, setPaymentTableModeForTest } = context.window.__paymentTableTestHooks;
 assert.strictEqual(typeof setPaymentTableCalculatedRenderState, "function");
 assert.strictEqual(typeof applyFreshCalculatedRowsForRender, "function");
 assert.strictEqual(typeof getPassiveSnapshotCalculatedRenderStateForEmptyLedger, "function");
+assert.strictEqual(typeof getTemporaryPeriodCanonicalSnapshotRenderStateForEmptyLedger, "function");
+assert.strictEqual(typeof materializeTemporaryPeriodCanonicalSnapshotRowsForEmptyLedger, "function");
+assert.strictEqual(typeof getCalculatedRenderStateForTest, "function");
 assert.strictEqual(typeof setPaymentTableModeForTest, "function");
 const {
   readinessRegressionState,
@@ -291,6 +294,44 @@ assert.strictEqual(setPaymentTableCalculatedRenderState(canonicalUidRows, canoni
 }), true);
 assert.strictEqual(getPassiveSnapshotCalculatedRenderStateForEmptyLedger(), null, "a later non-snapshot calculated state must not use the passive-empty-ledger guard");
 setPaymentTableModeForTest("default");
+
+// Temporary period rendering may use only an already accepted canonical snapshot
+// when raw ledger hydration is empty; it must not turn that state into a period snapshot.
+const temporaryCanonicalRows = [
+  { id: "temporary-january", year: 2026, month: 1, type: "accrual", accrued: 100, paid: 0 },
+  { id: "temporary-february", year: 2026, month: 2, type: "accrual", accrued: 100, paid: 0 }
+];
+const temporaryCanonicalRowsById = {
+  "temporary-january": { pay_main: 100, pay_penalty: 10, total: 110 },
+  "temporary-february": { pay_main: 200, pay_penalty: 20, total: 220 }
+};
+assert.strictEqual(setPaymentTableCalculatedRenderState(temporaryCanonicalRows, temporaryCanonicalRowsById, {
+  uid: "uid_test_1009", ledgerVersion: "canonical-ledger", runtimeSignature: "canonical-signature", periodActive: false,
+  source: "canonical_backend_snapshot", passiveSnapshotRestore: true
+}), true);
+setPaymentTableModeForTest("temporary_court_period");
+const temporaryCanonicalState = getTemporaryPeriodCanonicalSnapshotRenderStateForEmptyLedger();
+assert.ok(temporaryCanonicalState, "temporary mode must accept a valid canonical snapshot when raw ledger is empty");
+const temporaryRender = materializeTemporaryPeriodCanonicalSnapshotRowsForEmptyLedger(temporaryCanonicalState, { from: "2026-01-01", to: "2026-01-31" });
+assert.strictEqual(temporaryRender.rows.length, 1);
+assert.ok(Object.keys(temporaryRender.rowsById).length > 0, "temporary render must build rowsById from canonical rows");
+assert.strictEqual(getCalculatedRenderStateForTest(), temporaryCanonicalState, "temporary render must not replace canonical snapshot state");
+const emptyTemporaryRender = materializeTemporaryPeriodCanonicalSnapshotRowsForEmptyLedger(temporaryCanonicalState, { from: "2026-03-01", to: "2026-03-31" });
+assert.strictEqual(emptyTemporaryRender.rows.length, 0, "a period with no canonical rows must be detectable before DOM replacement");
+assert.strictEqual(Object.keys(emptyTemporaryRender.rowsById).length, 0, "empty temporary periods must not produce an empty computed snapshot");
+setPaymentTableModeForTest("readonly_no_recalc");
+assert.strictEqual(getPassiveSnapshotCalculatedRenderStateForEmptyLedger(), temporaryCanonicalState, "reset must retain the canonical snapshot after a temporary period render");
+setPaymentTableModeForTest("default");
+assert.strictEqual(setPaymentTableCalculatedRenderState(temporaryCanonicalRows, temporaryCanonicalRowsById, {
+  uid: "uid_test_1009", ledgerVersion: "fresh-runtime-ledger", runtimeSignature: "fresh-runtime-signature", periodActive: false,
+  source: "manual_full_recalc", passiveSnapshotRestore: false
+}), true);
+const fullRecalcView = temporaryCanonicalRows.map((row) => Object.assign({}, row, { debt: 0, penalty: 0, total: 0 }));
+const fullRecalcResult = applyFreshCalculatedRowsForRender(fullRecalcView, {
+  ledgerVersion: "fresh-runtime-ledger", runtimeSignature: "fresh-runtime-signature", periodActive: false
+});
+assert.strictEqual(fullRecalcResult.applied, true, "full recalculation must still apply fresh runtime rows");
+assert.strictEqual(fullRecalcView[0].total, 110);
 
 const rejectCalculatedState = (meta, contextMeta, expectedReason) => {
   assert.strictEqual(setPaymentTableCalculatedRenderState(canonicalUidRows, canonicalUidRowsById, Object.assign({
