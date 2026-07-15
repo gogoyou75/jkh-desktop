@@ -2002,6 +2002,19 @@
         try { console.log("[card-snapshot][build-from-payment-table]", { uid: uid, abonentId: abonentId, rowsByIdCount: _cardSnapshotRowsByIdCount(rowsById), ledgerVersion: ledgerVersion }); } catch (eFallbackLog) {}
       }
     }
+    try {
+      console.log("[card-snapshot][final-rows-uid-boundary]", {
+        expectedUid: uid,
+        actualUid: String(result && result.uid || ""),
+        suppliedUid: String(result && result.uid || ""),
+        currentUid: String(abonent && (abonent.uid || abonent.account_uid || abonent.accountUid) || ""),
+        resolvedUid: uid,
+        recalcResultUid: String(result && result.uid || ""),
+        optionsUid: String(options && options.uid || ""),
+        caller: "buildCardSnapshotFromCurrentResult.before_verifiedFinalFullRecalcRows",
+        timestamp: new Date().toISOString()
+      });
+    } catch (eFinalRowsUidBoundary) {}
     var finalRows = _verifiedFinalFullRecalcRows(abonent || uid, {
       finalRows: result && result.finalRows,
       uid: result && result.uid,
