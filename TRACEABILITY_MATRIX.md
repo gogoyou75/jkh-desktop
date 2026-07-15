@@ -1,5 +1,14 @@
 # TRACEABILITY MATRIX
 
+## Full Recalc → Snapshot → Summary → Index
+
+| Rule | Spec | Code | Status | Notes |
+|---|---|---|---|---|
+| Full Recalc uses one final result for snapshot and summary | LOGIC_SPEC Full Recalc | web/payment_table.js / web/data.js / web/abonent_card.html | OK | The successful result carries canonical UID, final rows, `rowsById`, runtime ledger version, and input hash. |
+| Snapshot and summary verifier contract | LOGIC_SPEC Full Recalc | web/data.js | OK | UID, runtime `ledgerVersion`, and `inputHash` must match current canonical inputs before persistence. |
+| Index consumes saved summary only | LOGIC_SPEC Full Recalc | web/index.html / backend/app.py | OK | No index-side ledger read or recalculation. |
+| Temporary Period Calculation is non-persistent | LOGIC_SPEC Full Recalc | web/abonent_card.html / web/payment_table.js | OK | It renders runtime rows without writing ledger, full snapshot, summary, or index totals. |
+
 ## Stage 16 - Persisted Snapshot / Summary
 
 | Rule | Spec | Code | Status | Notes |

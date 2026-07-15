@@ -170,84 +170,20 @@
 
 
   var __projectRawRuntimeOverrides = {};
-  var __lastPaymentLedgerSourceDiagnostic = null;
-  var __paymentLedgerSourceDiagnosticKey = "payments_uid_mqmevxsl_wlr604";
-
-  function _paymentLedgerSourceRawMetadata(raw) {
-    var present = raw !== null && raw !== undefined;
-    var rawText = present ? String(raw) : "";
-    var rowsCount = 0;
-    if (rawText) {
-      try {
-        var parsed = JSON.parse(rawText);
-        rowsCount = Array.isArray(parsed) ? parsed.length : 0;
-      } catch (e) { }
-    }
-    return { present: present, rawLength: rawText.length, rowsCount: rowsCount };
-  }
-
-  function _recordPaymentLedgerSourceDiagnostic(key, overridePresent, overrideRaw, serverRuntime, localRead) {
-    if (String(key || "") !== __paymentLedgerSourceDiagnosticKey) return;
-    var runtime = serverRuntime && typeof serverRuntime === "object" ? serverRuntime : null;
-    var runtimeActive = !!(runtime && runtime.active === true);
-    var runtimePresent = !!(runtime && runtime.present === true);
-    var runtimeRaw = runtimePresent ? runtime.raw : null;
-    var local = localRead && localRead.read === true ? localRead.raw : null;
-    var winner = overridePresent ? "runtime_override" : (runtimeActive ? "server_dump_runtime" : ((local !== null && local !== undefined) ? "local_jkhstore" : "missing"));
-    var returnedRaw = overridePresent ? overrideRaw : (runtimeActive ? (runtimePresent ? runtimeRaw : null) : local);
-    var overrideMeta = _paymentLedgerSourceRawMetadata(overridePresent ? overrideRaw : null);
-    var runtimeMeta = _paymentLedgerSourceRawMetadata(runtimeRaw);
-    var localMeta = _paymentLedgerSourceRawMetadata(local);
-    var returnedMeta = _paymentLedgerSourceRawMetadata(returnedRaw);
-    var diagnostic = {
-      key: __paymentLedgerSourceDiagnosticKey,
-      winner: winner,
-      runtimeOverridePresent: overridePresent,
-      runtimeOverrideRawLength: overrideMeta.rawLength,
-      runtimeOverrideRowsCount: overrideMeta.rowsCount,
-      serverDumpActive: runtimeActive,
-      serverDumpPresent: runtimePresent,
-      serverDumpRawLength: runtimeMeta.rawLength,
-      serverDumpRowsCount: runtimeMeta.rowsCount,
-      localPresent: localMeta.present,
-      localRawLength: localMeta.rawLength,
-      localRowsCount: localMeta.rowsCount,
-      returnedRawLength: returnedMeta.rawLength,
-      returnedRowsCount: returnedMeta.rowsCount
-    };
-    __lastPaymentLedgerSourceDiagnostic = diagnostic;
-    try { console.log("[payment-ledger-source]", diagnostic); } catch (e) { }
-  }
 
   function _getProjectRaw(key) {
     var overrideKey = String(key || "");
-    var isPaymentLedgerDiagnosticKey = overrideKey === __paymentLedgerSourceDiagnosticKey;
     var overridePresent = !!(overrideKey && Object.prototype.hasOwnProperty.call(__projectRawRuntimeOverrides, overrideKey));
     var overrideRaw = overridePresent ? __projectRawRuntimeOverrides[overrideKey] : null;
-    var serverRuntime = null;
-    var serverRuntimeRead = false;
-    var localRead = { read: false, raw: null };
-    if (isPaymentLedgerDiagnosticKey) {
-      try {
-        if (window.JKHDataLoader && typeof window.JKHDataLoader.readServerDumpRuntimeValue === "function") {
-          serverRuntime = window.JKHDataLoader.readServerDumpRuntimeValue(key, _ownerId());
-          serverRuntimeRead = true;
-        }
-      } catch (eDiagnosticRuntime) { }
-      try {
-        if (window.JKHStore && typeof JKHStore.getRaw === "function") localRead = { read: true, raw: JKHStore.getRaw(key) };
-      } catch (eDiagnosticLocal) { }
-      _recordPaymentLedgerSourceDiagnostic(key, overridePresent, overrideRaw, serverRuntime, localRead);
-    }
     if (overridePresent) return overrideRaw;
     try {
       if (window.JKHDataLoader && typeof window.JKHDataLoader.readServerDumpRuntimeValue === "function") {
-        serverRuntime = isPaymentLedgerDiagnosticKey && serverRuntimeRead ? serverRuntime : window.JKHDataLoader.readServerDumpRuntimeValue(key, _ownerId());
+        var serverRuntime = window.JKHDataLoader.readServerDumpRuntimeValue(key, _ownerId());
         if (serverRuntime && serverRuntime.active === true) return serverRuntime.present === true ? serverRuntime.raw : null;
       }
     } catch (eRuntime) { }
     try {
-      if (window.JKHStore && typeof JKHStore.getRaw === "function") return isPaymentLedgerDiagnosticKey && localRead.read ? localRead.raw : JKHStore.getRaw(key);
+      if (window.JKHStore && typeof JKHStore.getRaw === "function") return JKHStore.getRaw(key);
     } catch (e) { }
     return null;
   }
@@ -8039,9 +7975,6 @@
 
 window.getCalcPeriodStorageKey = resolveCalcPeriodStorageKey;
 window.getCalcPeriodActiveStorageKey = resolveCalcPeriodActiveStorageKey;
-window.JKH_getLastPaymentLedgerSourceDiagnostic = function () {
-  return __lastPaymentLedgerSourceDiagnostic ? Object.assign({}, __lastPaymentLedgerSourceDiagnostic) : null;
-};
 window.Data = Data;
 window.JKHBoot?.markReady?.('data');
 

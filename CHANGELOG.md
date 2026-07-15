@@ -1,5 +1,12 @@
 # CHANGELOG
 
+## Full Recalc → Snapshot → Summary → Index stabilization
+
+- Completed investigation and restored the explicit full-recalculation chain: one verified final result produces the persisted card snapshot and the `abonent_summary` consumed by the index.
+- Full-recalc final rows are verified by canonical UID, runtime ledger version, and financial `input_hash` before snapshot/summary persistence.
+- Temporary period calculation remains display-only: it does not write the payment ledger, full card snapshot, `abonent_summary`, or index totals.
+- Removed investigation-only targeted payment dump/write diagnostics after successful manual verification.
+
 ## Stage 15.1
 
 - Added minimal persisted subscriber card snapshots under `card_snapshot_<uid>`.

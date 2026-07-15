@@ -1,5 +1,13 @@
 # LOGIC SPEC
 
+## Full Recalc and Temporary Period Calculation
+
+- Explicit Full Recalc produces one canonical final result: `uid`, structural final rows, `rowsById`, runtime `ledgerVersion`, and `inputHash`.
+- The same verified final result is the source for `card_snapshot_<uid>` and `abonent_summary`; the index reads only the persisted summary and never recalculates the ledger.
+- Snapshot/summary persistence validates canonical UID, runtime ledger version, and `inputHash`. Runtime-version is a full financial-input fingerprint; raw-ledger-version is a distinct storage-level hash and must not be compared as the same contract.
+- Temporary Period Calculation is runtime-only. It may render selected-period rows on the card or in a report, but must not persist a full snapshot, update `abonent_summary`, or affect index totals.
+- `EMPTY_ROWS_BY_ID` is a snapshot-build symptom. A valid full result must supply both structural final rows and calculated `rowsById` before snapshot materialization.
+
 ## Stage 15.1 — card snapshot
 
 - `calc_engine.js` remains the source of calculation logic and is not changed by Stage 15.1.
