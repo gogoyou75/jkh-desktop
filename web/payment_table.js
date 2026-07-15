@@ -524,19 +524,29 @@
     return true;
   }
 
-  function getCanonicalSnapshotCalculatedRenderStateForEmptyLedger(){
-    const state = __paymentTableCalculatedRenderState;
-    if (!state || typeof state !== "object") return null;
-    if (state.passiveSnapshotRestore !== true || String(state.source || "") !== "canonical_backend_snapshot") return null;
-    if (Date.now() - Number(state.createdAt || 0) > 10 * 60 * 1000) return null;
+  function inspectCanonicalSnapshotCalculatedRenderStateForEmptyLedger(state){
+    const out = { accepted: false, reason: "CALCULATED_RENDER_STATE_MISSING", state: null };
+    if (!state || typeof state !== "object") return out;
+    if (state.passiveSnapshotRestore !== true || String(state.source || "") !== "canonical_backend_snapshot") { out.reason = "NOT_SERVER_BACKED_CANONICAL_SNAPSHOT"; return out; }
+    if (Date.now() - Number(state.createdAt || 0) > 10 * 60 * 1000) { out.reason = "CANONICAL_SNAPSHOT_EXPIRED"; return out; }
     const canonicalUid = resolveCanonicalAccountUidForCalculatedRender();
-    if (!canonicalUid.ok || (state.uid && String(state.uid || "") !== canonicalUid.uid)) return null;
-    if (state.periodActive === true) return null;
+    if (!canonicalUid.ok) { out.reason = canonicalUid.reason || "CANONICAL_UID_UNAVAILABLE"; return out; }
+    if (state.uid && String(state.uid || "") !== canonicalUid.uid) { out.reason = "CANONICAL_UID_MISMATCH"; return out; }
+    if (state.periodActive === true) { out.reason = "CANONICAL_SNAPSHOT_PERIOD_NOT_ALLOWED"; return out; }
     const rowsById = state.rowsById && typeof state.rowsById === "object" && !Array.isArray(state.rowsById) ? state.rowsById : {};
     const rows = mergeComputedRowsIntoViewRows(state.rows, rowsById);
     const stats = computedRowsStats(rows, null);
-    if (!rows.length || !Object.keys(rowsById).length || !(stats.hasDebtTotals && stats.hasPenaltyTotals && stats.hasTotalTotals)) return null;
-    return state;
+    if (!rows.length || !Object.keys(rowsById).length || !(stats.hasDebtTotals && stats.hasPenaltyTotals && stats.hasTotalTotals)) { out.reason = "CANONICAL_SNAPSHOT_NOT_RENDERABLE"; return out; }
+    out.accepted = true;
+    out.reason = "OK";
+    out.state = state;
+    return out;
+  }
+
+  function getCanonicalSnapshotCalculatedRenderStateForEmptyLedger(){
+    const state = __paymentTableCalculatedRenderState;
+    const inspection = inspectCanonicalSnapshotCalculatedRenderStateForEmptyLedger(state);
+    return inspection.accepted ? inspection.state : null;
   }
 
   function getPassiveSnapshotCalculatedRenderStateForEmptyLedger(){
@@ -557,6 +567,29 @@
       rows: rows,
       rowsById: normalizeComputedRowsByIdForSnapshot(rows, state.rowsById)
     };
+  }
+
+  function debugTemporarySnapshotFallback(selectedPeriod, materialized){
+    if (!(window.JKH_DEBUG_TEMPORARY_SNAPSHOT_FALLBACK === true)) return;
+    const calculated = __paymentTableCalculatedRenderState;
+    const inspection = inspectCanonicalSnapshotCalculatedRenderStateForEmptyLedger(calculated);
+    const summarize = function(label, state, reason){
+      const rows = state && Array.isArray(state.rows) ? state.rows : [];
+      const rowsById = state && state.rowsById && typeof state.rowsById === "object" && !Array.isArray(state.rowsById) ? state.rowsById : {};
+      return { label: label, source: String(state && state.source || ""), uid: String(state && state.uid || ""), rowsCount: rows.length, rowsByIdCount: Object.keys(rowsById).length, periodActive: !!(state && state.periodActive), reason: reason || "NOT_AVAILABLE" };
+    };
+    try {
+      console.log("[temporary-period][canonical-snapshot-fallback]", {
+        selectedPeriod: selectedPeriod || null,
+        candidates: [
+          summarize("calculated_render_state", calculated, inspection.reason),
+          summarize("computed_rows_snapshot", __paymentTableComputedRowsSnapshot, "NOT_SERVER_BACKED_CANONICAL_STATE"),
+          { label: "runtime_cache_state", source: String(__runtimeCacheState && __runtimeCacheState.reason || ""), uid: "", rowsCount: 0, rowsByIdCount: Object.keys(__runtimeCacheState && __runtimeCacheState.dataById || {}).length, periodActive: !!(__runtimeCacheState && __runtimeCacheState.builtForPeriod), reason: "STRUCTURAL_ROWS_UNAVAILABLE" }
+        ],
+        rowsBeforePeriodFilter: inspection.accepted ? inspection.state.rows.length : 0,
+        rowsAfterPeriodFilter: materialized && Array.isArray(materialized.rows) ? materialized.rows.length : 0
+      });
+    } catch(eTemporaryFallbackDebug) {}
   }
 
   function getMatchingCalculatedRenderRows(ledgerVersion, periodActive, selectedPeriod, runtimeSignatureValue){
@@ -812,6 +845,7 @@
         getPassiveSnapshotCalculatedRenderStateForEmptyLedger: getPassiveSnapshotCalculatedRenderStateForEmptyLedger,
         getTemporaryPeriodCanonicalSnapshotRenderStateForEmptyLedger: getTemporaryPeriodCanonicalSnapshotRenderStateForEmptyLedger,
         materializeTemporaryPeriodCanonicalSnapshotRowsForEmptyLedger: materializeTemporaryPeriodCanonicalSnapshotRowsForEmptyLedger,
+        inspectCanonicalSnapshotCalculatedRenderStateForEmptyLedger: inspectCanonicalSnapshotCalculatedRenderStateForEmptyLedger,
         setPaymentTableModeForTest: function(mode){ __paymentTableMode = String(mode || "default"); },
         expireCalculatedRenderState: function(){
           if (__paymentTableCalculatedRenderState) __paymentTableCalculatedRenderState.createdAt = 0;
@@ -5536,8 +5570,13 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
       try { console.warn("[card-reload][" + eventName + "]", { uid: String(snapshot && snapshot.uid || getAbonentId() || ""), snapshotRowsCount: materialized.snapshotRowsCount, ledgerRowsCount: materialized.ledgerRowsCount, renderedRowsCount: 0, source: "canonical_backend_snapshot", reason: materialized.reason }); } catch(eSkippedLog) {}
       return materialized;
     }
+    const canonicalUid = resolveCanonicalAccountUidForCalculatedRender();
     setPaymentTableCalculatedRenderState(materialized.rows, materialized.rowsById, {
-      uid: String(snapshot && snapshot.uid || getAbonentId() || ""),
+      // F5 renders this state directly, but later temporary display fallback
+      // validates it against the account's canonical UID. Keep the accepted
+      // server snapshot scoped to that same UID rather than snapshot.uid's
+      // external representation (for example, abonent id 1009).
+      uid: canonicalUid.ok ? canonicalUid.uid : String(snapshot && snapshot.uid || getAbonentId() || ""),
       ledgerVersion: String(snapshot && (snapshot.ledgerVersion || snapshot.ledger_version) || ""),
       runtimeSignature: String(snapshot && snapshot.runtimeSignature || ""),
       periodActive: false,
@@ -5700,6 +5739,9 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
       const temporaryCanonicalRows = temporaryCanonicalSnapshotState
         ? materializeTemporaryPeriodCanonicalSnapshotRowsForEmptyLedger(temporaryCanonicalSnapshotState, selectedPeriod)
         : null;
+      if (isTemporaryCourtPeriodMode() && Array.isArray(arr) && arr.length === 0) {
+        debugTemporarySnapshotFallback(selectedPeriod, temporaryCanonicalRows);
+      }
       const displayRows = temporaryCanonicalRows
         ? temporaryCanonicalRows.rows
         : arr.concat(draftRows);

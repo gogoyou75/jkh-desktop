@@ -60,12 +60,13 @@ recordPaymentRenderRegression("render", { rowCount: 0, ledgerRowsCount: 0, reaso
 const renderRegression = context.window.__getPaymentRenderRegressionSequence();
 assert.strictEqual(renderRegression.firstZeroReported, true);
 assert.strictEqual(renderRegression.events[renderRegression.events.length - 1].caller, "test-late-caller");
-const { setPaymentTableCalculatedRenderState, applyFreshCalculatedRowsForRender, getPassiveSnapshotCalculatedRenderStateForEmptyLedger, getTemporaryPeriodCanonicalSnapshotRenderStateForEmptyLedger, materializeTemporaryPeriodCanonicalSnapshotRowsForEmptyLedger, getCalculatedRenderStateForTest, setPaymentTableModeForTest } = context.window.__paymentTableTestHooks;
+const { setPaymentTableCalculatedRenderState, applyFreshCalculatedRowsForRender, getPassiveSnapshotCalculatedRenderStateForEmptyLedger, getTemporaryPeriodCanonicalSnapshotRenderStateForEmptyLedger, materializeTemporaryPeriodCanonicalSnapshotRowsForEmptyLedger, inspectCanonicalSnapshotCalculatedRenderStateForEmptyLedger, getCalculatedRenderStateForTest, setPaymentTableModeForTest } = context.window.__paymentTableTestHooks;
 assert.strictEqual(typeof setPaymentTableCalculatedRenderState, "function");
 assert.strictEqual(typeof applyFreshCalculatedRowsForRender, "function");
 assert.strictEqual(typeof getPassiveSnapshotCalculatedRenderStateForEmptyLedger, "function");
 assert.strictEqual(typeof getTemporaryPeriodCanonicalSnapshotRenderStateForEmptyLedger, "function");
 assert.strictEqual(typeof materializeTemporaryPeriodCanonicalSnapshotRowsForEmptyLedger, "function");
+assert.strictEqual(typeof inspectCanonicalSnapshotCalculatedRenderStateForEmptyLedger, "function");
 assert.strictEqual(typeof getCalculatedRenderStateForTest, "function");
 assert.strictEqual(typeof setPaymentTableModeForTest, "function");
 const {
@@ -309,6 +310,10 @@ assert.strictEqual(setPaymentTableCalculatedRenderState(temporaryCanonicalRows, 
   uid: "uid_test_1009", ledgerVersion: "canonical-ledger", runtimeSignature: "canonical-signature", periodActive: false,
   source: "canonical_backend_snapshot", passiveSnapshotRestore: true
 }), true);
+const restoredStateWithExternalUid = getCalculatedRenderStateForTest();
+restoredStateWithExternalUid.uid = "1009";
+assert.strictEqual(inspectCanonicalSnapshotCalculatedRenderStateForEmptyLedger(restoredStateWithExternalUid).reason, "CANONICAL_UID_MISMATCH", "direct F5 rendering can accept snapshot.uid while temporary fallback must reject its non-canonical representation");
+restoredStateWithExternalUid.uid = "uid_test_1009";
 setPaymentTableModeForTest("temporary_court_period");
 const temporaryCanonicalState = getTemporaryPeriodCanonicalSnapshotRenderStateForEmptyLedger();
 assert.ok(temporaryCanonicalState, "temporary mode must accept a valid canonical snapshot when raw ledger is empty");
