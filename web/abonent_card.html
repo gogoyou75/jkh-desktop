@@ -5563,10 +5563,11 @@ function bindCalcButtons(){
                 to: to || ""
             });
         } catch (e) {}
-        let href = (temporarySpravkaPayload ? "spravka_sud.html?temporary_court_period=1&abonent=" : "reports.html?abonent=") + encodeURIComponent(id);
+        let href = "reports.html?abonent=" + encodeURIComponent(id);
         if (id) href += "&account=" + encodeURIComponent(id);
         if (meta.resolvedUid) href += "&uid=" + encodeURIComponent(meta.resolvedUid);
         if (from && to && isValidPeriod(from, to)) href += "&from=" + encodeURIComponent(from) + "&to=" + encodeURIComponent(to);
+        if (temporarySpravkaPayload) href += "&temporary_court_period=1";
         href += (dbKey ? ("&db=" + encodeURIComponent(dbKey)) : (meta.ownerId ? ("&owner=" + encodeURIComponent(meta.ownerId)) : ""));
         location.href = href;
     });
