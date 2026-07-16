@@ -117,10 +117,13 @@ const reportsContext = {
   document: { getElementById: (id) => reportElements[id] || null },
   getAbonentIdFromURL: () => abonentId,
   requireValidReportPeriod: (a, b) => ({ ok: a === from && b === to, from: a, to: b }),
-  appendReportsContextToHref: (href) => `${href}&uid=${uid}&temporary_court_period=1`,
+  getReportsUrlParams: () => new URLSearchParams(`?abonent=${abonentId}&uid=${uid}&temporary_court_period=1`),
   showMissingAbonentError: () => { throw new Error("unexpected missing abonent"); },
-  console: { log: () => {} }, location: { href: "" }, encodeURIComponent
+  console: { log: () => {} }, location: { href: "" }, encodeURIComponent, URLSearchParams
 };
+const appendSource = balancedBlock(reportsSource, "function appendReportsContextToHref(href){");
+vm.runInNewContext(`function appendReportsContextToHref(href){${appendSource}}; this.appendReportsContextToHref = appendReportsContextToHref;`, reportsContext);
+reportsContext.appendReportsContextToHref = reportsContext.appendReportsContextToHref;
 const reportsBody = balancedBlock(reportsSource, 'document.getElementById("openReport01").addEventListener("click", () => {');
 fnFromBody(reportsBody, reportsContext, false)();
 assert.match(reportsContext.location.href, /spravka_sud\.html\?/);
