@@ -5063,6 +5063,16 @@ function bindCalcButtons(){
                     return;
                 }
                 __saveTemporaryPeriodState({ from: from, to: to }, { abonentId: currentAbonentId, source: "temporary-recalc-done", renderedPeriodRows: periodResult.renderedPeriodRows || 0 });
+                try {
+                    const runtime = typeof window.__getPaymentTableComputedRowsSnapshot === "function" ? window.__getPaymentTableComputedRowsSnapshot() : null;
+                    const meta = getCalcPeriodStorageMeta();
+                    if (runtime && runtime.periodActive === true && runtime.period && String(runtime.period.from || "") === String(from) && String(runtime.period.to || "") === String(to) && Array.isArray(runtime.rows) && runtime.rows.length && runtime.rowsById && Object.keys(runtime.rowsById).length && String(runtime.ledgerVersion || "") && String(runtime.runtimeSignature || "") && meta.resolvedUid) {
+                        window.__JKH_TEMPORARY_PERIOD_REPORT_STATE = { mode: "temporary_court_period", uid: String(meta.resolvedUid), abonentId: String(currentAbonentId), from: String(from), to: String(to), ledgerVersion: String(runtime.ledgerVersion), runtimeSignature: String(runtime.runtimeSignature) };
+                    } else {
+                        delete window.__JKH_TEMPORARY_PERIOD_REPORT_STATE;
+                        console.warn("[spravka][temporary-payload-not-ready]", { reason: "TEMPORARY_RUNTIME_STATE_INVALID" });
+                    }
+                } catch(eTemporaryReportState) { delete window.__JKH_TEMPORARY_PERIOD_REPORT_STATE; console.warn("[spravka][temporary-payload-not-ready]", { reason: "TEMPORARY_RUNTIME_STATE_READ_FAILED" }); }
                 restoreFullSummaryStatusUi(fullSummaryUiBeforeRecalc);
                 const fullStatusAfterPeriod = String(__lastRenderedSummaryStatusLocal || "");
                 const periodStatusMessage = __normalizeSummaryStatus(fullStatusBeforePeriod) === "fresh"
@@ -5521,12 +5531,13 @@ function bindCalcButtons(){
         }
         const meta = getCalcPeriodStorageMeta();
         let temporarySpravkaPayload = null;
-        if (window.JKH_CARD_PERIOD_MODE_ACTIVE === true && from && to && isValidPeriod(from, to) && meta.resolvedUid && typeof window.__getPaymentTableComputedRowsSnapshot === "function") {
+        const temporaryState = window.__JKH_TEMPORARY_PERIOD_REPORT_STATE;
+        if (temporaryState && temporaryState.mode === "temporary_court_period" && String(temporaryState.uid || "") === String(meta.resolvedUid || "") && String(temporaryState.abonentId || "") === String(id || "") && String(temporaryState.from || "") === String(from || "") && String(temporaryState.to || "") === String(to || "") && from && to && isValidPeriod(from, to) && typeof window.__getPaymentTableComputedRowsSnapshot === "function") {
             try {
                 const runtime = window.__getPaymentTableComputedRowsSnapshot();
                 const rows = runtime && Array.isArray(runtime.rows) ? runtime.rows : [];
                 const rowsById = runtime && runtime.rowsById && typeof runtime.rowsById === "object" ? runtime.rowsById : {};
-                if (runtime && runtime.periodActive === true && runtime.period && String(runtime.period.from || "") === String(from) && String(runtime.period.to || "") === String(to) && rows.length && Object.keys(rowsById).length) {
+                if (runtime && runtime.periodActive === true && runtime.period && String(runtime.period.from || "") === String(from) && String(runtime.period.to || "") === String(to) && String(runtime.ledgerVersion || "") === String(temporaryState.ledgerVersion || "") && String(runtime.runtimeSignature || "") === String(temporaryState.runtimeSignature || "") && rows.length && Object.keys(rowsById).length) {
                     const payload = { schemaVersion: 1, uid: String(meta.resolvedUid), abonentId: String(id), from: String(from), to: String(to), ledgerVersion: String(runtime.ledgerVersion || ""), runtimeSignature: String(runtime.runtimeSignature || ""), rows: rows, rowsById: rowsById, createdAt: Date.now(), source: "temporary_court_period" };
                     const raw = JSON.stringify(payload);
                     let hash = 2166136261; for (let i = 0; i < raw.length; i += 1) { hash ^= raw.charCodeAt(i); hash = Math.imul(hash, 16777619); }
@@ -5534,7 +5545,9 @@ function bindCalcButtons(){
                     sessionStorage.setItem("temporary_spravka_payload_" + payload.uid, JSON.stringify(payload));
                     temporarySpravkaPayload = payload;
                 }
-            } catch(eTemporaryPayload) { console.warn("[spravka][temporary-payload-create-failed]", eTemporaryPayload); }
+            } catch(eTemporaryPayload) { console.warn("[spravka][temporary-payload-create-failed]", { reason: "TEMPORARY_PAYLOAD_SERIALIZE_FAILED" }); }
+        } else if (temporaryState) {
+            console.warn("[spravka][temporary-payload-not-ready]", { reason: "TEMPORARY_REPORT_STATE_MISMATCH" });
         }
         // ✅ FIX: forward active db key (if present) to reports page
         // to keep correct data when multiple bases exist in localStorage.
