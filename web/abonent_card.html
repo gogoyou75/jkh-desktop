@@ -5066,8 +5066,11 @@ function bindCalcButtons(){
                 try {
                     const runtime = typeof window.__getPaymentTableComputedRowsSnapshot === "function" ? window.__getPaymentTableComputedRowsSnapshot() : null;
                     const meta = getCalcPeriodStorageMeta();
-                    if (runtime && runtime.periodActive === true && runtime.period && String(runtime.period.from || "") === String(from) && String(runtime.period.to || "") === String(to) && Array.isArray(runtime.rows) && runtime.rows.length && runtime.rowsById && Object.keys(runtime.rowsById).length && String(runtime.ledgerVersion || "") && String(runtime.runtimeSignature || "") && meta.resolvedUid) {
-                        window.__JKH_TEMPORARY_PERIOD_REPORT_STATE = { mode: "temporary_court_period", uid: String(meta.resolvedUid), abonentId: String(currentAbonentId), from: String(from), to: String(to), ledgerVersion: String(runtime.ledgerVersion), runtimeSignature: String(runtime.runtimeSignature) };
+                    const runtimeSignature = String(runtime && runtime.runtimeSignature || "").trim();
+                    const ledgerVersion = String(runtime && runtime.ledgerVersion || "").trim() || (runtimeSignature ? "temporary:" + runtimeSignature : "");
+                    if (runtime && runtime.periodActive === true && runtime.period && String(runtime.period.from || "") === String(from) && String(runtime.period.to || "") === String(to) && Array.isArray(runtime.rows) && runtime.rows.length && runtime.rowsById && Object.keys(runtime.rowsById).length && ledgerVersion && runtimeSignature && meta.resolvedUid) {
+                        try { sessionStorage.removeItem("temporary_spravka_payload_" + String(meta.resolvedUid)); } catch(eStalePayload) {}
+                        window.__JKH_TEMPORARY_PERIOD_REPORT_STATE = { mode: "temporary_court_period", uid: String(meta.resolvedUid), abonentId: String(currentAbonentId), from: String(from), to: String(to), ledgerVersion: ledgerVersion, runtimeSignature: runtimeSignature };
                     } else {
                         delete window.__JKH_TEMPORARY_PERIOD_REPORT_STATE;
                         console.warn("[spravka][temporary-payload-not-ready]", { reason: "TEMPORARY_RUNTIME_STATE_INVALID" });
@@ -5537,8 +5540,10 @@ function bindCalcButtons(){
                 const runtime = window.__getPaymentTableComputedRowsSnapshot();
                 const rows = runtime && Array.isArray(runtime.rows) ? runtime.rows : [];
                 const rowsById = runtime && runtime.rowsById && typeof runtime.rowsById === "object" ? runtime.rowsById : {};
-                if (runtime && runtime.periodActive === true && runtime.period && String(runtime.period.from || "") === String(from) && String(runtime.period.to || "") === String(to) && String(runtime.ledgerVersion || "") === String(temporaryState.ledgerVersion || "") && String(runtime.runtimeSignature || "") === String(temporaryState.runtimeSignature || "") && rows.length && Object.keys(rowsById).length) {
-                    const payload = { schemaVersion: 1, uid: String(meta.resolvedUid), abonentId: String(id), from: String(from), to: String(to), ledgerVersion: String(runtime.ledgerVersion || ""), runtimeSignature: String(runtime.runtimeSignature || ""), rows: rows, rowsById: rowsById, createdAt: Date.now(), source: "temporary_court_period" };
+                const runtimeSignature = String(runtime && runtime.runtimeSignature || "").trim();
+                const ledgerVersion = String(runtime && runtime.ledgerVersion || "").trim() || (runtimeSignature ? "temporary:" + runtimeSignature : "");
+                if (runtime && runtime.periodActive === true && runtime.period && String(runtime.period.from || "") === String(from) && String(runtime.period.to || "") === String(to) && ledgerVersion === String(temporaryState.ledgerVersion || "") && runtimeSignature === String(temporaryState.runtimeSignature || "") && rows.length && Object.keys(rowsById).length) {
+                    const payload = { schemaVersion: 1, uid: String(meta.resolvedUid), abonentId: String(id), from: String(from), to: String(to), ledgerVersion: ledgerVersion, runtimeSignature: runtimeSignature, rows: rows, rowsById: rowsById, createdAt: Date.now(), source: "temporary_court_period" };
                     const raw = JSON.stringify(payload);
                     let hash = 2166136261; for (let i = 0; i < raw.length; i += 1) { hash ^= raw.charCodeAt(i); hash = Math.imul(hash, 16777619); }
                     payload.integrity = String(hash >>> 0);
