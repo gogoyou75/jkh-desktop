@@ -1,5 +1,12 @@
 # CHANGELOG
 
+## Storage guard — accidental empty canonical ledger overwrite
+
+- `POST /api/store` now rejects `payments_<uid>` existing non-empty JSON array → incoming `[]` with HTTP `409` and stable code `PAYMENT_LEDGER_EMPTY_OVERWRITE_BLOCKED`; the stored value is not changed.
+- Initial empty ledger (missing key → `[]`) and idempotent empty ledger (`[]` → `[]`) remain valid.
+- The only exception is an active UID-scoped Full Recalc lock plus explicit `CALCULATED_FINAL_EMPTY`, `completed:true`, and `finalLedgerEmpty:true` contract. Generic sync and `PAYMENT_TABLE_WRITE` cannot receive this contract.
+- Added backend mutation tests and frontend-contract regression tests. Snapshot, summary, index, court certificate, import, temporary-period behavior, and calculation formulas were not changed.
+
 ## Full Recalc → Snapshot → Summary → Index stabilization
 
 - Completed investigation and restored the explicit full-recalculation chain: one verified final result produces the persisted card snapshot and the `abonent_summary` consumed by the index.

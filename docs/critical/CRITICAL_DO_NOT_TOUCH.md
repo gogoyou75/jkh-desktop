@@ -7,6 +7,7 @@
 ❌ Нельзя использовать new Date("YYYY-MM-DD")  
 ❌ Нельзя переносить долг без фиксации события TRANSFER  
 ❌ Нельзя модифицировать calc_engine.js без проверки TRANSFER  
+❌ Нельзя заменять существующий непустой `payments_<uid>` на `[]` без verified `CALCULATED_FINAL_EMPTY` Full Recalc contract
 
 ## ОБЯЗАТЕЛЬНО
 ✔ transfer_balance должен сохраняться  

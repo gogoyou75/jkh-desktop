@@ -319,6 +319,38 @@ class RecalcUidLock(db.Model):
     __table_args__ = (db.UniqueConstraint("owner_id", "abonent_uid", name="uq_recalc_uid_lock_owner_uid"),)
 
 
+_CANONICAL_PAYMENT_LEDGER_KEY_RE = re.compile(r"^payments_(uid_[a-z0-9][a-z0-9_-]*)$", re.IGNORECASE)
+PAYMENT_LEDGER_EMPTY_OVERWRITE_BLOCKED = "PAYMENT_LEDGER_EMPTY_OVERWRITE_BLOCKED"
+
+
+def _canonical_payment_ledger_uid(key):
+    match = _CANONICAL_PAYMENT_LEDGER_KEY_RE.fullmatch(str(key or ""))
+    return match.group(1) if match else ""
+
+
+def _verified_calculated_final_empty_contract(data, owner, uid):
+    """Accept the only permitted non-empty -> [] ledger replacement.
+
+    The client-side calculation is authoritative, but this server boundary requires
+    its active UID-scoped Full Recalc lock token and explicit completion evidence.
+    Generic sync and payment-table writes never receive that token/contract.
+    """
+    contract = data.get("payment_ledger_contract")
+    if not isinstance(contract, dict):
+        return False
+    if contract.get("action") != "CALCULATED_FINAL_EMPTY":
+        return False
+    if contract.get("completed") is not True or contract.get("finalLedgerEmpty") is not True:
+        return False
+    if _norm_text(contract.get("uid")) != uid:
+        return False
+    token = _norm_text(contract.get("recalcLockToken"))
+    if not token:
+        return False
+    lock = RecalcUidLock.query.filter_by(owner_id=owner, abonent_uid=uid, status="running").first()
+    return bool(lock and secrets.compare_digest(_norm_text(lock.lock_token), token))
+
+
 class RecalcBatchJob(db.Model):
     __tablename__ = "recalc_batch_jobs"
     id = db.Column(db.Integer, primary_key=True, autoincrement=True)
@@ -5200,6 +5232,27 @@ def store_set():
 
     owner_eff = _effective_owner_for_key(owner, key)
     row = KVStore.query.filter_by(owner=owner_eff, k=key).first()
+    ledger_uid = _canonical_payment_ledger_uid(key)
+    if ledger_uid:
+        try:
+            incoming_ledger = json.loads(value)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return _json_error("payment_ledger_value_must_be_json_array", 422)
+        if not isinstance(incoming_ledger, list):
+            return _json_error("payment_ledger_value_must_be_json_array", 422)
+        if row:
+            try:
+                existing_ledger = json.loads(row.v)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                existing_ledger = None
+            if isinstance(existing_ledger, list) and existing_ledger and not incoming_ledger:
+                if not _verified_calculated_final_empty_contract(data, owner_eff, ledger_uid):
+                    return jsonify(
+                        ok=False,
+                        error=PAYMENT_LEDGER_EMPTY_OVERWRITE_BLOCKED,
+                        oldRowsCount=len(existing_ledger),
+                        newRowsCount=0,
+                    ), 409
     request_id = uuid.uuid4().hex[:12]
     source_or_action = data.get("source") or data.get("action") or data.get("mode") or "store_set"
     existed = bool(row)

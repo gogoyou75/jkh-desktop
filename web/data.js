@@ -717,7 +717,8 @@
     return _isCardSnapshotStorageKey(key) ? String(key || "").slice("card_snapshot_".length) : "";
   }
 
-  async function _serverStoreSet(ownerId, key, value) {
+  async function _serverStoreSet(ownerId, key, value, options) {
+    var opts = options || {};
     var valueText = String(value == null ? "" : value);
     if (_isCardSnapshotStorageKey(key)) {
       try {
@@ -736,7 +737,9 @@
       method: "POST",
       headers: { "Content-Type": "application/json" },
       credentials: "include",
-      body: JSON.stringify({ client_owner_hint: ownerId, key: key, value: valueText })
+      body: JSON.stringify(Object.assign({ client_owner_hint: ownerId, key: key, value: valueText }, opts.paymentLedgerContract ? {
+        payment_ledger_contract: opts.paymentLedgerContract
+      } : {}))
     });
     var txt = await res.text();
     var data = null;
@@ -2626,9 +2629,23 @@
       return { ok:false, reason:"SERVER_PERSIST_REQUIRED", serverOk:false, localOk:false };
     }
     var payload = JSON.stringify(newRows);
+    var calculatedFinalEmptyContract = null;
+    if (newRows.length === 0 && opts.calculatedFinalEmpty === true &&
+        String(opts.source || "") === "manual_full_recalc" &&
+        String(opts.recalcLockToken || "").trim()) {
+      calculatedFinalEmptyContract = {
+        action: "CALCULATED_FINAL_EMPTY",
+        completed: true,
+        finalLedgerEmpty: true,
+        uid: uid,
+        recalcLockToken: String(opts.recalcLockToken).trim()
+      };
+    }
     var serverResult = null;
     try {
-      serverResult = await _serverStoreSet(_ownerId(), key, payload);
+      serverResult = await _serverStoreSet(_ownerId(), key, payload, {
+        paymentLedgerContract: calculatedFinalEmptyContract
+      });
     } catch (eServerSet) {
       try { console.log("[manual-recalc][project-raw]", { stage:"writePaymentLedgerServerBacked.serverSet.exception", httpStatus:null, responseBody:null, exception:eServerSet, requestUrl:"/api/store", requestPayloadSize:payload.length, storageKey:key, owner:_ownerId(), uid:uid }); } catch(eServerSetLog) {}
       return { ok:false, reason:"SERVER_PERSIST_REQUIRED", serverOk:false, localOk:false, serverResult:null, exception:eServerSet };

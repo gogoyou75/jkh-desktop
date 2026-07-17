@@ -6932,7 +6932,13 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
       let serverBackedLedger = false;
       if (window.Data && typeof Data.writePaymentLedgerServerBacked === "function") {
         serverBackedLedger = true;
-        savedLedger = await Data.writePaymentLedgerServerBacked(abonentId, proposedRows, { eventType:"AUTOACCRUAL_WRITE", summaryDirtyReason:false, source:"manual_full_recalc" });
+        savedLedger = await Data.writePaymentLedgerServerBacked(abonentId, proposedRows, {
+          eventType:"AUTOACCRUAL_WRITE",
+          summaryDirtyReason:false,
+          source:"manual_full_recalc",
+          calculatedFinalEmpty: explicitCompletedEmptyLedger,
+          recalcLockToken: String(opts.recalcLockToken || "")
+        });
       } else {
         savedLedger = window.Data.writePaymentLedger(abonentId, proposedRows, { eventType:"AUTOACCRUAL_WRITE", summaryDirtyReason:false });
       }
@@ -7112,7 +7118,9 @@ function scheduleRunningTotalsUpdate(viewRows, baseRows, tbody, ledgerSignature)
       logFullRecalcStep(runId, "autoaccrual", { abonentId: id });
       console.time("[recalc-step] autoaccrual");
       const autoResult = await measureRecalcStage("autoaccrualMs", async function(){
-        return await applyControlledAutoAccrualForManualRecalc(id, opts);
+        return await applyControlledAutoAccrualForManualRecalc(id, Object.assign({}, opts, {
+          recalcLockToken: recalcLock && recalcLock.lock_token || ""
+        }));
       });
       console.timeEnd("[recalc-step] autoaccrual");
       logFullRecalcStepDone(runId, "autoaccrual", { abonentId: id, ok: !!(autoResult && autoResult.ok === true), changed: !!(autoResult && autoResult.changed), reason: autoResult && autoResult.reason || "" });

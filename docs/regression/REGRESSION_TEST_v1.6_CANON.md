@@ -35,6 +35,21 @@
 - задолженность = 0  
 - пеня = 0  
 
+## 1.1. Canonical ledger: empty-overwrite server guard (CRITICAL)
+
+1) Для отсутствующего `payments_<uid>` отправить `[]` через разрешённый write-path.
+2) Для существующего `[]` повторить запись `[]`.
+3) Для существующего непустого ledger попытаться отправить `[]` generic sync и `PAYMENT_TABLE_WRITE`.
+4) Выполнить обычный Full Recalc с непустыми `proposedRows`.
+5) Проверить доказанный final-empty Full Recalc: `completed:true`, `finalLedgerEmpty:true`, exact UID и active recalc-lock token.
+
+**Ожидание:**
+- пп. 1–2: success;
+- п. 3: HTTP `409`, `PAYMENT_LEDGER_EMPTY_OVERWRITE_BLOCKED`, серверный ledger не изменён;
+- п. 4: запись непустого ledger работает как раньше;
+- п. 5: `[]` разрешён только с полным verified contract;
+- passive snapshot restore и временный period не пишут ledger.
+
 ---
 
 ## 2. Импорт Excel — блокировка оплат (CRITICAL)

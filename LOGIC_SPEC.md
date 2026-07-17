@@ -2,6 +2,14 @@
 
 ## Full Recalc and Temporary Period Calculation
 
+## Canonical payment-ledger empty-write boundary
+
+- `payments_<uid>` is the canonical financial ledger. `card_snapshot_<uid>` and `abonent_summary` are derived data and must never be used to reconstruct or silently replace it.
+- At `POST /api/store`, a missing canonical key may be created as `[]`, and existing `[]` may be written as `[]` idempotently.
+- Replacing an existing non-empty canonical ledger with `[]` is forbidden by default. The server returns HTTP `409` with `PAYMENT_LEDGER_EMPTY_OVERWRITE_BLOCKED` and leaves KV data unchanged.
+- The sole exception is a verified manual Full Recalc that supplies `CALCULATED_FINAL_EMPTY`, `completed:true`, `finalLedgerEmpty:true`, the exact UID, and the active UID-scoped recalc-lock token. Generic sync and payment-table edits have no authority to use this exception.
+- A canonical `payments_<uid>` value must be a JSON array at this server boundary; an invalid/non-array payload is rejected without coercion.
+
 - Explicit Full Recalc produces one canonical final result: `uid`, structural final rows, `rowsById`, runtime `ledgerVersion`, and `inputHash`.
 - The same verified final result is the source for `card_snapshot_<uid>` and `abonent_summary`; the index reads only the persisted summary and never recalculates the ledger.
 - Snapshot/summary persistence validates canonical UID, runtime ledger version, and `inputHash`. Runtime-version is a full financial-input fingerprint; raw-ledger-version is a distinct storage-level hash and must not be compared as the same contract.
