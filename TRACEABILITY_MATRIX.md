@@ -1,5 +1,15 @@
 # TRACEABILITY MATRIX
 
+## Full Recalc → Snapshot → Summary → Index
+
+| Rule | Spec | Code | Status | Notes |
+|---|---|---|---|---|
+| Full Recalc uses one final result for snapshot and summary | LOGIC_SPEC Full Recalc | web/payment_table.js / web/data.js / web/abonent_card.html | OK | The successful result carries canonical UID, final rows, `rowsById`, runtime ledger version, and input hash. |
+| Snapshot and summary verifier contract | LOGIC_SPEC Full Recalc | web/data.js | OK | UID, runtime `ledgerVersion`, and `inputHash` must match current canonical inputs before persistence. |
+| Index consumes saved summary only | LOGIC_SPEC Full Recalc | web/index.html / backend/app.py | OK | No index-side ledger read or recalculation. |
+| Temporary Period Calculation is non-persistent | LOGIC_SPEC Full Recalc | web/abonent_card.html / web/payment_table.js | OK | It renders runtime rows without writing ledger, full snapshot, summary, or index totals. |
+| Existing non-empty canonical ledger cannot become `[]` accidentally | LOGIC_SPEC Canonical payment-ledger empty-write boundary | `de6468b`; backend/app.py `/api/store`; web/data.js; web/payment_table.js; guard regression tests | OK | HTTP 409 `PAYMENT_LEDGER_EMPTY_OVERWRITE_BLOCKED`; only active-lock verified `CALCULATED_FINAL_EMPTY` may clear it. Manual LAB verification: 1009 Full Recalc restored ledger, snapshot/summary path and court certificate succeeded. |
+
 ## Stage 16 - Persisted Snapshot / Summary
 
 | Rule | Spec | Code | Status | Notes |

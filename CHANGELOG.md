@@ -1,5 +1,26 @@
 # CHANGELOG
 
+## LAB verification — empty canonical ledger recovery (2026-07-17)
+
+- Guard from `de6468b` was deployed and manually verified on LAB for abonent 1009.
+- The verified Full Recalc restored the canonical ledger; the subscriber card, fresh derived snapshot/summary path, and court certificate work normally.
+- The court-certificate table is populated and calculates amounts; return to the card also works.
+- PROD was not deployed or changed.
+
+## Storage guard — accidental empty canonical ledger overwrite
+
+- `POST /api/store` now rejects `payments_<uid>` existing non-empty JSON array → incoming `[]` with HTTP `409` and stable code `PAYMENT_LEDGER_EMPTY_OVERWRITE_BLOCKED`; the stored value is not changed.
+- Initial empty ledger (missing key → `[]`) and idempotent empty ledger (`[]` → `[]`) remain valid.
+- The only exception is an active UID-scoped Full Recalc lock plus explicit `CALCULATED_FINAL_EMPTY`, `completed:true`, and `finalLedgerEmpty:true` contract. Generic sync and `PAYMENT_TABLE_WRITE` cannot receive this contract.
+- Added backend mutation tests and frontend-contract regression tests. Snapshot, summary, index, court certificate, import, temporary-period behavior, and calculation formulas were not changed.
+
+## Full Recalc → Snapshot → Summary → Index stabilization
+
+- Completed investigation and restored the explicit full-recalculation chain: one verified final result produces the persisted card snapshot and the `abonent_summary` consumed by the index.
+- Full-recalc final rows are verified by canonical UID, runtime ledger version, and financial `input_hash` before snapshot/summary persistence.
+- Temporary period calculation remains display-only: it does not write the payment ledger, full card snapshot, `abonent_summary`, or index totals.
+- Removed investigation-only targeted payment dump/write diagnostics after successful manual verification.
+
 ## Stage 15.1
 
 - Added minimal persisted subscriber card snapshots under `card_snapshot_<uid>`.

@@ -375,6 +375,7 @@
   function loadOwnerTariffsRaw(){
     try{
       const key = ownerTariffsKey();
+      const ownerId = getOwnerId();
       diagnoseTariffsStorage('autoaccrual:loadOwnerTariffsRaw');
       diagnoseTariffServerReadFromAutoaccrual('autoaccrual:loadOwnerTariffsRaw');
       try{
@@ -397,9 +398,30 @@
       }
       if (!key) return [];
       const raw = storeGetRaw(key);
-      if (raw === null || raw === undefined) return [];
-      const parsed = JSON.parse(raw);
-      return Array.isArray(parsed) ? parsed : [];
+      if (raw !== null && raw !== undefined && String(raw) !== ''){
+        try {
+          const parsed = JSON.parse(raw);
+          if (Array.isArray(parsed) && parsed.length) return parsed;
+        } catch(eRawParse) {
+          console.warn('[JKHAutoAccrual] loadOwnerTariffsRaw raw parse failed', eRawParse);
+        }
+      }
+      if (window.JKHStore && typeof JKHStore.getJSON === 'function'){
+        const parsed = JKHStore.getJSON(key, [], ownerId);
+        if (Array.isArray(parsed)) {
+          try {
+            console.warn('[autoaccrual][tariffs-fallback-getJSON]', {
+              ownerId: ownerId,
+              key: key,
+              scopedKey: typeof JKHStore.key === 'function' ? JKHStore.key(key, ownerId) : '',
+              rawLength: raw ? String(raw).length : 0,
+              fallbackLength: parsed.length
+            });
+          } catch(eFallbackLog) {}
+          return parsed;
+        }
+      }
+      return [];
     }catch(e){
       console.warn('[JKHAutoAccrual] loadOwnerTariffsRaw failed', e);
       return [];
@@ -525,7 +547,16 @@
       const raw = key ? storeGetRaw(key) : null;
       logSecondTariffRead('loadNormalizedOwnerTariffs', raw ? String(raw).length : 0);
     }catch(eSecondRead){}
-    return normalizeOwnerTariffs(loadOwnerTariffsRaw());
+    const tariffs = normalizeOwnerTariffs(loadOwnerTariffsRaw());
+    try{
+      const key = ownerTariffsKey();
+      const ownerId = getOwnerId();
+      const fallback = key && window.JKHStore && typeof JKHStore.getJSON === 'function'
+        ? normalizeOwnerTariffs(JKHStore.getJSON(key, [], ownerId))
+        : [];
+      if (!tariffs.length && fallback.length) return fallback;
+    }catch(eFallbackNormalize){}
+    return tariffs;
   }
 
   function rateForMs(rates, ms){

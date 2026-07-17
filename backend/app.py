@@ -319,6 +319,38 @@ class RecalcUidLock(db.Model):
     __table_args__ = (db.UniqueConstraint("owner_id", "abonent_uid", name="uq_recalc_uid_lock_owner_uid"),)
 
 
+_CANONICAL_PAYMENT_LEDGER_KEY_RE = re.compile(r"^payments_(uid_[a-z0-9][a-z0-9_-]*)$", re.IGNORECASE)
+PAYMENT_LEDGER_EMPTY_OVERWRITE_BLOCKED = "PAYMENT_LEDGER_EMPTY_OVERWRITE_BLOCKED"
+
+
+def _canonical_payment_ledger_uid(key):
+    match = _CANONICAL_PAYMENT_LEDGER_KEY_RE.fullmatch(str(key or ""))
+    return match.group(1) if match else ""
+
+
+def _verified_calculated_final_empty_contract(data, owner, uid):
+    """Accept the only permitted non-empty -> [] ledger replacement.
+
+    The client-side calculation is authoritative, but this server boundary requires
+    its active UID-scoped Full Recalc lock token and explicit completion evidence.
+    Generic sync and payment-table writes never receive that token/contract.
+    """
+    contract = data.get("payment_ledger_contract")
+    if not isinstance(contract, dict):
+        return False
+    if contract.get("action") != "CALCULATED_FINAL_EMPTY":
+        return False
+    if contract.get("completed") is not True or contract.get("finalLedgerEmpty") is not True:
+        return False
+    if _norm_text(contract.get("uid")) != uid:
+        return False
+    token = _norm_text(contract.get("recalcLockToken"))
+    if not token:
+        return False
+    lock = RecalcUidLock.query.filter_by(owner_id=owner, abonent_uid=uid, status="running").first()
+    return bool(lock and secrets.compare_digest(_norm_text(lock.lock_token), token))
+
+
 class RecalcBatchJob(db.Model):
     __tablename__ = "recalc_batch_jobs"
     id = db.Column(db.Integer, primary_key=True, autoincrement=True)
@@ -516,6 +548,16 @@ def _summary_value(summary: dict, *keys):
         if value is not None and not (isinstance(value, str) and not value.strip()):
             return value
     return None
+
+
+def _summary_totals_diagnostic(summary: dict | None):
+    value = summary if isinstance(summary, dict) else {}
+    return {
+        "debt": _summary_value(value, "total_debt", "total", "totals.debt", "totals.total", "totals.total_debt"),
+        "penalty": _summary_value(value, "total_penalty", "penalty_debt", "penalty", "totals.penalty", "totals.total_penalty"),
+        "accrued": _summary_value(value, "total_accrued", "accrued", "totals.accrued", "totals.total_accrued"),
+        "paid": _summary_value(value, "total_paid", "paid", "totals.paid", "totals.total_paid"),
+    }
 
 
 def _apply_abonent_summary_columns(row: AbonentSummary, target: dict, summary: dict):
@@ -1992,6 +2034,34 @@ def _client_recalc_summary_payload(status: str, summary: dict | None, target: di
     return payload, clean_status, clean_reason
 
 
+def _client_recalc_fresh_guard(owner_id: str, account_uid: str, summary: dict | None):
+    if not isinstance(summary, dict):
+        return False, "SUMMARY_INVALID"
+    totals = summary.get("totals") if isinstance(summary.get("totals"), dict) else {}
+    required = {
+        "debt": totals.get("debt", totals.get("total", summary.get("total_debt"))),
+        "accrued": totals.get("accrued", summary.get("total_accrued")),
+        "paid": totals.get("paid", summary.get("total_paid")),
+        "penalty": totals.get("penalty", summary.get("total_penalty", summary.get("penalty_debt"))),
+    }
+    if not all(_summary_finite_number(value) for value in required.values()):
+        return False, "SUMMARY_TOTALS_INVALID"
+
+    row = CardSnapshot.query.filter_by(owner_id=owner_id, abonent_uid=account_uid).first()
+    if not row:
+        return False, "CARD_SNAPSHOT_MISSING"
+    if _cache_status(row.snapshot_status) != "fresh":
+        return False, "CARD_SNAPSHOT_NOT_FRESH"
+    try:
+        snapshot = json.loads(row.snapshot_json or "{}")
+    except (TypeError, ValueError):
+        return False, "CARD_SNAPSHOT_JSON_INVALID"
+    rows_by_id = snapshot.get("rowsById") if isinstance(snapshot, dict) else None
+    if not isinstance(rows_by_id, dict) or not rows_by_id:
+        return False, "CARD_SNAPSHOT_ROWS_MISSING"
+    return True, ""
+
+
 @app.get("/api/recalc_batch_job/<int:job_id>/next_uid")
 def client_recalc_batch_job_next_uid(job_id: int):
     user, err = _require_user()
@@ -2083,6 +2153,11 @@ def client_recalc_batch_job_complete_uid(job_id: int):
         "identity": {"account_uid": item.account_uid},
     }
     error_reason = _norm_text(body.get("error_reason"))
+    if status == "fresh":
+        fresh_ok, fresh_reason = _client_recalc_fresh_guard(owner, _norm_text(item.account_uid), summary)
+        if not fresh_ok:
+            status = "error"
+            error_reason = fresh_reason
     payload, summary_status, summary_reason = _client_recalc_summary_payload(
         status,
         summary,
@@ -2738,6 +2813,20 @@ def _abonents_api_row_payload(row):
     for key, value in data.items():
         if key.startswith("address_"):
             payload[key] = _norm_text(value)
+    try:
+        app.logger.info("[index-totals-chain][api-abonents-row] %s", json.dumps({
+            "uid": payload.get("uid"),
+            "summary_row_id": data.get("summary_row_id"),
+            "summary_status": payload.get("summary_status"),
+            "totals": {
+                "debt": payload.get("total_debt"),
+                "penalty": payload.get("total_penalty"),
+                "accrued": payload.get("total_accrued"),
+                "paid": payload.get("total_paid"),
+            },
+        }, ensure_ascii=False))
+    except Exception:
+        pass
     return payload
 
 
@@ -3327,6 +3416,15 @@ def abonent_summary_rebuild():
             summary = body.get("summary")
             if not isinstance(summary, dict):
                 return jsonify(ok=False, error="summary_invalid", counters=counters), 400
+            incoming_status = _summary_status_from_payload(summary)
+            app.logger.info("[index-totals-chain][backend-rebuild-input] %s", json.dumps({
+                "uid": account_uid,
+                "summary_status": incoming_status,
+                "totals": _summary_totals_diagnostic(summary),
+            }, ensure_ascii=False))
+            incoming_totals_error = _fresh_totals_validation_reason(summary) if incoming_status == "fresh" else ""
+            if incoming_totals_error:
+                return jsonify(ok=False, error=incoming_totals_error, counters=counters), 400
             summary_scope = _norm_text(summary.get("summary_scope") or summary.get("report_scope")).lower()
             if summary_scope in {"period", "report"}:
                 return jsonify(ok=False, error="period_summary_not_allowed", counters=counters), 400
@@ -3336,6 +3434,11 @@ def abonent_summary_rebuild():
             if not target:
                 return jsonify(ok=False, error="uid_not_found", counters=counters), 404
             summary = _summary_without_stale_totals(summary, target, owner)
+            app.logger.info("[index-totals-chain][backend-rebuild-normalized] %s", json.dumps({
+                "uid": account_uid,
+                "summary_status": _summary_status_from_payload(summary),
+                "totals": _summary_totals_diagnostic(summary),
+            }, ensure_ascii=False))
 
             abonent_id = _norm_text(body.get("abonent_id")) or _norm_text(target.get("abonent_id"))
             account_number = _norm_text(body.get("account_number")) or _norm_text(target.get("account_number"))
@@ -3357,11 +3460,33 @@ def abonent_summary_rebuild():
                 counters["created"] += 1
 
             db.session.commit()
+            persisted_summary = json.loads(row.summary_json or "{}")
+            app.logger.info("[index-totals-chain][backend-summary-row] %s", json.dumps({
+                "uid": account_uid,
+                "summary_row_id": row.id,
+                "summary_status": row.summary_status,
+                "summary_json_totals": _summary_totals_diagnostic(persisted_summary),
+                "column_totals": {
+                    "debt": _decimal_json_or_none(row.total_debt),
+                    "penalty": _decimal_json_or_none(row.penalty_debt),
+                    "accrued": _decimal_json_or_none(row.total_accrued),
+                    "paid": _decimal_json_or_none(row.total_paid),
+                },
+            }, ensure_ascii=False))
+            app.logger.info("[abonent_summary_save_response] %s", json.dumps({"owner": owner, "uid": account_uid, "summary_status": row.summary_status, "summary_reason": row.summary_reason, "total_debt": _decimal_json_or_none(row.total_debt), "total_penalty": _decimal_json_or_none(row.penalty_debt), "total_accrued": _decimal_json_or_none(row.total_accrued), "total_paid": _decimal_json_or_none(row.total_paid)}, ensure_ascii=False))
             return jsonify(
                 ok=True,
                 counters=counters,
                 summary_status=_summary_status_from_payload(summary),
                 summary_reason=_norm_text(summary.get("summary_reason") or summary.get("reason")),
+                summary=persisted_summary,
+                totals={
+                    "debt": _decimal_json_or_none(row.total_debt),
+                    "penalty": _decimal_json_or_none(row.penalty_debt),
+                    "accrued": _decimal_json_or_none(row.total_accrued),
+                    "paid": _decimal_json_or_none(row.total_paid),
+                    "total": _decimal_json_or_none(row.total_debt),
+                },
             )
 
         targets = _owner_abonent_summary_targets(owner)
@@ -3676,6 +3801,85 @@ def _snapshot_target_for_owner(owner_id: str, uid: str):
     return _owner_recalc_targets_by_uid(owner_id).get(uid)
 
 
+def _snapshot_rows_by_id_count(snapshot: dict):
+    rows_by_id = snapshot.get("rowsById") if isinstance(snapshot, dict) else None
+    if not isinstance(rows_by_id, dict):
+        return 0
+    return len([key for key, value in rows_by_id.items() if _norm_text(key) and isinstance(value, dict)])
+
+
+def _card_snapshot_validation_error(snapshot: dict, target: dict, uid: str):
+    if not isinstance(snapshot, dict) or not snapshot:
+        return "snapshot_invalid"
+
+    snapshot_uid = _snapshot_uid_from_payload(snapshot)
+    if not snapshot_uid:
+        return "account_uid_required"
+    if snapshot_uid != uid:
+        return "uid_mismatch"
+
+    target_abonent_id = _norm_text(target.get("abonent_id"))
+    snapshot_abonent_id = _norm_text(
+        snapshot.get("abonentId")
+        or snapshot.get("abonent_id")
+        or snapshot.get("account_id")
+    )
+    if not snapshot_abonent_id:
+        return "abonent_id_required"
+    if target_abonent_id and snapshot_abonent_id != target_abonent_id:
+        return "abonent_id_mismatch"
+
+    status_values = [
+        _norm_text(snapshot.get("snapshot_status") or snapshot.get("snapshotStatus")),
+        _norm_text(snapshot.get("summary_status") or snapshot.get("status")),
+        _norm_text(snapshot.get("calculation_status") or snapshot.get("calculationStatus")),
+    ]
+    for status in status_values:
+        clean = status.lower()
+        if clean and clean not in {"fresh", "ok", "success"}:
+            return "snapshot_not_fresh"
+
+    reason_values = [
+        _norm_text(snapshot.get("snapshot_reason") or snapshot.get("snapshotReason")),
+        _norm_text(snapshot.get("summary_reason") or snapshot.get("reason")),
+        _norm_text(snapshot.get("calculation_reason") or snapshot.get("calculationReason")),
+    ]
+    for reason in reason_values:
+        clean_reason = reason.upper()
+        if clean_reason and clean_reason not in {"OK", "RECALC_OK", "ALREADY_FRESH"}:
+            return "snapshot_not_successful"
+
+    scope_values = [
+        _norm_text(snapshot.get("summary_scope") or snapshot.get("summaryScope")),
+        _norm_text(snapshot.get("report_scope") or snapshot.get("reportScope")),
+        _norm_text(snapshot.get("scope")),
+        _norm_text(snapshot.get("snapshotMode") or snapshot.get("snapshot_mode")),
+        _norm_text(snapshot.get("calculation_mode") or snapshot.get("calculationMode")),
+        _norm_text(snapshot.get("recalcMode") or snapshot.get("recalc_mode") or snapshot.get("mode")),
+    ]
+    forbidden_scopes = {"period", "report", "temporary", "temporary_court_period", "report_period_calculation"}
+    for scope in scope_values:
+        clean_scope = scope.lower()
+        if clean_scope in forbidden_scopes:
+            return "snapshot_period_not_allowed"
+    if snapshot.get("periodActive") is True or snapshot.get("period_active") is True:
+        return "snapshot_period_not_allowed"
+    if snapshot.get("temporary") is True or snapshot.get("temporaryCalculation") is True or snapshot.get("temporary_calculation") is True:
+        return "snapshot_period_not_allowed"
+
+    if _snapshot_rows_by_id_count(snapshot) <= 0:
+        return "snapshot_rows_missing"
+
+    input_hash = _norm_text(snapshot.get("input_hash") or snapshot.get("inputHash"))
+    ledger_version = _norm_text(snapshot.get("ledger_version") or snapshot.get("ledgerVersion"))
+    if not input_hash:
+        return "input_hash_required"
+    if not ledger_version:
+        return "ledger_version_required"
+
+    return ""
+
+
 @app.get("/api/audit/snapshot_summary")
 def audit_snapshot_summary_endpoint():
     # Read-only diagnostics endpoint. Do not recalc, repair, rebuild, or mutate DB here.
@@ -3703,8 +3907,12 @@ def card_snapshot_get(account_uid: str):
     owner = _environment_owner_id(user.id)
     row = CardSnapshot.query.filter_by(owner_id=owner, abonent_uid=uid).first()
     if not row:
+        app.logger.info("[reload-chain][canonical-read] %s", json.dumps({"found": False, "owner": owner, "uid": uid}, ensure_ascii=False))
         return jsonify(ok=True, snapshot_status="missing", snapshot_reason="SNAPSHOT_NOT_BUILT", snapshot=None)
-    return jsonify(ok=True, **_card_snapshot_payload(row))
+    payload = _card_snapshot_payload(row)
+    snapshot = payload.get("snapshot") if isinstance(payload.get("snapshot"), dict) else {}
+    app.logger.info("[reload-chain][canonical-read] %s", json.dumps({"found": True, "owner": owner, "uid": uid, "status": row.snapshot_status, "rowsByIdCount": _snapshot_rows_by_id_count(snapshot), "totals": snapshot.get("totals"), "input_hash": row.input_hash, "ledgerVersion": row.ledger_version, "storedPayloadSize": len(row.snapshot_json or "")}, ensure_ascii=False))
+    return jsonify(ok=True, **payload)
 
 
 @app.post("/api/card_snapshot/<account_uid>")
@@ -3725,9 +3933,13 @@ def card_snapshot_put(account_uid: str):
     if snapshot_uid and snapshot_uid != uid:
         return jsonify(ok=False, error="uid_mismatch"), 400
     owner = _environment_owner_id(user.id)
+    app.logger.info("[reload-chain][canonical-save-request] %s", json.dumps({"routeUid": uid, "snapshotUid": _snapshot_uid_from_payload(snapshot), "abonentId": _norm_text(snapshot.get("abonentId") or snapshot.get("abonent_id")), "resolvedOwner": owner, "status": _norm_text(snapshot.get("snapshot_status") or snapshot.get("summary_status")), "snapshotMode": _norm_text(snapshot.get("snapshotMode") or snapshot.get("snapshot_mode")), "rowsByIdCount": _snapshot_rows_by_id_count(snapshot), "totals": snapshot.get("totals"), "input_hash": _norm_text(snapshot.get("input_hash")), "ledgerVersion": _norm_text(snapshot.get("ledgerVersion") or snapshot.get("ledger_version")), "payloadSize": len(json.dumps(body, ensure_ascii=False))}, ensure_ascii=False))
     target = _snapshot_target_for_owner(owner, uid)
     if not target:
         return jsonify(ok=False, error="uid_not_found"), 404
+    validation_error = _card_snapshot_validation_error(snapshot, target, uid)
+    if validation_error:
+        return jsonify(ok=False, error=validation_error), 400
     status = "fresh"
     reason = "OK"
     snapshot = dict(snapshot)
@@ -3754,6 +3966,23 @@ def card_snapshot_put(account_uid: str):
     row.computed_at = datetime.utcnow() if status == "fresh" else row.computed_at
     row.snapshot_json = json.dumps(snapshot, ensure_ascii=False, sort_keys=True)
     db.session.commit()
+    app.logger.info("[reload-chain][canonical-save-response] %s", json.dumps({"routeUid": uid, "resolvedOwner": owner, "httpStatus": 200, "status": row.snapshot_status, "rowsByIdCount": _snapshot_rows_by_id_count(snapshot), "totals": snapshot.get("totals"), "storedPayloadSize": len(row.snapshot_json or "")}, ensure_ascii=False))
+    app.logger.info(
+        "[diagnose][card-snapshot-canonical-put] %s",
+        json.dumps(
+            {
+                "reason": "card_snapshot_canonical_put",
+                "owner_id": owner,
+                "account_uid": uid,
+                "abonent_id": row.abonent_id,
+                "snapshot_status": row.snapshot_status,
+                "snapshot_reason": row.snapshot_reason,
+                "ledger_version": row.ledger_version,
+                "rowsByIdCount": _snapshot_rows_by_id_count(snapshot),
+            },
+            ensure_ascii=False,
+        ),
+    )
     return jsonify(ok=True, **_card_snapshot_payload(row))
 
 
@@ -4622,10 +4851,11 @@ def import_payments_apply(batch_id):
                 "fingerprint": fingerprint,
             }
             ledger.append(ledger_item)
+            incoming_ledger_value = json.dumps(ledger, ensure_ascii=False)
             if kv:
-                kv.v = json.dumps(ledger, ensure_ascii=False)
+                kv.v = incoming_ledger_value
             else:
-                db.session.add(KVStore(owner=batch.owner_id, k=key, v=json.dumps(ledger, ensure_ascii=False)))
+                db.session.add(KVStore(owner=batch.owner_id, k=key, v=incoming_ledger_value))
 
             payment_id = f"{normalized_account_number}:{next_id}"
             fingerprint_row.payment_id = payment_id
@@ -4926,11 +5156,43 @@ def store_get():
 
     owner_eff = _effective_owner_for_key(owner, key)
     row = KVStore.query.filter_by(owner=owner_eff, k=key).first()
+    if key.startswith("card_snapshot_"):
+        app.logger.info(
+            "[diagnose][card-snapshot-kv-get] %s",
+            json.dumps(
+                {
+                    "reason": "card_snapshot_kv_get",
+                    "server_owner": owner,
+                    "client_owner_hint": client_owner_hint,
+                    "resolved_owner": owner_eff,
+                    "key": key,
+                    "value_exists": bool(row and (row.v or "") != ""),
+                    "value_length": len(row.v or "") if row else 0,
+                    "status": "ok" if row else "not_found",
+                },
+                ensure_ascii=False,
+            ),
+        )
     if key.startswith("tariffs_"):
         app.logger.info(
             "[diagnose][tariff-server-read] %s",
             json.dumps(
                 {
+                    "requested_key": key,
+                    "resolved_owner": owner_eff,
+                    "normalized_owner": owner,
+                    "value_exists": bool(row and (row.v or "") != ""),
+                    "value_length": len(row.v or "") if row else 0,
+                },
+                ensure_ascii=False,
+            ),
+        )
+    if key in GLOBAL_KEYS:
+        app.logger.info(
+            "[diagnose][rates-server-read] %s",
+            json.dumps(
+                {
+                    "reason": "diagnose_rates_backend_exists" if row and (row.v or "") != "" else "diagnose_rates_backend_missing",
                     "requested_key": key,
                     "resolved_owner": owner_eff,
                     "normalized_owner": owner,
@@ -4970,11 +5232,52 @@ def store_set():
 
     owner_eff = _effective_owner_for_key(owner, key)
     row = KVStore.query.filter_by(owner=owner_eff, k=key).first()
+    ledger_uid = _canonical_payment_ledger_uid(key)
+    if ledger_uid:
+        try:
+            incoming_ledger = json.loads(value)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return _json_error("payment_ledger_value_must_be_json_array", 422)
+        if not isinstance(incoming_ledger, list):
+            return _json_error("payment_ledger_value_must_be_json_array", 422)
+        if row:
+            try:
+                existing_ledger = json.loads(row.v)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                existing_ledger = None
+            if isinstance(existing_ledger, list) and existing_ledger and not incoming_ledger:
+                if not _verified_calculated_final_empty_contract(data, owner_eff, ledger_uid):
+                    return jsonify(
+                        ok=False,
+                        error=PAYMENT_LEDGER_EMPTY_OVERWRITE_BLOCKED,
+                        oldRowsCount=len(existing_ledger),
+                        newRowsCount=0,
+                    ), 409
+    request_id = uuid.uuid4().hex[:12]
+    source_or_action = data.get("source") or data.get("action") or data.get("mode") or "store_set"
+    existed = bool(row)
     if row:
         row.v = value
     else:
         db.session.add(KVStore(owner=owner_eff, k=key, v=value))
     db.session.commit()
+    if key.startswith("card_snapshot_"):
+        app.logger.info(
+            "[diagnose][card-snapshot-kv-set] %s",
+            json.dumps(
+                {
+                    "reason": "card_snapshot_kv_set",
+                    "server_owner": owner,
+                    "client_owner_hint": client_owner_hint,
+                    "resolved_owner": owner_eff,
+                    "key": key,
+                    "value_length": len(value or ""),
+                    "existed": existed,
+                    "status": "ok",
+                },
+                ensure_ascii=False,
+            ),
+        )
     _sync_log("save", owner_eff, server_owner=owner, client_owner_hint=client_owner_hint, key=key, size=len(value or ""), status="ok")
     return jsonify(ok=True, owner=owner_eff)
 
@@ -4997,6 +5300,8 @@ def store_delete():
 
     owner_eff = _effective_owner_for_key(owner, key)
     row = KVStore.query.filter_by(owner=owner_eff, k=key).first()
+    request_id = uuid.uuid4().hex[:12]
+    source_or_action = data.get("source") or data.get("action") or data.get("mode") or "store_delete"
     if not row:
         _sync_log("delete", owner_eff, server_owner=owner, client_owner_hint=client_owner_hint, key=key, status="not_found")
         return jsonify(ok=True, deleted=False)

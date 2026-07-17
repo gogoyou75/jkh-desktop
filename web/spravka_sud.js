@@ -323,6 +323,20 @@
     return "";
   }
 
+  function consumeTemporarySpravkaPayload(ctx, uid, period){
+    const key = "temporary_spravka_payload_" + String(uid || "");
+    const reject = function(reason){ try { sessionStorage.removeItem(key); } catch(e) {} console.warn("[spravka][temporary-payload-rejected]", { reason: reason, uid: uid || "" }); return { ok:false, reason:reason }; };
+    let raw = null; try { raw = sessionStorage.getItem(key); } catch(e) { return { ok:false, reason:"PAYLOAD_UNAVAILABLE" }; }
+    if (!raw) return { ok:false, reason:"PAYLOAD_MISSING" };
+    let p; try { p = JSON.parse(raw); } catch(e) { return reject("PAYLOAD_JSON_INVALID"); }
+    if (!p || p.schemaVersion !== 1 || p.source !== "temporary_court_period" || String(p.uid||"") !== String(uid||"") || String(p.abonentId||"") !== String(ctx.abonentId||"") || String(p.from||"") !== String(period.from||"") || String(p.to||"") !== String(period.to||"") || !String(p.ledgerVersion||"") || !String(p.runtimeSignature||"") || !Array.isArray(p.rows) || !p.rows.length || !p.rowsById || typeof p.rowsById !== "object") return reject("PAYLOAD_FIELDS_INVALID");
+    const integrity = p.integrity; delete p.integrity;
+    const checkRaw = JSON.stringify(p); let hash = 2166136261; for (let i = 0; i < checkRaw.length; i += 1) { hash ^= checkRaw.charCodeAt(i); hash = Math.imul(hash, 16777619); }
+    if (String(hash >>> 0) !== String(integrity || "")) return reject("PAYLOAD_INTEGRITY_INVALID");
+    try { sessionStorage.removeItem(key); } catch(e) {}
+    return { ok:true, payload:p };
+  }
+
 
   function getActiveLinkForAbonent(dbRoot, abonentId){
     try {
@@ -802,11 +816,17 @@
 
       try { console.log("[reports][readonly-open]", { page: "spravka_sud", source: "skip-autoaccrual", abonentId: ctx.abonentId, writes: false }); } catch(eReadonlyOpen) {}
 
+      const temporaryRequested = String(getUrlParams().get("temporary_court_period") || "") === "1";
+      const temporaryPayload = temporaryRequested ? consumeTemporarySpravkaPayload(ctx, String(abonent.uid || ""), period) : { ok:false, reason:"NOT_REQUESTED" };
+      if (temporaryRequested && !temporaryPayload.ok) {
+        showFatal("Временный расчёт периода недоступен. Вернитесь в карточку абонента и повторно рассчитайте выбранный период.", { reason: temporaryPayload.reason });
+        return;
+      }
       let allRowsRaw;
       try {
-        allRowsRaw = (window.Data && typeof window.Data.readPaymentLedger === "function")
+        allRowsRaw = temporaryPayload.ok ? temporaryPayload.payload.rows : ((window.Data && typeof window.Data.readPaymentLedger === "function")
           ? window.Data.readPaymentLedger(ctx.abonentId)
-          : safeLedgerJSON(paymentsKey, [], ctx.readOwner);
+          : safeLedgerJSON(paymentsKey, [], ctx.readOwner));
       } catch (e) {
         if (isLedgerJsonInvalidError(e)) {
           showFatal(LEDGER_FATAL_MESSAGE, { abonentId: ctx.abonentId, error: e });
@@ -815,7 +835,7 @@
         throw e;
       }
       let allRows = Array.isArray(allRowsRaw) ? allRowsRaw : [];
-      const hasLedger = hasUsableLedgerRows(allRows);
+      const hasLedger = temporaryPayload.ok || hasUsableLedgerRows(allRows);
       console.log('[spravka_sud][ledger-check] id=' + ctx.abonentId + ' len=' + allRows.length);
       if (!hasLedger) {
         console.warn('[readonly][blocked-write-path]', { page: 'spravka_sud', abonentId: ctx.abonentId, reason: 'LEDGER_NOT_PREPARED' });
@@ -847,6 +867,7 @@
           return k >= fromKey && k <= toKey;
         });
       }
+      if (temporaryPayload.ok) { baseRows = allRows; try { console.log("[spravka][payload-accepted]", { source:"temporary_court_period_payload", uid:String(abonent.uid||""), rows:allRows.length, writes:false }); } catch(e) {} }
 
       let viewRows;
       try {

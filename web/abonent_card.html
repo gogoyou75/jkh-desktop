@@ -13,6 +13,7 @@ Doc: docs/LOGIC_SPEC_v1.5.3.md
 <html lang="ru">
 <head>
     <meta charset="UTF-8">
+    <script src="offline_origin_diag.js"></script>
     <script src="auth.js"></script>
     <script src="storage.js"></script>
     <script src="critical_guard.js" defer></script>
@@ -1529,13 +1530,28 @@ function __safeLoadPaymentTableOnce(reason, options){
         __paymentTableLoading = true;
         try {
             const loadMode = opts.mode || ((reason === "calc-period-bootstrap-url" || reason === "calc-period-bootstrap-session") && window.JKH_CARD_PERIOD_MODE_ACTIVE === true ? "temporary_court_period" : "readonly_no_recalc");
-            window.__loadPaymentTable({ mode: loadMode, reason: reason || 'abonent-card', force: !!opts.force });
+            window.__loadPaymentTable({
+                mode: loadMode,
+                reason: reason || 'abonent-card',
+                force: !!opts.force,
+                onSettled: opts.endTemporaryModeAfterRender === true ? function(){
+                    endTemporaryCardPeriodMode({
+                        abonentId: opts.abonentId || getAbonentIdFromURL(),
+                        source: "card_period_mode_end_after_bootstrap"
+                    });
+                } : null
+            });
             __hideExcludesFatalBox();
         } catch(e) {
             if (__isExcludesFatalError(e)) __showExcludesFatalBox(e);
             try { console.error('[abonent_card] __loadPaymentTable failed:', reason, e); } catch(_){}
         } finally {
-            setTimeout(() => { __paymentTableLoading = false; }, 300);
+            setTimeout(() => {
+                __paymentTableLoading = false;
+                try { __maybeStartCardAutoRecalc("payment-table-loaded:" + String(reason || "")); } catch(eAutoRecalc) {
+                    try { console.warn("[abonent_card][auto-recalc]", { event: "error", stage: "payment-table-loaded", error: String(eAutoRecalc && eAutoRecalc.message || eAutoRecalc) }); } catch(_) {}
+                }
+            }, 300);
         }
     }, 0);
 }
@@ -1569,6 +1585,38 @@ function __readTemporaryPeriodState(abonentId){
     } catch(e) {
         return null;
     }
+}
+
+function endTemporaryCardPeriodMode(options){
+    const opts = options && typeof options === "object" ? options : {};
+    const abonentId = String(opts.abonentId || getAbonentIdFromURL() || "").trim();
+    const source = String(opts.source || "temporary-period-consumed");
+    const sessionKey = __periodSessionKey(abonentId);
+    const flagBefore = window.JKH_CARD_PERIOD_MODE_ACTIVE === true;
+    const fromEl = document.getElementById("calcFrom");
+    const toEl = document.getElementById("calcTo");
+    let sessionRemoved = false;
+    window.JKH_CARD_PERIOD_MODE_ACTIVE = false;
+    try {
+        if (abonentId) {
+            sessionRemoved = sessionStorage.getItem(sessionKey) !== null;
+            sessionStorage.removeItem(sessionKey);
+        }
+    } catch(eSessionConsume) {}
+    const details = {
+        abonentId: abonentId,
+        source: source,
+        flagBefore: flagBefore,
+        flagAfter: window.JKH_CARD_PERIOD_MODE_ACTIVE === true,
+        sessionKey: sessionKey,
+        sessionRemoved: sessionRemoved,
+        visibleFrom: fromEl ? String(fromEl.value || "") : "",
+        visibleTo: toEl ? String(toEl.value || "") : ""
+    };
+    try { console.log("[card_period_mode_end]", details); } catch(eEndLog) {}
+    try { console.log("[card_period_mode_session_consumed]", details); } catch(eSessionLog) {}
+    try { console.log("[" + source + "]", details); } catch(eSourceLog) {}
+    return details;
 }
 
 function __isCardReturnFromSpravkaUrl(){
@@ -1730,7 +1778,7 @@ async function __initAbonentCardSafe(){
         try { loadAbonentSummaryStatus(); } catch(e) { try { console.warn('[summary][status-load-failed]', e); } catch(_){} }
 
         setTimeout(() => {
-            // Opening the card is read-only for summary/accrual state: no auto-recalc here.
+            // First table load remains readonly; auto-recalc is a separate guarded lifecycle step after it.
             const fromSpravka = __isCardReturnFromSpravkaUrl();
             if (fromSpravka) {
                 try { console.log("[card-init][ready-after-return]", { reason: "server-first-ready", force: true }); } catch(eReturnReady) {}
@@ -3297,7 +3345,7 @@ function loadCalcPeriodUI(){
                 try { console.log("[card-return][from-spravka]", { from: urlFrom, to: urlTo, requestedId: meta.requestedId, uid: meta.resolvedUid, ownerId: meta.ownerId, writes: false }); } catch(eReturnLog) {}
                 try { console.log("[period][restore-source]", { source: "url", key: "location.search", raw: window.location.search || "", from: urlFrom, to: urlTo, requestedId: meta.requestedId, uid: meta.resolvedUid, ownerId: meta.ownerId }); } catch (eRestoreUrlLog) {}
                 try { console.log("[period-recalc][return-state-restored]", { source: "url", periodFrom: urlFrom, periodTo: urlTo, mode: "temporary_court_period" }); } catch(eReturnStateUrl) {}
-                __safeLoadPaymentTableOnce("calc-period-bootstrap-url", { force: true });
+                __safeLoadPaymentTableOnce("calc-period-bootstrap-url", { force: true, endTemporaryModeAfterRender: true, abonentId: meta.requestedId });
                 try {
                     console.log("[card-period][bootstrap-inputs-from-url]", {
                         requestedId: meta.requestedId,
@@ -3330,7 +3378,7 @@ function loadCalcPeriodUI(){
                 toEl.value = sessionPeriod.period_to || "";
                 window.JKH_CARD_PERIOD_MODE_ACTIVE = true;
                 try { console.log("[period-recalc][return-state-restored]", { source: "session", periodFrom: fromEl.value || "", periodTo: toEl.value || "", mode: "temporary_court_period" }); } catch(eSessionRestoreLog) {}
-                __safeLoadPaymentTableOnce("calc-period-bootstrap-session", { force: true });
+                __safeLoadPaymentTableOnce("calc-period-bootstrap-session", { force: true, endTemporaryModeAfterRender: true, abonentId: meta.requestedId });
                 return;
             }
             fromEl.value = "";
@@ -3613,6 +3661,16 @@ let __lastRuntimeCacheValidation = { valid: false, reason: "RUNTIME_CACHE_NOT_VA
 let __cardSnapshotFreshValidated = false;
 let __lastCardSnapshotValidation = { valid: false, reason: "CARD_SNAPSHOT_NOT_VALIDATED" };
 let __fullRecalcRunSeq = 0;
+let __JKH_CARD_AUTO_RECALC = {
+    uid: null,
+    pending: false,
+    inFlight: false,
+    done: false,
+    lastReason: "",
+    requestedStatus: "",
+    startedAt: 0
+};
+window.__JKH_CARD_AUTO_RECALC = __JKH_CARD_AUTO_RECALC;
 
 function __nextFullRecalcRunId(){
     __fullRecalcRunSeq += 1;
@@ -3626,6 +3684,141 @@ function __fullRecalcUiYield(){
 function __currentFullRecalcRun(){
     const state = window.__JKH_FULL_RECALC_STATE;
     return state && state.running === true ? state : null;
+}
+
+function __resetCardAutoRecalcForUid(uid){
+    const normalizedUid = String(uid || "").trim();
+    if (__JKH_CARD_AUTO_RECALC.uid === normalizedUid) return;
+    __JKH_CARD_AUTO_RECALC.uid = normalizedUid;
+    __JKH_CARD_AUTO_RECALC.pending = false;
+    __JKH_CARD_AUTO_RECALC.inFlight = false;
+    __JKH_CARD_AUTO_RECALC.done = false;
+    __JKH_CARD_AUTO_RECALC.lastReason = "";
+    __JKH_CARD_AUTO_RECALC.requestedStatus = "";
+    __JKH_CARD_AUTO_RECALC.startedAt = 0;
+}
+
+function __skipCardAutoRecalcFreshSnapshot(uid){
+    __resetCardAutoRecalcForUid(uid);
+    __JKH_CARD_AUTO_RECALC.pending = false;
+    __JKH_CARD_AUTO_RECALC.inFlight = false;
+    __JKH_CARD_AUTO_RECALC.done = true;
+    __JKH_CARD_AUTO_RECALC.lastReason = "FRESH_SNAPSHOT";
+    try {
+        console.log("[abonent_card][auto-recalc]", {
+            event: "skipped fresh snapshot",
+            uid: String(uid || "")
+        });
+    } catch(eLog) {}
+}
+
+function __requestCardAutoRecalc(uid, reason, status){
+    const normalizedUid = String(uid || "").trim();
+    if (!normalizedUid) return;
+    __resetCardAutoRecalcForUid(normalizedUid);
+    if (__JKH_CARD_AUTO_RECALC.done === true) {
+        try {
+            console.log("[abonent_card][auto-recalc]", {
+                event: "skipped already done",
+                uid: normalizedUid,
+                reason: String(reason || "")
+            });
+        } catch(eDoneLog) {}
+        return;
+    }
+    if (__JKH_CARD_AUTO_RECALC.inFlight === true) {
+        try {
+            console.log("[abonent_card][auto-recalc]", {
+                event: "already in flight",
+                uid: normalizedUid,
+                reason: String(reason || "")
+            });
+        } catch(eFlightLog) {}
+        return;
+    }
+    __JKH_CARD_AUTO_RECALC.pending = true;
+    __JKH_CARD_AUTO_RECALC.lastReason = String(reason || "CARD_SNAPSHOT_NOT_FRESH");
+    __JKH_CARD_AUTO_RECALC.requestedStatus = __normalizeSummaryStatus(status || "dirty");
+    try {
+        console.log("[abonent_card][auto-recalc]", {
+            event: "requested",
+            uid: normalizedUid,
+            reason: __JKH_CARD_AUTO_RECALC.lastReason,
+            status: __JKH_CARD_AUTO_RECALC.requestedStatus
+        });
+    } catch(eRequestLog) {}
+    setTimeout(function(){ __maybeStartCardAutoRecalc("request"); }, 0);
+}
+
+function __isCurrentCardSnapshotFreshForAutoRecalc(uid){
+    try {
+        if (!window.Data || typeof Data.readCardSnapshot !== "function") return false;
+        return __isFreshCardSnapshotUsable(uid, Data.readCardSnapshot(uid));
+    } catch(e) {
+        return false;
+    }
+}
+
+function __monitorCardAutoRecalc(uid, attempt){
+    const nextAttempt = Math.max(0, Number(attempt) || 0) + 1;
+    setTimeout(function(){
+        const activeRun = __currentFullRecalcRun();
+        if (activeRun) {
+            __monitorCardAutoRecalc(uid, nextAttempt);
+            return;
+        }
+        const fresh = __isCurrentCardSnapshotFreshForAutoRecalc(uid);
+        if (!fresh && nextAttempt < 40) {
+            __monitorCardAutoRecalc(uid, nextAttempt);
+            return;
+        }
+        __JKH_CARD_AUTO_RECALC.inFlight = false;
+        __JKH_CARD_AUTO_RECALC.done = true;
+        try {
+            console.log("[abonent_card][auto-recalc]", {
+                event: fresh ? "done" : "error",
+                uid: String(uid || ""),
+                reason: fresh ? "OK" : String(__JKH_CARD_AUTO_RECALC.lastReason || "AUTO_RECALC_FINISHED_WITHOUT_FRESH_SNAPSHOT")
+            });
+        } catch(eDoneLog) {}
+        try { loadAbonentSummaryStatus(); } catch(eStatusReload) {
+            renderAbonentSummaryStatus("error", String(eStatusReload && eStatusReload.message || eStatusReload || "AUTO_RECALC_STATUS_RELOAD_FAILED"));
+        }
+    }, 500);
+}
+
+async function __maybeStartCardAutoRecalc(source){
+    const state = __JKH_CARD_AUTO_RECALC;
+    if (!state || state.pending !== true) return;
+    const uid = String(state.uid || "").trim();
+    if (!uid) return;
+    if (state.done === true) return;
+    if (state.inFlight === true) {
+        try { console.log("[abonent_card][auto-recalc]", { event: "already in flight", uid: uid, source: String(source || "") }); } catch(eFlightLog) {}
+        return;
+    }
+    if (__isCurrentCardSnapshotFreshForAutoRecalc(uid)) {
+        __skipCardAutoRecalcFreshSnapshot(uid);
+        return;
+    }
+    if (await __tryUseBackendFreshSnapshot(uid, state.lastReason || "AUTO_RECALC_GATE")) {
+        state.pending = false;
+        state.inFlight = false;
+        state.done = true;
+        return;
+    }
+    state.pending = false;
+    state.inFlight = false;
+    state.done = true;
+    try {
+        console.log("[abonent_card][auto-recalc]", {
+            event: "blocked passive cache",
+            uid: uid,
+            reason: "card_auto_recalc_disabled_passive_cache",
+            originalReason: String(state.lastReason || ""),
+            source: String(source || "")
+        });
+    } catch(eBlockedLog) {}
 }
 
 function __logFullRecalcEventIgnored(eventName, detail){
@@ -3697,8 +3890,8 @@ function __summaryStatusText(status){
 
 function __summaryWarningText(status){
     if (status === "calculating") return "Выполняется пересчёт…";
-    if (status === "dirty") return "Итог устарел — нажмите «Пересчитать». Старые totals не считаются актуальными.";
-    if (status === "missing") return "Итог ещё не создан. Старые totals не подставляются. Нажмите «Пересчитать», чтобы создать summary.";
+    if (status === "dirty") return "Требуется пересчёт. Показан последний сохранённый расчёт. Нажмите «Пересчитать», чтобы обновить итог.";
+    if (status === "missing") return "Нет сохранённого расчёта. Нажмите «Пересчитать».";
     if (status === "cancelled") return "Пересчёт остановлен пользователем. Частичные данные не сохранялись как актуальный итог.";
     if (status === "timeout") return "Пересчёт остановлен по таймауту. Частичные данные не сохранялись как актуальный итог.";
     if (status === "error") return "Расчёт summary невозможен. Проверьте причину ошибки и выполните «Пересчитать» после исправления данных.";
@@ -3732,7 +3925,7 @@ function renderAbonentSummaryStatus(status, reason){
     }
     if (warningEl) {
         const modeMismatchReason = visibleReason === "CARD_SNAPSHOT_MODE_MISMATCH_FULL_VS_PERIOD" || visibleReason === "CARD_SNAPSHOT_PERIOD_MISMATCH" || visibleReason === "CARD_SNAPSHOT_LEGACY_MODE_AMBIGUOUS";
-        const text = modeMismatchReason ? "Сохранённый snapshot не соответствует текущему режиму расчёта. Нажмите «Пересчитать» для этого режима." : visibleReason === "CARD_ROWS_NOT_RESTORED"
+        const text = __isRatesSummaryReason(visibleReason) ? __ratesFatalLedgerVisibleMessage() : modeMismatchReason ? "Сохранённый snapshot не соответствует текущему режиму расчёта. Нажмите «Пересчитать» для этого режима." : visibleReason === "CARD_ROWS_NOT_RESTORED"
             ? "Итоги есть, но строки карточки не восстановлены. Нажмите «Пересчитать»."
             : __summaryWarningText(normalized);
         warningEl.textContent = text;
@@ -3810,14 +4003,7 @@ window.addEventListener("jkh:runtime-cache-invalid", function(event){
     __runtimeCacheFreshBlocked = true;
     __lastRuntimeCacheValidation = { valid: false, reason: reason, detail: detail };
     try { console.warn("[summary][runtime-cache-downgrade]", detail); } catch(eLog) {}
-    if (__cardSnapshotFreshValidated && __lastCardSnapshotValidation.valid) return;
-    if (__lastRenderedSummaryStatusLocal === "fresh" && __lastCardSnapshotValidation && __lastCardSnapshotValidation.valid === false && __lastCardSnapshotValidation.reason) {
-        renderAbonentSummaryStatus("dirty", __lastCardSnapshotValidation.reason);
-        return;
-    }
-    if (__lastRenderedSummaryStatusLocal === "fresh") {
-        renderAbonentSummaryStatus("dirty", reason === "RUNTIME_CACHE_PERIOD_MISMATCH" ? "Требуется пересчёт таблицы для выбранного периода" : reason);
-    }
+    try { console.log("[summary][runtime-cache-passive]", { reason: reason, source: String(detail.source || "") }); } catch(ePassiveLog) {}
 });
 
 window.addEventListener("jkh:runtime-cache-valid", function(event){
@@ -3864,10 +4050,12 @@ window.addEventListener("jkh:card-snapshot-invalid", function(event){
     __cardSnapshotFreshValidated = false;
     __lastCardSnapshotValidation = { valid: false, reason: reason, detail: detail };
     try { console.warn("[summary][card-snapshot-invalid]", detail); } catch(eLog) {}
+    try { console.log("[summary][card-local-snapshot-passive]", { reason: "card_local_snapshot_invalid_passive", detailReason: reason }); } catch(ePassiveLog) {}
     __debugCurrentCardSnapshotLifecycle(reason);
-    if (__lastRenderedSummaryStatusLocal === "fresh" || __normalizeSummaryStatus(window.__lastCardSummaryForDebug && window.__lastCardSummaryForDebug.summary_status) === "fresh") {
-        renderAbonentSummaryStatus("dirty", reason);
-    }
+    try {
+        const uid = getAbonentTechnicalIdFromURL();
+        if (uid) __resetCardAutoRecalcForUid(uid);
+    } catch(eAutoRequest) {}
 });
 
 function __baseStorageKeyForCurrentOwner(storageKey){
@@ -3913,7 +4101,14 @@ window.addEventListener("storage", function(event){
             if (!window.Data || typeof Data.readCardSnapshot !== "function" || !uid) return;
             const snapshot = Data.readCardSnapshot(uid);
             if (snapshot && snapshot.dirty === true) {
-                window.dispatchEvent(new CustomEvent("jkh:card-snapshot-invalid", { detail: { reason: snapshot.dirtyReason || "FINANCIAL_INPUT_CHANGED", source: "storage", key: baseKey } }));
+                try {
+                    console.log("[card-snapshot][storage-passive-cache-mismatch]", {
+                        reason: "card_local_snapshot_invalid_passive",
+                        detailReason: snapshot.dirtyReason || "FINANCIAL_INPUT_CHANGED",
+                        source: "storage",
+                        key: baseKey
+                    });
+                } catch(ePassiveLog) {}
             }
         } catch(e) {
             try { console.warn("[card-snapshot][storage-recheck-failed]", e); } catch(_) {}
@@ -3931,6 +4126,105 @@ function __isFreshCardSnapshotUsable(uid, snapshot){
     return !!currentLedgerVersion && String(snapshot.ledgerVersion || "") === currentLedgerVersion;
 }
 
+function __renderFreshCardSnapshot(uid, snapshot, sourceReason){
+    const reloadRowsById = snapshot && snapshot.rowsById && typeof snapshot.rowsById === "object" && !Array.isArray(snapshot.rowsById) ? snapshot.rowsById : {};
+    try {
+        if (typeof window.__offlineOriginMarkPassiveRestore === "function") {
+            window.__offlineOriginMarkPassiveRestore({
+                snapshotFresh: true,
+                backendSucceeded: String(sourceReason || "").indexOf("backend") >= 0,
+                restoredRows: 0,
+                source: String(sourceReason || "")
+            });
+        }
+    } catch(eOfflineOriginSnapshot) {}
+    try {
+        console.log("[reload-chain][card-snapshot-accepted]", {
+            uid: String(uid || ""),
+            source: String(sourceReason || "local_card_snapshot"),
+            status: String(snapshot && snapshot.summary_status || ""),
+            rowsByIdCount: Object.keys(reloadRowsById).length,
+            totals: snapshot && snapshot.totals || null,
+            ledgerVersion: String(snapshot && snapshot.ledgerVersion || "")
+        });
+    } catch(eReloadAcceptedLog) {}
+    const summary = __summaryFromCardSnapshot(snapshot, snapshot.summary_status || "fresh", snapshot.summary_reason || "");
+    window.__lastCardSummaryForDebug = summary;
+    __cardSnapshotFreshValidated = true;
+    __lastCardSnapshotValidation = {
+        valid: true,
+        reason: "",
+        detail: {
+            uid: uid,
+            ledgerVersion: snapshot.ledgerVersion,
+            rowsByIdCount: snapshot.rowsById && typeof snapshot.rowsById === "object" ? Object.keys(snapshot.rowsById).length : 0,
+            source: String(sourceReason || "local_card_snapshot")
+        }
+    };
+    __runtimeCacheFreshBlocked = false;
+    renderAbonentSummaryStatus("fresh", "OK");
+    __skipCardAutoRecalcFreshSnapshot(uid);
+    __renderAbonentTotalsFromFreshSummary(summary);
+    if (typeof window.JKH_restoreCanonicalSnapshotRowsForPassiveDisplay === "function") {
+        Promise.resolve(window.JKH_restoreCanonicalSnapshotRowsForPassiveDisplay(snapshot)).then(function(result){
+            try {
+                if (typeof window.__offlineOriginMarkPassiveRestore === "function") {
+                    window.__offlineOriginMarkPassiveRestore({
+                        snapshotFresh: true,
+                        backendSucceeded: String(sourceReason || "").indexOf("backend") >= 0,
+                        restoredRows: Number(result && result.renderedRowsCount || 0),
+                        rowsRestoreOk: !!(result && result.ok === true),
+                        source: String(sourceReason || "")
+                    });
+                }
+            } catch(eOfflineOriginRows) {}
+        }).catch(function(eRestoreRows){
+            try { console.warn("[card-reload][card_rows_materialization_failed]", { uid: String(uid || ""), snapshotRowsCount: Object.keys(reloadRowsById).length, ledgerRowsCount: 0, renderedRowsCount: 0, source: String(sourceReason || "canonical_backend_snapshot"), reason: String(eRestoreRows && eRestoreRows.message || eRestoreRows || "CARD_ROWS_NOT_RESTORED") }); } catch(_) {}
+        });
+    }
+}
+
+async function __tryUseBackendFreshSnapshot(uid, reason){
+    const normalizedUid = String(uid || "").trim();
+    if (!normalizedUid || !window.Data || typeof Data.readFreshBackendCardSnapshotForCard !== "function") return false;
+    try {
+        const result = await Data.readFreshBackendCardSnapshotForCard(normalizedUid, { hydrateLocal: true, validateLocalInputs: false });
+        if (result && result.ok === true && result.snapshot) {
+            try { console.log("[reload-chain][card-open-source]", { uid: normalizedUid, source: "backend_canonical_snapshot", accepted: true, reason: String(result.reason || "OK"), rowsByIdCount: Number(result.rowsByIdCount || 0) }); } catch(eReloadSourceLog) {}
+            try {
+                console.log("[abonent_card][backend-snapshot]", {
+                    reason: result.hydratedLocal ? "card_backend_snapshot_hydrated_local" : "card_backend_snapshot_used",
+                    sourceReason: String(reason || ""),
+                    uid: normalizedUid,
+                    rowsByIdCount: result.rowsByIdCount || 0
+                });
+            } catch(eUsedLog) {}
+            __renderFreshCardSnapshot(normalizedUid, result.snapshot, result.reason || "card_backend_snapshot_used");
+            return true;
+        }
+        try {
+            console.warn("[reload-chain][card-snapshot-rejected]", { uid: normalizedUid, source: "backend_canonical_snapshot", accepted: false, reason: String(result && (result.detail || result.reason) || "BACKEND_SNAPSHOT_UNAVAILABLE"), rowsByIdCount: Number(result && result.rowsByIdCount || 0) });
+            console.warn("[abonent_card][backend-snapshot]", {
+                reason: result && result.reason === "card_auto_recalc_backend_snapshot_missing" ? "card_auto_recalc_backend_snapshot_missing" : "card_auto_recalc_backend_snapshot_incompatible",
+                detail: result && (result.detail || result.reason) || "BACKEND_SNAPSHOT_UNAVAILABLE",
+                sourceReason: String(reason || ""),
+                uid: normalizedUid
+            });
+        } catch(eMissLog) {}
+    } catch(e) {
+        try {
+            console.warn("[reload-chain][card-snapshot-rejected]", { uid: normalizedUid, source: "backend_canonical_snapshot", accepted: false, reason: String(e && e.message || e || "BACKEND_SNAPSHOT_READ_FAILED"), rowsByIdCount: 0 });
+            console.warn("[abonent_card][backend-snapshot]", {
+                reason: "card_auto_recalc_backend_snapshot_missing",
+                detail: String(e && e.message || e || "BACKEND_SNAPSHOT_READ_FAILED"),
+                sourceReason: String(reason || ""),
+                uid: normalizedUid
+            });
+        } catch(eCatchLog) {}
+    }
+    return false;
+}
+
 async function loadAbonentSummaryStatus(){
     const { id, a } = getCurrentAbonent();
     const uid = String(a && a.uid || "").trim();
@@ -3944,42 +4238,40 @@ async function loadAbonentSummaryStatus(){
     }
 
     try {
+        if (await __tryUseBackendFreshSnapshot(uid, "CARD_OPEN_BACKEND_FIRST")) return;
         const snapshot = Data.readCardSnapshot(uid);
         if (!snapshot) {
-            __debugCurrentCardSnapshotLifecycle("CARD_SNAPSHOT_MISSING");
+            __debugCurrentCardSnapshotLifecycle("LOCAL_CARD_SNAPSHOT_MISSING_PASSIVE");
             window.__lastCardSummaryForDebug = null;
-            renderAbonentSummaryStatus("missing", "Требуется пересчёт");
+            __resetCardAutoRecalcForUid(uid);
+            renderAbonentSummaryStatus("missing", "Нет сохранённого расчёта. Нажмите «Пересчитать»");
             return;
         }
         if (snapshot.dirty === true) {
-            __debugCurrentCardSnapshotLifecycle(snapshot.dirtyReason || "CARD_SNAPSHOT_DIRTY");
-            __cardSnapshotFreshValidated = false;
-            __lastCardSnapshotValidation = { valid: false, reason: snapshot.dirtyReason || "CARD_SNAPSHOT_DIRTY" };
-            window.__lastCardSummaryForDebug = null;
-            renderAbonentSummaryStatus("dirty", snapshot.dirtyReason || "Требуется пересчёт");
+            __debugCurrentCardSnapshotLifecycle(snapshot.dirtyReason || "LOCAL_CARD_SNAPSHOT_DIRTY_PASSIVE");
+            const cachedSummary = __summaryFromCardSnapshot(snapshot, "missing", "LOCAL_CARD_SNAPSHOT_DIRTY_PASSIVE");
+            window.__lastCardSummaryForDebug = cachedSummary;
+            __resetCardAutoRecalcForUid(uid);
+            renderAbonentSummaryStatus("missing", "Серверный snapshot недоступен. Локальный cache не является источником актуальности.");
+            __renderAbonentTotalsFromSummary(cachedSummary);
             return;
         }
         if (!__isFreshCardSnapshotUsable(uid, snapshot)) {
-            __debugCurrentCardSnapshotLifecycle("CARD_ROWS_NOT_RESTORED");
-            window.__lastCardSummaryForDebug = null;
+            __debugCurrentCardSnapshotLifecycle("LOCAL_CARD_SNAPSHOT_INVALID_PASSIVE");
+            const invalidSummary = __summaryFromCardSnapshot(snapshot, "missing", "LOCAL_CARD_SNAPSHOT_INVALID_PASSIVE");
+            window.__lastCardSummaryForDebug = invalidSummary;
             __cardSnapshotFreshValidated = false;
-            __lastCardSnapshotValidation = { valid: false, reason: "CARD_ROWS_NOT_RESTORED" };
-            renderAbonentSummaryStatus("dirty", "CARD_ROWS_NOT_RESTORED");
+            __lastCardSnapshotValidation = { valid: false, reason: "LOCAL_CARD_SNAPSHOT_INVALID_PASSIVE" };
+            __resetCardAutoRecalcForUid(uid);
+            renderAbonentSummaryStatus("missing", "Серверный snapshot недоступен. Локальный cache не является источником актуальности.");
+            __renderAbonentTotalsFromSummary(invalidSummary);
             return;
         }
-        const summary = {
-            summary_status: snapshot.summary_status || "fresh",
-            summary_reason: snapshot.summary_reason || "",
-            totals: snapshot.totals || {}
-        };
-        window.__lastCardSummaryForDebug = summary;
-        __cardSnapshotFreshValidated = true;
-        __lastCardSnapshotValidation = { valid: true, reason: "", detail: { uid: uid, ledgerVersion: snapshot.ledgerVersion, rowsByIdCount: Object.keys(snapshot.rowsById).length } };
-        __runtimeCacheFreshBlocked = false;
-        renderAbonentSummaryStatus("fresh", "OK");
-        __renderAbonentTotalsFromFreshSummary(summary);
+        __renderFreshCardSnapshot(uid, snapshot, "local_card_snapshot_passive_fallback");
     } catch (e) {
-        renderAbonentSummaryStatus("error", String(e && e.message || e || "CARD_SNAPSHOT_READ_ERROR"));
+        const reason = String(e && e.message || e || "CARD_SNAPSHOT_READ_ERROR");
+        __resetCardAutoRecalcForUid(uid);
+        renderAbonentSummaryStatus("error", reason);
     }
 }
 
@@ -3994,10 +4286,23 @@ function __summaryCalcErrorCode(e){
     return msg || "CALC_FAILED";
 }
 
+function __isRatesSummaryReason(reason){
+    const code = String(reason || "");
+    return code === "RATES_MISSING" || code === "RATES_JSON_INVALID" || code === "MISSING_REQUIRED_RATE";
+}
+
+function __ratesFatalLedgerVisibleMessage(){
+    return "Ставки рефинансирования отсутствуют или повреждены. Начисления показаны, пеня и итоговый summary не рассчитаны.";
+}
+
 function __renderAbonentTotalsFromFreshSummary(summary){
     const status = __normalizeSummaryStatus(summary && (summary.summary_status || summary.status));
     if (status !== "fresh") return;
     if (!__freshSummaryVisibleGuard().ok) return;
+    __renderAbonentTotalsFromSummary(summary);
+}
+
+function __renderAbonentTotalsFromSummary(summary){
     const totals = summary && summary.totals && typeof summary.totals === "object" ? summary.totals : null;
     if (!totals) return;
 
@@ -4017,6 +4322,15 @@ function __renderAbonentTotalsFromFreshSummary(summary){
     put(document.getElementById('abonent_total_debt') || document.getElementById('total_debt') || document.querySelector('[data-field="total_debt"]') || document.querySelector('[data-total="debt"]'), total);
     put(document.getElementById('abonent_total_main_debt') || document.getElementById('total_main_debt') || document.querySelector('[data-field="total_main_debt"]'), principal);
     put(document.getElementById('abonent_total_penalty_debt') || document.getElementById('total_penalty_debt') || document.querySelector('[data-field="total_penalty_debt"]'), penalty);
+}
+
+function __summaryFromCardSnapshot(snapshot, statusOverride, reasonOverride){
+    const sourceStatus = statusOverride || snapshot && (snapshot.summary_status || snapshot.status) || "missing";
+    return {
+        summary_status: sourceStatus,
+        summary_reason: reasonOverride || snapshot && (snapshot.summary_reason || snapshot.reason) || "",
+        totals: snapshot && snapshot.totals && typeof snapshot.totals === "object" ? snapshot.totals : {}
+    };
 }
 
 async function __saveAbonentSummaryAfterUidRecalc(abonentId, from, to){
@@ -4075,15 +4389,16 @@ function bindCalcButtons(){
             state.cancelled = true;
             state.abortRequested = true;
             state.abortReason = "FULL_RECALC_CANCELLED";
-            state.abortMessage = "Пересчёт остановлен пользователем";
+            state.abortMessage = "Запрошена остановка пересчёта пользователем";
             state.cancelledAt = Date.now();
             state.currentStage = String(state.currentStage || "cancel-requested");
-            renderAbonentSummaryStatus((window.JKH_SUMMARY_STATUS && window.JKH_SUMMARY_STATUS.CALCULATING) || "calculating", "Останавливаем пересчёт…");
+            renderAbonentSummaryStatus((window.JKH_SUMMARY_STATUS && window.JKH_SUMMARY_STATUS.CALCULATING) || "calculating", "Запрошена остановка пересчёта…");
             __setFullRecalcStopVisible(false);
         });
     }
 
     function clearPeriodResetFlagAfterManualInput(eventName){
+        window.JKH_CARD_PERIOD_MODE_ACTIVE = true;
         if (window.__periodResetInProgress === true) {
             window.__periodResetInProgress = false;
             try {
@@ -4123,6 +4438,9 @@ function bindCalcButtons(){
         if (String(reason || "") === "DB_NOT_HYDRATED") {
             return "База данных ещё загружается. Повторите через несколько секунд.";
         }
+        if (__isRatesSummaryReason(reason)) {
+            return __ratesFatalLedgerVisibleMessage();
+        }
         if (String(reason || "") === "ZERO_ACCRUAL_OVERWRITE_BLOCKED" ||
             (String(reason || "") === "PAYMENT_LEDGER_WRITE_BLOCKED" && window.__JKH_LAST_AUTOACCRUAL_BLOCK && window.__JKH_LAST_AUTOACCRUAL_BLOCK.reason === "ZERO_ACCRUAL_OVERWRITE_BLOCKED")) {
             return "Пересчёт заблокирован: результат содержит нулевые начисления вместо существующих.";
@@ -4137,6 +4455,7 @@ function bindCalcButtons(){
     }
 
     runBtn.addEventListener("click", async () => {
+        try { console.log("[manual-recalc] button clicked"); } catch(eManualRecalcClickLog) {}
         const existingRun = __currentFullRecalcRun();
         if (existingRun) {
             try {
@@ -4157,7 +4476,10 @@ function bindCalcButtons(){
         let to   = String(toEl.value || "").trim();
         let hasAnyPeriodInput = !!(from || to);
         let hasValidPeriodInput = isValidPeriod(from, to);
-        const recalcForReportPeriod = hasAnyPeriodInput;
+        const recalcMode = window.JKH_CARD_PERIOD_MODE_ACTIVE === true
+            ? "temporary_report_period"
+            : "full_summary";
+        const recalcForReportPeriod = recalcMode === "temporary_report_period";
         const prevText = runBtn.textContent;
         const fullSummaryUiBeforeRecalc = captureFullSummaryStatusUi();
         const clickMeta = getCalcPeriodStorageMeta();
@@ -4240,6 +4562,36 @@ function bindCalcButtons(){
         } catch(eSummaryUiSetLog) {}
         runBtn.textContent = "Пересчёт…";
         let watchdogFired = false;
+        let fullRecalcExitSummaryStatus = "";
+        let fullRecalcExitSummaryReason = "";
+        let fullRecalcExitSnapshotReason = "";
+        function fullRecalcExitPayload(reason, branch, step, returnValue, exception, caller){
+            return {
+                reason: String(reason || ""),
+                branch: String(branch || ""),
+                step: String(step || fullRecalcState.currentStage || ""),
+                runId: recalcRunId,
+                uid: String(fullRecalcState.uid || clickMeta.resolvedUid || ""),
+                summaryStatus: String(fullRecalcExitSummaryStatus || ""),
+                summaryReason: String(fullRecalcExitSummaryReason || ""),
+                snapshotReason: String(fullRecalcExitSnapshotReason || ""),
+                returnValue: returnValue === undefined ? "" : returnValue,
+                exception: exception ? String(exception && (exception.message || exception.reason) || exception) : "",
+                caller: String(caller || "abonent_card.manualFullRecalc")
+            };
+        }
+        function logFullRecalcExit(reason, branch, step, returnValue, exception, caller){
+            try { console.warn("[full-recalc][exit]", fullRecalcExitPayload(reason, branch, step, returnValue, exception, caller)); } catch(eExitLog) {}
+        }
+        function logFullRecalcAfterAwait(step, value){
+            try {
+                console.log("[full-recalc][after-await]", Object.assign(fullRecalcExitPayload("after-await", "await", step, "", null, "abonent_card.manualFullRecalc"), {
+                    ok: value && typeof value === "object" && Object.prototype.hasOwnProperty.call(value, "ok") ? value.ok === true : "",
+                    valueReason: String(value && (value.reason || value.summary_reason) || ""),
+                    valueStatus: String(value && (value.summary_status || value.status) || "")
+                }));
+            } catch(eAfterAwaitLog) {}
+        }
         function initRecalcCallCountReport(){
             window.__JKH_RECALC_CALL_COUNTS = {
                 runId: recalcRunId,
@@ -4315,7 +4667,6 @@ function bindCalcButtons(){
                 "save-runtime-cache-after-summary": "сохранение свежего runtime cache",
                 "build-card-snapshot": "построение snapshot",
                 "save-card-snapshot": "сохранение snapshot",
-                "save-card-snapshot-async": "сохранение snapshot",
                 "final-render": "финальная отрисовка",
                 "unlock": "разблокировка UI"
             };
@@ -4528,42 +4879,98 @@ function bindCalcButtons(){
         function heartbeatPostRecalcStage(stage){
             heartbeatFullRecalc(stage || "snapshot-save");
         }
-        function schedulePostRecalcSnapshotSave(snapshot){
-            setTimeout(async function(){
-                let snapshotSaveResult = null;
+        async function savePostRecalcSnapshot(snapshot){
+            let snapshotSaveResult = null;
+            try {
+                heartbeatFullRecalc("save-card-snapshot");
+                heartbeatPostRecalcStage("snapshot-save-start");
                 try {
-                    heartbeatFullRecalc("save-card-snapshot-async");
-                    heartbeatPostRecalcStage("snapshot-save-start");
-                    if (fullRecalcState.abortRequested === true) return;
-                    try { console.log("[full-recalc][step]", { runId: recalcRunId, step: "save-card-snapshot-async" }); } catch(eStepLog) {}
-                    const snapshotSaveStartedAt = Date.now();
-                    snapshotSaveResult = await Data.saveCardSnapshotAndWait(currentAbonentId, snapshot, { runId: recalcRunId, skipReadback: true });
-                    setRecalcReportStage("snapshotSaveMs", Date.now() - snapshotSaveStartedAt);
-                    const saveOk = !!(snapshotSaveResult && snapshotSaveResult.localOk === true && snapshotSaveResult.serverOk === true);
-                    if (typeof window.__setPostRecalcSnapshotSaveResult === "function") window.__setPostRecalcSnapshotSaveResult(recalcRunId, saveOk);
+                    console.log("[card-snapshot][save-callsite]", {
+                        reason: "manual_full_recalc_save_post_recalc_snapshot_enter",
+                        caller: "abonent_card.savePostRecalcSnapshot",
+                        runId: recalcRunId,
+                        abonentId: String(currentAbonentId || ""),
+                        uid: String(snapshot && snapshot.uid || fullRecalcState.uid || ""),
+                        summaryStatus: String(snapshot && (snapshot.summary_status || snapshot.snapshot_status || "") || ""),
+                        summaryReason: String(snapshot && (snapshot.summary_reason || snapshot.snapshot_reason || "") || ""),
+                        recalculationMode: "manual_full_recalc",
+                        snapshotMode: String(snapshot && (snapshot.snapshot_mode || snapshot.mode || snapshot.scope || "canonical_full") || ""),
+                        invocationReason: "post-successful-manual-full-recalc"
+                    });
+                } catch(eSnapshotCallsiteEnterLog) {}
+                if (fullRecalcState.abortRequested === true) {
                     try {
-                        console.log("[full-recalc][step-done]", { runId: recalcRunId, step: "save-card-snapshot-async", ok: saveOk });
-                        console.log("[full-recalc][save-snapshot]", {
+                        console.warn("[card-snapshot][save-callsite-skip]", {
+                            reason: "FULL_RECALC_CANCELLED",
+                            caller: "abonent_card.savePostRecalcSnapshot",
                             runId: recalcRunId,
                             abonentId: String(currentAbonentId || ""),
-                            uid: String(snapshot && snapshot.uid || ""),
-                            key: String(snapshotSaveResult && snapshotSaveResult.key || ""),
-                            localOk: !!(snapshotSaveResult && snapshotSaveResult.localOk === true),
-                            serverOk: !!(snapshotSaveResult && snapshotSaveResult.serverOk === true),
-                            serverReadbackOk: !!(snapshotSaveResult && snapshotSaveResult.serverReadbackOk === true),
-                            ledgerVersion: String(snapshot && snapshot.ledgerVersion || ""),
-                            snapshotLedgerVersion: String(snapshotSaveResult && snapshotSaveResult.ledgerVersion || "")
+                            uid: String(snapshot && snapshot.uid || fullRecalcState.uid || ""),
+                            summaryStatus: String(snapshot && (snapshot.summary_status || snapshot.snapshot_status || "") || ""),
+                            summaryReason: String(snapshot && (snapshot.summary_reason || snapshot.snapshot_reason || "") || ""),
+                            recalculationMode: "manual_full_recalc",
+                            snapshotMode: String(snapshot && (snapshot.snapshot_mode || snapshot.mode || snapshot.scope || "canonical_full") || ""),
+                            invocationReason: "save-skipped-abort-requested"
                         });
-                    } catch(eSnapshotSaveLog) {}
-                    heartbeatPostRecalcStage("snapshot-save-done");
-                } catch(eSnapshotAsync) {
-                    if (typeof window.__setPostRecalcSnapshotSaveResult === "function") window.__setPostRecalcSnapshotSaveResult(recalcRunId, false);
-                    heartbeatPostRecalcStage("snapshot-save-failed");
-                } finally {
-                    fullRecalcState.snapshotSavePending = false;
-                    printRecalcCallCountReport("snapshot-save-done", { force: true });
+                    } catch(eSnapshotCallsiteAbortLog) {}
+                    return { ok: false, reason: "FULL_RECALC_CANCELLED" };
                 }
-            }, 0);
+                try { console.log("[full-recalc][step]", { runId: recalcRunId, step: "save-card-snapshot" }); } catch(eStepLog) {}
+                const snapshotSaveStartedAt = Date.now();
+                try {
+                    console.log("[card-snapshot][save-callsite]", {
+                        reason: "before_saveCardSnapshotAndWait",
+                        caller: "abonent_card.savePostRecalcSnapshot",
+                        runId: recalcRunId,
+                        abonentId: String(currentAbonentId || ""),
+                        uid: String(snapshot && snapshot.uid || fullRecalcState.uid || ""),
+                        summaryStatus: String(snapshot && (snapshot.summary_status || snapshot.snapshot_status || "") || ""),
+                        summaryReason: String(snapshot && (snapshot.summary_reason || snapshot.snapshot_reason || "") || ""),
+                        recalculationMode: "manual_full_recalc",
+                        snapshotMode: String(snapshot && (snapshot.snapshot_mode || snapshot.mode || snapshot.scope || "canonical_full") || ""),
+                        invocationReason: "calling-saveCardSnapshotAndWait"
+                    });
+                } catch(eSnapshotCallsiteBeforeLog) {}
+                snapshotSaveResult = await Data.saveCardSnapshotAndWait(currentAbonentId, snapshot, { runId: recalcRunId });
+                setRecalcReportStage("snapshotSaveMs", Date.now() - snapshotSaveStartedAt);
+                const saveOk = !!(snapshotSaveResult && snapshotSaveResult.ok === true && snapshotSaveResult.backendSnapshotOk === true && snapshotSaveResult.backendReadbackOk === true);
+                if (typeof window.__setPostRecalcSnapshotSaveResult === "function") window.__setPostRecalcSnapshotSaveResult(recalcRunId, saveOk);
+                try {
+                    console.log("[full-recalc][step-done]", { runId: recalcRunId, step: "save-card-snapshot", ok: saveOk });
+                    console.log("[full-recalc][save-snapshot]", {
+                        runId: recalcRunId,
+                        abonentId: String(currentAbonentId || ""),
+                        uid: String(snapshot && snapshot.uid || ""),
+                        key: String(snapshotSaveResult && snapshotSaveResult.key || ""),
+                        localOk: !!(snapshotSaveResult && snapshotSaveResult.localOk === true),
+                        serverOk: !!(snapshotSaveResult && snapshotSaveResult.serverOk === true),
+                        serverReadbackOk: !!(snapshotSaveResult && snapshotSaveResult.serverReadbackOk === true),
+                        localCacheOk: !!(snapshotSaveResult && snapshotSaveResult.localCacheOk === true),
+                        backendSnapshotOk: !!(snapshotSaveResult && snapshotSaveResult.backendSnapshotOk === true),
+                        backendReadbackOk: !!(snapshotSaveResult && snapshotSaveResult.backendReadbackOk === true),
+                        warning: String(snapshotSaveResult && snapshotSaveResult.warning || ""),
+                        ledgerVersion: String(snapshot && snapshot.ledgerVersion || ""),
+                        snapshotLedgerVersion: String(snapshotSaveResult && snapshotSaveResult.ledgerVersion || "")
+                    });
+                    if (saveOk && snapshotSaveResult && snapshotSaveResult.localCacheOk === false) {
+                        console.warn("[full-recalc][save-snapshot-warning]", {
+                            runId: recalcRunId,
+                            reason: "card_snapshot_backend_save_succeeded_local_cache_failed",
+                            key: String(snapshotSaveResult.key || ""),
+                            warning: String(snapshotSaveResult.warning || "LOCAL_CACHE_SAVE_FAILED")
+                        });
+                    }
+                } catch(eSnapshotSaveLog) {}
+                heartbeatPostRecalcStage(saveOk ? "snapshot-save-done" : "snapshot-save-failed");
+                return saveOk ? { ok: true, result: snapshotSaveResult } : { ok: false, reason: String(snapshotSaveResult && snapshotSaveResult.reason || "CARD_SNAPSHOT_SAVE_FAILED"), result: snapshotSaveResult };
+            } catch(eSnapshotSave) {
+                if (typeof window.__setPostRecalcSnapshotSaveResult === "function") window.__setPostRecalcSnapshotSaveResult(recalcRunId, false);
+                heartbeatPostRecalcStage("snapshot-save-failed");
+                return { ok: false, reason: String(eSnapshotSave && eSnapshotSave.message || eSnapshotSave || "CARD_SNAPSHOT_SAVE_FAILED"), result: snapshotSaveResult };
+            } finally {
+                fullRecalcState.snapshotSavePending = false;
+                printRecalcCallCountReport("snapshot-save-done", { force: true });
+            }
         }
 
         try {
@@ -4573,13 +4980,17 @@ function bindCalcButtons(){
             try {
                 hydrateCardRuntimeDbFromStore();
                 uidResult = await Data.ensureAbonentUid(currentAbonentId, { source: "abonent_card.calc" });
+                logFullRecalcAfterAwait("ensure-uid", uidResult);
             } catch (e) {
                 uidResult = { ok: false, reason: String(e && e.message || e) };
+                logFullRecalcExit("ENSURE_UID_REJECTED", "catch", "ensure-uid", uidResult, e);
             }
             try { console.log("[full-recalc][step-done]", { runId: recalcRunId, step: "ensure-uid", ok: !!(uidResult && uidResult.ok === true) }); } catch(eStepDoneLog) {}
             await __fullRecalcUiYield();
+            logFullRecalcAfterAwait("ui-yield-after-ensure-uid", { ok: true });
 
             if (!uidResult || uidResult.ok !== true || !uidResult.uid) {
+                logFullRecalcExit("UID_NOT_SAVED", "early-return", "ensure-uid", { ok: false, reason: "UID_NOT_SAVED", uidResult: uidResult || null }, null);
                 renderAbonentSummaryStatus("error", "UID_NOT_SAVED");
                 alert("Период расчёта не сохранён: UID абонента не сохранён.");
                 return;
@@ -4590,6 +5001,7 @@ function bindCalcButtons(){
             if (!hasAnyPeriodInput) {
                 const fullPeriod = autofillFullCardPeriodUI("full-summary-recalc-before-run");
                 if (!fullPeriod || fullPeriod.ok !== true) {
+                    logFullRecalcExit("FULL_PERIOD_REQUIRED", "early-return", "autofill-full-period", fullPeriod || null, null);
                     renderAbonentSummaryStatus("error", String(fullPeriod && fullPeriod.reason || "FULL_PERIOD_REQUIRED"));
                     alert("Не удалось определить полный период карточки. Выберите период вручную.");
                     return;
@@ -4607,15 +5019,21 @@ function bindCalcButtons(){
                     if (saveCalcPeriod.lastError !== "PERIOD_REQUIRED") {
                         alert("Период расчёта не сохранён: не найден canonical UID key.");
                     }
+                    logFullRecalcExit(saveCalcPeriod.lastError || "CALC_PERIOD_SAVE_FAILED", "early-return", "save-calc-period", { ok: false, reason: saveCalcPeriod.lastError || "CALC_PERIOD_SAVE_FAILED" }, null);
                     return;
                 }
                 const reportPeriodResult = saveReportPeriodForSpravka(from, to, { source: "abonent_card.recalc" });
                 __logCardPeriodSaved(getCalcPeriodStorageMeta(), reportPeriodResult);
                 if (!reportPeriodResult.ok) {
                     alert("Период для справки не сохранён: " + String(reportPeriodResult.reason || "REPORT_PERIOD_READBACK_FAILED") + " (" + String(reportPeriodResult.reportKey || "report_period_uid_<uid>") + ").");
+                    logFullRecalcExit(reportPeriodResult.reason || "REPORT_PERIOD_READBACK_FAILED", "early-return", "save-report-period", reportPeriodResult, null);
                     return;
                 }
-                if (!confirmCalcPeriodSaved()) return;
+                // Diagnostic-expanded form of: if (!confirmCalcPeriodSaved()) return;
+                if (!confirmCalcPeriodSaved()) {
+                    logFullRecalcExit("CALC_PERIOD_CONFIRM_FAILED", "early-return", "confirm-calc-period-saved", { ok: false, reason: "CALC_PERIOD_CONFIRM_FAILED" }, null);
+                    return;
+                }
                 if (typeof window.runTemporaryPeriodCalculation !== "function") {
                     console.warn("[period-recalc][blocked-full-write]", {
                         abonentId: String(currentAbonentId || ""),
@@ -4623,6 +5041,8 @@ function bindCalcButtons(){
                     });
                     renderAbonentSummaryStatus("error", "TEMPORARY_PERIOD_API_UNAVAILABLE");
                     alert("Временный расчёт периода недоступен.");
+                    logFullRecalcExit("TEMPORARY_PERIOD_API_UNAVAILABLE", "early-return", "temporary-period-api", { ok: false, reason: "TEMPORARY_PERIOD_API_UNAVAILABLE" }, null);
+                    endTemporaryCardPeriodMode({ abonentId: currentAbonentId, source: "card_period_mode_end_after_temporary_failure" });
                     return;
                 }
                 const fullStatusBeforePeriod = String(fullSummaryUiBeforeRecalc.status || __lastRenderedSummaryStatusLocal || "");
@@ -4633,13 +5053,29 @@ function bindCalcButtons(){
                     period: { from: from, to: to },
                     mode: "temporary_court_period"
                 });
+                logFullRecalcAfterAwait("temporary-period-calculation", periodResult);
                 if (!periodResult || periodResult.ok !== true) {
                     const reason = String(periodResult && periodResult.reason || "TEMPORARY_PERIOD_CALC_FAILED");
                     renderAbonentSummaryStatus("error", reason);
                     alert("Расчёт периода не выполнен: " + reason);
+                    logFullRecalcExit(reason, "early-return", "temporary-period-calculation", periodResult || null, null);
+                    endTemporaryCardPeriodMode({ abonentId: currentAbonentId, source: "card_period_mode_end_after_temporary_failure" });
                     return;
                 }
                 __saveTemporaryPeriodState({ from: from, to: to }, { abonentId: currentAbonentId, source: "temporary-recalc-done", renderedPeriodRows: periodResult.renderedPeriodRows || 0 });
+                try {
+                    const runtime = typeof window.__getPaymentTableComputedRowsSnapshot === "function" ? window.__getPaymentTableComputedRowsSnapshot() : null;
+                    const meta = getCalcPeriodStorageMeta();
+                    const runtimeSignature = String(runtime && runtime.runtimeSignature || "").trim();
+                    const ledgerVersion = String(runtime && runtime.ledgerVersion || "").trim() || (runtimeSignature ? "temporary:" + runtimeSignature : "");
+                    if (runtime && runtime.periodActive === true && runtime.period && String(runtime.period.from || "") === String(from) && String(runtime.period.to || "") === String(to) && Array.isArray(runtime.rows) && runtime.rows.length && runtime.rowsById && Object.keys(runtime.rowsById).length && ledgerVersion && runtimeSignature && meta.resolvedUid) {
+                        try { sessionStorage.removeItem("temporary_spravka_payload_" + String(meta.resolvedUid)); } catch(eStalePayload) {}
+                        window.__JKH_TEMPORARY_PERIOD_REPORT_STATE = { mode: "temporary_court_period", uid: String(meta.resolvedUid), abonentId: String(currentAbonentId), from: String(from), to: String(to), ledgerVersion: ledgerVersion, runtimeSignature: runtimeSignature };
+                    } else {
+                        delete window.__JKH_TEMPORARY_PERIOD_REPORT_STATE;
+                        console.warn("[spravka][temporary-payload-not-ready]", { reason: "TEMPORARY_RUNTIME_STATE_INVALID" });
+                    }
+                } catch(eTemporaryReportState) { delete window.__JKH_TEMPORARY_PERIOD_REPORT_STATE; console.warn("[spravka][temporary-payload-not-ready]", { reason: "TEMPORARY_RUNTIME_STATE_READ_FAILED" }); }
                 restoreFullSummaryStatusUi(fullSummaryUiBeforeRecalc);
                 const fullStatusAfterPeriod = String(__lastRenderedSummaryStatusLocal || "");
                 const periodStatusMessage = __normalizeSummaryStatus(fullStatusBeforePeriod) === "fresh"
@@ -4650,6 +5086,15 @@ function bindCalcButtons(){
                     fullStatusAfter: fullStatusAfterPeriod
                 });
                 try { console.log("[period-recalc][loading-cleared]", { fullStatusBefore: fullStatusBeforePeriod, fullStatusAfter: fullStatusAfterPeriod, periodStatus: periodStatusMessage }); } catch(eLoadingCleared) {}
+                logFullRecalcExit("TEMPORARY_PERIOD_CALC_DONE", "normal-return", "temporary-period-render", { ok: true, reason: "TEMPORARY_PERIOD_CALC_DONE" }, null);
+                endTemporaryCardPeriodMode({ abonentId: currentAbonentId, source: "card_period_mode_end_after_temporary_success" });
+                return;
+            }
+
+            if (recalcForReportPeriod) {
+                alert("Укажите корректную дату начала и окончания периода расчёта.");
+                logFullRecalcExit("PERIOD_INVALID", "early-return", "temporary-period-invalid", { ok: false, reason: "PERIOD_INVALID" }, null);
+                endTemporaryCardPeriodMode({ abonentId: currentAbonentId, source: "card_period_mode_end_after_temporary_invalid" });
                 return;
             }
 
@@ -4659,7 +5104,9 @@ function bindCalcButtons(){
                 heartbeatFullRecalc("fullRecalcForCurrentAbonent");
                 try { console.log("[full-recalc][step]", { runId: recalcRunId, step: "fullRecalcForCurrentAbonent" }); } catch(eStepLog) {}
                 hydrateCardRuntimeDbFromStore();
+                try { if (typeof window.__offlineOriginReportBeforeManualRecalc === "function") window.__offlineOriginReportBeforeManualRecalc(); } catch(eOfflineOriginReport) {}
                 const recalcResult = await window.fullRecalcForCurrentAbonent({ applyAutoAccrual: true, period: { from: from, to: to }, recalcMode: "FULL_SUMMARY_REBUILD", summaryScope: "full", recalcRunId: recalcRunId });
+                logFullRecalcAfterAwait("fullRecalcForCurrentAbonent", recalcResult);
                 fullRecalcState.resultReceived = true;
                 fullRecalcState.resultOk = !!(recalcResult && recalcResult.ok === true);
                 if (fullRecalcState.resultOk) {
@@ -4691,6 +5138,7 @@ function bindCalcButtons(){
                 heartbeatPostRecalcStage("recalc-result-received");
                 try { console.log("[full-recalc][step-done]", { runId: recalcRunId, step: "fullRecalcForCurrentAbonent", ok: !!(recalcResult && recalcResult.ok === true) }); } catch(eStepDoneLog) {}
                 await __fullRecalcUiYield();
+                logFullRecalcAfterAwait("ui-yield-after-fullRecalcForCurrentAbonent", { ok: true });
                 try {
                     console.log("[summary-ui][final-result-received]", {
                         runId: recalcRunId,
@@ -4707,32 +5155,83 @@ function bindCalcButtons(){
                     if (recalcResult && (recalcResult.cancelled === true || reason === "FULL_RECALC_CANCELLED" || recalcResult.timedOut === true || reason === "FULL_RECALC_TIMEOUT")) {
                         const finalStatus = recalcResult.timedOut === true || reason === "FULL_RECALC_TIMEOUT" ? "timeout" : "cancelled";
                         const finalReason = finalStatus === "timeout" ? "Пересчёт остановлен по таймауту" : "Пересчёт остановлен пользователем";
+                        fullRecalcExitSummaryStatus = finalStatus;
+                        fullRecalcExitSummaryReason = finalReason;
                         fullRecalcState.cancelled = true;
                         rememberExplicitFullRecalcFinal(finalStatus, finalReason, recalcResult);
                         renderExplicitFullRecalcFinal(finalStatus === "timeout" ? "recalc-timeout" : "recalc-cancelled");
                         printRecalcCallCountReport(finalStatus === "timeout" ? "recalc-timeout" : "recalc-cancelled", { force: true });
+                        logFullRecalcExit(reason, "early-return", "recalc-result-cancelled-or-timeout", recalcResult || null, null);
                         return;
                     }
+                    fullRecalcExitSummaryStatus = "error";
+                    fullRecalcExitSummaryReason = reason;
                     rememberExplicitFullRecalcFinal("error", reason, recalcResult);
                     renderExplicitFullRecalcFinal("recalc-result-error");
+                    renderAbonentSummaryStatus("error", reason);
+                    if (__isRatesSummaryReason(reason)) {
+                        __safeLoadPaymentTableOnce("manual-full-recalc-rates-error");
+                    }
                     printRecalcCallCountReport("recalc-result-error", { force: true });
                     try { console.log("[full-recalc][ui-status-final]", { abonentId: String(currentAbonentId || ""), status: "error", reason: reason }); } catch(eUiFinalFailLog) {}
                     alert(manualRecalcErrorMessage(recalcResult, reason));
+                    logFullRecalcExit(reason, "early-return", "recalc-result-error", recalcResult || null, null);
                     return;
                 }
                 heartbeatPostRecalcStage("recalc-result-ok");
-                if (finishFullRecalcAbortFromUi("abort-after-result-ok")) return;
+                if (finishFullRecalcAbortFromUi("abort-after-result-ok")) {
+                    fullRecalcExitSummaryStatus = "cancelled";
+                    fullRecalcExitSummaryReason = String(fullRecalcState.abortReason || "FULL_RECALC_CANCELLED");
+                    logFullRecalcExit(fullRecalcExitSummaryReason, "early-return", "abort-after-result-ok", { ok: false, reason: fullRecalcExitSummaryReason }, null);
+                    return;
+                }
                 const summary = recalcResult && recalcResult.summary && typeof recalcResult.summary === "object" ? recalcResult.summary : null;
                 window.__lastCardSummaryForDebug = summary || null;
                 const summaryStatus = recalcResult && (recalcResult.summary_status || recalcResult.status) || summary && (summary.summary_status || summary.status) || "";
                 const summaryReason = recalcResult && (recalcResult.summary_reason || recalcResult.reason) || summary && (summary.summary_reason || summary.reason) || "";
+                fullRecalcExitSummaryStatus = String(summaryStatus || "");
+                fullRecalcExitSummaryReason = String(summaryReason || "");
                 if (__normalizeSummaryStatus(summaryStatus) === "fresh") {
-                    if (finishFullRecalcAbortFromUi("abort-before-snapshot")) return;
+                    if (finishFullRecalcAbortFromUi("abort-before-snapshot")) {
+                        try {
+                            console.warn("[card-snapshot][save-callsite-skip]", {
+                                reason: "FULL_RECALC_ABORT_BEFORE_SNAPSHOT",
+                                caller: "abonent_card.manualFullRecalc",
+                                runId: recalcRunId,
+                                abonentId: String(currentAbonentId || ""),
+                                uid: String(fullRecalcState.uid || ""),
+                                summaryStatus: String(summaryStatus || ""),
+                                summaryReason: String(summaryReason || ""),
+                                recalculationMode: "manual_full_recalc",
+                                snapshotMode: "canonical_full",
+                                invocationReason: "save-not-called-abort-before-snapshot"
+                            });
+                        } catch(eSnapshotAbortBeforeLog) {}
+                        fullRecalcExitSummaryReason = String(fullRecalcState.abortReason || "FULL_RECALC_CANCELLED");
+                        logFullRecalcExit(fullRecalcExitSummaryReason, "early-return", "abort-before-snapshot", { ok: false, reason: fullRecalcExitSummaryReason }, null);
+                        return;
+                    }
                     if (!window.Data || typeof Data.buildCardSnapshotFromCurrentResult !== "function" || typeof Data.saveCardSnapshotAndWait !== "function") {
+                        fullRecalcExitSnapshotReason = "CARD_SNAPSHOT_API_UNAVAILABLE";
+                        try {
+                            console.warn("[card-snapshot][save-callsite-skip]", {
+                                reason: "CARD_SNAPSHOT_API_UNAVAILABLE",
+                                caller: "abonent_card.manualFullRecalc",
+                                runId: recalcRunId,
+                                abonentId: String(currentAbonentId || ""),
+                                uid: String(fullRecalcState.uid || ""),
+                                summaryStatus: String(summaryStatus || ""),
+                                summaryReason: String(summaryReason || ""),
+                                recalculationMode: "manual_full_recalc",
+                                snapshotMode: "canonical_full",
+                                invocationReason: "save-not-called-api-unavailable"
+                            });
+                        } catch(eSnapshotApiUnavailableLog) {}
                         rememberExplicitFullRecalcFinal("error", "CARD_SNAPSHOT_API_UNAVAILABLE", recalcResult);
                         renderExplicitFullRecalcFinal("snapshot-api-unavailable");
                         try { console.log("[full-recalc][ui-status-final]", { abonentId: String(currentAbonentId || ""), status: "error", reason: "CARD_SNAPSHOT_API_UNAVAILABLE" }); } catch(eUiFinalApiLog) {}
                         alert("Snapshot карточки не сохранён: API snapshot недоступен.");
+                        logFullRecalcExit("CARD_SNAPSHOT_API_UNAVAILABLE", "early-return", "snapshot-api-unavailable", { ok: false, reason: "CARD_SNAPSHOT_API_UNAVAILABLE" }, null);
                         return;
                     }
                     heartbeatFullRecalc("build-card-snapshot");
@@ -4740,26 +5239,128 @@ function bindCalcButtons(){
                     const snapshot = Data.buildCardSnapshotFromCurrentResult(currentAbonentId, recalcResult);
                     try { console.log("[full-recalc][step-done]", { runId: recalcRunId, step: "build-card-snapshot" }); } catch(eStepDoneLog) {}
                     await __fullRecalcUiYield();
-                    if (finishFullRecalcAbortFromUi("abort-after-snapshot-build")) return;
+                    logFullRecalcAfterAwait("ui-yield-after-build-card-snapshot", { ok: true });
+                    if (finishFullRecalcAbortFromUi("abort-after-snapshot-build")) {
+                        try {
+                            console.warn("[card-snapshot][save-callsite-skip]", {
+                                reason: "FULL_RECALC_ABORT_AFTER_SNAPSHOT_BUILD",
+                                caller: "abonent_card.manualFullRecalc",
+                                runId: recalcRunId,
+                                abonentId: String(currentAbonentId || ""),
+                                uid: String(snapshot && snapshot.uid || fullRecalcState.uid || ""),
+                                summaryStatus: String(summaryStatus || ""),
+                                summaryReason: String(summaryReason || ""),
+                                recalculationMode: "manual_full_recalc",
+                                snapshotMode: String(snapshot && (snapshot.snapshot_mode || snapshot.mode || snapshot.scope || "canonical_full") || "canonical_full"),
+                                invocationReason: "save-not-called-abort-after-snapshot-build"
+                            });
+                        } catch(eSnapshotAbortAfterBuildLog) {}
+                        fullRecalcExitSummaryReason = String(fullRecalcState.abortReason || "FULL_RECALC_CANCELLED");
+                        logFullRecalcExit(fullRecalcExitSummaryReason, "early-return", "abort-after-snapshot-build", { ok: false, reason: fullRecalcExitSummaryReason }, null);
+                        return;
+                    }
                     const snapshotRowsById = snapshot && snapshot.rowsById && typeof snapshot.rowsById === "object" && !Array.isArray(snapshot.rowsById) ? snapshot.rowsById : null;
                     if (!snapshot || !snapshotRowsById || !Object.keys(snapshotRowsById).length) {
+                        fullRecalcExitSnapshotReason = "EMPTY_ROWS_BY_ID";
+                        try {
+                            console.warn("[card-snapshot][save-callsite-skip]", {
+                                reason: "EMPTY_ROWS_BY_ID",
+                                caller: "abonent_card.manualFullRecalc",
+                                runId: recalcRunId,
+                                abonentId: String(currentAbonentId || ""),
+                                uid: String(snapshot && snapshot.uid || fullRecalcState.uid || ""),
+                                summaryStatus: String(summaryStatus || ""),
+                                summaryReason: String(summaryReason || ""),
+                                recalculationMode: "manual_full_recalc",
+                                snapshotMode: String(snapshot && (snapshot.snapshot_mode || snapshot.mode || snapshot.scope || "canonical_full") || "canonical_full"),
+                                invocationReason: "save-not-called-empty-rows-by-id"
+                            });
+                        } catch(eSnapshotEmptyRowsCallsiteLog) {}
                         rememberExplicitFullRecalcFinal("error", "EMPTY_ROWS_BY_ID", recalcResult);
                         renderExplicitFullRecalcFinal("snapshot-empty-rows");
                         try { console.log("[full-recalc][ui-status-final]", { abonentId: String(currentAbonentId || ""), status: "error", reason: "EMPTY_ROWS_BY_ID" }); } catch(eUiFinalEmptyRowsLog) {}
                         alert("Snapshot карточки пуст — пересчёт не дал строк с computed totals");
+                        logFullRecalcExit("EMPTY_ROWS_BY_ID", "early-return", "snapshot-empty-rows", { ok: false, reason: "EMPTY_ROWS_BY_ID" }, null);
                         return;
                     }
+                    try {
+                        const snapshotRowIds = Object.keys(snapshotRowsById);
+                        console.log("[reload-chain][full-result-before-save]", {
+                            abonentId: String(currentAbonentId || ""),
+                            uid: String(snapshot.uid || fullRecalcState.uid || ""),
+                            ownerId: String(getCalcPeriodStorageMeta().ownerId || ""),
+                            summary_status: String(snapshot.summary_status || summaryStatus || ""),
+                            summary_reason: String(snapshot.summary_reason || summaryReason || ""),
+                            snapshotStatus: String(snapshot.snapshot_status || snapshot.summary_status || ""),
+                            snapshotMode: String(snapshot.snapshotMode || ""),
+                            summaryScope: String(snapshot.summaryScope || snapshot.summary_scope || "full"),
+                            rowsByIdCount: snapshotRowIds.length,
+                            firstRowId: snapshotRowIds[0] || "",
+                            lastRowId: snapshotRowIds.length ? snapshotRowIds[snapshotRowIds.length - 1] : "",
+                            totals: snapshot.totals || null,
+                            input_hash: String(snapshot.input_hash || ""),
+                            ledgerVersion: String(snapshot.ledgerVersion || ""),
+                            serializedSnapshotSize: JSON.stringify(snapshot).length
+                        });
+                    } catch(eReloadBeforeSaveLog) {}
                     __cardSnapshotFreshValidated = true;
                     __lastCardSnapshotValidation = { valid: true, reason: "", detail: { runId: recalcRunId, source: "post-recalc-memory" } };
                     __runtimeCacheFreshBlocked = false;
                     if (typeof window.__markPostRecalcSnapshotFresh === "function") window.__markPostRecalcSnapshotFresh(recalcRunId, snapshot);
                     fullRecalcState.snapshotSavePending = true;
-                    schedulePostRecalcSnapshotSave(snapshot);
+                    const snapshotSave = await savePostRecalcSnapshot(snapshot);
+                    logFullRecalcAfterAwait("savePostRecalcSnapshot", snapshotSave);
+                    if (!snapshotSave || snapshotSave.ok !== true) {
+                        const snapshotReason = String(snapshotSave && snapshotSave.reason || "CARD_SNAPSHOT_SAVE_FAILED");
+                        rememberExplicitFullRecalcFinal("error", snapshotReason, recalcResult);
+                        renderExplicitFullRecalcFinal("snapshot-save-failed");
+                        renderAbonentSummaryStatus("error", snapshotReason);
+                        try { console.log("[full-recalc][ui-status-final]", { abonentId: String(currentAbonentId || ""), status: "error", reason: snapshotReason }); } catch(eUiFinalSnapshotSaveLog) {}
+                        alert("Расчёт выполнен, но fresh snapshot карточки не сохранён: " + snapshotReason);
+                        logFullRecalcExit(snapshotReason, "early-return", "snapshot-save-failed", snapshotSave || null, null);
+                        return;
+                    }
+                    if (!window.Data || typeof Data.saveCanonicalSnapshotTotalsToAbonentSummary !== "function") {
+                        const totalsSyncReason = "CANONICAL_SUMMARY_TOTALS_API_UNAVAILABLE";
+                        rememberExplicitFullRecalcFinal("error", totalsSyncReason, recalcResult);
+                        renderExplicitFullRecalcFinal("canonical-summary-totals-api-unavailable");
+                        renderAbonentSummaryStatus("error", totalsSyncReason);
+                        logFullRecalcExit(totalsSyncReason, "early-return", "canonical-summary-totals-api-unavailable", { ok: false, reason: totalsSyncReason }, null);
+                        return;
+                    }
+                    const canonicalSummarySave = await Data.saveCanonicalSnapshotTotalsToAbonentSummary(currentAbonentId, snapshot, summary || recalcResult && recalcResult.summary || null);
+                    logFullRecalcAfterAwait("saveCanonicalSnapshotTotalsToAbonentSummary", canonicalSummarySave);
+                    if (!canonicalSummarySave || canonicalSummarySave.ok !== true) {
+                        const totalsSyncReason = String(canonicalSummarySave && canonicalSummarySave.reason || "ABONENT_SUMMARY_CANONICAL_TOTALS_SAVE_FAILED");
+                        rememberExplicitFullRecalcFinal("error", totalsSyncReason, recalcResult);
+                        renderExplicitFullRecalcFinal("canonical-summary-totals-save-failed");
+                        renderAbonentSummaryStatus("error", totalsSyncReason);
+                        alert("Canonical snapshot сохранён, но totals для списка не подтверждены: " + totalsSyncReason);
+                        logFullRecalcExit(totalsSyncReason, "early-return", "canonical-summary-totals-save-failed", canonicalSummarySave || null, null);
+                        return;
+                    }
+                    __skipCardAutoRecalcFreshSnapshot(fullRecalcState.uid || currentAbonentId);
+                } else {
+                    try {
+                        console.warn("[card-snapshot][save-callsite-skip]", {
+                            reason: "SUMMARY_NOT_FRESH",
+                            caller: "abonent_card.manualFullRecalc",
+                            runId: recalcRunId,
+                            abonentId: String(currentAbonentId || ""),
+                            uid: String(fullRecalcState.uid || ""),
+                            summaryStatus: String(summaryStatus || ""),
+                            summaryReason: String(summaryReason || ""),
+                            recalculationMode: "manual_full_recalc",
+                            snapshotMode: "canonical_full",
+                            invocationReason: "save-not-called-summary-not-fresh"
+                        });
+                    } catch(eSnapshotSummaryNotFreshLog) {}
                 }
                 if (finishFullRecalcAbortFromUi("abort-before-final-render")) return;
                 rememberExplicitFullRecalcFinal("fresh", "OK", recalcResult);
                 heartbeatFullRecalc("final-render");
                 heartbeatPostRecalcStage("final-render-start");
+                try { console.log("[manual-recalc] render started"); } catch(eManualRecalcRenderStartLog) {}
                 renderAbonentSummaryStatus(summaryStatus, __normalizeSummaryStatus(summaryStatus) === "fresh" ? "OK" : summaryReason);
                 renderExplicitFullRecalcFinal("recalc-success");
                 heartbeatPostRecalcStage("final-render-done");
@@ -4785,13 +5386,20 @@ function bindCalcButtons(){
                     const statusBox = document.getElementById("paymentTableStatus") || document.getElementById("paymentStatus") || document.getElementById("paymentsStatus");
                     if (statusBox) statusBox.textContent = "Итог обновлён.";
                 }
+                try { console.log("[manual-recalc] render finished"); } catch(eManualRecalcRenderFinishLog) {}
                 recalcHandled = true;
+            } else {
+                logFullRecalcExit("FULL_RECALC_FUNCTION_UNAVAILABLE", "missing-function", "fullRecalcForCurrentAbonent", { ok: false, reason: "FULL_RECALC_FUNCTION_UNAVAILABLE" }, null);
             }
             if (!recalcHandled) {
+                logFullRecalcExit("RECALC_NOT_HANDLED", "fallthrough", "manual-full-recalc", { ok: false, reason: "RECALC_NOT_HANDLED" }, null);
                 __safeLoadPaymentTableOnce("manual-full-recalc");
             }
         } catch (eRecalcHandler) {
             const reason = String(eRecalcHandler && (eRecalcHandler.message || eRecalcHandler.reason) || eRecalcHandler || "RECALC_EXCEPTION");
+            if (recalcForReportPeriod && window.JKH_CARD_PERIOD_MODE_ACTIVE === true) {
+                endTemporaryCardPeriodMode({ abonentId: currentAbonentId, source: "card_period_mode_end_after_temporary_failure" });
+            }
             if (reason === "FULL_RECALC_CANCELLED" || reason === "FULL_RECALC_TIMEOUT") {
                 const finalStatus = reason === "FULL_RECALC_TIMEOUT" ? "timeout" : "cancelled";
                 const finalReason = finalStatus === "timeout" ? "Пересчёт остановлен по таймауту" : "Пересчёт остановлен пользователем";
@@ -4800,9 +5408,13 @@ function bindCalcButtons(){
                 if (explicitFullRecalcStarted) renderExplicitFullRecalcFinal(finalStatus === "timeout" ? "exception-timeout" : "exception-cancelled");
                 else renderAbonentSummaryStatus(finalStatus, finalReason);
                 printRecalcCallCountReport(finalStatus === "timeout" ? "exception-timeout" : "exception-cancelled", { force: true });
+                logFullRecalcExit(reason, "catch-return", "exception-cancelled-or-timeout", { ok: false, reason: reason }, eRecalcHandler);
                 return;
             }
-            if (watchdogFired || fullRecalcState.timedOut) return;
+            if (watchdogFired || fullRecalcState.timedOut) {
+                logFullRecalcExit("WATCHDOG_OR_TIMEOUT", "catch-return", "exception-watchdog-timeout", { ok: false, reason: "WATCHDOG_OR_TIMEOUT" }, eRecalcHandler);
+                return;
+            }
             rememberExplicitFullRecalcFinal("error", reason, null);
             if (explicitFullRecalcStarted) renderExplicitFullRecalcFinal("exception");
             else renderAbonentSummaryStatus("error", reason);
@@ -4823,7 +5435,11 @@ function bindCalcButtons(){
                 });
             } catch(eRecalcCatchLog) {}
             alert("Пересчёт не завершён: " + reason);
+            logFullRecalcExit(reason, "catch", "exception", { ok: false, reason: reason }, eRecalcHandler);
         } finally {
+            if (recalcForReportPeriod && window.JKH_CARD_PERIOD_MODE_ACTIVE === true) {
+                endTemporaryCardPeriodMode({ abonentId: currentAbonentId, source: "card_period_mode_end_after_temporary_failure" });
+            }
             try { console.log("[full-recalc][finally]", { runId: recalcRunId, abonentId: String(currentAbonentId || ""), timedOut: !!(watchdogFired || fullRecalcState.timedOut) }); } catch(eFinallyLog) {}
             if (!watchdogFired && explicitFullRecalcStarted && __lastRenderedSummaryStatusLocal === "calculating") {
                 renderExplicitFullRecalcFinal("finally-running-safety");
@@ -4917,6 +5533,27 @@ function bindCalcButtons(){
             }
         }
         const meta = getCalcPeriodStorageMeta();
+        let temporarySpravkaPayload = null;
+        const temporaryState = window.__JKH_TEMPORARY_PERIOD_REPORT_STATE;
+        if (temporaryState && temporaryState.mode === "temporary_court_period" && String(temporaryState.uid || "") === String(meta.resolvedUid || "") && String(temporaryState.abonentId || "") === String(id || "") && String(temporaryState.from || "") === String(from || "") && String(temporaryState.to || "") === String(to || "") && from && to && isValidPeriod(from, to) && typeof window.__getPaymentTableComputedRowsSnapshot === "function") {
+            try {
+                const runtime = window.__getPaymentTableComputedRowsSnapshot();
+                const rows = runtime && Array.isArray(runtime.rows) ? runtime.rows : [];
+                const rowsById = runtime && runtime.rowsById && typeof runtime.rowsById === "object" ? runtime.rowsById : {};
+                const runtimeSignature = String(runtime && runtime.runtimeSignature || "").trim();
+                const ledgerVersion = String(runtime && runtime.ledgerVersion || "").trim() || (runtimeSignature ? "temporary:" + runtimeSignature : "");
+                if (runtime && runtime.periodActive === true && runtime.period && String(runtime.period.from || "") === String(from) && String(runtime.period.to || "") === String(to) && ledgerVersion === String(temporaryState.ledgerVersion || "") && runtimeSignature === String(temporaryState.runtimeSignature || "") && rows.length && Object.keys(rowsById).length) {
+                    const payload = { schemaVersion: 1, uid: String(meta.resolvedUid), abonentId: String(id), from: String(from), to: String(to), ledgerVersion: ledgerVersion, runtimeSignature: runtimeSignature, rows: rows, rowsById: rowsById, createdAt: Date.now(), source: "temporary_court_period" };
+                    const raw = JSON.stringify(payload);
+                    let hash = 2166136261; for (let i = 0; i < raw.length; i += 1) { hash ^= raw.charCodeAt(i); hash = Math.imul(hash, 16777619); }
+                    payload.integrity = String(hash >>> 0);
+                    sessionStorage.setItem("temporary_spravka_payload_" + payload.uid, JSON.stringify(payload));
+                    temporarySpravkaPayload = payload;
+                }
+            } catch(eTemporaryPayload) { console.warn("[spravka][temporary-payload-create-failed]", { reason: "TEMPORARY_PAYLOAD_SERIALIZE_FAILED" }); }
+        } else if (temporaryState) {
+            console.warn("[spravka][temporary-payload-not-ready]", { reason: "TEMPORARY_REPORT_STATE_MISMATCH" });
+        }
         // ✅ FIX: forward active db key (if present) to reports page
         // to keep correct data when multiple bases exist in localStorage.
         let dbKey = "";
@@ -4948,6 +5585,7 @@ function bindCalcButtons(){
         if (id) href += "&account=" + encodeURIComponent(id);
         if (meta.resolvedUid) href += "&uid=" + encodeURIComponent(meta.resolvedUid);
         if (from && to && isValidPeriod(from, to)) href += "&from=" + encodeURIComponent(from) + "&to=" + encodeURIComponent(to);
+        if (temporarySpravkaPayload) href += "&temporary_court_period=1";
         href += (dbKey ? ("&db=" + encodeURIComponent(dbKey)) : (meta.ownerId ? ("&owner=" + encodeURIComponent(meta.ownerId)) : ""));
         location.href = href;
     });

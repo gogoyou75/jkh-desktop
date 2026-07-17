@@ -87,6 +87,17 @@
     });
   }
 
+  function _authAutoloadSuccessDataPatch(result, status) {
+    var cacheWarning = result && result.cacheWarning && typeof result.cacheWarning === "object" ? result.cacheWarning : null;
+    return {
+      status: String(status || ""),
+      loadedAt: String(result && result.loadedAt || _nowISO()),
+      source: "server",
+      message: cacheWarning ? String(result && result.message || "LOCAL_CACHE_WRITE_FAILED") : "",
+      cacheWarning: cacheWarning
+    };
+  }
+
   async function runAutoLoadAfterLoginOnce(sourceTag) {
     var tag = String(sourceTag || "unknown");
     if (!window.JKHDataLoader || typeof window.JKHDataLoader.loadFromServer !== "function") {
@@ -109,6 +120,7 @@
 
     gate.inFlight = (async function () {
       console.info("[auth] autoload gate start source=%s userId=%s", tag, uid);
+      var preservedDataStateBeforeAutoload = _serverDataStateSnapshotIfPreserved();
       try {
         _setUIState({
           server: { status: "online", checkedAt: _nowISO(), message: "" },
@@ -129,9 +141,10 @@
           if (!typedServerStatus) {
             typedServerStatus = (typedStatus === "offline") ? "offline" : "online";
           }
+          var failedDataPatch = { status: typedStatus, source: "server", message: String(result && result.message || "Не удалось автоматически загрузить данные") };
           _setUIState({
             server: { status: typedServerStatus, checkedAt: _nowISO(), message: String(result && result.message || "") },
-            data: { status: typedStatus, source: "server", message: String(result && result.message || "Не удалось автоматически загрузить данные") }
+            data: _authDataPatchForConnectivityFailure(failedDataPatch, preservedDataStateBeforeAutoload, "server_offline_data_state_preserved")
           });
           console.warn("[auth] autoload failed but login allowed source=%s userId=%s", tag, uid);
           return false;
@@ -141,10 +154,23 @@
         gate.failed = false;
         gate.lastResult = true;
         gate.doneForUserId = uid;
+        var cacheWarning = result && result.cacheWarning && typeof result.cacheWarning === "object" ? result.cacheWarning : null;
         _setUIState({
           server: { status: "online", checkedAt: _nowISO(), message: "" },
-          data: { status: status, loadedAt: String(result && result.loadedAt || _nowISO()), source: "server", message: "" }
+          data: _authAutoloadSuccessDataPatch(result, status)
         });
+        if (cacheWarning) {
+          try {
+            console.warn("[server-load][ready-with-cache-warning]", {
+              source: "auth.runAutoLoadAfterLoginOnce",
+              userId: uid,
+              serverStatus: "online",
+              dataStatus: status,
+              dataSource: "server",
+              cacheWarning: cacheWarning
+            });
+          } catch (eCacheWarningLog) {}
+        }
         console.info("[auth] autoload gate done source=%s userId=%s status=%s", tag, uid, status);
         return true;
       } catch (e) {
@@ -162,9 +188,10 @@
         if (!nextServerStatus || nextServerStatus === "unknown") {
           nextServerStatus = _isNetworkOrTimeoutError(e) ? "offline" : "online";
         }
+        var exceptionDataPatch = { status: nextDataStatus, source: "server", message: String(e && e.message ? e.message : e || "") };
         _setUIState({
           server: { status: nextServerStatus, checkedAt: _nowISO(), message: String(e && e.message ? e.message : e || "") },
-          data: { status: nextDataStatus, source: "server", message: String(e && e.message ? e.message : e || "") }
+          data: _authDataPatchForConnectivityFailure(exceptionDataPatch, preservedDataStateBeforeAutoload, "server_offline_data_state_preserved")
         });
         console.warn("[auth] autoload exception but login allowed source=%s userId=%s:", tag, uid, e);
         return false;
@@ -236,9 +263,101 @@ function _emitUIStateChanged(st) {
   } catch (e) {}
 }
 
+function _uiStateTraceFrame(stack) {
+  var lines = String(stack || "").split("\n");
+  for (var i = 1; i < lines.length; i++) {
+    var line = String(lines[i] || "").trim();
+    if (!line) continue;
+    if (line.indexOf("_uiStateTraceFrame") >= 0) continue;
+    if (line.indexOf("_traceUIStateChange") >= 0) continue;
+    if (line.indexOf("_setUIState") >= 0) continue;
+    return line;
+  }
+  return "";
+}
+
+function _traceUIStateChange(moduleName, before, after, patch, stack) {
+  try {
+    before = before || {};
+    after = after || {};
+    var beforeServer = before.server || {};
+    var beforeData = before.data || {};
+    var afterServer = after.server || {};
+    var afterData = after.data || {};
+    var patchServer = patch && patch.server && typeof patch.server === "object" ? patch.server : {};
+    var patchData = patch && patch.data && typeof patch.data === "object" ? patch.data : {};
+    var serverChanged = String(beforeServer.status || "") !== String(afterServer.status || "");
+    var dataChanged = String(beforeData.status || "") !== String(afterData.status || "");
+    var sourceChanged = String(beforeData.source || "") !== String(afterData.source || "");
+    var messageChanged = String(beforeData.message || "") !== String(afterData.message || "");
+    var setsOffline = String(afterServer.status || "") === "offline" || String(afterData.status || "") === "offline";
+    if (!serverChanged && !dataChanged && !sourceChanged && !messageChanged && !setsOffline) return;
+    var stackLines = String(stack || "").split("\n").slice(1, 9).map(function(line) { return String(line || "").trim(); }).filter(Boolean);
+    console.log("[ui-state][transition]", {
+      reason: setsOffline ? "ui_state_offline_transition" : "ui_state_transition",
+      module: moduleName,
+      caller: _uiStateTraceFrame(stack),
+      serverBefore: String(beforeServer.status || ""),
+      serverAfter: String(afterServer.status || ""),
+      dataBefore: String(beforeData.status || ""),
+      dataAfter: String(afterData.status || ""),
+      sourceBefore: String(beforeData.source || ""),
+      sourceAfter: String(afterData.source || ""),
+      patchServerStatus: String(patchServer.status || ""),
+      patchDataStatus: String(patchData.status || ""),
+      patchDataSource: String(patchData.source || ""),
+      message: String((patchData.message || patchServer.message || afterData.message || afterServer.message || "")).slice(0, 240),
+      stack: stackLines
+    });
+  } catch (eTrace) {}
+}
+
+function _isPreservedServerDataState(dataState) {
+  var status = String(dataState && dataState.status || "");
+  var source = String(dataState && dataState.source || "");
+  return source === "server" && (status === "ready" || status === "empty");
+}
+
+function _serverDataStateSnapshotIfPreserved() {
+  var st = _ensureUIState();
+  return _isPreservedServerDataState(st && st.data) ? Object.assign({}, st.data) : null;
+}
+
+function _authDataPatchForConnectivityFailure(nextDataPatch, preservedDataState, diagnosticReason) {
+  var preserved = preservedDataState && _isPreservedServerDataState(preservedDataState) ? Object.assign({}, preservedDataState) : _serverDataStateSnapshotIfPreserved();
+  if (preserved && String(nextDataPatch && nextDataPatch.status || "") === "offline") {
+    try {
+      console.warn("[ui-state][data-preserved]", {
+        reason: diagnosticReason || "server_offline_data_state_preserved",
+        dataStatus: String(preserved.status || ""),
+        dataSource: String(preserved.source || ""),
+        message: String(nextDataPatch && nextDataPatch.message || "")
+      });
+    } catch (ePreserveLog) {}
+    return preserved;
+  }
+  if (String(nextDataPatch && nextDataPatch.status || "") === "offline") {
+    try {
+      console.warn("[ui-state][data-preserved]", {
+        reason: "initial_server_load_failed_no_hydrated_data",
+        dataStatus: String(nextDataPatch && nextDataPatch.status || ""),
+        dataSource: String(nextDataPatch && nextDataPatch.source || ""),
+        message: String(nextDataPatch && nextDataPatch.message || "")
+      });
+    } catch (eInitialFailLog) {}
+  }
+  return nextDataPatch;
+}
+
 function _setUIState(patch) {
   patch = patch || {};
   var st = _ensureUIState();
+  var before = {
+    server: Object.assign({}, st.server || {}),
+    data: Object.assign({}, st.data || {})
+  };
+  var stack = "";
+  try { stack = (new Error()).stack || ""; } catch (eStack) {}
   if (patch.auth && typeof patch.auth === "object") {
     st.auth = Object.assign({}, st.auth, patch.auth);
   }
@@ -248,6 +367,45 @@ function _setUIState(patch) {
   if (patch.data && typeof patch.data === "object") {
     st.data = Object.assign({}, st.data, patch.data);
   }
+  try {
+    if (typeof window.__offlineOriginRecordTransition === "function") {
+      window.__offlineOriginRecordTransition({
+        module: "auth",
+        setter: "auth._setUIState",
+        stack: stack,
+        reason: String(patch.reason || patch.data && patch.data.message || patch.server && patch.server.message || ""),
+        previousDataStatus: String(before.data && before.data.status || ""),
+        newDataStatus: String(st.data && st.data.status || ""),
+        previousDataSource: String(before.data && before.data.source || ""),
+        newDataSource: String(st.data && st.data.source || ""),
+        previousServerStatus: String(before.server && before.server.status || ""),
+        newServerStatus: String(st.server && st.server.status || "")
+      });
+    }
+  } catch(eOfflineOrigin) {}
+  try {
+    if (typeof window.__recordReadinessWrite === "function") {
+      var readinessStack = String(stack || "").split("\n").slice(1, 6).map(function(line){ return String(line || "").trim(); });
+      var readinessCallerFrame = readinessStack.filter(function(line){ return line.indexOf("_setUIState") < 0; })[0] || "";
+      var readinessLocation = readinessCallerFrame.match(/(?:\(|@)([^()]+:\d+:\d+)\)?$/) || readinessCallerFrame.match(/([^ ]+:\d+:\d+)$/);
+      var readinessCaller = readinessCallerFrame.replace(/^at\s+/, "").split(/\s+\(|@/)[0] || "";
+      window.__recordReadinessWrite({
+        previousUiStatus: String(before.data && before.data.status || ""),
+        newUiStatus: String(st.data && st.data.status || ""),
+        previousServerStatus: String(before.server && before.server.status || ""),
+        newServerStatus: String(st.server && st.server.status || ""),
+        caller: readinessCaller,
+        function: "auth._setUIState",
+        line: readinessLocation ? String(readinessLocation[1] || "") : "",
+        reason: String(patch.reason || patch.data && patch.data.message || patch.server && patch.server.message || (
+          "ui:" + String(before.data && before.data.status || "") + "->" + String(st.data && st.data.status || "")
+          + ";server:" + String(before.server && before.server.status || "") + "->" + String(st.server && st.server.status || "")
+        )),
+        stack: readinessStack
+      });
+    }
+  } catch(eReadinessWrite) {}
+  _traceUIStateChange("auth", before, st, patch, stack);
   _emitUIStateChanged(st);
   return st;
 }
@@ -895,7 +1053,8 @@ function _isNetworkOrTimeoutError(err) {
             status: (st.data.status === "empty" ? "empty" : "ready"),
             loadedAt: st.data.loadedAt || "",
             source: "server",
-            message: ""
+            message: st.data.message || "",
+            cacheWarning: st.data.cacheWarning || null
           }
         });
       } else {
@@ -990,7 +1149,10 @@ function _isNetworkOrTimeoutError(err) {
     getLastEmail: getLastEmail,
 
     syncSessionFromServer: syncSessionFromServer,
-    runAutoLoadAfterLoginOnce: runAutoLoadAfterLoginOnce
+    runAutoLoadAfterLoginOnce: runAutoLoadAfterLoginOnce,
+    __testHooks: {
+      authAutoloadSuccessDataPatch: _authAutoloadSuccessDataPatch
+    }
   };
 
   _markAuthModuleLoaded();

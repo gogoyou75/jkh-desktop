@@ -172,6 +172,16 @@
     return false;
   }
 
+  function hydrateGlobalReadCache(baseKey, value) {
+    var key = String(baseKey || "");
+    if (!isGlobalProjectKey(key)) {
+      throw new Error("GLOBAL_READ_CACHE_KEY_REJECTED");
+    }
+    var v = (value === null || value === undefined) ? "" : String(value);
+    _lsSetDirect(k(key, "GLOBAL"), v);
+    return true;
+  }
+
   function resolveOwnerForKey(baseKey, ownerId) {
     if (isGlobalProjectKey(baseKey)) return "GLOBAL";
     return ownerId || getActiveOwnerId();
@@ -185,7 +195,13 @@
     return Storage.prototype.getItem.call(localStorage, fullKey);
   }
   function _lsSetDirect(fullKey, value) {
-    return Storage.prototype.setItem.call(localStorage, fullKey, value);
+    try {
+      return Storage.prototype.setItem.call(localStorage, fullKey, value);
+    } catch (e) {
+      try { if (e && typeof e === "object" && !e.jkhStorageKey) e.jkhStorageKey = String(fullKey || ""); } catch (_) {}
+      try { if (typeof window.__offlineOriginMarkLocalStorageError === "function") window.__offlineOriginMarkLocalStorageError(e, "storage._lsSetDirect"); } catch (_) {}
+      throw e;
+    }
   }
   function _lsRemoveDirect(fullKey) {
     return Storage.prototype.removeItem.call(localStorage, fullKey);
@@ -193,10 +209,32 @@
 
   var __tariffServerReadDiagSeen = {};
 
+  function _projectRawDiagnosticUid(baseKey) {
+    var m = String(baseKey || "").match(/^payments_(uid_[a-z0-9][a-z0-9_-]*)$/i);
+    return m ? m[1] : "";
+  }
+
+  function _logManualRecalcProjectRaw(payload) {
+    try {
+      console.log("[manual-recalc][project-raw]", Object.assign({
+        stage: "",
+        httpStatus: null,
+        responseBody: null,
+        exception: null,
+        requestUrl: null,
+        requestPayloadSize: null,
+        storageKey: "",
+        owner: normalizeOwnerId(payload && payload.owner || getActiveOwnerId()),
+        uid: ""
+      }, payload || {}));
+    } catch (eProjectRawLog) {}
+  }
+
   function _diagnoseTariffServerRead(baseKey, ownerId, localRaw) {
     try {
       var key = String(baseKey || "");
-      if (key.indexOf("tariffs_") !== 0) return;
+      var isRateKey = key === "refinancing_rates_normal_v1" || key === "refinancing_rates_moratorium_v1";
+      if (key.indexOf("tariffs_") !== 0 && !isRateKey) return;
       var owner = normalizeOwnerId(ownerId || getActiveOwnerId());
       if (!owner || owner === "guest" || owner === "ALL") return;
       if (typeof fetch !== "function") return;
@@ -211,14 +249,24 @@
           var serverValue = data && Object.prototype.hasOwnProperty.call(data, "value") && data.value !== null && data.value !== undefined
             ? String(data.value)
             : "";
+          var localExists = localValue !== "";
+          var serverExists = !!(data && data.ok === true && serverValue !== "");
           console.log("[diagnose][tariff-server-read]", {
             source: "JKHStore.getRaw",
             ownerId: owner,
             key: key,
-            localExists: localValue !== "",
-            serverExists: !!(data && data.ok === true && serverValue !== ""),
+            requestedKey: key,
+            localExists: localExists,
+            serverExists: serverExists,
+            serverOk: !!(data && data.ok === true),
+            serverOwner: String(data && data.owner || ""),
+            returnedKeysCount: serverValue !== "" ? 1 : 0,
             serverLength: serverValue.length,
-            localLength: localValue.length
+            localLength: localValue.length,
+            hasRefinancingRatesNormalV1: key === "refinancing_rates_normal_v1" && serverExists,
+            hasRefinancingRatesMoratoriumV1: key === "refinancing_rates_moratorium_v1" && serverExists,
+            localExistsFalseExpected: isRateKey && !localExists && serverExists,
+            reason: isRateKey && !localExists && serverExists ? "diagnose_rates_server_ok_local_false_expected" : (isRateKey && !serverExists ? "diagnose_rates_backend_missing" : "diagnose_rates_backend_exists")
           });
         })
         .catch(function (e) {
@@ -226,10 +274,17 @@
             source: "JKHStore.getRaw",
             ownerId: owner,
             key: key,
+            requestedKey: key,
             localExists: localValue !== "",
             serverExists: null,
+            serverOk: false,
+            returnedKeysCount: 0,
             serverLength: 0,
             localLength: localValue.length,
+            hasRefinancingRatesNormalV1: false,
+            hasRefinancingRatesMoratoriumV1: false,
+            localExistsFalseExpected: false,
+            reason: isRateKey ? "diagnose_rates_backend_missing" : "SERVER_READ_EXCEPTION",
             error: String(e && e.message || e)
           });
         });
@@ -243,12 +298,37 @@
   }
 
   function setItem(key, value, ownerId) {
-    if (!_guardCalcPeriodWrite(key, ownerId, "setItem")) return false;
-    if (isGuestMode()) throw new Error("GUEST_READONLY");
-    if (isAllMode()) throw new Error("ALLMODE_READONLY");
-    if (isGlobalProjectKey(key) && !_isAdmin()) throw new Error("GLOBAL_ADMIN_ONLY");
-    if (_isProjectDataKey(key)) { _cacheSet(key, value, ownerId); return; }
-    _lsSetDirect(k(key, ownerId), value);
+    if (!_guardCalcPeriodWrite(key, ownerId, "setItem")) {
+      _logManualRecalcProjectRaw({ stage:"storage.setItem.calcPeriodGuard", requestPayloadSize:String(value == null ? "" : value).length, storageKey:String(key || ""), owner:ownerId || getActiveOwnerId(), uid:_projectRawDiagnosticUid(key), exception:null });
+      return false;
+    }
+    if (isGuestMode()) {
+      _logManualRecalcProjectRaw({ stage:"storage.setItem.guestReadonly", requestPayloadSize:String(value == null ? "" : value).length, storageKey:String(key || ""), owner:ownerId || getActiveOwnerId(), uid:_projectRawDiagnosticUid(key), exception:"GUEST_READONLY" });
+      throw new Error("GUEST_READONLY");
+    }
+    if (isAllMode()) {
+      _logManualRecalcProjectRaw({ stage:"storage.setItem.allModeReadonly", requestPayloadSize:String(value == null ? "" : value).length, storageKey:String(key || ""), owner:ownerId || getActiveOwnerId(), uid:_projectRawDiagnosticUid(key), exception:"ALLMODE_READONLY" });
+      throw new Error("ALLMODE_READONLY");
+    }
+    if (isGlobalProjectKey(key) && !_isAdmin()) {
+      _logManualRecalcProjectRaw({ stage:"storage.setItem.globalAdminOnly", requestPayloadSize:String(value == null ? "" : value).length, storageKey:String(key || ""), owner:ownerId || getActiveOwnerId(), uid:_projectRawDiagnosticUid(key), exception:"GLOBAL_ADMIN_ONLY" });
+      throw new Error("GLOBAL_ADMIN_ONLY");
+    }
+    if (_isProjectDataKey(key)) {
+      try {
+        _cacheSet(key, value, ownerId);
+      } catch (eCacheSet) {
+        _logManualRecalcProjectRaw({ stage:"storage._cacheSet.exception", requestPayloadSize:String(value == null ? "" : value).length, storageKey:String(key || ""), owner:ownerId || getActiveOwnerId(), uid:_projectRawDiagnosticUid(key), exception:eCacheSet });
+        throw eCacheSet;
+      }
+      return;
+    }
+    try {
+      _lsSetDirect(k(key, ownerId), value);
+    } catch (eLsSet) {
+      _logManualRecalcProjectRaw({ stage:"storage._lsSetDirect.exception", requestPayloadSize:String(value == null ? "" : value).length, storageKey:String(key || ""), owner:ownerId || getActiveOwnerId(), uid:_projectRawDiagnosticUid(key), exception:eLsSet });
+      throw eLsSet;
+    }
   }
 
   function removeItem(key, ownerId) {
@@ -565,12 +645,143 @@
     } catch (e) {}
   }
 
+  function _uiStateTraceFrame(stack) {
+    var lines = String(stack || "").split("\n");
+    for (var i = 1; i < lines.length; i++) {
+      var line = String(lines[i] || "").trim();
+      if (!line) continue;
+      if (line.indexOf("_uiStateTraceFrame") >= 0) continue;
+      if (line.indexOf("_traceUIStateChange") >= 0) continue;
+      if (line.indexOf("_setUIState") >= 0) continue;
+      return line;
+    }
+    return "";
+  }
+
+  function _traceUIStateChange(moduleName, before, after, patch, stack) {
+    try {
+      before = before || {};
+      after = after || {};
+      var beforeServer = before.server || {};
+      var beforeData = before.data || {};
+      var afterServer = after.server || {};
+      var afterData = after.data || {};
+      var patchServer = patch && patch.server && typeof patch.server === "object" ? patch.server : {};
+      var patchData = patch && patch.data && typeof patch.data === "object" ? patch.data : {};
+      var serverChanged = String(beforeServer.status || "") !== String(afterServer.status || "");
+      var dataChanged = String(beforeData.status || "") !== String(afterData.status || "");
+      var sourceChanged = String(beforeData.source || "") !== String(afterData.source || "");
+      var messageChanged = String(beforeData.message || "") !== String(afterData.message || "");
+      var setsOffline = String(afterServer.status || "") === "offline" || String(afterData.status || "") === "offline";
+      if (!serverChanged && !dataChanged && !sourceChanged && !messageChanged && !setsOffline) return;
+      var stackLines = String(stack || "").split("\n").slice(1, 9).map(function(line) { return String(line || "").trim(); }).filter(Boolean);
+      console.log("[ui-state][transition]", {
+        reason: setsOffline ? "ui_state_offline_transition" : "ui_state_transition",
+        module: moduleName,
+        caller: _uiStateTraceFrame(stack),
+        serverBefore: String(beforeServer.status || ""),
+        serverAfter: String(afterServer.status || ""),
+        dataBefore: String(beforeData.status || ""),
+        dataAfter: String(afterData.status || ""),
+        sourceBefore: String(beforeData.source || ""),
+        sourceAfter: String(afterData.source || ""),
+        patchServerStatus: String(patchServer.status || ""),
+        patchDataStatus: String(patchData.status || ""),
+        patchDataSource: String(patchData.source || ""),
+        message: String((patchData.message || patchServer.message || afterData.message || afterServer.message || "")).slice(0, 240),
+        stack: stackLines
+      });
+    } catch (eTrace) {}
+  }
+
+  function _isPreservedServerDataState(dataState) {
+    var status = String(dataState && dataState.status || "");
+    var source = String(dataState && dataState.source || "");
+    return source === "server" && (status === "ready" || status === "empty");
+  }
+
+  function _serverDataStateSnapshotIfPreserved() {
+    var st = _ensureUIState();
+    return _isPreservedServerDataState(st && st.data) ? Object.assign({}, st.data) : null;
+  }
+
+  function _serverConnectivityFailureUIStatePatch(serverPatch, offlineDataPatch, preservedDataState, diagnosticReason) {
+    var preserved = preservedDataState && _isPreservedServerDataState(preservedDataState) ? Object.assign({}, preservedDataState) : _serverDataStateSnapshotIfPreserved();
+    if (preserved) {
+      try {
+        console.warn("[ui-state][data-preserved]", {
+          reason: diagnosticReason || "server_offline_data_state_preserved",
+          serverStatus: String(serverPatch && serverPatch.status || ""),
+          dataStatus: String(preserved.status || ""),
+          dataSource: String(preserved.source || ""),
+          message: String(serverPatch && serverPatch.message || "")
+        });
+      } catch (ePreserveLog) {}
+      return { server: serverPatch, data: preserved };
+    }
+    try {
+      console.warn("[ui-state][data-preserved]", {
+        reason: "initial_server_load_failed_no_hydrated_data",
+        serverStatus: String(serverPatch && serverPatch.status || ""),
+        dataStatus: String(offlineDataPatch && offlineDataPatch.status || ""),
+        dataSource: String(offlineDataPatch && offlineDataPatch.source || ""),
+        message: String(serverPatch && serverPatch.message || "")
+      });
+    } catch (eInitialFailLog) {}
+    return { server: serverPatch, data: offlineDataPatch };
+  }
+
   function _setUIState(patch) {
     patch = patch || {};
     var st = _ensureUIState();
+    var before = {
+      server: Object.assign({}, st.server || {}),
+      data: Object.assign({}, st.data || {})
+    };
+    var stack = "";
+    try { stack = (new Error()).stack || ""; } catch (eStack) {}
     if (patch.auth && typeof patch.auth === "object") st.auth = Object.assign({}, st.auth, patch.auth);
     if (patch.server && typeof patch.server === "object") st.server = Object.assign({}, st.server, patch.server);
     if (patch.data && typeof patch.data === "object") st.data = Object.assign({}, st.data, patch.data);
+    try {
+      if (typeof window.__offlineOriginRecordTransition === "function") {
+        window.__offlineOriginRecordTransition({
+          module: "storage",
+          setter: "storage._setUIState",
+          stack: stack,
+          reason: String(patch.reason || patch.data && patch.data.message || patch.server && patch.server.message || ""),
+          previousDataStatus: String(before.data && before.data.status || ""),
+          newDataStatus: String(st.data && st.data.status || ""),
+          previousDataSource: String(before.data && before.data.source || ""),
+          newDataSource: String(st.data && st.data.source || ""),
+          previousServerStatus: String(before.server && before.server.status || ""),
+          newServerStatus: String(st.server && st.server.status || "")
+        });
+      }
+    } catch(eOfflineOrigin) {}
+    try {
+      if (typeof window.__recordReadinessWrite === "function") {
+        var readinessStack = String(stack || "").split("\n").slice(1, 6).map(function(line){ return String(line || "").trim(); });
+        var readinessCallerFrame = readinessStack.filter(function(line){ return line.indexOf("_setUIState") < 0; })[0] || "";
+        var readinessLocation = readinessCallerFrame.match(/(?:\(|@)([^()]+:\d+:\d+)\)?$/) || readinessCallerFrame.match(/([^ ]+:\d+:\d+)$/);
+        var readinessCaller = readinessCallerFrame.replace(/^at\s+/, "").split(/\s+\(|@/)[0] || "";
+        window.__recordReadinessWrite({
+          previousUiStatus: String(before.data && before.data.status || ""),
+          newUiStatus: String(st.data && st.data.status || ""),
+          previousServerStatus: String(before.server && before.server.status || ""),
+          newServerStatus: String(st.server && st.server.status || ""),
+          caller: readinessCaller,
+          function: "storage._setUIState",
+          line: readinessLocation ? String(readinessLocation[1] || "") : "",
+          reason: String(patch.reason || patch.data && patch.data.message || patch.server && patch.server.message || (
+            "ui:" + String(before.data && before.data.status || "") + "->" + String(st.data && st.data.status || "")
+            + ";server:" + String(before.server && before.server.status || "") + "->" + String(st.server && st.server.status || "")
+          )),
+          stack: readinessStack
+        });
+      }
+    } catch(eReadinessWrite) {}
+    _traceUIStateChange("storage", before, st, patch, stack);
     _emitUIStateChanged(st);
     return st;
   }
@@ -639,6 +850,7 @@
     getRaw: function (baseKey, ownerId) { return getItem(baseKey, ownerId); },
     setRaw: function (baseKey, value, ownerId) { return setItem(baseKey, value, ownerId); },
     removeRaw: function (baseKey, ownerId) { return removeItem(baseKey, ownerId); },
+    hydrateGlobalReadCache: hydrateGlobalReadCache,
 
     // JSON helpers
     getJSON: function (baseKey, fallback, ownerId) {
@@ -830,7 +1042,9 @@
   }
 
   function _lsSet(key, val) {
-    try { Storage.prototype.setItem.call(localStorage, key, String(val)); } catch (e) {}
+    try { Storage.prototype.setItem.call(localStorage, key, String(val)); } catch (e) {
+      try { if (typeof window.__offlineOriginMarkLocalStorageError === "function") window.__offlineOriginMarkLocalStorageError(e, "storage._lsSet"); } catch (_) {}
+    }
   }
 
   function _getMode() {
@@ -1369,10 +1583,67 @@
           } catch (eTariffWriteLog) {}
         }
       } catch (eWrite) {
-        throw eWrite;
+        return {
+          removed: removed,
+          written: written,
+          invalidAbonentsDb: invalidAbonentsDb,
+          serverDbEmpty: serverDbEmpty,
+          cacheError: eWrite,
+          failedStorageKey: String(eWrite && eWrite.jkhStorageKey || kx || "")
+        };
       }
     }
     return { removed: removed, written: written, invalidAbonentsDb: invalidAbonentsDb, serverDbEmpty: serverDbEmpty };
+  }
+
+  var __serverDumpRuntime = null;
+
+  function _replaceServerDumpRuntime(ownerId, envType, dumpObj, cacheWarning) {
+    __serverDumpRuntime = null;
+    if (!cacheWarning || !dumpObj || typeof dumpObj !== "object" || Array.isArray(dumpObj)) {
+      return;
+    }
+    __serverDumpRuntime = {
+      ownerId: String(ownerId || ""),
+      envType: String(envType || ""),
+      data: dumpObj
+    };
+  }
+
+  function _readServerDumpRuntimeValue(key, ownerId) {
+    var entry = __serverDumpRuntime;
+    if (!entry) return { active: false, present: false, raw: null };
+    if (String(entry.ownerId || "") !== String(ownerId || _ownerId() || "")) return { active: false, present: false, raw: null };
+    if (String(entry.envType || "") !== String(getEnvType() || "")) return { active: false, present: false, raw: null };
+    var baseKey = String(key || "");
+    if (!Object.prototype.hasOwnProperty.call(entry.data, baseKey)) return { active: true, present: false, raw: null };
+    return { active: true, present: true, raw: _serializeServerDumpValue(entry.data[baseKey]) };
+  }
+
+  function _clearServerDumpRuntime() {
+    __serverDumpRuntime = null;
+  }
+
+  function _isQuotaExceededError(error) {
+    var name = String(error && error.name || "");
+    var message = String(error && error.message || error || "");
+    var code = Number(error && error.code || 0);
+    return name === "QuotaExceededError" || name === "NS_ERROR_DOM_QUOTA_REACHED" || code === 22 || code === 1014 || /quota/i.test(message);
+  }
+
+  function _serverLoadCacheWarning(error, details) {
+    var input = details && typeof details === "object" ? details : {};
+    return {
+      status: "error",
+      errorName: String(error && error.name || "Error"),
+      errorMessage: String(error && error.message || error || "LOCAL_CACHE_WRITE_FAILED"),
+      quotaExceeded: _isQuotaExceededError(error),
+      ownerId: String(input.ownerId || ""),
+      envType: String(input.envType || ""),
+      dumpLoaded: input.dumpLoaded === true,
+      dumpItemCount: Number(input.dumpItemCount || 0),
+      failedStorageKey: String(input.failedStorageKey || error && error.jkhStorageKey || "")
+    };
   }
 
   function _isDbEffectivelyEmpty(rawDb) {
@@ -1455,6 +1726,9 @@
     var txt = await r.text();
     var data;
     try { data = JSON.parse(txt); } catch (e) { data = null; }
+    if (String(url || "").indexOf("/api/store_dump") === 0) {
+      var parsedResponseData = data && data.data;
+    }
     return { okHttp: r.ok, status: r.status, data: data, text: txt };
   }
 
@@ -1724,12 +1998,15 @@
     window.__JKH_DATA_LOADER_IN_FLIGHT = (async function () {
       var ownerId = _ownerId();
       var checkedAt = _nowISO();
+      var preservedDataStateBeforeLoad = _serverDataStateSnapshotIfPreserved();
 
       if (!isOnlineMode()) {
-        _setUIState({
-          server: { status: "offline", checkedAt: checkedAt, message: "OFFLINE mode" },
-          data: { status: "offline", source: "server", message: "OFFLINE mode" }
-        });
+        _setUIState(_serverConnectivityFailureUIStatePatch(
+          { status: "offline", checkedAt: checkedAt, message: "OFFLINE mode" },
+          { status: "offline", source: "server", message: "OFFLINE mode" },
+          preservedDataStateBeforeLoad,
+          "connectivity_offline_without_data_downgrade"
+        ));
         return { ok: false, status: "offline", serverStatus: "offline", message: "OFFLINE mode" };
       }
 
@@ -1760,10 +2037,19 @@
           var httpErr = (resDump.data && resDump.data.error) ? resDump.data.error : ("HTTP " + resDump.status);
           var serverStatus = (resDump.status === 401) ? "unauthorized" : ((resDump.status === 403) ? "forbidden" : "offline");
           var dataStatus = (resDump.status === 401) ? "unauthorized" : ((resDump.status === 403) ? "forbidden" : "offline");
-          _setUIState({
-            server: { status: serverStatus, checkedAt: _nowISO(), message: (serverStatus === "offline" ? httpErr : "") },
-            data: { status: dataStatus, source: "server", message: (dataStatus === "unauthorized" ? "Требуется вход" : httpErr) }
-          });
+          if (serverStatus === "offline") {
+            _setUIState(_serverConnectivityFailureUIStatePatch(
+              { status: serverStatus, checkedAt: _nowISO(), message: httpErr },
+              { status: dataStatus, source: "server", message: httpErr },
+              preservedDataStateBeforeLoad,
+              "server_offline_data_state_preserved"
+            ));
+          } else {
+            _setUIState({
+              server: { status: serverStatus, checkedAt: _nowISO(), message: "" },
+              data: { status: dataStatus, source: "server", message: (dataStatus === "unauthorized" ? "Требуется вход" : httpErr) }
+            });
+          }
           return { ok: false, status: dataStatus, serverStatus: serverStatus, message: httpErr };
         }
 
@@ -1785,7 +2071,8 @@
           });
         }
 
-        var data = (resDump.data && Object.prototype.hasOwnProperty.call(resDump.data, "data")) ? resDump.data.data : null;
+        var parsedResponseData = resDump.data && resDump.data.data;
+        var data = (resDump.data && Object.prototype.hasOwnProperty.call(resDump.data, "data")) ? parsedResponseData : null;
         if (!data || typeof data !== "object" || Array.isArray(data)) {
           _setUIState({
             server: { status: "online", checkedAt: _nowISO(), message: "" },
@@ -1795,6 +2082,19 @@
           return { ok: false, status: "invalid", serverStatus: "online", message: "INVALID_PAYLOAD_STORE_DUMP" };
         }
 
+        var dumpItemCount = Object.keys(data).length;
+        var hasServerRuntimeDb = Object.prototype.hasOwnProperty.call(data, KEY_DB);
+        var serverRuntimeRaw = hasServerRuntimeDb ? _serializeServerDumpValue(data[KEY_DB]) : "";
+        if (hasServerRuntimeDb && !_validateAbonentsDbRaw(serverRuntimeRaw)) {
+          _setUIState({
+            server: { status: "online", checkedAt: _nowISO(), message: "" },
+            data: { status: "invalid", source: "server", message: "Некорректная структура abonents_db_v1 в dump" }
+          });
+          _setStatus({ lastAction: "Ошибка загрузки", lastError: "INVALID_ABONENTS_DB_SCHEMA_FROM_SERVER" });
+          return { ok: false, status: "invalid", serverStatus: "online", message: "INVALID_ABONENTS_DB_SCHEMA_FROM_SERVER" };
+        }
+        var serverRuntimeDb = null;
+        try { serverRuntimeDb = serverRuntimeRaw ? JSON.parse(serverRuntimeRaw) : null; } catch (eServerRuntimeParse) { serverRuntimeDb = null; }
         var replaced = _replaceOwnerProjectScopeFromDump(ownerId, data);
         if (replaced.invalidAbonentsDb) {
           _setUIState({
@@ -1804,11 +2104,21 @@
           _setStatus({ lastAction: "Ошибка загрузки", lastError: "INVALID_ABONENTS_DB_SCHEMA_FROM_SERVER" });
           return { ok: false, status: "invalid", serverStatus: "online", message: "INVALID_ABONENTS_DB_SCHEMA_FROM_SERVER" };
         }
+        var cacheWarning = replaced.cacheError ? _serverLoadCacheWarning(replaced.cacheError, {
+          ownerId: ownerId,
+          envType: responseEnv,
+          dumpLoaded: true,
+          dumpItemCount: dumpItemCount,
+          failedStorageKey: replaced.failedStorageKey
+        }) : null;
+        _replaceServerDumpRuntime(ownerId, responseEnv, data, cacheWarning);
 
         var applied = replaced.written;
         var runtimeBefore = window.AbonentsDB || null;
         var rawRuntimeDb = _readLocalCompat(KEY_DB, ownerId);
-        var parsedRuntimeDb = window.unwrapRuntimeDb ? window.unwrapRuntimeDb(rawRuntimeDb) : safeJsonParse(rawRuntimeDb, null);
+        var parsedRuntimeDb = cacheWarning
+          ? serverRuntimeDb
+          : (window.unwrapRuntimeDb ? window.unwrapRuntimeDb(rawRuntimeDb) : safeJsonParse(rawRuntimeDb, null));
         var runtimeCounts = {
           abonents: runtimeBefore && runtimeBefore.abonents && typeof runtimeBefore.abonents === "object" ? Object.keys(runtimeBefore.abonents).length : 0,
           premises: runtimeBefore && runtimeBefore.premises && typeof runtimeBefore.premises === "object" ? Object.keys(runtimeBefore.premises).length : 0,
@@ -1876,10 +2186,35 @@
         }
         var status = (!replaced.serverDbEmpty || runtimeHadContent || parsedHasContent) ? "ready" : "empty";
         var loadedAt = _nowISO();
+        var cacheWarningMessage = cacheWarning ? ("Данные загружены с сервера; локальный cache не сохранён: " + cacheWarning.errorMessage) : "";
         _setUIState({
           server: { status: "online", checkedAt: _nowISO(), message: "" },
-          data: { status: status, loadedAt: loadedAt, source: "server", message: (status === "empty" ? "Серверный dump пуст" : "") }
+          data: {
+            status: status,
+            loadedAt: loadedAt,
+            source: "server",
+            message: cacheWarningMessage || (status === "empty" ? "Серверный dump пуст" : ""),
+            cacheWarning: cacheWarning
+          }
         });
+
+        if (cacheWarning) {
+          try {
+            console.warn("[server-load][local-cache-failed]", Object.assign({}, cacheWarning, {
+              serverStatus: "online",
+              dataStatus: status,
+              preservedReadableState: status === "ready" || status === "empty"
+            }));
+            console.warn("[server-load][ready-with-cache-warning]", {
+              ownerId: ownerId,
+              envType: responseEnv,
+              serverStatus: "online",
+              dataStatus: status,
+              dataSource: "server",
+              cacheWarning: cacheWarning
+            });
+          } catch (eCacheWarningLog) {}
+        }
 
         _setStatus({
           lastAction: "✅ Загружено с сервера",
@@ -1889,13 +2224,23 @@
           lastReadAt: loadedAt
         });
 
-        return { ok: true, status: status, loadedAt: loadedAt, serverStatus: "online", message: "" };
+        return {
+          ok: true,
+          status: status,
+          loadedAt: loadedAt,
+          serverStatus: "online",
+          message: cacheWarningMessage,
+          cacheWarning: cacheWarning,
+          warning: cacheWarning ? "LOCAL_CACHE_WRITE_FAILED" : ""
+        };
       } catch (e) {
         var msg = String(e && e.message ? e.message : e);
-        _setUIState({
-          server: { status: "offline", checkedAt: _nowISO(), message: msg },
-          data: { status: "offline", source: "server", message: "Ошибка сети: " + msg }
-        });
+        _setUIState(_serverConnectivityFailureUIStatePatch(
+          { status: "offline", checkedAt: _nowISO(), message: msg },
+          { status: "offline", source: "server", message: "Ошибка сети: " + msg },
+          preservedDataStateBeforeLoad,
+          "server_offline_data_state_preserved"
+        ));
         _setStatus({ lastAction: "Ошибка загрузки", lastError: msg });
         return { ok: false, status: "offline", serverStatus: "offline", message: msg };
       } finally {
@@ -1908,12 +2253,21 @@
 
   window.JKHDataLoader = {
     loadFromServer: _loadFromServerServerFirst,
+    __testHooks: {
+      isQuotaExceededError: _isQuotaExceededError,
+      serverLoadCacheWarning: _serverLoadCacheWarning,
+      replaceOwnerProjectScopeFromDump: _replaceOwnerProjectScopeFromDump,
+      readServerDumpRuntimeValue: _readServerDumpRuntimeValue
+    },
+    readServerDumpRuntimeValue: _readServerDumpRuntimeValue,
     resetLocalProjectScope: function (ownerId) {
       var targetOwner = String(ownerId || _ownerId());
+      if (__serverDumpRuntime && String(__serverDumpRuntime.ownerId || "") === targetOwner) _clearServerDumpRuntime();
       var removed = _clearOwnerProjectScope(targetOwner);
       return { ok: true, ownerId: targetOwner, removed: removed };
     },
     resetAllLocalProjectScopes: function () {
+      _clearServerDumpRuntime();
       return { ok: true, removed: _clearAllProjectScopes() };
     }
   };

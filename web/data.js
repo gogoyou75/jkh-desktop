@@ -169,18 +169,91 @@
 
 
 
+  var __projectRawRuntimeOverrides = {};
+
   function _getProjectRaw(key) {
+    var overrideKey = String(key || "");
+    var overridePresent = !!(overrideKey && Object.prototype.hasOwnProperty.call(__projectRawRuntimeOverrides, overrideKey));
+    var overrideRaw = overridePresent ? __projectRawRuntimeOverrides[overrideKey] : null;
+    if (overridePresent) return overrideRaw;
+    try {
+      if (window.JKHDataLoader && typeof window.JKHDataLoader.readServerDumpRuntimeValue === "function") {
+        var serverRuntime = window.JKHDataLoader.readServerDumpRuntimeValue(key, _ownerId());
+        if (serverRuntime && serverRuntime.active === true) return serverRuntime.present === true ? serverRuntime.raw : null;
+      }
+    } catch (eRuntime) { }
     try {
       if (window.JKHStore && typeof JKHStore.getRaw === "function") return JKHStore.getRaw(key);
     } catch (e) { }
     return null;
   }
 
+  function _setProjectRawRuntimeOverride(key, value) {
+    var overrideKey = String(key || "");
+    if (!overrideKey) return;
+    __projectRawRuntimeOverrides[overrideKey] = String(value == null ? "" : value);
+  }
+
+  function _projectRawDiagnosticUid(key) {
+    var m = String(key || "").match(/^payments_(uid_[a-z0-9][a-z0-9_-]*)$/i);
+    return m ? m[1] : "";
+  }
+
+  function _logManualRecalcProjectRaw(payload) {
+    try {
+      console.log("[manual-recalc][project-raw]", Object.assign({
+        stage: "",
+        httpStatus: null,
+        responseBody: null,
+        exception: null,
+        requestUrl: null,
+        requestPayloadSize: null,
+        storageKey: "",
+        owner: _ownerId(),
+        uid: ""
+      }, payload || {}));
+    } catch (eProjectRawLog) {}
+  }
+
   function _setProjectRaw(key, value) {
     try {
-      if (window.JKHStore && typeof JKHStore.setRaw === "function") return JKHStore.setRaw(key, value);
-    } catch (e) { }
+      if (window.JKHStore && typeof JKHStore.setRaw === "function") {
+        var result = JKHStore.setRaw(key, value);
+        if (result === false) {
+          _logManualRecalcProjectRaw({ stage:"JKHStore.setRaw.return_false", requestPayloadSize:String(value == null ? "" : value).length, storageKey:String(key || ""), uid:_projectRawDiagnosticUid(key), exception:null });
+        }
+        return result;
+      }
+      _logManualRecalcProjectRaw({ stage:"JKHStore.setRaw.unavailable", requestPayloadSize:String(value == null ? "" : value).length, storageKey:String(key || ""), uid:_projectRawDiagnosticUid(key), exception:null });
+    } catch (e) {
+      _logManualRecalcProjectRaw({ stage:"JKHStore.setRaw.exception", requestPayloadSize:String(value == null ? "" : value).length, storageKey:String(key || ""), uid:_projectRawDiagnosticUid(key), exception:e });
+    }
+    _logManualRecalcProjectRaw({ stage:"_setProjectRaw.return_false", requestPayloadSize:String(value == null ? "" : value).length, storageKey:String(key || ""), uid:_projectRawDiagnosticUid(key), exception:null });
     return false;
+  }
+
+  function _setProjectRawDetailed(key, value) {
+    var details = {
+      ok: false,
+      key: String(key || ""),
+      payloadLength: String(value == null ? "" : value).length,
+      errorName: "",
+      errorMessage: ""
+    };
+    try {
+      if (window.JKHStore && typeof JKHStore.setRaw === "function") {
+        var result = JKHStore.setRaw(key, value);
+        details.ok = result !== false;
+        if (!details.ok) details.errorMessage = "JKHStore.setRaw returned false";
+        return details;
+      }
+      details.errorMessage = "JKHStore.setRaw unavailable";
+    } catch (e) {
+      details.errorName = String(e && e.name || "");
+      details.errorMessage = String(e && e.message || e || "LOCAL_CACHE_SAVE_FAILED");
+      _logManualRecalcProjectRaw({ stage:"JKHStore.setRaw.exception", requestPayloadSize:details.payloadLength, storageKey:details.key, uid:_projectRawDiagnosticUid(key), exception:e });
+    }
+    return details;
   }
 
   function _removeProjectRaw(key) {
@@ -636,25 +709,98 @@
     return { ok: !!(res.ok && data && data.ok === true), status: res.status, data: data, text: txt, key: key };
   }
 
-  async function _serverStoreSet(ownerId, key, value) {
+  function _isCardSnapshotStorageKey(key) {
+    return String(key || "").indexOf("card_snapshot_") === 0;
+  }
+
+  function _cardSnapshotUidFromStorageKey(key) {
+    return _isCardSnapshotStorageKey(key) ? String(key || "").slice("card_snapshot_".length) : "";
+  }
+
+  async function _serverStoreSet(ownerId, key, value, options) {
+    var opts = options || {};
+    var valueText = String(value == null ? "" : value);
+    if (_isCardSnapshotStorageKey(key)) {
+      try {
+        console.log("[card-snapshot][kv-set-request]", {
+          reason: "card_snapshot_kv_set_request",
+          snapshotKey: String(key || ""),
+          key: String(key || ""),
+          ownerId: String(ownerId || ""),
+          uid: _cardSnapshotUidFromStorageKey(key),
+          serializedSize: valueText.length,
+          requestUrl: "/api/store"
+        });
+      } catch(eKvSetReqLog) {}
+    }
     var res = await fetch("/api/store", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       credentials: "include",
-      body: JSON.stringify({ client_owner_hint: ownerId, key: key, value: String(value == null ? "" : value) })
+      body: JSON.stringify(Object.assign({ client_owner_hint: ownerId, key: key, value: valueText }, opts.paymentLedgerContract ? {
+        payment_ledger_contract: opts.paymentLedgerContract
+      } : {}))
     });
     var txt = await res.text();
     var data = null;
     try { data = JSON.parse(txt); } catch (e) {}
+    if (_isCardSnapshotStorageKey(key)) {
+      try {
+        console.log("[card-snapshot][kv-set-response]", {
+          reason: "card_snapshot_kv_set_response",
+          snapshotKey: String(key || ""),
+          key: String(key || ""),
+          ownerId: String(ownerId || ""),
+          uid: _cardSnapshotUidFromStorageKey(key),
+          serializedSize: valueText.length,
+          ok: !!(res.ok && data && data.ok === true),
+          httpStatus: res.status,
+          backendOwner: String(data && data.owner || ""),
+          backendKey: String(data && (data.key || data.k) || key || ""),
+          responseError: String(data && data.error || "")
+        });
+      } catch(eKvSetRespLog) {}
+    }
     return { ok: !!(res.ok && data && data.ok === true), status: res.status, data: data, text: txt, key: key };
   }
 
   async function _serverStoreGet(ownerId, key) {
     var url = "/api/store?key=" + encodeURIComponent(key) + "&client_owner_hint=" + encodeURIComponent(ownerId);
+    if (_isCardSnapshotStorageKey(key)) {
+      try {
+        console.log("[card-snapshot][kv-readback-request]", {
+          reason: "card_snapshot_kv_readback_request",
+          snapshotKey: String(key || ""),
+          key: String(key || ""),
+          ownerId: String(ownerId || ""),
+          uid: _cardSnapshotUidFromStorageKey(key),
+          requestUrl: url
+        });
+      } catch(eKvReadReqLog) {}
+    }
     var res = await fetch(url, { method: "GET", credentials: "include" });
     var txt = await res.text();
     var data = null;
     try { data = JSON.parse(txt); } catch (e) {}
+    if (_isCardSnapshotStorageKey(key)) {
+      try {
+        var rawValue = data && data.value !== null && data.value !== undefined ? String(data.value) : "";
+        console.log("[card-snapshot][kv-readback-response]", {
+          reason: "card_snapshot_kv_readback_response",
+          snapshotKey: String(key || ""),
+          key: String(key || ""),
+          ownerId: String(ownerId || ""),
+          uid: _cardSnapshotUidFromStorageKey(key),
+          ok: !!(res.ok && data && data.ok === true),
+          missing: res.status === 404,
+          httpStatus: res.status,
+          backendOwner: String(data && data.owner || ""),
+          backendKey: String(data && (data.key || data.k) || key || ""),
+          returnedSize: rawValue.length,
+          responseError: String(data && data.error || "")
+        });
+      } catch(eKvReadRespLog) {}
+    }
     return { ok: !!(res.ok && data && data.ok === true), missing: res.status === 404, status: res.status, data: data, text: txt, key: key, raw: data && data.value };
   }
 
@@ -1032,6 +1178,122 @@
     }
   }
 
+  function _validateFreshCardSnapshotForCurrentInputs(abonentOrId, snapshot, source, options) {
+    var opts = options && typeof options === "object" ? options : {};
+    var normalized = _normalizeCardSnapshot(abonentOrId, snapshot);
+    if (!normalized) return { ok: false, reason: "CARD_SNAPSHOT_INVALID", snapshot: null };
+    var status = String(normalized.summary_status || normalized.snapshot_status || normalized.status || "").toLowerCase();
+    if (status !== "fresh") return { ok: false, reason: "CARD_SNAPSHOT_NOT_FRESH", snapshot: normalized };
+    if (normalized.periodActive === true || String(normalized.snapshotMode || "").toLowerCase() === "period") {
+      return { ok: false, reason: "CARD_SNAPSHOT_PERIOD_ACTIVE", snapshot: normalized };
+    }
+    var rowsByIdCount = _cardSnapshotRowsByIdCount(normalized.rowsById);
+    if (rowsByIdCount <= 0) return { ok: false, reason: "CARD_SNAPSHOT_ROWS_MISSING", snapshot: normalized };
+    if (opts.validateLocalInputs === false) {
+      return {
+        ok: true,
+        reason: "OK",
+        snapshot: normalized,
+        source: String(source || ""),
+        currentLedgerVersion: "",
+        snapshotLedgerVersion: String(normalized.ledgerVersion || normalized.ledger_version || ""),
+        rowsByIdCount: rowsByIdCount,
+        localInputValidationSkipped: true
+      };
+    }
+
+    var currentVersions = computeFinancialInputVersions(abonentOrId);
+    var currentLedgerVersion = String(currentVersions.ledger_version || computeLedgerRuntimeVersion(abonentOrId) || "");
+    var snapshotLedgerVersion = String(normalized.ledgerVersion || normalized.ledger_version || "");
+    if (!currentLedgerVersion || !snapshotLedgerVersion || snapshotLedgerVersion !== currentLedgerVersion) {
+      return {
+        ok: false,
+        reason: "LEDGER_VERSION_CHANGED",
+        snapshot: normalized,
+        currentLedgerVersion: currentLedgerVersion,
+        snapshotLedgerVersion: snapshotLedgerVersion,
+        rowsByIdCount: rowsByIdCount
+      };
+    }
+    if (normalized.input_hash && currentVersions.input_hash && normalized.input_hash !== currentVersions.input_hash) {
+      return {
+        ok: false,
+        reason: "INPUT_HASH_CHANGED",
+        snapshot: normalized,
+        currentInputHash: currentVersions.input_hash,
+        snapshotInputHash: normalized.input_hash,
+        rowsByIdCount: rowsByIdCount
+      };
+    }
+    return {
+      ok: true,
+      reason: "OK",
+      snapshot: normalized,
+      source: String(source || ""),
+      currentLedgerVersion: currentLedgerVersion,
+      snapshotLedgerVersion: snapshotLedgerVersion,
+      rowsByIdCount: rowsByIdCount
+    };
+  }
+
+  async function readFreshBackendCardSnapshotForCard(abonentOrId, options) {
+    var opts = options && typeof options === "object" ? options : {};
+    var found = _findAbonentByIdOrUid(abonentOrId);
+    var abonent = found && found.abonent ? found.abonent : null;
+    var uid = String(abonent && abonent.uid || (typeof abonentOrId === "object" ? abonentOrId && abonentOrId.uid : abonentOrId) || "").trim();
+    if (!isValidUid(uid)) return { ok: false, reason: "UID_REQUIRED", snapshot: null };
+    if (typeof fetch !== "function") return { ok: false, reason: "FETCH_UNAVAILABLE", snapshot: null };
+    var res = await fetch("/api/card_snapshot/" + encodeURIComponent(uid), { method: "GET", credentials: "include" });
+    var text = await res.text();
+    var data = null;
+    try { data = text ? JSON.parse(text) : null; } catch (eParse) { data = null; }
+    if (!res.ok || !data || data.ok === false) {
+      return { ok: false, reason: (data && data.error) || ("HTTP_" + res.status), snapshot: null, status: res.status };
+    }
+    var serverStatus = String(data.snapshot_status || data.status || "").toLowerCase();
+    var serverSnapshot = data.snapshot && typeof data.snapshot === "object" ? data.snapshot : null;
+    if (!serverSnapshot || serverStatus === "missing") {
+      try { console.log("[card-snapshot][backend-read-through]", { uid: uid, reason: "card_auto_recalc_backend_snapshot_missing" }); } catch (eMissingLog) {}
+      return { ok: false, reason: "card_auto_recalc_backend_snapshot_missing", snapshot: null, status: res.status };
+    }
+    var validation = _validateFreshCardSnapshotForCurrentInputs(abonent || uid, serverSnapshot, "backend_card_snapshot", {
+      validateLocalInputs: opts.validateLocalInputs !== false
+    });
+    if (!validation.ok) {
+      try {
+        console.warn("[card-snapshot][backend-read-through]", {
+          uid: uid,
+          reason: "card_auto_recalc_backend_snapshot_incompatible",
+          detail: validation.reason,
+          rowsByIdCount: validation.rowsByIdCount || 0
+        });
+      } catch (eIncompatLog) {}
+      return Object.assign({}, validation, { ok: false, reason: "card_auto_recalc_backend_snapshot_incompatible", detail: validation.reason, status: res.status });
+    }
+    var key = resolveCardSnapshotKey(abonent || uid);
+    var hydratedLocal = false;
+    if (opts.hydrateLocal !== false && key) {
+      var localOk = _setProjectRaw(key, JSON.stringify(validation.snapshot));
+      hydratedLocal = localOk !== false;
+    }
+    try {
+      console.log("[card-snapshot][backend-read-through]", {
+        uid: uid,
+        reason: hydratedLocal ? "card_backend_snapshot_hydrated_local" : "card_backend_snapshot_used",
+        key: key,
+        rowsByIdCount: validation.rowsByIdCount,
+        ledgerVersion: validation.snapshotLedgerVersion
+      });
+    } catch (eUsedLog) {}
+    return Object.assign({}, validation, {
+      ok: true,
+      reason: hydratedLocal ? "card_backend_snapshot_hydrated_local" : "card_backend_snapshot_used",
+      hydratedLocal: hydratedLocal,
+      key: key,
+      status: res.status
+    });
+  }
+
   function _parseCardSnapshotRawForDiagnostics(raw) {
     var out = { ok: false, rowsByIdCount: 0, ledgerVersion: "", snapshot: null, reason: "" };
     try {
@@ -1101,29 +1363,233 @@
     var found = _findAbonentByIdOrUid(abonentOrId);
     var abonent = found && found.abonent ? found.abonent : null;
     var uid = String(abonent && abonent.uid || snapshot && snapshot.uid || "").trim();
-    if (!isValidUid(uid)) return { ok: false, reason: "UID_REQUIRED" };
-    var res = await fetch("/api/card_snapshot/" + encodeURIComponent(uid), {
+    if (!isValidUid(uid)) {
+      try {
+        console.warn("[card-snapshot][canonical-post-skipped]", {
+          reason: "card_snapshot_backend_post_invalid_uid",
+          uid: uid,
+          abonentId: String(abonentOrId && typeof abonentOrId === "object" ? (abonentOrId.id || abonentOrId.uid || "") : (abonentOrId || ""))
+        });
+      } catch (eInvalidUidLog) {}
+      return { ok: false, reason: "UID_REQUIRED" };
+    }
+    var postUrl = "/api/card_snapshot/" + encodeURIComponent(uid);
+    var requestBody = JSON.stringify({ snapshot: snapshot });
+    var requestRowsById = snapshot && snapshot.rowsById && typeof snapshot.rowsById === "object" && !Array.isArray(snapshot.rowsById) ? snapshot.rowsById : {};
+    var requestRowIds = Object.keys(requestRowsById);
+    var requestTotals = snapshot && snapshot.totals && typeof snapshot.totals === "object" ? snapshot.totals : {};
+    try {
+      sessionStorage.setItem("jkh_reload_chain_diag:" + uid, JSON.stringify({
+        uid: uid,
+        savedSnapshotRows: requestRowIds.length,
+        savedDebt: requestTotals.debt !== undefined ? requestTotals.debt : requestTotals.total,
+        savedPenalty: requestTotals.penalty,
+        savedAccrued: requestTotals.accrued,
+        savedPaid: requestTotals.paid,
+        snapshotStatus: String(snapshot && (snapshot.snapshot_status || snapshot.summary_status || "") || "")
+      }));
+    } catch(eReloadDiagStore) {}
+    try {
+      console.log("[reload-chain][canonical-save-request]", {
+        routeUid: uid,
+        snapshotUid: String(snapshot && snapshot.uid || ""),
+        abonentId: String(found && found.id || ""),
+        ownerId: String(window.JKHStore && typeof JKHStore.getOwnerId === "function" ? JKHStore.getOwnerId() || "" : ""),
+        status: String(snapshot && (snapshot.snapshot_status || snapshot.summary_status || "") || ""),
+        snapshotMode: String(snapshot && snapshot.snapshotMode || ""),
+        rowsByIdCount: requestRowIds.length,
+        firstRowId: requestRowIds[0] || "",
+        lastRowId: requestRowIds.length ? requestRowIds[requestRowIds.length - 1] : "",
+        totals: requestTotals,
+        input_hash: String(snapshot && snapshot.input_hash || ""),
+        ledgerVersion: String(snapshot && snapshot.ledgerVersion || ""),
+        payloadSize: requestBody.length
+      });
+    } catch(eReloadSaveRequestLog) {}
+    try {
+      console.log("[card-snapshot][canonical-post-request]", {
+        reason: "card_snapshot_backend_post_request",
+        uid: uid,
+        requestUrl: postUrl,
+        method: "POST",
+        payloadLength: requestBody.length,
+        snapshotStatus: String(snapshot && (snapshot.snapshot_status || snapshot.summary_status || "") || ""),
+        ledgerVersion: String(snapshot && (snapshot.ledgerVersion || snapshot.ledger_version || "") || ""),
+        rowsByIdCount: _cardSnapshotRowsByIdCount(snapshot && snapshot.rowsById)
+      });
+    } catch (ePostRequestLog) {}
+    var res = await fetch(postUrl, {
       method: "POST",
       credentials: "include",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ snapshot: snapshot })
+      body: requestBody
     });
     var text = await res.text();
     var data = null;
     try { data = text ? JSON.parse(text) : null; } catch (e) { data = null; }
-    if (!res.ok || !data || data.ok === false) throw new Error((data && data.error) || ("HTTP_" + res.status));
+    var backendSnapshotOk = !!(res.ok && data && data.ok === true);
+    var falseReason = backendSnapshotOk ? "" : String((data && data.error) || (!data ? "RESPONSE_JSON_INVALID_OR_EMPTY" : ("HTTP_" + res.status)));
+    try {
+      console.log("[reload-chain][canonical-save-response]", {
+        routeUid: uid,
+        httpStatus: res.status,
+        ok: backendSnapshotOk,
+        responseBody: text,
+        responseBodySize: String(text || "").length,
+        persistedRowsByIdCount: data && data.snapshot && data.snapshot.rowsById && typeof data.snapshot.rowsById === "object" ? Object.keys(data.snapshot.rowsById).length : 0,
+        persistedTotals: data && data.snapshot && data.snapshot.totals || null
+      });
+      console.log("[card-snapshot][canonical-post-response]", {
+        reason: "card_snapshot_backend_post_response",
+        uid: uid,
+        requestUrl: postUrl,
+        httpStatus: res.status,
+        okHttp: res.ok,
+        backendSnapshotOk: backendSnapshotOk,
+        backendSnapshotOkFalseReason: falseReason,
+        responseBody: text,
+        responseBodyLength: String(text || "").length,
+        parsedOk: !!(data && data.ok === true),
+        responseError: String(data && data.error || ""),
+        backendOwner: String(data && data.owner_id || ""),
+        backendUid: String(data && data.abonent_uid || ""),
+        snapshotStatus: String(data && data.snapshot_status || "")
+      });
+    } catch (ePostResponseLog) {}
+    if (!backendSnapshotOk) {
+      try {
+        console.warn("[card-snapshot][canonical-post-not-ok]", {
+          reason: "card_snapshot_backend_snapshot_ok_false",
+          uid: uid,
+          requestUrl: postUrl,
+          httpStatus: res.status,
+          okHttp: res.ok,
+          backendSnapshotOk: false,
+          backendSnapshotOkFalseReason: falseReason,
+          responseBody: text
+        });
+      } catch (ePostNotOkLog) {}
+      var err = new Error(falseReason || ("HTTP_" + res.status));
+      try {
+        err.cardSnapshotHttpStatus = res.status;
+        err.cardSnapshotResponseBody = text;
+        err.cardSnapshotBackendOkFalseReason = falseReason;
+      } catch (eErrMeta) {}
+      throw err;
+    }
+    try {
+      var readbackRes = await fetch(postUrl, { method: "GET", credentials: "include" });
+      var readbackText = await readbackRes.text();
+      var readbackData = null;
+      try { readbackData = readbackText ? JSON.parse(readbackText) : null; } catch(eReadbackJson) { readbackData = null; }
+      var readbackSnapshot = readbackData && readbackData.snapshot && typeof readbackData.snapshot === "object" ? readbackData.snapshot : null;
+      var readbackRowsById = readbackSnapshot && readbackSnapshot.rowsById && typeof readbackSnapshot.rowsById === "object" ? readbackSnapshot.rowsById : {};
+      try {
+        var comparisonRaw = sessionStorage.getItem("jkh_reload_chain_diag:" + uid);
+        var comparisonState = comparisonRaw ? JSON.parse(comparisonRaw) : { uid: uid };
+        var readbackTotals = readbackSnapshot && readbackSnapshot.totals && typeof readbackSnapshot.totals === "object" ? readbackSnapshot.totals : {};
+        comparisonState.loadedSnapshotRows = Object.keys(readbackRowsById).length;
+        comparisonState.loadedDebt = readbackTotals.debt !== undefined ? readbackTotals.debt : readbackTotals.total;
+        comparisonState.loadedPenalty = readbackTotals.penalty;
+        comparisonState.loadedAccrued = readbackTotals.accrued;
+        comparisonState.loadedPaid = readbackTotals.paid;
+        sessionStorage.setItem("jkh_reload_chain_diag:" + uid, JSON.stringify(comparisonState));
+      } catch(eReloadDiagReadbackStore) {}
+      console.log("[reload-chain][canonical-readback-after-save]", {
+        found: !!readbackSnapshot,
+        httpStatus: readbackRes.status,
+        ownerId: String(readbackData && readbackData.owner_id || ""),
+        uid: String(readbackData && readbackData.abonent_uid || uid),
+        status: String(readbackData && readbackData.snapshot_status || ""),
+        rowsByIdCount: Object.keys(readbackRowsById).length,
+        totals: readbackSnapshot && readbackSnapshot.totals || null,
+        input_hash: String(readbackData && readbackData.input_hash || readbackSnapshot && readbackSnapshot.input_hash || ""),
+        ledgerVersion: String(readbackData && readbackData.ledger_version || readbackSnapshot && readbackSnapshot.ledgerVersion || ""),
+        storedPayloadSize: readbackSnapshot ? JSON.stringify(readbackSnapshot).length : 0
+      });
+    } catch(eCanonicalReadbackDiag) {
+      try { console.warn("[reload-chain][canonical-readback-after-save]", { found: false, uid: uid, reason: String(eCanonicalReadbackDiag && eCanonicalReadbackDiag.message || eCanonicalReadbackDiag) }); } catch(_) {}
+    }
     return data;
   }
 
+  function _cardSnapshotSaveDiagPayload(result, extra) {
+    var out = {};
+    try {
+      if (result && typeof result === "object") {
+        out.ok = result.ok === true;
+        out.reason = String(result.reason || "");
+        out.warning = String(result.warning || "");
+        out.key = String(result.key || "");
+        out.ownerId = String(result.ownerId || "");
+        out.status = Number(result.status || 0);
+        out.localOk = result.localOk === true;
+        out.localCacheOk = result.localCacheOk === true;
+        out.serverOk = result.serverOk === true;
+        out.backendKvOk = result.backendKvOk === true;
+        out.backendSnapshotOk = result.backendSnapshotOk === true;
+        out.serverReadbackOk = result.serverReadbackOk === true;
+        out.backendReadbackOk = result.backendReadbackOk === true;
+        out.rowsByIdCount = Number(result.rowsByIdCount || 0);
+        out.ledgerVersion = String(result.ledgerVersion || "");
+      }
+      if (extra && typeof extra === "object") {
+        for (var kx in extra) {
+          if (Object.prototype.hasOwnProperty.call(extra, kx)) out[kx] = extra[kx];
+        }
+      }
+    } catch (ePayload) {}
+    return out;
+  }
+
+  function _logCardSnapshotSaveDiag(tag, result, extra) {
+    try {
+      var payload = _cardSnapshotSaveDiagPayload(result, extra);
+      if (!payload.reason && extra && extra.reason) payload.reason = String(extra.reason || "");
+      console.log("[card-snapshot][" + tag + "]", payload);
+    } catch (eLog) {}
+  }
+
   async function saveCardSnapshotAndWait(abonentOrId, snapshot, options) {
+    try {
+      console.log("[card-snapshot][save-enter]", {
+        reason: "card_snapshot_save_enter",
+        abonentId: String(abonentOrId && typeof abonentOrId === "object" ? (abonentOrId.id || abonentOrId.uid || "") : (abonentOrId || "")),
+        uid: String(snapshot && snapshot.uid || ""),
+        summaryStatus: String(snapshot && (snapshot.summary_status || snapshot.snapshot_status || "") || ""),
+        summaryReason: String(snapshot && (snapshot.summary_reason || snapshot.snapshot_reason || "") || ""),
+        snapshotMode: String(snapshot && (snapshot.snapshot_mode || snapshot.mode || snapshot.scope || "") || ""),
+        runId: String(options && options.runId || "")
+      });
+    } catch (eEnterLog) {}
     var opts = options && typeof options === "object" ? options : {};
-    var result = { ok: false, localOk: false, serverOk: false, serverReadbackOk: false, key: "", ownerId: "", status: 0, reason: "", rowsByIdCount: 0, ledgerVersion: "" };
+    var result = {
+      ok: false,
+      localOk: false,
+      localCacheOk: false,
+      localCacheReason: "",
+      localCacheError: null,
+      serverOk: false,
+      backendKvOk: false,
+      backendSnapshotOk: false,
+      serverReadbackOk: false,
+      backendReadbackOk: false,
+      key: "",
+      ownerId: "",
+      status: 0,
+      reason: "",
+      warning: "",
+      rowsByIdCount: 0,
+      ledgerVersion: ""
+    };
     var runId = String(opts.runId || _fullRecalcRunId({}) || "");
     var skipReadback = opts.skipReadback === true;
     try {
       if (!Data.ensureWriteOrExplain()) {
         result.reason = "WRITE_BLOCKED";
         try { console.warn("[card-snapshot][save-and-wait-failed]", result); } catch (eWriteLog) {}
+        _logCardSnapshotSaveDiag("save-skip", result, { reason: result.reason, runId: runId, skipStage: "ensure-write" });
+        _logCardSnapshotSaveDiag("save-return", result, { reason: result.reason, runId: runId, returnStage: "ensure-write" });
         return result;
       }
       var prepared = _prepareCardSnapshotForSave(abonentOrId, snapshot);
@@ -1132,6 +1598,8 @@
       if (!prepared.ok) {
         result.reason = prepared.reason || "SNAPSHOT_INVALID";
         try { console.warn("[card-snapshot][save-and-wait-failed]", result); } catch (ePreparedLog) {}
+        _logCardSnapshotSaveDiag("save-skip", result, { reason: result.reason, runId: runId, skipStage: "prepare-snapshot" });
+        _logCardSnapshotSaveDiag("save-return", result, { reason: result.reason, runId: runId, returnStage: "prepare-snapshot" });
         return result;
       }
       var key = prepared.key;
@@ -1140,52 +1608,123 @@
       var serialized = prepared.serialized;
       result.rowsByIdCount = _cardSnapshotRowsByIdCount(normalized.rowsById);
       result.ledgerVersion = String(normalized.ledgerVersion || "");
-      var localOk = _setProjectRaw(key, serialized);
-      result.localOk = localOk !== false;
+      var localWrite = _setProjectRawDetailed(key, serialized);
+      result.localOk = !!(localWrite && localWrite.ok === true);
+      result.localCacheOk = result.localOk;
+      if (!result.localCacheOk) {
+        result.localCacheReason = "LOCAL_CACHE_SAVE_FAILED";
+        result.warning = "LOCAL_CACHE_SAVE_FAILED";
+        result.localCacheError = {
+          key: key,
+          payloadLength: String(serialized || "").length,
+          errorName: String(localWrite && localWrite.errorName || ""),
+          errorMessage: String(localWrite && localWrite.errorMessage || "LOCAL_CACHE_SAVE_FAILED")
+        };
+        try {
+          console.warn("[card-snapshot][local-cache-save-failed]", Object.assign({
+            reason: "card_snapshot_local_cache_save_failed",
+            runId: runId,
+            ownerId: ownerId
+          }, result.localCacheError));
+        } catch (eLocalCacheLog) {}
+        try { console.warn("[card-snapshot][backend-save-continued]", { reason: "card_snapshot_backend_save_continued", runId: runId, ownerId: ownerId, key: key, payloadLength: String(serialized || "").length }); } catch (eContinueLog) {}
+      }
       try { console.log("[card-snapshot][save]", { runId: runId, key: key, ok: result.localOk, rows: normalized.rows.length, ledgerVersion: normalized.ledgerVersion }); } catch (eSaveLog) {}
       await _dataUiYield();
-      if (!result.localOk) {
-        result.reason = "LOCAL_SAVE_FAILED";
-        try { console.warn("[card-snapshot][save-and-wait-failed]", result); } catch (eLocalLog) {}
-        return result;
-      }
       if (!ownerId || ownerId === "guest" || ownerId === "ALL") {
         result.reason = "OWNER_SCOPE_UNAVAILABLE";
+        try { console.warn("[card-snapshot][kv-save-skipped]", { reason: "card_snapshot_kv_save_skipped", skipReason: result.reason, runId: runId, ownerId: ownerId, snapshotKey: key, key: key, uid: _cardSnapshotUidFromStorageKey(key), serializedSize: String(serialized || "").length }); } catch (eSkipKvLog) {}
         try { console.warn("[card-snapshot][server-save-failed]", { ownerId: ownerId, key: key, reason: result.reason }); } catch (eOwnerLog) {}
         try { console.warn("[card-snapshot][save-and-wait-failed]", result); } catch (eOwnerWaitLog) {}
+        _logCardSnapshotSaveDiag("save-skip", result, { reason: result.reason, runId: runId, skipStage: "owner-scope" });
+        _logCardSnapshotSaveDiag("save-return", result, { reason: result.reason, runId: runId, returnStage: "owner-scope" });
         return result;
       }
+      _logCardSnapshotSaveDiag("before-kv-save", result, { reason: "card_snapshot_before_kv_save", runId: runId, uid: _cardSnapshotUidFromStorageKey(key), serializedSize: String(serialized || "").length });
       var serverResult = await _serverStoreSet(ownerId, key, serialized);
       result.status = Number(serverResult && serverResult.status || 0);
-      result.serverOk = !!(serverResult && serverResult.ok === true);
+      result.backendKvOk = !!(serverResult && serverResult.ok === true);
+      result.serverOk = result.backendKvOk;
+      try {
+        console.log("[card-snapshot][kv-save-result]", {
+          reason: "card_snapshot_kv_save_result",
+          runId: runId,
+          ownerId: ownerId,
+          snapshotKey: key,
+          key: key,
+          uid: _cardSnapshotUidFromStorageKey(key),
+          ok: result.backendKvOk,
+          httpStatus: result.status,
+          backendOwner: String(serverResult && serverResult.data && serverResult.data.owner || ""),
+          backendKey: String(serverResult && serverResult.data && (serverResult.data.key || serverResult.data.k) || key || ""),
+          responseError: String(serverResult && serverResult.data && serverResult.data.error || "")
+        });
+      } catch (eKvSaveResultLog) {}
       await _dataUiYield();
-      if (!result.serverOk) {
+      if (!result.backendKvOk) {
         result.reason = serverResult && (serverResult.text || serverResult.data && serverResult.data.error) || "SERVER_STORE_FAILED";
-        try { console.warn("[card-snapshot][server-save-failed]", { ownerId: ownerId, key: key, status: result.status, reason: result.reason }); } catch (eServerFailLog) {}
+        try { console.warn("[card-snapshot][server-save-failed]", { reason: "card_snapshot_backend_save_failed", ownerId: ownerId, key: key, status: result.status, failure: result.reason }); } catch (eServerFailLog) {}
         try { console.warn("[card-snapshot][save-and-wait-failed]", result); } catch (eWaitFailLog) {}
+        _logCardSnapshotSaveDiag("save-skip", result, { reason: result.reason, runId: runId, skipStage: "kv-save-failed" });
+        _logCardSnapshotSaveDiag("save-return", result, { reason: result.reason, runId: runId, returnStage: "kv-save-failed" });
         return result;
       }
       try {
-        await saveCardSnapshotToBackend(abonentOrId, normalized);
+        _logCardSnapshotSaveDiag("before-canonical-save", result, { reason: "card_snapshot_before_canonical_save", runId: runId, uid: _cardSnapshotUidFromStorageKey(key) });
+        var backendSnapshotResult = await saveCardSnapshotToBackend(abonentOrId, normalized);
+        result.backendSnapshotOk = !!(backendSnapshotResult && backendSnapshotResult.ok === true);
+        try {
+          console.log("[card-snapshot][canonical-save-result]", {
+            reason: "card_snapshot_canonical_save_result",
+            runId: runId,
+            ownerId: ownerId,
+            snapshotKey: key,
+            key: key,
+            uid: _cardSnapshotUidFromStorageKey(key),
+            ok: result.backendSnapshotOk,
+            backendOwner: String(backendSnapshotResult && backendSnapshotResult.owner_id || ""),
+            backendUid: String(backendSnapshotResult && backendSnapshotResult.abonent_uid || ""),
+            snapshotStatus: String(backendSnapshotResult && backendSnapshotResult.snapshot_status || "")
+          });
+        } catch(eCanonicalLog) {}
       } catch (eTable) {
         result.ok = false;
         result.reason = "CARD_SNAPSHOT_TABLE_SAVE_FAILED:" + String(eTable && eTable.message || eTable);
-        try { console.warn("[card-snapshot][table-save-failed]", { ownerId: ownerId, key: key, reason: result.reason }); } catch (eTableLog) {}
+        try {
+          console.warn("[card-snapshot][table-save-failed]", {
+            reason: "card_snapshot_backend_save_failed",
+            ownerId: ownerId,
+            key: key,
+            failure: result.reason,
+            backendSnapshotOk: false,
+            backendSnapshotOkFalseReason: String(eTable && (eTable.cardSnapshotBackendOkFalseReason || eTable.message) || eTable || ""),
+            httpStatus: Number(eTable && eTable.cardSnapshotHttpStatus || 0),
+            responseBody: String(eTable && eTable.cardSnapshotResponseBody || "")
+          });
+        } catch (eTableLog) {}
+        _logCardSnapshotSaveDiag("save-skip", result, { reason: result.reason, runId: runId, skipStage: "canonical-save-failed" });
+        _logCardSnapshotSaveDiag("save-return", result, { reason: result.reason, runId: runId, returnStage: "canonical-save-failed" });
         return result;
       }
-      result.ok = true;
-      result.reason = "";
       try { console.log("[card-snapshot][server-save-ok]", { ownerId: ownerId, key: key, status: result.status }); } catch (eServerOkLog) {}
       await _dataUiYield();
       if (skipReadback) {
         result.serverReadbackOk = true;
+        result.backendReadbackOk = true;
+        result.ok = result.backendSnapshotOk === true;
+        result.reason = result.ok ? "" : "CARD_SNAPSHOT_TABLE_SAVE_FAILED";
         try { console.log("[card-snapshot][server-readback-skipped]", { runId: runId, ownerId: ownerId, key: key, reason: "post-recalc-save-ok" }); } catch (eReadbackSkipLog) {}
+        if (result.ok && result.localCacheOk === false) {
+          try { console.warn("[card-snapshot][backend-save-ok-local-cache-failed]", { reason: "card_snapshot_backend_save_succeeded_local_cache_failed", runId: runId, ownerId: ownerId, key: key, warning: result.warning }); } catch (eWarnOkLog) {}
+        }
         try { console.log("[card-snapshot][save-and-wait-ok]", result); } catch (eWaitSkipOkLog) {}
+        _logCardSnapshotSaveDiag("save-return", result, { reason: result.reason || "OK", runId: runId, returnStage: "readback-skipped" });
         return result;
       }
       var readback = await _serverStoreGet(ownerId, key);
       var readbackParsed = _parseCardSnapshotRawForDiagnostics(readback && readback.raw);
       result.serverReadbackOk = !!(readback && readback.ok === true && readbackParsed.ok === true && readbackParsed.ledgerVersion === result.ledgerVersion);
+      result.backendReadbackOk = result.serverReadbackOk;
       if (!result.serverReadbackOk) {
         result.ok = false;
         result.reason = "CARD_SNAPSHOT_SERVER_READBACK_FAILED";
@@ -1198,19 +1737,30 @@
             parseReason: readbackParsed.reason,
             rowsByIdCount: readbackParsed.rowsByIdCount,
             readbackLedgerVersion: readbackParsed.ledgerVersion,
-            ledgerVersion: result.ledgerVersion
+            ledgerVersion: result.ledgerVersion,
+            reason: "card_snapshot_backend_readback_failed"
           });
         } catch (eReadbackFailLog) {}
         try { console.warn("[card-snapshot][save-and-wait-failed]", result); } catch (eReadbackWaitLog) {}
+        _logCardSnapshotSaveDiag("save-skip", result, { reason: result.reason, runId: runId, skipStage: "server-readback-failed" });
+        _logCardSnapshotSaveDiag("save-return", result, { reason: result.reason, runId: runId, returnStage: "server-readback-failed" });
         return result;
       }
+      result.ok = result.backendSnapshotOk === true;
+      result.reason = result.ok ? "" : "CARD_SNAPSHOT_TABLE_SAVE_FAILED";
       try { console.log("[card-snapshot][server-readback-ok]", { ownerId: ownerId, key: key, status: readback && readback.status, rowsByIdCount: readbackParsed.rowsByIdCount, ledgerVersion: readbackParsed.ledgerVersion }); } catch (eReadbackOkLog) {}
+      if (result.ok && result.localCacheOk === false) {
+        try { console.warn("[card-snapshot][backend-save-ok-local-cache-failed]", { reason: "card_snapshot_backend_save_succeeded_local_cache_failed", runId: runId, ownerId: ownerId, key: key, warning: result.warning }); } catch (eWarnOkLog2) {}
+      }
       try { console.log("[card-snapshot][save-and-wait-ok]", result); } catch (eWaitOkLog) {}
+      _logCardSnapshotSaveDiag("save-return", result, { reason: result.reason || "OK", runId: runId, returnStage: "success" });
       return result;
     } catch (e) {
       result.reason = String(e && e.message || e || "CARD_SNAPSHOT_SAVE_FAILED");
       try { console.warn("[card-snapshot][server-save-failed]", { ownerId: result.ownerId, key: result.key, status: result.status, reason: result.reason }); } catch (eCatchServerLog) {}
       try { console.warn("[card-snapshot][save-and-wait-failed]", result); } catch (eCatchWaitLog) {}
+      _logCardSnapshotSaveDiag("save-skip", result, { reason: result.reason, runId: runId, skipStage: "exception" });
+      _logCardSnapshotSaveDiag("save-return", result, { reason: result.reason, runId: runId, returnStage: "exception" });
       return result;
     }
   }
@@ -1296,6 +1846,57 @@
     return rowsById;
   }
 
+  function _snapshotRowAccruedPaidTotals(rows) {
+    var accrued = 0;
+    var paid = 0;
+    (Array.isArray(rows) ? rows : []).forEach(function(row) {
+      accrued += _summaryNumber(row && row.accrued);
+      paid += _summaryNumber(row && row.paid);
+    });
+    return {
+      accrued: Math.round(accrued * 100) / 100,
+      paid: Math.round(paid * 100) / 100
+    };
+  }
+
+  function _resolveCardSnapshotCanonicalTotals(summary, rows) {
+    var source = summary && summary.totals && typeof summary.totals === "object" && !Array.isArray(summary.totals) ? summary.totals : null;
+    var rowTotals = _snapshotRowAccruedPaidTotals(rows);
+    var last = null;
+    (Array.isArray(rows) ? rows : []).forEach(function(row) {
+      var principal = Number(row && row.pay_main);
+      var penalty = Number(row && row.pay_penalty);
+      var total = Number(row && row.total);
+      if (Number.isFinite(principal) && Number.isFinite(penalty) && Number.isFinite(total)) last = { principal: principal, penalty: penalty, total: total };
+    });
+    var sourceTotal = Number(source && source.total);
+    var sourcePrincipal = Number(source && source.principal);
+    var sourcePenalty = Number(source && source.penalty);
+    var sourceAccrued = Number(source && source.accrued);
+    var sourcePaid = Number(source && source.paid);
+    var sourceDebtIsFinite = source && Number.isFinite(sourceTotal) && Number.isFinite(sourcePrincipal) && Number.isFinite(sourcePenalty);
+    var finalNonZero = last && (Math.abs(last.principal) > 0.0000001 || Math.abs(last.penalty) > 0.0000001 || Math.abs(last.total) > 0.0000001);
+    var sourceDebtAllZero = sourceDebtIsFinite && Math.abs(sourceTotal) <= 0.0000001 && Math.abs(sourcePrincipal) <= 0.0000001 && Math.abs(sourcePenalty) <= 0.0000001;
+    var sourceAccruedStale = !Number.isFinite(sourceAccrued) || (Math.abs(sourceAccrued) <= 0.0000001 && Math.abs(rowTotals.accrued) > 0.0000001);
+    var sourcePaidStale = !Number.isFinite(sourcePaid) || (Math.abs(sourcePaid) <= 0.0000001 && Math.abs(rowTotals.paid) > 0.0000001);
+    if (!last) return { ok: false, reason: "CANONICAL_TOTALS_UNAVAILABLE" };
+    var totals = Object.assign({}, source || {});
+    if (!sourceDebtIsFinite || (sourceDebtAllZero && finalNonZero)) {
+      totals.principal = last.principal;
+      totals.debt = last.total;
+      totals.penalty = last.penalty;
+      totals.total = last.total;
+      totals.balance = last.total;
+      totals.total_debt = last.total;
+      totals.total_penalty = last.penalty;
+    }
+    if (sourceAccruedStale) totals.accrued = rowTotals.accrued;
+    if (sourcePaidStale) totals.paid = rowTotals.paid;
+    totals.total_accrued = totals.accrued;
+    totals.total_paid = totals.paid;
+    return { ok: true, totals: totals, source: (!sourceDebtIsFinite || (sourceDebtAllZero && finalNonZero) || sourceAccruedStale || sourcePaidStale) ? "computed_snapshot_rows" : "summary.totals" };
+  }
+
   function buildCardSnapshotFromCurrentResult(abonentOrId, result, options) {
     var found = _findAbonentByIdOrUid(abonentOrId);
     var abonent = found && found.abonent ? found.abonent : null;
@@ -1340,7 +1941,17 @@
         try { console.log("[card-snapshot][build-from-payment-table]", { uid: uid, abonentId: abonentId, rowsByIdCount: _cardSnapshotRowsByIdCount(rowsById), ledgerVersion: ledgerVersion }); } catch (eFallbackLog) {}
       }
     }
-    var ledgerRows = fallback && Array.isArray(fallback.rows) && _cardSnapshotRowsByIdCount(rowsById) > 0 ? fallback.rows : readPaymentLedger(abonent || uid);
+    var finalRows = _verifiedFinalFullRecalcRows(abonent || uid, {
+      finalRows: result && result.finalRows,
+      uid: result && result.uid,
+      ledgerVersion: result && result.ledgerVersion,
+      inputHash: result && result.inputHash
+    });
+    if (result && Array.isArray(result.finalRows) && !finalRows.ok) {
+      try { console.warn("[card-snapshot][build-blocked-final-rows]", { uid: uid, reason: finalRows.reason }); } catch (eFinalRowsLog) {}
+      return null;
+    }
+    var ledgerRows = finalRows.ok ? finalRows.rows : (fallback && Array.isArray(fallback.rows) && _cardSnapshotRowsByIdCount(rowsById) > 0 ? fallback.rows : readPaymentLedger(abonent || uid));
     _emitActiveFullRecalcHeartbeat("build-card-snapshot", true);
     var snapshotBuildRowIdx = 0;
     var rows = (Array.isArray(ledgerRows) ? ledgerRows : []).map(function(row) {
@@ -1373,7 +1984,12 @@
       } catch (eBuildLog) {}
       return null;
     }
-    var totals = summary && summary.totals && typeof summary.totals === "object" ? deepClone(summary.totals) : {};
+    var canonicalTotals = _resolveCardSnapshotCanonicalTotals(summary, rows);
+    if (!canonicalTotals.ok) {
+      try { console.warn("[card-snapshot][build-blocked-canonical-totals]", { uid: uid, abonentId: abonentId, reason: canonicalTotals.reason, rowsByIdCount: rowsByIdCount }); } catch (eTotalsLog) {}
+      return null;
+    }
+    var totals = canonicalTotals.totals;
     var snapshotPeriodActive = runtimeCache.periodActive === true;
     var snapshotPeriod = snapshotPeriodActive && runtimeCache.period && typeof runtimeCache.period === "object"
       ? { from: String(runtimeCache.period.from || ""), to: String(runtimeCache.period.to || "") }
@@ -1837,10 +2453,15 @@
   }
 
   function writePaymentLedger(abonentOrId, rows, options) {
-    if (!Data.ensureWriteOrExplain()) return false;
     var opts = options || {};
+    var proposedRowsForDiagnostics = Array.isArray(rows) ? rows : [];
+    if (!Data.ensureWriteOrExplain()) {
+      try { console.log("[manual-recalc][ledger-block]", { stage:"Data.ensureWriteOrExplain", subreason:"WRITE_NOT_ALLOWED", existingRows:null, newRows:proposedRowsForDiagnostics.length, proposedRows:proposedRowsForDiagnostics, blockedBy:"Data.ensureWriteOrExplain", details:null }); } catch(eLedgerBlockLog) {}
+      return false;
+    }
     if (!_isHydratedDatabaseReady() && String(opts.eventType || "").trim() === "AUTOACCRUAL_WRITE") {
       _logBlockedBeforeHydrateData(abonentOrId, "AUTOACCRUAL_WRITE");
+      try { console.log("[manual-recalc][ledger-block]", { stage:"_isHydratedDatabaseReady", subreason:"DB_NOT_HYDRATED", existingRows:null, newRows:proposedRowsForDiagnostics.length, proposedRows:proposedRowsForDiagnostics, blockedBy:"Data.writePaymentLedger", details:{ eventType:opts.eventType || "" } }); } catch(eLedgerBlockLog) {}
       return false;
     }
     var found = _findAbonentByIdOrUid(abonentOrId);
@@ -1850,10 +2471,12 @@
     var key = resolvePaymentLedgerKey(abonentOrId);
     if (!key || !isValidUid(uid)) {
       console.warn("[financial][ledger-write-blocked]", { abonentId: id, reason: "UID_REQUIRED" });
+      try { console.log("[manual-recalc][ledger-block]", { stage:"resolvePaymentLedgerKey", subreason:"UID_REQUIRED", existingRows:null, newRows:proposedRowsForDiagnostics.length, proposedRows:proposedRowsForDiagnostics, blockedBy:"Data.writePaymentLedger", details:{ abonentId:id, uid:uid, key:key || "" } }); } catch(eLedgerBlockLog) {}
       return false;
     }
     if (key !== "payments_" + uid || (id && id !== uid && key === "payments_" + id)) {
       console.warn("[financial][ledger-write-blocked]", { abonentId: id, uid: uid, key: key, reason: "LS_LEDGER_WRITE_FORBIDDEN" });
+      try { console.log("[manual-recalc][ledger-block]", { stage:"canonicalLedgerKey", subreason:"LS_LEDGER_WRITE_FORBIDDEN", existingRows:null, newRows:proposedRowsForDiagnostics.length, proposedRows:proposedRowsForDiagnostics, blockedBy:"Data.writePaymentLedger", details:{ abonentId:id, uid:uid, key:key, expectedKey:"payments_" + uid } }); } catch(eLedgerBlockLog) {}
       return false;
     }
     var currentRaw = _getProjectRaw(key);
@@ -1862,6 +2485,7 @@
         _parseLedgerRows(currentRaw, key);
       } catch (e) {
         console.warn("[financial][ledger-write-blocked]", { abonentId: id, uid: uid, key: key, reason: "LEDGER_JSON_INVALID" });
+        try { console.log("[manual-recalc][ledger-block]", { stage:"_parseLedgerRows.currentRaw", subreason:"LEDGER_JSON_INVALID", existingRows:null, newRows:proposedRowsForDiagnostics.length, proposedRows:proposedRowsForDiagnostics, blockedBy:"_parseLedgerRows", details:{ abonentId:id, uid:uid, key:key, error:e } }); } catch(eLedgerBlockLog) {}
         return false;
       }
     }
@@ -1877,6 +2501,14 @@
         newAccruedCount === 0 &&
         _hasResponsibilityPeriodForLedgerWrite(id, abonent) &&
         !_isExplicitLedgerClear(opts)) {
+      var affectedMonths = {};
+      var affectedRowIds = [];
+      oldRows.forEach(function(row) {
+        if (Math.abs(_summaryNumber(row && row.accrued)) <= 0.0000001) return;
+        var monthKey = String(row && (row.period_from || row.month && row.year && (row.month + "." + row.year) || row.month || row.year || "") || "");
+        if (monthKey) affectedMonths[monthKey] = true;
+        if (row && row.id !== undefined && row.id !== null) affectedRowIds.push(row.id);
+      });
       var blockInfo = {
         abonentId: id,
         uid: uid,
@@ -1884,14 +2516,21 @@
         newAccruedCount: newAccruedCount,
         rowsOld: oldRows.length,
         rowsNew: newRows.length,
+        affectedMonths: Object.keys(affectedMonths),
+        affectedRowIds: affectedRowIds,
         reason: "ZERO_ACCRUAL_OVERWRITE_BLOCKED"
       };
       try { window.__JKH_LAST_AUTOACCRUAL_BLOCK = blockInfo; } catch (eBlockState) {}
       try { console.error("[autoaccrual][blocked-zero-overwrite]", blockInfo); } catch (eBlockLog) {}
+      try { console.log("[manual-recalc][ledger-block]", { stage:"zeroAccrualOverwriteGuard", subreason:"ZERO_ACCRUAL_OVERWRITE_BLOCKED", existingRows:oldRows.length, newRows:newRows.length, proposedRows:newRows, blockedBy:"Data.writePaymentLedger", details:blockInfo }); } catch(eLedgerBlockLog) {}
       return false;
     }
     var payload = JSON.stringify(Array.isArray(rows) ? rows : []);
     var ok = _setProjectRaw(key, payload);
+    if (ok === false) {
+      _logManualRecalcProjectRaw({ stage:"writePaymentLedger._setProjectRaw.false", requestPayloadSize:payload.length, storageKey:key, uid:uid, exception:null });
+      try { console.log("[manual-recalc][ledger-block]", { stage:"_setProjectRaw", subreason:"PROJECT_RAW_WRITE_FAILED", existingRows:oldRows.length, newRows:newRows.length, proposedRows:newRows, blockedBy:"_setProjectRaw", details:{ abonentId:id, uid:uid, key:key, eventType:opts.eventType || "" } }); } catch(eLedgerBlockLog) {}
+    }
     if (ok !== false && opts.event !== false) {
       recordFinancialEvent(Object.assign({
         type: opts.eventType || "LEDGER_WRITE",
@@ -1910,6 +2549,150 @@
       }
     }
     return ok;
+  }
+
+  async function writePaymentLedgerServerBacked(abonentOrId, rows, options) {
+    var opts = options || {};
+    var proposedRowsForDiagnostics = Array.isArray(rows) ? rows : [];
+    if (!Data.ensureWriteOrExplain()) {
+      try { console.log("[manual-recalc][ledger-block]", { stage:"Data.ensureWriteOrExplain", subreason:"WRITE_NOT_ALLOWED", existingRows:null, newRows:proposedRowsForDiagnostics.length, proposedRows:proposedRowsForDiagnostics, blockedBy:"Data.ensureWriteOrExplain", details:null }); } catch(eLedgerBlockLog) {}
+      return { ok:false, reason:"WRITE_NOT_ALLOWED" };
+    }
+    if (!_isHydratedDatabaseReady() && String(opts.eventType || "").trim() === "AUTOACCRUAL_WRITE") {
+      _logBlockedBeforeHydrateData(abonentOrId, "AUTOACCRUAL_WRITE");
+      try { console.log("[manual-recalc][ledger-block]", { stage:"_isHydratedDatabaseReady", subreason:"DB_NOT_HYDRATED", existingRows:null, newRows:proposedRowsForDiagnostics.length, proposedRows:proposedRowsForDiagnostics, blockedBy:"Data.writePaymentLedgerServerBacked", details:{ eventType:opts.eventType || "" } }); } catch(eLedgerBlockLog) {}
+      return { ok:false, reason:"DB_NOT_HYDRATED" };
+    }
+    var found = _findAbonentByIdOrUid(abonentOrId);
+    var id = String(found && found.id || (typeof abonentOrId === "object" ? abonentOrId && abonentOrId.id : abonentOrId) || "").trim();
+    var abonent = found && found.abonent ? found.abonent : null;
+    var uid = String(abonent && abonent.uid || "").trim();
+    var key = resolvePaymentLedgerKey(abonentOrId);
+    if (!key || !isValidUid(uid)) {
+      console.warn("[financial][ledger-write-blocked]", { abonentId: id, reason: "UID_REQUIRED" });
+      try { console.log("[manual-recalc][ledger-block]", { stage:"resolvePaymentLedgerKey", subreason:"UID_REQUIRED", existingRows:null, newRows:proposedRowsForDiagnostics.length, proposedRows:proposedRowsForDiagnostics, blockedBy:"Data.writePaymentLedgerServerBacked", details:{ abonentId:id, uid:uid, key:key || "" } }); } catch(eLedgerBlockLog) {}
+      return { ok:false, reason:"UID_REQUIRED" };
+    }
+    if (key !== "payments_" + uid || (id && id !== uid && key === "payments_" + id)) {
+      console.warn("[financial][ledger-write-blocked]", { abonentId: id, uid: uid, key: key, reason: "LS_LEDGER_WRITE_FORBIDDEN" });
+      try { console.log("[manual-recalc][ledger-block]", { stage:"canonicalLedgerKey", subreason:"LS_LEDGER_WRITE_FORBIDDEN", existingRows:null, newRows:proposedRowsForDiagnostics.length, proposedRows:proposedRowsForDiagnostics, blockedBy:"Data.writePaymentLedgerServerBacked", details:{ abonentId:id, uid:uid, key:key, expectedKey:"payments_" + uid } }); } catch(eLedgerBlockLog) {}
+      return { ok:false, reason:"LS_LEDGER_WRITE_FORBIDDEN" };
+    }
+    var currentRaw = _getProjectRaw(key);
+    if (currentRaw !== null && currentRaw !== undefined) {
+      try {
+        _parseLedgerRows(currentRaw, key);
+      } catch (e) {
+        console.warn("[financial][ledger-write-blocked]", { abonentId: id, uid: uid, key: key, reason: "LEDGER_JSON_INVALID" });
+        try { console.log("[manual-recalc][ledger-block]", { stage:"_parseLedgerRows.currentRaw", subreason:"LEDGER_JSON_INVALID", existingRows:null, newRows:proposedRowsForDiagnostics.length, proposedRows:proposedRowsForDiagnostics, blockedBy:"_parseLedgerRows", details:{ abonentId:id, uid:uid, key:key, error:e } }); } catch(eLedgerBlockLog) {}
+        return { ok:false, reason:"LEDGER_JSON_INVALID" };
+      }
+    }
+    var oldRows = [];
+    if (currentRaw !== null && currentRaw !== undefined) {
+      try { oldRows = _parseLedgerRows(currentRaw, key); } catch (eOldRows) { oldRows = []; }
+    }
+    var newRows = Array.isArray(rows) ? rows : [];
+    var oldAccruedCount = _ledgerAccruedPositiveCount(oldRows);
+    var newAccruedCount = _ledgerAccruedPositiveCount(newRows);
+    if (String(opts.eventType || "").trim() === "AUTOACCRUAL_WRITE" &&
+        oldAccruedCount > 0 &&
+        newAccruedCount === 0 &&
+        _hasResponsibilityPeriodForLedgerWrite(id, abonent) &&
+        !_isExplicitLedgerClear(opts)) {
+      var affectedMonths = {};
+      var affectedRowIds = [];
+      oldRows.forEach(function(row) {
+        if (Math.abs(_summaryNumber(row && row.accrued)) <= 0.0000001) return;
+        var monthKey = String(row && (row.period_from || row.month && row.year && (row.month + "." + row.year) || row.month || row.year || "") || "");
+        if (monthKey) affectedMonths[monthKey] = true;
+        if (row && row.id !== undefined && row.id !== null) affectedRowIds.push(row.id);
+      });
+      var blockInfo = {
+        abonentId: id,
+        uid: uid,
+        oldAccruedCount: oldAccruedCount,
+        newAccruedCount: newAccruedCount,
+        rowsOld: oldRows.length,
+        rowsNew: newRows.length,
+        affectedMonths: Object.keys(affectedMonths),
+        affectedRowIds: affectedRowIds,
+        reason: "ZERO_ACCRUAL_OVERWRITE_BLOCKED"
+      };
+      try { window.__JKH_LAST_AUTOACCRUAL_BLOCK = blockInfo; } catch (eBlockState) {}
+      try { console.error("[autoaccrual][blocked-zero-overwrite]", blockInfo); } catch (eBlockLog) {}
+      try { console.log("[manual-recalc][ledger-block]", { stage:"zeroAccrualOverwriteGuard", subreason:"ZERO_ACCRUAL_OVERWRITE_BLOCKED", existingRows:oldRows.length, newRows:newRows.length, proposedRows:newRows, blockedBy:"Data.writePaymentLedgerServerBacked", details:blockInfo }); } catch(eLedgerBlockLog) {}
+      return { ok:false, reason:"ZERO_ACCRUAL_OVERWRITE_BLOCKED", block:blockInfo };
+    }
+    if (typeof fetch !== "function") {
+      try { console.log("[manual-recalc][project-raw]", { stage:"writePaymentLedgerServerBacked.fetch.unavailable", httpStatus:null, responseBody:null, exception:null, requestUrl:"/api/store", requestPayloadSize:0, storageKey:key, owner:_ownerId(), uid:uid }); } catch(eNoFetchLog) {}
+      return { ok:false, reason:"SERVER_PERSIST_REQUIRED", serverOk:false, localOk:false };
+    }
+    var payload = JSON.stringify(newRows);
+    var calculatedFinalEmptyContract = null;
+    if (newRows.length === 0 && opts.calculatedFinalEmpty === true &&
+        String(opts.source || "") === "manual_full_recalc" &&
+        String(opts.recalcLockToken || "").trim()) {
+      calculatedFinalEmptyContract = {
+        action: "CALCULATED_FINAL_EMPTY",
+        completed: true,
+        finalLedgerEmpty: true,
+        uid: uid,
+        recalcLockToken: String(opts.recalcLockToken).trim()
+      };
+    }
+    var serverResult = null;
+    try {
+      serverResult = await _serverStoreSet(_ownerId(), key, payload, {
+        paymentLedgerContract: calculatedFinalEmptyContract
+      });
+    } catch (eServerSet) {
+      try { console.log("[manual-recalc][project-raw]", { stage:"writePaymentLedgerServerBacked.serverSet.exception", httpStatus:null, responseBody:null, exception:eServerSet, requestUrl:"/api/store", requestPayloadSize:payload.length, storageKey:key, owner:_ownerId(), uid:uid }); } catch(eServerSetLog) {}
+      return { ok:false, reason:"SERVER_PERSIST_REQUIRED", serverOk:false, localOk:false, serverResult:null, exception:eServerSet };
+    }
+    if (!(serverResult && serverResult.ok === true)) {
+      try { console.log("[manual-recalc][project-raw]", { stage:"writePaymentLedgerServerBacked.serverSet.failed", httpStatus:serverResult && serverResult.status, responseBody:serverResult && (serverResult.data || serverResult.text), exception:null, requestUrl:"/api/store", requestPayloadSize:payload.length, storageKey:key, owner:_ownerId(), uid:uid }); } catch(eServerFailedLog) {}
+      return { ok:false, reason:"SERVER_PERSIST_REQUIRED", serverOk:false, localOk:false, serverResult:serverResult || null };
+    }
+    var readback = null;
+    try {
+      readback = await _serverStoreGet(_ownerId(), key);
+    } catch (eServerReadback) {
+      try { console.log("[manual-recalc][project-raw]", { stage:"writePaymentLedgerServerBacked.serverReadback.exception", httpStatus:null, responseBody:null, exception:eServerReadback, requestUrl:"/api/store", requestPayloadSize:payload.length, storageKey:key, owner:_ownerId(), uid:uid }); } catch(eReadbackExceptionLog) {}
+      return { ok:false, reason:"SERVER_PERSIST_REQUIRED", serverOk:true, serverReadbackOk:false, localOk:false, serverResult:serverResult, exception:eServerReadback };
+    }
+    if (!(readback && readback.ok === true && String(readback.raw || "") === payload)) {
+      try { console.log("[manual-recalc][project-raw]", { stage:"writePaymentLedgerServerBacked.serverReadback.failed", httpStatus:readback && readback.status, responseBody:readback && (readback.data || readback.text), exception:null, requestUrl:"/api/store", requestPayloadSize:payload.length, storageKey:key, owner:_ownerId(), uid:uid }); } catch(eReadbackFailedLog) {}
+      return { ok:false, reason:"SERVER_PERSIST_REQUIRED", serverOk:true, serverReadbackOk:false, localOk:false, serverResult:serverResult, readback:readback || null };
+    }
+    _setProjectRawRuntimeOverride(key, payload);
+    var localOk = true;
+    try {
+      var localResult = _setProjectRaw(key, payload);
+      localOk = localResult !== false;
+    } catch (eLocalSet) {
+      localOk = false;
+      try { console.warn("[manual-recalc][project-raw]", { stage:"writePaymentLedgerServerBacked.localCache.exception", reason:"LOCAL_CACHE_WRITE_FAILED", exception:eLocalSet, storageKey:key, owner:_ownerId(), uid:uid }); } catch(eLocalExceptionLog) {}
+    }
+    if (!localOk) {
+      try { console.warn("[manual-recalc][project-raw]", { stage:"writePaymentLedgerServerBacked.localCache.failed", reason:"LOCAL_CACHE_WRITE_FAILED", storageKey:key, owner:_ownerId(), uid:uid }); } catch(eLocalFailedLog) {}
+    }
+    if (opts.event !== false) {
+      recordFinancialEvent(Object.assign({
+        type: opts.eventType || "LEDGER_WRITE",
+        sourceAbonentId: id,
+        targetAbonentId: id,
+        mode: opts.mode || "",
+        date: opts.date || ""
+      }, opts.event || {}));
+    }
+    try { console.warn("[ledger][write-invalidates-card-snapshot]", { abonentId: id, uid: uid, eventType: opts.eventType || "LEDGER_WRITE", summaryDirtyReason: opts.summaryDirtyReason, source: opts.source || "server_backed" }); } catch (eInvLog) {}
+    invalidateLedgerRuntimeCache(abonentOrId);
+    invalidateCardSnapshot(abonentOrId, opts.summaryDirtyReason || "LEDGER_WRITE");
+    if (opts.summaryDirtyReason !== false) {
+      markAbonentSummaryDirtyLater(abonent || id, opts.summaryDirtyReason || "LEDGER_WRITE");
+    }
+    return { ok:true, reason:localOk ? "OK" : "LOCAL_CACHE_WRITE_FAILED", serverOk:true, serverReadbackOk:true, localOk:localOk, key:key, uid:uid, rows:newRows.length };
   }
 
   function createEmptyPaymentLedger(abonentOrId) {
@@ -3242,6 +4025,10 @@
         account_number: String(abonent && (abonent.account_number || abonent.accountNumber || abonent.ls || abonent.id) || abonentId || ""),
         summary: summaryPayload
       };
+      _recordSummaryTotalsChain(uid, "summary-save-payload", summaryPayload, {
+        endpoint: "/api/abonent_summary/rebuild",
+        abonentId: abonentId
+      });
       try {
         console.log("[summary][build-payload]", {
           uid: uid,
@@ -3251,12 +4038,18 @@
         });
       } catch (eBuildLog) {}
 
-      var res = await fetch("/api/abonent_summary/rebuild", {
-        method: "POST",
-        credentials: "include",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload)
-      });
+      var res = null;
+      try { console.log("[manual-recalc] fetch started"); } catch (eManualRecalcFetchStartLog) {}
+      try {
+        res = await fetch("/api/abonent_summary/rebuild", {
+          method: "POST",
+          credentials: "include",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload)
+        });
+      } finally {
+        try { console.log("[manual-recalc] fetch finished"); } catch (eManualRecalcFetchFinishLog) {}
+      }
       var text = await res.text();
       var data = null;
       try { data = text ? JSON.parse(text) : null; } catch (eParse) { data = null; }
@@ -3271,11 +4064,154 @@
           totalsKeys: summaryTotalsKeys
         });
       } catch (eOkLog) {}
+      _recordSummaryTotalsChain(uid, "summary-save-response", data && data.summary, {
+        endpoint: "/api/abonent_summary/rebuild",
+        responseTotals: data && data.totals || null,
+        summaryStatus: String(data && data.summary_status || "")
+      });
       return data;
     } catch (e) {
       try { console.warn("[summary][save-failed]", { uid: saveLogCtx.uid, status: saveLogCtx.status, reason: String(e && e.message || e), totalsKeys: saveLogCtx.totalsKeys }); } catch (eLog) {}
       return { ok: false, error: String(e && e.message || e) };
     }
+  }
+
+  function _canonicalSnapshotSummaryTotals(snapshot){
+    var totals = snapshot && snapshot.totals && typeof snapshot.totals === "object" && !Array.isArray(snapshot.totals) ? snapshot.totals : {};
+    function finite(name, aliases){
+      var keys = [name].concat(aliases || []);
+      for (var i = 0; i < keys.length; i++) {
+        var value = totals[keys[i]];
+        if (value === null || value === undefined || value === "") continue;
+        var number = Number(String(value).replace(",", "."));
+        if (Number.isFinite(number)) return { ok: true, value: number, source: "totals." + keys[i] };
+        return { ok: false, reason: "CANONICAL_TOTAL_" + String(name || "").toUpperCase() + "_INVALID" };
+      }
+      return { ok: false, reason: "CANONICAL_TOTAL_" + String(name || "").toUpperCase() + "_MISSING" };
+    }
+    var debt = finite("debt", ["total", "total_debt"]);
+    var penalty = finite("penalty", ["total_penalty"]);
+    var accrued = finite("accrued", ["total_accrued"]);
+    var paid = finite("paid", ["total_paid"]);
+    var invalid = [debt, penalty, accrued, paid].find(function(item){ return !item.ok; });
+    if (invalid) return { ok: false, reason: invalid.reason, totals: null };
+    return {
+      ok: true,
+      reason: "OK",
+      totals: {
+        debt: debt.value,
+        penalty: penalty.value,
+        accrued: accrued.value,
+        paid: paid.value,
+        total: debt.value,
+        total_debt: debt.value,
+        total_penalty: penalty.value,
+        total_accrued: accrued.value,
+        total_paid: paid.value
+      }
+    };
+  }
+
+  function _summaryTotalsChainValues(summary){
+    var value = summary && typeof summary === "object" ? summary : {};
+    var totals = value.totals && typeof value.totals === "object" ? value.totals : {};
+    function pick(){
+      for (var i = 0; i < arguments.length; i += 1) {
+        var candidate = arguments[i];
+        if (candidate !== null && candidate !== undefined && candidate !== "") return candidate;
+      }
+      return null;
+    }
+    return {
+      debt: pick(totals.debt, totals.total, totals.total_debt, value.total_debt, value.total),
+      penalty: pick(totals.penalty, totals.total_penalty, value.total_penalty, value.penalty_debt, value.penalty),
+      accrued: pick(totals.accrued, totals.total_accrued, value.total_accrued, value.accrued),
+      paid: pick(totals.paid, totals.total_paid, value.total_paid, value.paid)
+    };
+  }
+
+  function _recordSummaryTotalsChain(uid, stage, summary, extra){
+    var normalizedUid = String(uid || "");
+    var key = "jkh_summary_totals_chain:" + normalizedUid;
+    var chain = { uid: normalizedUid, sequence: 0, stages: [], firstZeroStage: null };
+    try {
+      var raw = sessionStorage.getItem(key);
+      if (raw) chain = JSON.parse(raw) || chain;
+    } catch(eRead) {}
+    if (!Array.isArray(chain.stages)) chain.stages = [];
+    chain.sequence = Number(chain.sequence || 0) + 1;
+    var totals = _summaryTotalsChainValues(summary);
+    var entry = Object.assign({
+      sequence: chain.sequence,
+      timestamp: new Date().toISOString(),
+      stage: String(stage || ""),
+      totals: totals,
+      summaryStatus: String(summary && (summary.summary_status || summary.status) || "")
+    }, extra || {});
+    var priorNonZero = chain.stages.some(function(item){
+      var t = item && item.totals || {};
+      return [t.debt, t.penalty, t.accrued, t.paid].some(function(v){ return Number(v) !== 0; });
+    });
+    var nowAllZero = [totals.debt, totals.penalty, totals.accrued, totals.paid].every(function(v){ return Number(v) === 0; });
+    if (!chain.firstZeroStage && priorNonZero && nowAllZero) chain.firstZeroStage = entry;
+    chain.stages.push(entry);
+    try { sessionStorage.setItem(key, JSON.stringify(chain)); } catch(eWrite) {}
+    try {
+      console.log("[index-totals-chain][stage]", entry);
+      if (chain.firstZeroStage === entry) console.warn("[index-totals-chain][first-zero]", { firstZeroStage: entry, stages: chain.stages.slice() });
+    } catch(eLog) {}
+    return entry;
+  }
+
+  async function saveCanonicalSnapshotTotalsToAbonentSummary(abonentOrId, snapshot, baseSummary){
+    var mode = String(snapshot && (snapshot.snapshotMode || snapshot.snapshot_mode) || "").trim().toLowerCase();
+    var status = String(snapshot && (snapshot.summary_status || snapshot.snapshot_status || snapshot.status) || "").trim().toLowerCase();
+    if (!snapshot || status !== "fresh" || (mode !== "full" && mode !== "canonical" && mode !== "canonical_full") || snapshot.periodActive === true) {
+      return { ok: false, reason: "CANONICAL_FULL_SNAPSHOT_REQUIRED" };
+    }
+    var canonical = _canonicalSnapshotSummaryTotals(snapshot);
+    if (!canonical.ok) return canonical;
+    _recordSummaryTotalsChain(snapshot && snapshot.uid, "canonical-snapshot-totals", { totals: canonical.totals }, {
+      snapshotMode: mode,
+      snapshotStatus: status
+    });
+    var summary = baseSummary && typeof baseSummary === "object" && !Array.isArray(baseSummary) ? deepClone(baseSummary) : {};
+    var snapshotPeriod = snapshot.period && typeof snapshot.period === "object" ? snapshot.period : {};
+    var period = summary.period && typeof summary.period === "object" ? summary.period : snapshotPeriod;
+    summary.summary_status = "fresh";
+    summary.status = "fresh";
+    summary.summary_reason = "OK";
+    summary.reason = "OK";
+    summary.summary_scope = "full";
+    summary.calculation_mode = "FULL_SUMMARY_REBUILD";
+    summary.period = { from: String(period && period.from || summary.start_date || summary.period_start || ""), to: String(period && period.to || summary.end_date || summary.period_end || "") };
+    summary.start_date = summary.period.from;
+    summary.end_date = summary.period.to;
+    summary.period_start = summary.period.from;
+    summary.period_end = summary.period.to;
+    summary.total_debt = canonical.totals.debt;
+    summary.total_penalty = canonical.totals.penalty;
+    summary.penalty_debt = canonical.totals.penalty;
+    summary.total_accrued = canonical.totals.accrued;
+    summary.total_paid = canonical.totals.paid;
+    summary.total = canonical.totals.total;
+    summary.totals = Object.assign({}, summary.totals && typeof summary.totals === "object" ? summary.totals : {}, canonical.totals);
+    summary.input_hash = String(snapshot.input_hash || summary.input_hash || "");
+    summary.ledger_version = String(snapshot.ledgerVersion || snapshot.ledger_version || summary.ledger_version || "");
+    summary.ledgerVersion = summary.ledger_version;
+    try { console.log("[canonical_totals_before_summary_save]", { uid: String(snapshot.uid || ""), totals: canonical.totals, input_hash: summary.input_hash, ledgerVersion: summary.ledger_version, period: summary.period }); } catch(eBeforeLog) {}
+    _recordSummaryTotalsChain(snapshot && snapshot.uid, "canonical-summary-payload", summary, { summaryScope: summary.summary_scope });
+    try { console.log("[abonent_summary_save_payload]", { uid: String(snapshot.uid || ""), summary_status: summary.summary_status, summary_reason: summary.summary_reason, summary_scope: summary.summary_scope, totals: summary.totals }); } catch(ePayloadLog) {}
+    var saved = await saveAbonentSummaryAfterRecalc(abonentOrId, summary);
+    try { console.log("[abonent_summary_save_response]", saved); } catch(eResponseLog) {}
+    if (!saved || saved.ok !== true || !saved.summary || typeof saved.summary !== "object") {
+      return { ok: false, reason: String(saved && (saved.error || saved.reason) || "ABONENT_SUMMARY_CANONICAL_TOTALS_SAVE_FAILED"), save: saved || null };
+    }
+    var persisted = _canonicalSnapshotSummaryTotals({ totals: saved.totals && typeof saved.totals === "object" ? saved.totals : {} });
+    var matches = persisted.ok === true && ["debt", "penalty", "accrued", "paid", "total"].every(function(key){ return Number(persisted.totals[key]) === Number(canonical.totals[key]); });
+    var comparison = { uid: String(snapshot.uid || ""), matches: matches, canonicalTotals: canonical.totals, summaryTotals: persisted.totals, summaryStatus: String(saved.summary.summary_status || saved.summary.status || "") };
+    try { console.log("[canonical_vs_summary_totals]", comparison); } catch(eComparisonLog) {}
+    return { ok: matches, reason: matches ? "OK" : "CANONICAL_SUMMARY_TOTALS_MISMATCH", comparison: comparison, summary: saved.summary, save: saved };
   }
 
 
@@ -3502,6 +4438,164 @@
     if (msg.indexOf("RESPONSIBILITY_DATE_MISSING") >= 0) return "RESPONSIBILITY_DATE_MISSING";
     if (msg.indexOf("PERIOD_REQUIRED") >= 0) return "START_DATE_MISSING";
     return msg || "CALC_FAILED";
+  }
+
+  function _manualRatesDiagParse(raw) {
+    var out = { count: 0, first: null, last: null };
+    if (raw === null || raw === undefined) return out;
+    try {
+      var arr = JSON.parse(String(raw || ""));
+      if (!Array.isArray(arr)) return out;
+      var normalized = arr.map(function(item) {
+        return {
+          from: String(item && (item.from || item.dateFrom || item.start || item.fromISO || item.from_iso) || ""),
+          rate: item && (item.rate !== undefined ? item.rate : item.value)
+        };
+      }).filter(function(item) { return item.from || item.rate !== undefined; });
+      normalized.sort(function(a, b) { return String(a.from || "").localeCompare(String(b.from || "")); });
+      out.count = normalized.length;
+      out.first = normalized.length ? normalized[0] : null;
+      out.last = normalized.length ? normalized[normalized.length - 1] : null;
+    } catch (eParse) {}
+    return out;
+  }
+
+  function _manualRatesDiagStorageKey(baseKey, ownerId) {
+    try {
+      if (window.JKHStore && typeof JKHStore.key === "function") return JKHStore.key(baseKey, ownerId);
+    } catch (eKey) {}
+    return String(baseKey || "");
+  }
+
+  function _manualRatesDiagRaw(baseKey, ownerId) {
+    try {
+      if (window.JKHStore && typeof JKHStore.getRaw === "function") return JKHStore.getRaw(baseKey, ownerId);
+    } catch (eStore) {}
+    try {
+      var storageKey = _manualRatesDiagStorageKey(baseKey, ownerId);
+      if (storageKey && window.localStorage) return localStorage.getItem(storageKey);
+    } catch (eLs) {}
+    return null;
+  }
+
+  function _manualRatesDiagShape(raw) {
+    var out = { isArray: false, count: 0, firstKeys: [] };
+    if (raw === null || raw === undefined) return out;
+    try {
+      var parsed = JSON.parse(String(raw || ""));
+      out.isArray = Array.isArray(parsed);
+      out.count = Array.isArray(parsed) ? parsed.length : 0;
+      if (Array.isArray(parsed) && parsed.length && parsed[0] && typeof parsed[0] === "object") {
+        out.firstKeys = Object.keys(parsed[0]).slice(0, 12);
+      } else if (parsed && typeof parsed === "object") {
+        out.firstKeys = Object.keys(parsed).slice(0, 12);
+      }
+    } catch (eShape) {
+      out.parseError = String(eShape && eShape.message || eShape);
+    }
+    return out;
+  }
+
+  function _emitManualRatesDiagnostic(ctx) {
+    try {
+      var ownerId = String(_ownerId() || "");
+      var activeOwnerId = ownerId;
+      try {
+        if (window.Auth && typeof Auth.getActiveDbOwnerId === "function") activeOwnerId = normalizeOwnerId(Auth.getActiveDbOwnerId());
+      } catch (eActiveOwner) {}
+      var envType = "";
+      try {
+        envType = window.JKHStore && typeof JKHStore.getEnvType === "function" ? String(JKHStore.getEnvType() || "") : "";
+      } catch (eEnv) {}
+      var normalBase = window.JKH_CONST && window.JKH_CONST.REFI_KEY_NORMAL ? window.JKH_CONST.REFI_KEY_NORMAL : "refinancing_rates_normal_v1";
+      var moraBase = window.JKH_CONST && window.JKH_CONST.REFI_KEY_MORA ? window.JKH_CONST.REFI_KEY_MORA : "refinancing_rates_moratorium_v1";
+      var legacyNormal = "refinancing_v1";
+      var ownerNormal = "ref_rates_" + ownerId;
+      var ownerMora = "ref_rates_moratorium_" + ownerId;
+      var normalKeys = [normalBase, _manualRatesDiagStorageKey(normalBase, "GLOBAL"), _manualRatesDiagStorageKey(normalBase, ownerId), ownerNormal, legacyNormal];
+      var moraKeys = [moraBase, _manualRatesDiagStorageKey(moraBase, "GLOBAL"), _manualRatesDiagStorageKey(moraBase, ownerId), ownerMora];
+      var rawNormal = _manualRatesDiagRaw(normalBase, "GLOBAL");
+      if (rawNormal === null || rawNormal === undefined) rawNormal = _manualRatesDiagRaw(normalBase, ownerId);
+      if (rawNormal === null || rawNormal === undefined) rawNormal = _manualRatesDiagRaw(ownerNormal, ownerId);
+      if (rawNormal === null || rawNormal === undefined) rawNormal = _manualRatesDiagRaw(legacyNormal, ownerId);
+      var rawMora = _manualRatesDiagRaw(moraBase, "GLOBAL");
+      if (rawMora === null || rawMora === undefined) rawMora = _manualRatesDiagRaw(moraBase, ownerId);
+      if (rawMora === null || rawMora === undefined) rawMora = _manualRatesDiagRaw(ownerMora, ownerId);
+      var parsedNormal = _manualRatesDiagParse(rawNormal);
+      var parsedMora = _manualRatesDiagParse(rawMora);
+      var shapeNormal = _manualRatesDiagShape(rawNormal);
+      var shapeMora = _manualRatesDiagShape(rawMora);
+      var payload = {
+        uid: String(ctx && ctx.uid || ""),
+        abonentId: String(ctx && ctx.abonentId || ""),
+        ownerId: ownerId,
+        activeOwnerId: activeOwnerId,
+        envType: envType,
+        moratorium: !!(ctx && ctx.moratorium),
+        requestedDate: String(ctx && ctx.requestedDate || ""),
+        periodFrom: String(ctx && ctx.periodFrom || ""),
+        periodTo: String(ctx && ctx.periodTo || ""),
+        normalKeysChecked: normalKeys,
+        moratoriumKeysChecked: moraKeys,
+        rawNormalExists: rawNormal !== null && rawNormal !== undefined,
+        rawMoratoriumExists: rawMora !== null && rawMora !== undefined,
+        normalShape: shapeNormal,
+        moratoriumShape: shapeMora,
+        parsedNormalCount: parsedNormal.count,
+        parsedMoratoriumCount: parsedMora.count,
+        firstNormalRate: parsedNormal.first,
+        lastNormalRate: parsedNormal.last,
+        firstMoratoriumRate: parsedMora.first,
+        lastMoratoriumRate: parsedMora.last,
+        hasCalcEngineLoadRates: !!(window.JKHCalcEngine && typeof window.JKHCalcEngine.loadRates === "function"),
+        calcInputAssembly: "JKHCalcEngine.loadRates_internal",
+        source: String(ctx && ctx.source || "data.recalcAbonentSummaryExplicit"),
+        reason: String(ctx && ctx.reason || "")
+      };
+      console.log("[manual-recalc][rates]", payload);
+      if (typeof fetch === "function") {
+        [
+          { kind: "normal", key: normalBase },
+          { kind: "moratorium", key: moraBase }
+        ].forEach(function(item) {
+          var url = "/api/store?key=" + encodeURIComponent(item.key) + "&client_owner_hint=" + encodeURIComponent(ownerId);
+          fetch(url, { method: "GET", credentials: "include" })
+            .then(function(res) {
+              return res.text().then(function(text) {
+                var data = null;
+                try { data = JSON.parse(text); } catch (eJson) {}
+                var parsed = _manualRatesDiagParse(data && data.value);
+                var shape = _manualRatesDiagShape(data && data.value);
+                var serverHasRates = !!(res.ok && data && data.ok === true && parsed.count > 0);
+                console.log("[manual-recalc][rates]", Object.assign({}, payload, {
+                  rawNormalExists: item.kind === "normal" ? data && data.value !== null && data.value !== undefined : payload.rawNormalExists,
+                  rawMoratoriumExists: item.kind === "moratorium" ? data && data.value !== null && data.value !== undefined : payload.rawMoratoriumExists,
+                  normalShape: item.kind === "normal" ? shape : payload.normalShape,
+                  moratoriumShape: item.kind === "moratorium" ? shape : payload.moratoriumShape,
+                  parsedNormalCount: item.kind === "normal" ? parsed.count : payload.parsedNormalCount,
+                  parsedMoratoriumCount: item.kind === "moratorium" ? parsed.count : payload.parsedMoratoriumCount,
+                  firstNormalRate: item.kind === "normal" ? parsed.first : payload.firstNormalRate,
+                  lastNormalRate: item.kind === "normal" ? parsed.last : payload.lastNormalRate,
+                  firstMoratoriumRate: item.kind === "moratorium" ? parsed.first : payload.firstMoratoriumRate,
+                  lastMoratoriumRate: item.kind === "moratorium" ? parsed.last : payload.lastMoratoriumRate,
+                  source: "server:/api/store:" + item.kind,
+                  serverOk: !!(res.ok && data && data.ok === true),
+                  serverOwner: String(data && data.owner || ""),
+                  requestedKey: item.key,
+                  returnedKeysCount: data && data.value !== null && data.value !== undefined ? 1 : 0,
+                  hasRefinancingRatesNormalV1: item.kind === "normal" && serverHasRates,
+                  hasRefinancingRatesMoratoriumV1: item.kind === "moratorium" && serverHasRates,
+                  localExistsFalseExpected: item.kind === "normal" ? payload.rawNormalExists === false && serverHasRates : payload.rawMoratoriumExists === false && serverHasRates,
+                  reason: serverHasRates ? "diagnose_rates_backend_exists" : (res.ok && data && data.ok === true ? "diagnose_rates_backend_shape_mismatch" : "diagnose_rates_backend_missing")
+                }));
+              });
+            })
+            .catch(function(eFetch) {
+              console.log("[manual-recalc][rates]", Object.assign({}, payload, { source: "server:/api/store:" + item.kind, reason: "SERVER_RATE_READ_EXCEPTION:" + String(eFetch && eFetch.message || eFetch) }));
+            });
+        });
+      }
+    } catch (eDiag) {}
   }
 
   function _todayIsoLocal() {
@@ -4481,7 +5575,24 @@
     return "";
   }
 
-  function buildAbonentSummaryAfterExplicitRecalc(abonentOrId, from, to) {
+  function _verifiedFinalFullRecalcRows(abonentOrId, options) {
+    var opts = options || {};
+    if (!Array.isArray(opts.finalRows)) return { ok: false, reason: "FINAL_ROWS_NOT_PROVIDED" };
+    var found = _findAbonentByIdOrUid(abonentOrId);
+    var abonent = found && found.abonent ? found.abonent : null;
+    var uid = String(abonent && (abonent.uid || abonent.account_uid || abonent.accountUid) || "").trim();
+    var suppliedUid = String(opts.uid || "").trim();
+    if (!isValidUid(uid) || suppliedUid !== uid) return { ok: false, reason: "FINAL_ROWS_UID_MISMATCH" };
+    var versions = computeFinancialInputVersions(abonent || uid);
+    var expectedLedgerVersion = computeLedgerRuntimeVersion(abonent || uid);
+    var suppliedLedgerVersion = String(opts.ledgerVersion || opts.ledger_version || "");
+    var suppliedInputHash = String(opts.inputHash || opts.input_hash || "");
+    if (!suppliedLedgerVersion || suppliedLedgerVersion !== expectedLedgerVersion) return { ok: false, reason: "FINAL_ROWS_LEDGER_VERSION_MISMATCH" };
+    if (!suppliedInputHash || suppliedInputHash !== String(versions.input_hash || "")) return { ok: false, reason: "FINAL_ROWS_INPUT_HASH_MISMATCH" };
+    return { ok: true, rows: _cloneLedgerRows(opts.finalRows), versions: versions };
+  }
+
+  function buildAbonentSummaryAfterExplicitRecalc(abonentOrId, from, to, options) {
     var found = _findAbonentByIdOrUid(abonentOrId);
     var abonent = found && found.abonent ? found.abonent : (abonentOrId && typeof abonentOrId === "object" ? abonentOrId : null);
     var abonentId = String(found && found.id || (typeof abonentOrId === "object" ? abonentOrId && abonentOrId.id : abonentOrId) || "").trim();
@@ -4495,23 +5606,37 @@
     if (!isValidUid(uid)) throw new Error("UID_REQUIRED");
     var ledgerKey = resolvePaymentLedgerKey(abonentOrId);
     if (ledgerKey !== ("payments_" + uid)) throw new Error("UID_LEDGER_PATH_REQUIRED");
+    var finalRows = _verifiedFinalFullRecalcRows(abonentOrId, options);
+    if (options && Array.isArray(options.finalRows) && !finalRows.ok) throw new Error(finalRows.reason);
     console.time("[card-recalc] read ledger");
     try {
       var rawLedger = _getProjectRaw(ledgerKey);
-      if (rawLedger !== null && rawLedger !== undefined) _parseLedgerRows(rawLedger, ledgerKey);
+      if (!finalRows.ok && rawLedger !== null && rawLedger !== undefined) _parseLedgerRows(rawLedger, ledgerKey);
     } finally {
       console.timeEnd("[card-recalc] read ledger");
     }
     console.time("[card-recalc] build rows");
     try {
       _emitActiveFullRecalcHeartbeat("summary-build-rows", true);
-      var rows = window.JKHCalcEngine.loadPaymentsForAbonent(String(abonentId));
+      var rows = finalRows.ok ? finalRows.rows : window.JKHCalcEngine.loadPaymentsForAbonent(String(abonentId));
       _emitActiveFullRecalcHeartbeat("summary-build-rows", true);
     } finally {
       console.timeEnd("[card-recalc] build rows");
     }
     console.time("[card-recalc] calc totals");
     try {
+      var summaryRateDiagMoraRaw = "";
+      try { summaryRateDiagMoraRaw = _getProjectRaw("moratorium_" + (uid || abonentId)); } catch (eSummaryMoraRaw) {}
+      _emitManualRatesDiagnostic({
+        uid: uid,
+        abonentId: abonentId,
+        moratorium: String(summaryRateDiagMoraRaw || "") === "1",
+        requestedDate: to,
+        periodFrom: from,
+        periodTo: to,
+        source: "data.buildAbonentSummaryAfterExplicitRecalc.before-calc",
+        reason: "diagnose_rates_missing_in_calc_input"
+      });
       _emitActiveFullRecalcHeartbeat("summary-calc-totals", true);
       var totals = window.JKHCalcEngine.calcTotalsAsOfAdjusted(rows, asOf, {
         abonentId: String(abonentId),
@@ -4535,7 +5660,7 @@
       var periodFrom = String(from || "");
       var periodTo = String(to || "");
       var accountUid = String(abonent && (abonent.uid || abonent.account_uid || abonent.accountUid) || "").trim();
-      var versions = computeFinancialInputVersions(abonent || accountUid);
+      var versions = finalRows.ok ? finalRows.versions : computeFinancialInputVersions(abonent || accountUid);
       var accountNumber = String(abonent && (abonent.account_number || abonent.accountNumber || abonent.ls || abonent.id) || abonentId || "").trim();
       var fio = String(abonent && (abonent.fio || abonent.full_name || abonent.fullName || abonent.name_full || abonent.display_name) || "").trim();
       var fioParts = fio ? fio.split(/\s+/) : [];
@@ -5042,7 +6167,12 @@
       if (!period.ok) throw new Error(period.error || "PERIOD_INVALID");
       _logFullRecalcStep(runId, "calc-totals", { mode: mode, periodFrom: String(period.from || ""), periodTo: String(period.to || "") });
       await _dataUiYield();
-      summary = buildAbonentSummaryAfterExplicitRecalc(abonentOrId, period.from, period.to);
+      summary = buildAbonentSummaryAfterExplicitRecalc(abonentOrId, period.from, period.to, {
+        finalRows: opts.finalRows,
+        uid: opts.uid,
+        ledgerVersion: opts.ledgerVersion || opts.ledger_version,
+        inputHash: opts.inputHash || opts.input_hash
+      });
       _logFullRecalcStepDone(runId, "calc-totals", { status: summary && (summary.summary_status || summary.status) || "" });
       await _dataUiYield();
       if (periodActive) {
@@ -5055,6 +6185,24 @@
       }
     } catch (e) {
       var reason = _summaryCalcErrorCode(e);
+      if (reason === "RATES_MISSING" || reason === "RATES_JSON_INVALID" || reason === "MISSING_REQUIRED_RATE") {
+        var rateDiagFound = _findAbonentByIdOrUid(abonentOrId);
+        var rateDiagAbonent = rateDiagFound && rateDiagFound.abonent ? rateDiagFound.abonent : (abonentOrId && typeof abonentOrId === "object" ? abonentOrId : null);
+        var rateDiagId = String(rateDiagFound && rateDiagFound.id || (typeof abonentOrId === "object" ? abonentOrId && abonentOrId.id : abonentOrId) || "").trim();
+        var rateDiagUid = String(rateDiagAbonent && (rateDiagAbonent.uid || rateDiagAbonent.account_uid || rateDiagAbonent.accountUid) || "").trim();
+        var rateDiagMoraRaw = "";
+        try { rateDiagMoraRaw = _getProjectRaw("moratorium_" + (rateDiagUid || rateDiagId)); } catch (eMoraRaw) {}
+        _emitManualRatesDiagnostic({
+          uid: rateDiagUid,
+          abonentId: rateDiagId,
+          moratorium: String(rateDiagMoraRaw || "") === "1",
+          requestedDate: e && e.details && e.details.date || "",
+          periodFrom: period && period.from || "",
+          periodTo: period && period.to || "",
+          source: "data.recalcAbonentSummaryExplicit.catch",
+          reason: reason
+        });
+      }
       _logFullRecalcStepDone(runId, "calc-totals", { status: "error", reason: reason });
       summary = buildAbonentSummaryErrorAfterExplicitRecalc(abonentOrId, period, reason);
       if (periodActive) {
@@ -5068,7 +6216,11 @@
     }
 
     var saveResult = null;
-    if (periodActive || opts.saveSummary === false) {
+    var summaryIsFresh = String(summary && (summary.summary_status || summary.status) || "").toLowerCase() === "fresh";
+    if (!summaryIsFresh && !periodActive) {
+      saveResult = { ok: false, skipped: true, reason: "FAILED_FULL_SUMMARY_NOT_SAVED", summary_status: summary.summary_status || summary.status || "error", summary_reason: summary.summary_reason || summary.reason || "CALC_FAILED", summary_scope: "full" };
+      try { console.warn("[summary][failed-full-save-skipped]", { uid: String(summary.account_uid || summary.uid || ""), reason: saveResult.summary_reason }); } catch(eFailedSkipLog) {}
+    } else if (periodActive || opts.saveSummary === false) {
       saveResult = {
         ok: true,
         skipped: true,
@@ -5115,7 +6267,9 @@
       summary: summary,
       save: saveResult,
       status: status,
-      reason: reasonOut
+      reason: reasonOut,
+      ledgerVersion: String(summary && (summary.ledger_version || summary.ledgerVersion) || ""),
+      inputHash: String(summary && summary.input_hash || "")
     };
   }
 
@@ -5768,6 +6922,7 @@
     computeLedgerVersion: computeLedgerVersion,
     computeFinancialInputVersions: computeFinancialInputVersions,
     readCardSnapshot: readCardSnapshot,
+    readFreshBackendCardSnapshotForCard: readFreshBackendCardSnapshotForCard,
     saveCardSnapshot: saveCardSnapshot,
     saveCardSnapshotAndWait: saveCardSnapshotAndWait,
     debugCardSnapshotLifecycle: debugCardSnapshotLifecycle,
@@ -5806,8 +6961,10 @@
     waitForServerFirstDataReady: waitForServerFirstDataReady,
     waitForHydratedDatabase: waitForHydratedDatabase,
     saveAbonentSummaryAfterRecalc: saveAbonentSummaryAfterRecalc,
+    saveCanonicalSnapshotTotalsToAbonentSummary: saveCanonicalSnapshotTotalsToAbonentSummary,
     markAbonentSummaryDirty: markAbonentSummaryDirty,
     writePaymentLedger: writePaymentLedger,
+    writePaymentLedgerServerBacked: writePaymentLedgerServerBacked,
     createEmptyPaymentLedger: createEmptyPaymentLedger,
     normalizeFinancialMode: normalizeFinancialMode,
     recordFinancialEvent: recordFinancialEvent,

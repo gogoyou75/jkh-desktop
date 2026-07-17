@@ -1,0 +1,101 @@
+- generic [active] [ref=e1]:
+  - generic [ref=e2]:
+    - generic [ref=e3] [cursor=pointer]:
+      - generic [ref=e4]: 🏠
+      - generic [ref=e5]: Главная
+    - generic [ref=e6] [cursor=pointer]:
+      - generic [ref=e7]: 👤
+      - generic [ref=e8]: Абонент
+    - generic [ref=e9] [cursor=pointer]:
+      - generic [ref=e10]: ➕
+      - generic [ref=e11]: Абонент +
+    - generic [ref=e12] [cursor=pointer]:
+      - generic [ref=e13]: 🏘️
+      - generic [ref=e14]: Квартиры
+    - 'generic "Гость: только просмотр (войдите, чтобы редактировать)"':
+      - generic: 📄
+      - generic: Импорт XLS
+    - generic [ref=e15] [cursor=pointer]:
+      - generic [ref=e16]: 💰
+      - generic [ref=e17]: Тарифы
+    - generic [ref=e18] [cursor=pointer]:
+      - generic [ref=e19]: 🏢
+      - generic [ref=e20]: Реквизиты
+    - generic [ref=e21] [cursor=pointer]:
+      - generic [ref=e22]: 📈
+      - generic [ref=e23]: Ставки
+    - generic [ref=e24] [cursor=pointer]:
+      - generic [ref=e25]: 📘
+      - generic [ref=e26]: Справки
+  - generic [ref=e27]:
+    - generic [ref=e28]:
+      - generic [ref=e29]:
+        - textbox "поиск" [ref=e30]
+        - button "Очистить поиск" [ref=e31] [cursor=pointer]: ✖
+      - link "расширенный" [ref=e32] [cursor=pointer]:
+        - /url: search_extended.html
+    - generic [ref=e33]:
+      - button "отправить" [ref=e34] [cursor=pointer]
+      - button "распечатать" [ref=e35] [cursor=pointer]
+      - button "сохранить"
+    - generic [ref=e36]:
+      - link "регистрация" [ref=e37] [cursor=pointer]:
+        - /url: login.html
+      - link "вход" [ref=e38] [cursor=pointer]:
+        - /url: login.html
+  - generic [ref=e39]:
+    - heading "ОБЩАЯ ИНФОРМАЦИЯ ПО КАЖДОМУ АБОНЕНТУ" [level=2] [ref=e40]
+    - generic [ref=e41]:
+      - generic [ref=e42]: Состояние системы
+      - generic [ref=e43]:
+        - generic [ref=e44]: "🛰️ Сервер: требуется вход"
+        - generic [ref=e45]: "📦 Данные: ожидание"
+        - generic [ref=e46]: "🕒 Обновлено: —"
+        - button "Обновить данные" [ref=e47]
+      - generic [ref=e48]: Требуется вход для серверной загрузки данных.
+    - table [ref=e49]:
+      - rowgroup [ref=e50]:
+        - row [ref=e51]:
+          - columnheader [ref=e52]
+          - columnheader "лицевой счёт" [ref=e53] [cursor=pointer]
+          - columnheader "Фамилия" [ref=e55] [cursor=pointer]
+          - columnheader "Имя" [ref=e57] [cursor=pointer]
+          - columnheader "Отчество" [ref=e59] [cursor=pointer]
+          - columnheader "Всего задолженность" [ref=e61] [cursor=pointer]
+          - columnheader "ПЕНЯ за период" [ref=e63] [cursor=pointer]
+          - columnheader "Начислено за период" [ref=e65] [cursor=pointer]
+          - columnheader "ОПЛАЧЕНО за период" [ref=e67] [cursor=pointer]
+          - columnheader "дата начала расчёта" [ref=e69] [cursor=pointer]
+          - columnheader "дата окончания расчёта" [ref=e71] [cursor=pointer]
+          - columnheader "примечание абонента" [ref=e73] [cursor=pointer]
+          - columnheader "ID квартиры (regnum)" [ref=e75] [cursor=pointer]
+          - columnheader "summary_status" [ref=e77] [cursor=pointer]
+        - row [ref=e79]:
+          - columnheader [ref=e80]
+          - columnheader [ref=e81]:
+            - textbox [ref=e82]
+          - columnheader [ref=e83]:
+            - textbox [ref=e84]
+          - columnheader [ref=e85]:
+            - textbox [ref=e86]
+          - columnheader [ref=e87]:
+            - textbox [ref=e88]
+          - columnheader [ref=e89]:
+            - textbox [ref=e90]
+          - columnheader [ref=e91]:
+            - textbox [ref=e92]
+          - columnheader [ref=e93]:
+            - textbox [ref=e94]
+          - columnheader [ref=e95]:
+            - textbox [ref=e96]
+          - columnheader [ref=e97]:
+            - textbox [ref=e98]
+          - columnheader [ref=e99]:
+            - textbox [ref=e100]
+          - columnheader [ref=e101]:
+            - textbox [ref=e102]
+          - columnheader [ref=e103]:
+            - textbox [ref=e104]
+          - columnheader [ref=e105]:
+            - textbox [ref=e106]
+      - rowgroup

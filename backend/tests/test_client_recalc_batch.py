@@ -157,6 +157,23 @@ class ClientRecalcBatchTest(unittest.TestCase):
     def test_fresh_completion_updates_summary_json_and_columns(self):
         job_id = self._create_job("owner1", ["uid-1"])
         item = self.client.get(f"/api/recalc_batch_job/{job_id}/next_uid").get_json()
+        with app_module.app.app_context():
+            app_module.db.session.add(app_module.CardSnapshot(
+                owner_id="owner1",
+                abonent_uid="uid-1",
+                abonent_id="1001",
+                snapshot_status="fresh",
+                snapshot_reason="OK",
+                snapshot_json=json.dumps({
+                    "uid": "uid-1",
+                    "summary_status": "fresh",
+                    "summary_reason": "OK",
+                    "ledgerVersion": "ledger-v1",
+                    "rowsById": {"row-1": {"pay_main": 100.50, "pay_penalty": 5.00, "total": 105.50}},
+                    "totals": {"debt": "105.50", "accrued": "120.75", "paid": "15.25", "penalty": "5.00"},
+                }, sort_keys=True),
+            ))
+            app_module.db.session.commit()
         response = self.client.post(f"/api/recalc_batch_job/{job_id}/complete_uid", json={
             "item_id": item["item_id"],
             "status": "fresh",
@@ -180,6 +197,28 @@ class ClientRecalcBatchTest(unittest.TestCase):
             self.assertEqual(row.penalty_debt, Decimal("5.00"))
             payload = json.loads(row.summary_json)
             self.assertEqual(payload["calculation_source"], "CLIENT_CALCULATED_SUMMARY")
+
+    def test_fresh_completion_without_snapshot_is_error(self):
+        job_id = self._create_job("owner1", ["uid-1"])
+        item = self.client.get(f"/api/recalc_batch_job/{job_id}/next_uid").get_json()
+        response = self.client.post(f"/api/recalc_batch_job/{job_id}/complete_uid", json={
+            "item_id": item["item_id"],
+            "status": "fresh",
+            "summary": {
+                "account_uid": "uid-1",
+                "summary_status": "fresh",
+                "summary_reason": "OK",
+                "totals": {"debt": "0.00", "accrued": "0.00", "paid": "0.00", "penalty": "0.00"},
+            },
+        })
+        self.assertEqual(response.status_code, 200)
+        with app_module.app.app_context():
+            row = app_module.AbonentSummary.query.filter_by(owner_id="owner1", account_uid="uid-1").first()
+            self.assertEqual(row.summary_status, "error")
+            self.assertEqual(row.summary_reason, "CARD_SNAPSHOT_MISSING")
+            payload = json.loads(row.summary_json)
+            self.assertEqual(payload["summary_status"], "error")
+            self.assertNotIn("totals", payload)
 
 
 if __name__ == "__main__":

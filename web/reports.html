@@ -318,8 +318,12 @@ function appendReportsContextToHref(href){
     const params = getReportsUrlParams();
     const dbKey = String(params.get("db") || "").trim();
     const ownerParam = String(params.get("owner") || "").trim();
+    const uid = String(params.get("uid") || "").trim();
+    const temporaryCourtPeriod = String(params.get("temporary_court_period") || "") === "1";
     if (dbKey) href += "&db=" + encodeURIComponent(dbKey);
     if (ownerParam) href += "&owner=" + encodeURIComponent(ownerParam);
+    if (uid) href += "&uid=" + encodeURIComponent(uid);
+    if (temporaryCourtPeriod) href += "&temporary_court_period=1";
     return href;
 }
 
