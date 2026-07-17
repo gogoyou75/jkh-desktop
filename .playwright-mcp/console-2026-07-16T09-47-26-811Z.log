@@ -1,0 +1,9 @@
+[   21482ms] [LOG] [diagnose][store-instance] {instanceId: 7fa7a31d-94bc-4e68-995f-7a486c266d19, sameObject: true} @ https://lab.valvera.ru/storage.js:880
+[   21786ms] [WARNING] [data][server-first-block-local-cache] {ownerId: guest, hosted: true} @ https://lab.valvera.ru/data.js:3329
+[   21787ms] [LOG] [runtime-db-keys] [orgName, orgInn, chairman, premises, links, premiseEvents, abonents] @ https://lab.valvera.ru/data.js:3292
+[   21787ms] [LOG] [runtime-abonents-count] 0 @ https://lab.valvera.ru/data.js:3293
+[   21787ms] [LOG] [runtime-db-shape] {reason: bootstrap-init, hasAbonents: true, hasPremises: true, hasLinks: true} @ https://lab.valvera.ru/data.js:3300
+[   21787ms] [WARNING] [calc-period][legacy-summary] {migrated: 0, kept: 0, skippedForeign: 0} @ https://lab.valvera.ru/data.js:3480
+[   21901ms] [ERROR] Failed to load resource: the server responded with a status of 401 (UNAUTHORIZED) @ https://lab.valvera.ru/api/auth/me:0
+[   21903ms] [LOG] [ui-state][transition] {reason: ui_state_offline_transition, module: auth, caller: at https://lab.valvera.ru/auth.js:1091:9, serverBefore: unknown, serverAfter: offline} @ https://lab.valvera.ru/auth.js:295
+[   21927ms] [WARNING] [JKH] guest mode — UI not blocked @ https://lab.valvera.ru/:1414
