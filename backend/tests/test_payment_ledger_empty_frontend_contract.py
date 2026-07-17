@@ -1,9 +1,19 @@
-import os
 import unittest
 from pathlib import Path
 
 
-ROOT = Path(__file__).resolve().parents[2]
+def find_project_root() -> Path:
+    test_file = Path(__file__).resolve()
+    for candidate in (test_file.parents[1], test_file.parents[2]):
+        if (
+            (candidate / "web" / "data.js").is_file()
+            and (candidate / "web" / "payment_table.js").is_file()
+        ):
+            return candidate
+    raise RuntimeError(f"Project root not found from test path: {test_file}")
+
+
+ROOT = find_project_root()
 
 
 class PaymentLedgerEmptyFrontendContractTest(unittest.TestCase):
