@@ -113,18 +113,28 @@ release_lock() {
   cleanup_lock
 }
 
+site_url_for_environment() {
+  case "$1" in
+    LAB) printf '%s\n' "http://127.0.0.1:8080" ;;
+    PROD) printf '%s\n' "http://127.0.0.1:8081" ;;
+    *) return 1 ;;
+  esac
+}
+
+api_url_for_site() {
+  printf '%s/api/auth/me\n' "${1%/}"
+}
+
 set_environment_vars() {
   case "$1" in
     LAB)
       ENVIRONMENT="LAB"
       PROJECT_DIR="/root/jkh-lab"
-      SITE_CHECK="http://127.0.0.1:8080"
       MYSQL_CONTAINER="jkh_lab_mysql"
       ;;
     PROD)
       ENVIRONMENT="PROD"
       PROJECT_DIR="/root/jkh"
-      SITE_CHECK="http://127.0.0.1/"
       MYSQL_CONTAINER="jkh_mysql"
       ;;
     *)
@@ -135,7 +145,8 @@ set_environment_vars() {
   esac
 
   ENV_FILE="$PROJECT_DIR/.env"
-  API_CHECK="${SITE_CHECK%/}/api/auth/me"
+  SITE_CHECK="$(site_url_for_environment "$ENVIRONMENT")" || return 1
+  API_CHECK="$(api_url_for_site "$SITE_CHECK")"
 }
 
 select_environment() {
@@ -149,7 +160,7 @@ select_environment() {
     echo "1) LAB  (/root/jkh-lab, http://127.0.0.1:8080)"
     echo "   Тестовая среда. Используется для проверки веток и безопасных проб."
     echo
-    echo "2) PROD (/root/jkh,     http://127.0.0.1/)"
+    echo "2) PROD (/root/jkh,     http://127.0.0.1:8081)"
     echo "   Рабочая среда. Опасные действия требуют YES_PROD и backup MySQL."
     echo
     echo "0) Выход"
@@ -1762,6 +1773,12 @@ preflight_docker_ps() {
 lab_prod_readiness_preflight() {
   local lab_dir="/root/jkh-lab"
   local prod_dir="/root/jkh"
+  local lab_site prod_site lab_api prod_api
+
+  lab_site="$(site_url_for_environment LAB)" || return 1
+  prod_site="$(site_url_for_environment PROD)" || return 1
+  lab_api="$(api_url_for_site "$lab_site")"
+  prod_api="$(api_url_for_site "$prod_site")"
 
   PREFLIGHT_REASONS=()
 
@@ -1779,15 +1796,15 @@ lab_prod_readiness_preflight() {
   print_line
   echo "Health LAB"
   print_line
-  preflight_http_check "LAB site" "http://127.0.0.1:8080" "200" "302"
-  preflight_http_check "LAB API auth" "http://127.0.0.1:8080/api/auth/me" "401"
+  preflight_http_check "LAB site" "$lab_site" "200" "302"
+  preflight_http_check "LAB API auth" "$lab_api" "401"
 
   echo
   print_line
   echo "Health PROD"
   print_line
-  preflight_http_check "PROD site" "http://127.0.0.1/" "200" "302"
-  preflight_http_check "PROD API auth" "http://127.0.0.1/api/auth/me" "401"
+  preflight_http_check "PROD site" "$prod_site" "200" "302"
+  preflight_http_check "PROD API auth" "$prod_api" "401"
 
   preflight_docker_ps "LAB" "$lab_dir"
   preflight_docker_ps "PROD" "$prod_dir"
@@ -1846,7 +1863,11 @@ wizard_collect_visible_blockers() {
 
 lab_prod_deploy_wizard() {
   local lab_dir="/root/jkh-lab"
-  local branch upstream source_branch head_commit lab_site lab_api
+  local branch upstream source_branch head_commit lab_site lab_api prod_api
+
+  lab_site="$(site_url_for_environment LAB)" || return 1
+  lab_api="$(api_url_for_site "$lab_site")"
+  prod_api="$(api_url_for_site "$(site_url_for_environment PROD)")" || return 1
 
   echo
   print_line
@@ -1880,10 +1901,11 @@ lab_prod_deploy_wizard() {
   print_line
   echo "Health LAB"
   print_line
-  lab_site="$(curl -sS -o /dev/null -w "%{http_code}" "http://127.0.0.1:8080" 2>/dev/null || true)"
-  lab_api="$(curl -sS -o /dev/null -w "%{http_code}" "http://127.0.0.1:8080/api/auth/me" 2>/dev/null || true)"
-  echo "LAB site: http://127.0.0.1:8080 -> HTTP ${lab_site:-000}"
-  echo "LAB API auth: http://127.0.0.1:8080/api/auth/me -> HTTP ${lab_api:-000}"
+  local lab_site_status lab_api_status
+  lab_site_status="$(curl -sS -o /dev/null -w "%{http_code}" "$lab_site" 2>/dev/null || true)"
+  lab_api_status="$(curl -sS -o /dev/null -w "%{http_code}" "$lab_api" 2>/dev/null || true)"
+  echo "LAB site: $lab_site -> HTTP ${lab_site_status:-000}"
+  echo "LAB API auth: $lab_api -> HTTP ${lab_api_status:-000}"
 
   echo
   print_line
@@ -1906,11 +1928,11 @@ lab_prod_deploy_wizard() {
   echo "- НЕЛЬЗЯ менять docker-compose.yml вручную ради релиза."
 
   wizard_collect_visible_blockers
-  if [ "$lab_site" != "200" ] && [ "$lab_site" != "302" ]; then
-    PREFLIGHT_REASONS+=("LAB site health не прошёл: HTTP ${lab_site:-000}")
+  if [ "$lab_site_status" != "200" ] && [ "$lab_site_status" != "302" ]; then
+    PREFLIGHT_REASONS+=("LAB site health не прошёл: HTTP ${lab_site_status:-000}")
   fi
-  if [ "$lab_api" != "401" ]; then
-    PREFLIGHT_REASONS+=("LAB API health не прошёл: HTTP ${lab_api:-000}")
+  if [ "$lab_api_status" != "401" ]; then
+    PREFLIGHT_REASONS+=("LAB API health не прошёл: HTTP ${lab_api_status:-000}")
   fi
 
   echo
@@ -1957,7 +1979,7 @@ lab_prod_deploy_wizard() {
   echo "Шаг 6:"
   echo "Проверить PROD:"
   echo "пункт 7 или пункт 10"
-  echo "curl -i http://127.0.0.1/api/auth/me"
+  echo "curl -i $prod_api"
 }
 
 run_basic_checks() {
