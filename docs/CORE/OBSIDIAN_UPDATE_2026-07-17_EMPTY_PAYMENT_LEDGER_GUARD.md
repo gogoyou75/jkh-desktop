@@ -30,7 +30,7 @@ Block an existing non-empty canonical ledger from becoming `[]` by default. Retu
 
 ## LAB Verification
 
-Not executed from the local worktree because it is not deployed. Required post-deploy checks: initial empty test UID; non-empty → `[]` returns 409 without mutation; normal Full Recalc; payment add/edit/delete-one; temporary period; court certificate. Abonent 1009 is not modified.
+Initial local note: pending deployment. Superseded by the final LAB verification below.
 
 ## Regression Risk
 
@@ -47,3 +47,19 @@ Revert this single commit, then rerun backend and frontend-contract regression t
 ## Commit
 
 To be filled with the resulting single commit hash.
+
+## LAB FINAL VERIFICATION
+
+- Date: 2026-07-17
+- Environment: LAB
+- Implementation Commit: `de6468b`
+- Tested Abonent: 1009
+- UID: `uid_mqmevxsl_wlr604`
+- Previous State: canonical ledger was `[]`; snapshot contained 230 rows.
+- Recovery Method: verified dry-run followed by the standard Full Recalc.
+- User Verification: card, calculated data, Full Recalc, court-certificate navigation, and return to the card work.
+- Court Certificate Result: the table is populated and amounts are calculated; the missing-accrual message no longer appears.
+- Guard Regression Result: the normal non-empty Full Recalc was not blocked and restored the canonical ledger.
+- PROD Status: not deployed and not changed.
+- Remaining Unknown: the historical writer that stored `[]` is not proven.
+- Final Decision: LAB issue resolved. The implementation is eligible for a later PROD deployment only through a separate controlled task.

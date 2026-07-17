@@ -1,5 +1,12 @@
 # CHANGELOG
 
+## LAB verification — empty canonical ledger recovery (2026-07-17)
+
+- Guard from `de6468b` was deployed and manually verified on LAB for abonent 1009.
+- The verified Full Recalc restored the canonical ledger; the subscriber card, fresh derived snapshot/summary path, and court certificate work normally.
+- The court-certificate table is populated and calculates amounts; return to the card also works.
+- PROD was not deployed or changed.
+
 ## Storage guard — accidental empty canonical ledger overwrite
 
 - `POST /api/store` now rejects `payments_<uid>` existing non-empty JSON array → incoming `[]` with HTTP `409` and stable code `PAYMENT_LEDGER_EMPTY_OVERWRITE_BLOCKED`; the stored value is not changed.

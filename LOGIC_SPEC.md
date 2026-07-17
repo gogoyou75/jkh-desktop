@@ -9,6 +9,7 @@
 - Replacing an existing non-empty canonical ledger with `[]` is forbidden by default. The server returns HTTP `409` with `PAYMENT_LEDGER_EMPTY_OVERWRITE_BLOCKED` and leaves KV data unchanged.
 - The sole exception is a verified manual Full Recalc that supplies `CALCULATED_FINAL_EMPTY`, `completed:true`, `finalLedgerEmpty:true`, the exact UID, and the active UID-scoped recalc-lock token. Generic sync and payment-table edits have no authority to use this exception.
 - A canonical `payments_<uid>` value must be a JSON array at this server boundary; an invalid/non-array payload is rejected without coercion.
+- LAB verification for abonent 1009 confirmed this contract: accidental non-empty → `[]` remains blocked, while a verified non-empty Full Recalc persists the restored canonical ledger and refreshes its derived snapshot/summary. The court certificate then reads that restored canonical ledger; this LAB result does not authorize a PROD deployment.
 
 - Explicit Full Recalc produces one canonical final result: `uid`, structural final rows, `rowsById`, runtime `ledgerVersion`, and `inputHash`.
 - The same verified final result is the source for `card_snapshot_<uid>` and `abonent_summary`; the index reads only the persisted summary and never recalculates the ledger.

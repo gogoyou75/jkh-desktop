@@ -50,6 +50,10 @@
 - п. 5: `[]` разрешён только с полным verified contract;
 - passive snapshot restore и временный period не пишут ledger.
 
+### LAB result — abonent 1009 (2026-07-17)
+
+Manual verification after deployment of `de6468b` passed: the card displayed calculated data, Full Recalc restored the canonical ledger, derived snapshot/summary remained usable, `spravka_sud` populated its table and calculated amounts, and return to the card worked. No explicit regression was observed in this scenario. This result is LAB-only and does not authorize PROD deployment.
+
 ---
 
 ## 2. Импорт Excel — блокировка оплат (CRITICAL)
