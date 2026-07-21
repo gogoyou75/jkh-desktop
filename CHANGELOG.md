@@ -1,5 +1,12 @@
 # CHANGELOG
 
+## Canonical payment-ledger write history
+
+- Added `payment_ledger_store_audit` metadata history for every canonical `payments_<uid>` POST/DELETE operation, including successful writes, blocked empty overwrites, invalid payloads, initial empty creation, and missing-key deletes.
+- Audit records actor, UID/key, request ID, source, old/new row counts, guard/HTTP result, and verified calculated-final-empty lock metadata; it never stores full ledger rows, secrets, or payment details.
+- Canonical ledger mutation and audit persistence are transactional: audit failure rolls back the ledger change and returns a failure response.
+- Added admin-only, owner-scoped, limit-bounded `GET /api/audit/payment-ledger-store`. No ledger recovery, snapshot synchronization, calculation, or frontend behavior changed.
+
 ## LAB verification — empty canonical ledger recovery (2026-07-17)
 
 - Guard from `de6468b` was deployed and manually verified on LAB for abonent 1009.

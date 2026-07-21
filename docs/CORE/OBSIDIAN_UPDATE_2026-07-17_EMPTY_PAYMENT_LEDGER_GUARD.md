@@ -63,3 +63,18 @@ To be filled with the resulting single commit hash.
 - PROD Status: not deployed and not changed.
 - Remaining Unknown: the historical writer that stored `[]` is not proven.
 - Final Decision: LAB issue resolved. The implementation is eligible for a later PROD deployment only through a separate controlled task.
+
+## Canonical Ledger Store Audit
+
+- Date: 2026-07-21
+- Task: Add persistent metadata audit for canonical `payments_<uid>` POST/DELETE operations.
+- Root Cause: The historical `1009` empty-ledger writer could not be identified because `/api/store` retained no durable before/after audit history.
+- Changes: Added transactional `payment_ledger_store_audit`, request ID response/log correlation, and admin-only read endpoint `GET /api/audit/payment-ledger-store`.
+- Files: `backend/app.py`, `backend/migrations/007_payment_ledger_store_audit.sql`, backend audit/guard tests, canonical documentation.
+- Tests: POST success/block/invalid/initial empty/approved calculated empty, DELETE existing/missing, non-payment exclusion, admin filters, owner access, and audit-failure fail-closed behavior.
+- Data Contract: `payments_<uid>` remains canonical; audit is metadata-only and cannot restore ledger or use snapshot as fallback.
+- Regression Risks: The audit table migration must be applied before deploy; audit database failures now intentionally reject canonical ledger mutations.
+- Diagnostic Cleanup: No temporary browser or console diagnostics added.
+- Project Knowledge: A successful canonical mutation without a durable audit record is forbidden.
+- Commit: To be filled after local test completion.
+- Next Action: Deploy only through a controlled LAB task, apply migration, and verify the audit endpoint on a safe test operation.

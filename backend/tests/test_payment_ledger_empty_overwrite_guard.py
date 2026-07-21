@@ -39,7 +39,8 @@ class _Session:
 
     def add(self, row):
         self.added.append(row)
-        self.rows.append(row)
+        if hasattr(row, "v"):
+            self.rows.append(row)
 
     def commit(self):
         self.commits += 1
@@ -108,7 +109,9 @@ class PaymentLedgerEmptyOverwriteGuardTest(unittest.TestCase):
         self.assertEqual(status, 409)
         self.assertEqual(data["error"], app_module.PAYMENT_LEDGER_EMPTY_OVERWRITE_BLOCKED)
         self.assertEqual(rows[0].v, original)
-        self.assertEqual(session.commits, 0)
+        self.assertEqual(session.commits, 1)
+        self.assertEqual(len(session.added), 1)
+        self.assertEqual(session.added[0].guard_result, "BLOCKED")
 
     def test_payment_table_empty_is_blocked_without_mutation(self):
         original = json.dumps([{"id": 1}])
@@ -116,7 +119,9 @@ class PaymentLedgerEmptyOverwriteGuardTest(unittest.TestCase):
         self.assertEqual(status, 409)
         self.assertEqual(data["error"], app_module.PAYMENT_LEDGER_EMPTY_OVERWRITE_BLOCKED)
         self.assertEqual(rows[0].v, original)
-        self.assertEqual(session.commits, 0)
+        self.assertEqual(session.commits, 1)
+        self.assertEqual(len(session.added), 1)
+        self.assertEqual(session.added[0].guard_result, "BLOCKED")
 
     def test_unknown_or_missing_contract_empty_is_blocked(self):
         original = json.dumps([{"id": 1}])
@@ -126,7 +131,9 @@ class PaymentLedgerEmptyOverwriteGuardTest(unittest.TestCase):
                 self.assertEqual(status, 409)
                 self.assertEqual(data["error"], app_module.PAYMENT_LEDGER_EMPTY_OVERWRITE_BLOCKED)
                 self.assertEqual(rows[0].v, original)
-                self.assertEqual(session.commits, 0)
+                self.assertEqual(session.commits, 1)
+                self.assertEqual(len(session.added), 1)
+                self.assertEqual(session.added[0].guard_result, "BLOCKED")
 
     def test_verified_calculated_final_empty_contract_is_allowed(self):
         original = json.dumps([{"id": 1}])
@@ -149,7 +156,9 @@ class PaymentLedgerEmptyOverwriteGuardTest(unittest.TestCase):
                 self.assertEqual(status, 409)
                 self.assertEqual(data["error"], app_module.PAYMENT_LEDGER_EMPTY_OVERWRITE_BLOCKED)
                 self.assertEqual(rows[0].v, original)
-                self.assertEqual(session.commits, 0)
+                self.assertEqual(session.commits, 1)
+                self.assertEqual(len(session.added), 1)
+                self.assertEqual(session.added[0].guard_result, "BLOCKED")
 
     def test_nonpayments_key_retains_generic_empty_value_behavior(self):
         data, status, rows, session = self._call_store_set("[1]", "[]", key="notes_guard_test")

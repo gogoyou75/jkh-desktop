@@ -9,6 +9,7 @@
 | Index consumes saved summary only | LOGIC_SPEC Full Recalc | web/index.html / backend/app.py | OK | No index-side ledger read or recalculation. |
 | Temporary Period Calculation is non-persistent | LOGIC_SPEC Full Recalc | web/abonent_card.html / web/payment_table.js | OK | It renders runtime rows without writing ledger, full snapshot, summary, or index totals. |
 | Existing non-empty canonical ledger cannot become `[]` accidentally | LOGIC_SPEC Canonical payment-ledger empty-write boundary | `de6468b`; backend/app.py `/api/store`; web/data.js; web/payment_table.js; guard regression tests | OK | HTTP 409 `PAYMENT_LEDGER_EMPTY_OVERWRITE_BLOCKED`; only active-lock verified `CALCULATED_FINAL_EMPTY` may clear it. Manual LAB verification: 1009 Full Recalc restored ledger, snapshot/summary path and court certificate succeeded. |
+| Every canonical ledger store mutation has persistent metadata audit | LOGIC_SPEC Canonical payment-ledger empty-write boundary | backend/app.py `PaymentLedgerStoreAudit`, `/api/audit/payment-ledger-store`; migration `007_payment_ledger_store_audit.sql`; backend audit tests | OK | POST/DELETE, blocked guard, validation rejection, initial empty, and calculated-final-empty are recorded without storing ledger rows. Mutation succeeds only when its audit event commits in the same transaction. |
 
 ## Stage 16 - Persisted Snapshot / Summary
 

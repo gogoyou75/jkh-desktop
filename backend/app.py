@@ -245,6 +245,38 @@ class PaymentAuditLog(db.Model):
     created_at = db.Column(db.DateTime, nullable=False, server_default=text("CURRENT_TIMESTAMP"))
 
 
+class PaymentLedgerStoreAudit(db.Model):
+    """Immutable diagnostics for canonical payments_<uid> store operations.
+
+    This intentionally records only metadata.  Ledger rows themselves can contain
+    financial and personal data and are never copied into the audit trail.
+    """
+
+    __tablename__ = "payment_ledger_store_audit"
+
+    id = db.Column(sqlite_autoincrement_bigint_pk(), primary_key=True, autoincrement=True)
+    created_at = db.Column(db.DateTime, nullable=False, server_default=text("CURRENT_TIMESTAMP"), index=True)
+    owner_id = db.Column(db.String(128), nullable=False, index=True)
+    actor_id = db.Column(db.String(128), nullable=False, default="", index=True)
+    storage_key = db.Column(db.String(255), nullable=False, index=True)
+    account_uid = db.Column(db.String(128), nullable=False, index=True)
+    action = db.Column(db.String(16), nullable=False, index=True)
+    endpoint = db.Column(db.String(128), nullable=False)
+    request_id = db.Column(db.String(64), nullable=False, unique=True, index=True)
+    source = db.Column(db.String(128), nullable=False, default="UNKNOWN")
+    old_rows_count = db.Column(db.Integer, nullable=True)
+    new_rows_count = db.Column(db.Integer, nullable=True)
+    old_value_present = db.Column(db.Boolean, nullable=False, default=False)
+    new_value_present = db.Column(db.Boolean, nullable=False, default=False)
+    guard_result = db.Column(db.String(32), nullable=False, default="NOT_APPLICABLE")
+    guard_reason = db.Column(db.String(128), nullable=False, default="")
+    http_status = db.Column(db.Integer, nullable=False)
+    full_recalc_lock_present = db.Column(db.Boolean, nullable=False, default=False)
+    calculated_final_empty = db.Column(db.Boolean, nullable=False, default=False)
+    payload_size = db.Column(db.Integer, nullable=False, default=0)
+    details_json = db.Column(db.Text, nullable=False, default="{}")
+
+
 class AbonentSummary(db.Model):
     __tablename__ = "abonent_summary"
 
@@ -349,6 +381,86 @@ def _verified_calculated_final_empty_contract(data, owner, uid):
         return False
     lock = RecalcUidLock.query.filter_by(owner_id=owner, abonent_uid=uid, status="running").first()
     return bool(lock and secrets.compare_digest(_norm_text(lock.lock_token), token))
+
+
+def _payment_ledger_audit_value_meta(raw_value):
+    """Return non-sensitive shape metadata without retaining ledger content."""
+    meta = {"present": raw_value is not None, "is_array": False, "rows_count": None, "valid_json": True}
+    if raw_value is None:
+        return meta
+    try:
+        parsed = json.loads(raw_value)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        meta["valid_json"] = False
+        return meta
+    if isinstance(parsed, list):
+        meta["is_array"] = True
+        meta["rows_count"] = len(parsed)
+    return meta
+
+
+def _payment_ledger_audit_contract_meta(data, owner, uid):
+    contract = data.get("payment_ledger_contract") if isinstance(data, dict) else None
+    calculated_final_empty = bool(
+        isinstance(contract, dict)
+        and contract.get("action") == "CALCULATED_FINAL_EMPTY"
+        and contract.get("completed") is True
+        and contract.get("finalLedgerEmpty") is True
+        and _norm_text(contract.get("uid")) == uid
+    )
+    lock_present = False
+    if calculated_final_empty and _norm_text(contract.get("recalcLockToken")):
+        lock = RecalcUidLock.query.filter_by(owner_id=owner, abonent_uid=uid, status="running").first()
+        lock_present = bool(lock)
+    return calculated_final_empty, lock_present
+
+
+def _add_payment_ledger_store_audit(*, owner, actor, key, uid, action, request_id, source,
+                                    old_meta, new_meta, guard_result, guard_reason,
+                                    http_status, lock_present, calculated_final_empty,
+                                    payload_size):
+    details = {
+        "old_array": bool(old_meta["is_array"]),
+        "new_array": bool(new_meta["is_array"]),
+        "old_valid_json": bool(old_meta["valid_json"]),
+        "new_valid_json": bool(new_meta["valid_json"]),
+        "source": source,
+        "contract": {
+            "calculated_final_empty": bool(calculated_final_empty),
+            "full_recalc_lock_present": bool(lock_present),
+        },
+    }
+    db.session.add(PaymentLedgerStoreAudit(
+        owner_id=owner,
+        actor_id=_norm_text(getattr(actor, "id", "")),
+        storage_key=key,
+        account_uid=uid,
+        action=action,
+        endpoint="/api/store",
+        request_id=request_id,
+        source=source or "UNKNOWN",
+        old_rows_count=old_meta["rows_count"],
+        new_rows_count=new_meta["rows_count"],
+        old_value_present=bool(old_meta["present"]),
+        new_value_present=bool(new_meta["present"]),
+        guard_result=guard_result,
+        guard_reason=guard_reason or "",
+        http_status=http_status,
+        full_recalc_lock_present=bool(lock_present),
+        calculated_final_empty=bool(calculated_final_empty),
+        payload_size=max(0, int(payload_size or 0)),
+        details_json=json.dumps(details, ensure_ascii=False, sort_keys=True),
+    ))
+
+
+def _payment_ledger_audit_commit_or_error(request_id):
+    try:
+        db.session.commit()
+    except SQLAlchemyError:
+        db.session.rollback()
+        app.logger.exception("[payment-ledger-audit] commit failed request_id=%s", request_id)
+        return _json_error("payment_ledger_audit_persist_failed", 500)
+    return None
 
 
 class RecalcBatchJob(db.Model):
@@ -3896,6 +4008,77 @@ def audit_snapshot_summary_endpoint():
         return jsonify(ok=False, error="snapshot_summary_audit_failed", details=str(exc)), 500
 
 
+def _payment_ledger_store_audit_payload(row):
+    try:
+        details = json.loads(row.details_json or "{}")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        details = {"details_valid_json": False}
+    return {
+        "id": row.id,
+        "created_at": row.created_at.isoformat() if row.created_at else "",
+        "owner_id": row.owner_id,
+        "actor_id": row.actor_id,
+        "storage_key": row.storage_key,
+        "account_uid": row.account_uid,
+        "action": row.action,
+        "endpoint": row.endpoint,
+        "request_id": row.request_id,
+        "source": row.source,
+        "old_rows_count": row.old_rows_count,
+        "new_rows_count": row.new_rows_count,
+        "old_value_present": bool(row.old_value_present),
+        "new_value_present": bool(row.new_value_present),
+        "guard_result": row.guard_result,
+        "guard_reason": row.guard_reason,
+        "http_status": row.http_status,
+        "full_recalc_lock_present": bool(row.full_recalc_lock_present),
+        "calculated_final_empty": bool(row.calculated_final_empty),
+        "payload_size": row.payload_size,
+        "details": details,
+    }
+
+
+@app.get("/api/audit/payment-ledger-store")
+def payment_ledger_store_audit_endpoint():
+    admin, err = _require_admin()
+    if err:
+        return err
+    requested_owner = _norm_text(request.args.get("owner_id") or request.args.get("owner"))
+    owner = _environment_owner_id(requested_owner) if requested_owner else _environment_owner_id(admin.id)
+    if not _owner_belongs_to_current_environment(owner):
+        return _json_error("owner_invalid", 400)
+    try:
+        limit = int(request.args.get("limit", "100"))
+    except (TypeError, ValueError):
+        return _json_error("limit_invalid", 400)
+    limit = max(1, min(limit, 500))
+    query = PaymentLedgerStoreAudit.query.filter_by(owner_id=owner)
+    account_uid = _norm_text(request.args.get("account_uid"))
+    storage_key = _norm_text(request.args.get("storage_key"))
+    action = _norm_text(request.args.get("action")).upper()
+    request_id = _norm_text(request.args.get("request_id"))
+    if account_uid:
+        query = query.filter_by(account_uid=account_uid)
+    if storage_key:
+        query = query.filter_by(storage_key=storage_key)
+    if action:
+        query = query.filter_by(action=action)
+    if request_id:
+        query = query.filter_by(request_id=request_id)
+    for arg_name, operator in (("date_from", ">="), ("date_to", "<=")):
+        raw_date = _norm_text(request.args.get(arg_name))
+        if not raw_date:
+            continue
+        try:
+            parsed_date = datetime.fromisoformat(raw_date)
+        except ValueError:
+            return _json_error(f"{arg_name}_invalid", 400)
+        column = PaymentLedgerStoreAudit.created_at
+        query = query.filter(column >= parsed_date) if operator == ">=" else query.filter(column <= parsed_date)
+    rows = query.order_by(PaymentLedgerStoreAudit.created_at.desc(), PaymentLedgerStoreAudit.id.desc()).limit(limit).all()
+    return jsonify(ok=True, owner_id=owner, limit=limit, items=[_payment_ledger_store_audit_payload(row) for row in rows])
+
+
 @app.get("/api/card_snapshot/<account_uid>")
 def card_snapshot_get(account_uid: str):
     user, err = _require_user()
@@ -5233,13 +5416,36 @@ def store_set():
     owner_eff = _effective_owner_for_key(owner, key)
     row = KVStore.query.filter_by(owner=owner_eff, k=key).first()
     ledger_uid = _canonical_payment_ledger_uid(key)
+    request_id = uuid.uuid4().hex[:12]
+    source_or_action = _norm_text(data.get("source") or data.get("action") or data.get("mode")) or "UNKNOWN"
     if ledger_uid:
+        old_meta = _payment_ledger_audit_value_meta(row.v if row else None)
+        new_meta = _payment_ledger_audit_value_meta(value)
+        calculated_final_empty, lock_present = _payment_ledger_audit_contract_meta(data, owner_eff, ledger_uid)
         try:
             incoming_ledger = json.loads(value)
         except (TypeError, ValueError, json.JSONDecodeError):
-            return _json_error("payment_ledger_value_must_be_json_array", 422)
+            _add_payment_ledger_store_audit(
+                owner=owner_eff, actor=user, key=key, uid=ledger_uid, action="POST", request_id=request_id,
+                source=source_or_action, old_meta=old_meta, new_meta=new_meta, guard_result="REJECTED",
+                guard_reason="payment_ledger_value_must_be_json_array", http_status=422,
+                lock_present=lock_present, calculated_final_empty=calculated_final_empty, payload_size=len(value or ""),
+            )
+            audit_error = _payment_ledger_audit_commit_or_error(request_id)
+            if audit_error:
+                return audit_error
+            return jsonify(ok=False, error="payment_ledger_value_must_be_json_array", request_id=request_id), 422
         if not isinstance(incoming_ledger, list):
-            return _json_error("payment_ledger_value_must_be_json_array", 422)
+            _add_payment_ledger_store_audit(
+                owner=owner_eff, actor=user, key=key, uid=ledger_uid, action="POST", request_id=request_id,
+                source=source_or_action, old_meta=old_meta, new_meta=new_meta, guard_result="REJECTED",
+                guard_reason="payment_ledger_value_must_be_json_array", http_status=422,
+                lock_present=lock_present, calculated_final_empty=calculated_final_empty, payload_size=len(value or ""),
+            )
+            audit_error = _payment_ledger_audit_commit_or_error(request_id)
+            if audit_error:
+                return audit_error
+            return jsonify(ok=False, error="payment_ledger_value_must_be_json_array", request_id=request_id), 422
         if row:
             try:
                 existing_ledger = json.loads(row.v)
@@ -5247,20 +5453,40 @@ def store_set():
                 existing_ledger = None
             if isinstance(existing_ledger, list) and existing_ledger and not incoming_ledger:
                 if not _verified_calculated_final_empty_contract(data, owner_eff, ledger_uid):
+                    _add_payment_ledger_store_audit(
+                        owner=owner_eff, actor=user, key=key, uid=ledger_uid, action="POST", request_id=request_id,
+                        source=source_or_action, old_meta=old_meta, new_meta=new_meta, guard_result="BLOCKED",
+                        guard_reason=PAYMENT_LEDGER_EMPTY_OVERWRITE_BLOCKED, http_status=409,
+                        lock_present=lock_present, calculated_final_empty=calculated_final_empty, payload_size=len(value or ""),
+                    )
+                    audit_error = _payment_ledger_audit_commit_or_error(request_id)
+                    if audit_error:
+                        return audit_error
                     return jsonify(
                         ok=False,
                         error=PAYMENT_LEDGER_EMPTY_OVERWRITE_BLOCKED,
                         oldRowsCount=len(existing_ledger),
                         newRowsCount=0,
+                        request_id=request_id,
                     ), 409
-    request_id = uuid.uuid4().hex[:12]
-    source_or_action = data.get("source") or data.get("action") or data.get("mode") or "store_set"
     existed = bool(row)
-    if row:
-        row.v = value
-    else:
-        db.session.add(KVStore(owner=owner_eff, k=key, v=value))
-    db.session.commit()
+    try:
+        if ledger_uid:
+            _add_payment_ledger_store_audit(
+                owner=owner_eff, actor=user, key=key, uid=ledger_uid, action="POST", request_id=request_id,
+                source=source_or_action, old_meta=old_meta, new_meta=new_meta, guard_result="ALLOWED",
+                guard_reason="", http_status=200, lock_present=lock_present,
+                calculated_final_empty=calculated_final_empty, payload_size=len(value or ""),
+            )
+        if row:
+            row.v = value
+        else:
+            db.session.add(KVStore(owner=owner_eff, k=key, v=value))
+        db.session.commit()
+    except SQLAlchemyError:
+        db.session.rollback()
+        app.logger.exception("[payment-ledger-audit] store set failed request_id=%s key=%s", request_id, key)
+        return _json_error("payment_ledger_audit_persist_failed", 500)
     if key.startswith("card_snapshot_"):
         app.logger.info(
             "[diagnose][card-snapshot-kv-set] %s",
@@ -5278,8 +5504,8 @@ def store_set():
                 ensure_ascii=False,
             ),
         )
-    _sync_log("save", owner_eff, server_owner=owner, client_owner_hint=client_owner_hint, key=key, size=len(value or ""), status="ok")
-    return jsonify(ok=True, owner=owner_eff)
+    _sync_log("save", owner_eff, server_owner=owner, client_owner_hint=client_owner_hint, key=key, size=len(value or ""), status="ok", request_id=request_id, source=source_or_action)
+    return jsonify(ok=True, owner=owner_eff, request_id=request_id)
 
 
 @app.delete("/api/store")
@@ -5301,15 +5527,34 @@ def store_delete():
     owner_eff = _effective_owner_for_key(owner, key)
     row = KVStore.query.filter_by(owner=owner_eff, k=key).first()
     request_id = uuid.uuid4().hex[:12]
-    source_or_action = data.get("source") or data.get("action") or data.get("mode") or "store_delete"
+    source_or_action = _norm_text(data.get("source") or data.get("action") or data.get("mode")) or "UNKNOWN"
+    ledger_uid = _canonical_payment_ledger_uid(key)
+    if ledger_uid:
+        old_meta = _payment_ledger_audit_value_meta(row.v if row else None)
+        new_meta = _payment_ledger_audit_value_meta(None)
+        _add_payment_ledger_store_audit(
+            owner=owner_eff, actor=user, key=key, uid=ledger_uid, action="DELETE", request_id=request_id,
+            source=source_or_action, old_meta=old_meta, new_meta=new_meta, guard_result="NOT_APPLICABLE",
+            guard_reason="NOT_FOUND" if not row else "", http_status=200, lock_present=False,
+            calculated_final_empty=False, payload_size=0,
+        )
     if not row:
-        _sync_log("delete", owner_eff, server_owner=owner, client_owner_hint=client_owner_hint, key=key, status="not_found")
-        return jsonify(ok=True, deleted=False)
+        if ledger_uid:
+            audit_error = _payment_ledger_audit_commit_or_error(request_id)
+            if audit_error:
+                return audit_error
+        _sync_log("delete", owner_eff, server_owner=owner, client_owner_hint=client_owner_hint, key=key, status="not_found", request_id=request_id, source=source_or_action)
+        return jsonify(ok=True, deleted=False, request_id=request_id)
 
-    db.session.delete(row)
-    db.session.commit()
-    _sync_log("delete", owner_eff, server_owner=owner, client_owner_hint=client_owner_hint, key=key, status="ok")
-    return jsonify(ok=True, deleted=True)
+    try:
+        db.session.delete(row)
+        db.session.commit()
+    except SQLAlchemyError:
+        db.session.rollback()
+        app.logger.exception("[payment-ledger-audit] store delete failed request_id=%s key=%s", request_id, key)
+        return _json_error("payment_ledger_audit_persist_failed", 500)
+    _sync_log("delete", owner_eff, server_owner=owner, client_owner_hint=client_owner_hint, key=key, status="ok", request_id=request_id, source=source_or_action)
+    return jsonify(ok=True, deleted=True, request_id=request_id)
 
 
 @app.get("/api/store_dump")
