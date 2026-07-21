@@ -1534,11 +1534,16 @@ function __safeLoadPaymentTableOnce(reason, options){
                 mode: loadMode,
                 reason: reason || 'abonent-card',
                 force: !!opts.force,
-                onSettled: opts.endTemporaryModeAfterRender === true ? function(){
-                    endTemporaryCardPeriodMode({
-                        abonentId: opts.abonentId || getAbonentIdFromURL(),
-                        source: "card_period_mode_end_after_bootstrap"
-                    });
+                onSettled: (opts.endTemporaryModeAfterRender === true || opts.temporaryPeriodResetDebug === true) ? function(){
+                    if (opts.endTemporaryModeAfterRender === true) {
+                        endTemporaryCardPeriodMode({
+                            abonentId: opts.abonentId || getAbonentIdFromURL(),
+                            source: "card_period_mode_end_after_bootstrap"
+                        });
+                    }
+                    if (opts.temporaryPeriodResetDebug === true && window.JKH_DEBUG_TEMPORARY_PERIOD_RESET === true && typeof window.JKH_debugTemporaryPeriodResetState === "function") {
+                        window.JKH_debugTemporaryPeriodResetState("temporary-period-reset-rendered", opts.temporaryPeriodResetContext || {});
+                    }
                 } : null
             });
             __hideExcludesFatalBox();
@@ -5457,7 +5462,21 @@ function bindCalcButtons(){
         if (!canWriteOrExplainLocal()) return;
         const id = getAbonentIdFromURL();
         const meta = getCalcPeriodStorageMeta();
+        const reportKey = getReportPeriodStorageKey(meta);
         const urlBefore = String(window.location.href || "");
+        const resetDebugContext = {
+            uid: meta.resolvedUid,
+            abonentId: String(id || ""),
+            uiPeriod: { from: String(fromEl.value || ""), to: String(toEl.value || "") },
+            periodKeys: {
+                calc: __readPeriodKey(meta.storageKey, meta.ownerId),
+                active: __readActiveKey(meta.activeStorageKey, meta.ownerId),
+                report: __readPeriodKey(reportKey, meta.ownerId)
+            }
+        };
+        if (window.JKH_DEBUG_TEMPORARY_PERIOD_RESET === true && typeof window.JKH_debugTemporaryPeriodResetState === "function") {
+            window.JKH_debugTemporaryPeriodResetState("temporary-period-reset-before", resetDebugContext);
+        }
         window.__periodResetInProgress = true;
         fromEl.value = "";
         toEl.value = "";
@@ -5493,7 +5512,14 @@ function bindCalcButtons(){
         try {
             if (window.JKH_resetPaymentTablePeriodRuntime) window.JKH_resetPaymentTablePeriodRuntime("card-period-reset");
         } catch(eReset) {}
-        __safeLoadPaymentTableOnce("card-period-reset", { force: true });
+        if (window.JKH_DEBUG_TEMPORARY_PERIOD_RESET === true && typeof window.JKH_debugTemporaryPeriodResetState === "function") {
+            window.JKH_debugTemporaryPeriodResetState("temporary-period-reset-cleared", Object.assign({}, resetDebugContext, { resetResult: resetResult }));
+        }
+        __safeLoadPaymentTableOnce("card-period-reset", {
+            force: true,
+            temporaryPeriodResetDebug: true,
+            temporaryPeriodResetContext: Object.assign({}, resetDebugContext, { resetResult: resetResult })
+        });
     });
 
     repBtn.addEventListener("click", async () => {

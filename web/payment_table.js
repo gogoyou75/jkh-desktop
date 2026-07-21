@@ -1071,6 +1071,70 @@
     };
   };
 
+  function __temporaryPeriodResetDebugDigest(rows, rowsById){
+    const map = rowsById && typeof rowsById === "object" && !Array.isArray(rowsById) ? rowsById : {};
+    const merged = mergeComputedRowsIntoViewRows(Array.isArray(rows) ? rows : [], map);
+    let accrued = 0, paid = 0, debt = 0, penalty = 0, total = 0;
+    merged.forEach(function(row){
+      const financial = computedFinancialFields(row || {});
+      accrued += toNum(row && row.accrued);
+      paid += toNum(row && row.paid);
+      debt += toNum(financial.debt);
+      penalty += toNum(financial.penalty);
+      total += toNum(financial.total);
+    });
+    return { accrued:r2(accrued), paid:r2(paid), debt:r2(debt), penalty:r2(penalty), total:r2(total) };
+  }
+
+  function __temporaryPeriodResetDebugState(stage, context){
+    if (window.JKH_DEBUG_TEMPORARY_PERIOD_RESET !== true) return null;
+    const runtime = window.__getPaymentTableComputedRowsSnapshot();
+    const calculated = __paymentTableCalculatedRenderState;
+    const snapshot = window.Data && typeof Data.readCardSnapshot === "function" ? Data.readCardSnapshot(getAbonentId()) : null;
+    const temporary = window.__JKH_TEMPORARY_PERIOD_REPORT_STATE || null;
+    const runtimeRows = runtime && Array.isArray(runtime.rows) ? runtime.rows : [];
+    const runtimeRowsById = runtime && runtime.rowsById || {};
+    const calculatedRows = calculated && Array.isArray(calculated.rows) ? calculated.rows : [];
+    const calculatedRowsById = calculated && calculated.rowsById || {};
+    const snapshotRows = snapshot && Array.isArray(snapshot.rows) ? snapshot.rows : [];
+    const snapshotRowsById = snapshot && snapshot.rowsById || {};
+    const runtimeDigest = __temporaryPeriodResetDebugDigest(runtimeRows, runtimeRowsById);
+    const calculatedDigest = __temporaryPeriodResetDebugDigest(calculatedRows, calculatedRowsById);
+    const canonicalDigest = __temporaryPeriodResetDebugDigest(snapshotRows, snapshotRowsById);
+    const canonicalUid = resolveCanonicalAccountUidForCalculatedRender();
+    const sameDigest = function(a, b){ return ["accrued", "paid", "debt", "penalty", "total"].every(function(k){ return Math.abs(toNum(a[k]) - toNum(b[k])) < 0.000001; }); };
+    const renderSource = String(calculated && calculated.source || "");
+    let result = "INSUFFICIENT_DATA";
+    let retainedObject = "";
+    if (stage === "temporary-period-reset-rendered" && renderSource === "canonical_backend_snapshot" && snapshotRows.length) {
+      if (sameDigest(calculatedDigest, canonicalDigest) && sameDigest(runtimeDigest, canonicalDigest)) result = "PASS_CANONICAL_VALUES";
+      else if (temporary && sameDigest(calculatedDigest, runtimeDigest) && !sameDigest(calculatedDigest, canonicalDigest)) {
+        result = "FAIL_TEMPORARY_VALUES_SURVIVED";
+        retainedObject = "__JKH_TEMPORARY_PERIOD_REPORT_STATE/runtimeSnapshot";
+      } else {
+        result = "FAIL_MIXED_RENDER_STATE";
+        retainedObject = "__paymentTableCalculatedRenderState";
+      }
+    }
+    const payload = {
+      event: stage,
+      uid: String(canonicalUid && canonicalUid.uid || ""),
+      abonentId: String(getAbonentId() || ""),
+      context: context || {},
+      periodModeActive: window.JKH_CARD_PERIOD_MODE_ACTIVE === true,
+      temporaryReportState: temporary,
+      runtimeSnapshot: runtime ? { mode: __paymentTableMode, periodActive:runtime.periodActive === true, period:runtime.period || null, ledgerVersion:runtime.ledgerVersion || "", runtimeSignature:runtime.runtimeSignature || "", rowsCount:runtimeRows.length, rowsByIdCount:Object.keys(runtimeRowsById).length, digest:runtimeDigest, source:"temporary runtime / runtime snapshot" } : null,
+      calculatedRenderState: calculated ? { source:renderSource, periodActive:calculated.periodActive === true, period:calculated.period || null, ledgerVersion:calculated.ledgerVersion || "", runtimeSignature:calculated.runtimeSignature || "", rowsCount:calculatedRows.length, rowsByIdCount:Object.keys(calculatedRowsById).length, digest:calculatedDigest, sourceFinancialFields:"calculated render state" } : null,
+      canonicalSnapshot: snapshot ? { ledgerVersion:snapshot.ledgerVersion || "", runtimeSignature:snapshot.runtimeSignature || "", rowsCount:snapshotRows.length, rowsByIdCount:Object.keys(snapshotRowsById).length, totals:snapshot.totals || null, digest:canonicalDigest, sourceFinancialFields:"canonical backend snapshot" } : null,
+      result: result,
+      retainedObject: retainedObject
+    };
+    try { console.log(stage, payload); } catch(e) {}
+    return payload;
+  }
+
+  window.JKH_debugTemporaryPeriodResetState = __temporaryPeriodResetDebugState;
+
   function tryApplyCardSnapshotToRows(rows, expectedLedgerVersion, periodActive, selectedPeriod, expectedSignature){
     const out = { valid: false, reason: "CARD_SNAPSHOT_MISSING", dataById: {}, periodMatches: false, missingRows: [] };
     let snapshotForDiagnostics = null;
