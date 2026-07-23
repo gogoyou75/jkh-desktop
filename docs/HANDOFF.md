@@ -426,6 +426,8 @@ Phase 2
 
 Status: completed for the safe first slice. `web/full_recalc_core.js` owns pure permanent rows-by-id orchestration and receives the unchanged browser totals calculator by injection. Browser Full Recalc and Batch V1 remain primary; persistence and temporary mode are unchanged. Node Worker is not created. Next phase remains a no-write Node shadow runner, subject to separate authorization.
 
+Phase 2B status: completed. The shared calculation call accepts explicit serialized responsibility, rates, exclusions, freeze, transfer and payment-period inputs. Browser compatibility still obtains these through the existing loaders before the call; formulas, persistence, temporary mode and autoaccrual are unchanged. Node Worker is not created.
+
 Phase 3
 Node shadow runner для одного UID без сохранения данных.
 

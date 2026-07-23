@@ -5072,6 +5072,10 @@
       if (!window.JKHFullRecalcCore || typeof window.JKHFullRecalcCore.buildRowsById !== "function") {
         throw new Error("FULL_RECALC_CORE_UNAVAILABLE");
       }
+      if (!window.JKHCalcEngine || typeof window.JKHCalcEngine.buildBrowserFinancialInputs !== "function") {
+        throw new Error("FINANCIAL_INPUT_ADAPTER_UNAVAILABLE");
+      }
+      var financialInputs = window.JKHCalcEngine.buildBrowserFinancialInputs(abonentId);
       var coreResult = window.JKHFullRecalcCore.buildRowsById({
         mode: "permanent_full_recalc",
         ownerId: null,
@@ -5082,22 +5086,25 @@
         responsibilityPeriod: period,
         ledger: filteredRows,
         tariffs: null,
-        rates: null,
-        exclusions: null,
-        transfer: null,
-        freeze: null,
+        rates: financialInputs.rates,
+        exclusions: financialInputs.exclusions,
+        transfer: financialInputs.transfer,
+        freeze: financialInputs.freeze,
+        financialInputs: financialInputs,
+        calculationOptions: { abonentId: abonentId, applyAdvanceOffset: true, allowNegativePrincipal: true },
         versions: { ledgerVersion: ledgerVersion, inputHash: inputHash },
         rounding: null,
         diagnostics: null,
         calculatedRows: calculatedRows
       }, {
-        calculateTotals: function(asOfKey, asOf) {
-          return getAdjustedTotalsCached(asOfKey, function() {
+        calculateTotals: function(request) {
+          return getAdjustedTotalsCached(request.asOfKey, function() {
           var calcStart = rowsNow();
-          var computed = window.JKHCalcEngine.calcTotalsAsOfAdjusted(filteredRows, asOf, {
+          var computed = window.JKHCalcEngine.calcTotalsAsOfAdjusted(request.ledger, request.asOf, {
             abonentId: abonentId,
             applyAdvanceOffset: true,
-            allowNegativePrincipal: true
+            allowNegativePrincipal: true,
+            financialInputs: request.financialInputs
           });
           var calcMs = Math.round(rowsNow() - calcStart);
           calcAdjustedMs += calcMs;

@@ -8,6 +8,11 @@
 - The browser adapter in `web/data.js` preserves the existing as-of-date enumeration and calls the unchanged `window.JKHCalcEngine.calcTotalsAsOfAdjusted()` through that injected dependency.
 - This is not a second financial engine and is not a Node Worker. The browser path remains canonical; ledger, snapshot, summary, lock, false-fresh, temporary-period and UI contracts are unchanged.
 
+## Phase 2B — explicit financial inputs
+
+- `financialInputs` carries serialized responsibility, rates, exclusions, freeze, transfer and payment-period values. Its explicit calculation path does not call browser loaders.
+- The compatibility path calls `buildBrowserFinancialInputs()` before calculation, preserving current loader normalization and error behavior. Formula-bearing functions, FIFO, penalties and rounding are unchanged.
+
 ## Canonical payment-ledger empty-write boundary
 
 - `payments_<uid>` is the canonical financial ledger. `card_snapshot_<uid>` and `abonent_summary` are derived data and must never be used to reconstruct or silently replace it.

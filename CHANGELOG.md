@@ -1,5 +1,11 @@
 # CHANGELOG
 
+## Phase 2B — explicit financial inputs
+
+- `JKHCalcEngine.calcTotalsAsOfAdjusted()` now accepts `options.financialInputs`; responsibility, rates, exclusions, freeze, transfer and payment-period data are normalized from that explicit, serializable input rather than loaded during the calculation.
+- `buildBrowserFinancialInputs()` preserves the former browser loaders for compatibility. The permanent rows-by-id adapter passes this result through `FullRecalcCore` to the unchanged financial formulas.
+- Added no-hidden-read and Node-without-browser-global coverage. Autoaccrual, persistence, temporary mode, Browser Batch V1, backend and Docker remain unchanged.
+
 ## Phase 2 — environment-neutral Full Recalc Core
 
 - Added `web/full_recalc_core.js`: a pure, dependency-injected rows-by-id Core with no persistence, transport, UI, browser-cache, or browser-data reads.

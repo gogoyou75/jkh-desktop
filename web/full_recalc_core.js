@@ -34,7 +34,13 @@
       var asOfKey = String(item.asOfKey || "").trim();
       if (!rowId || !asOf || !asOfKey) continue;
       uniqueAsOf[asOfKey] = true;
-      var totals = deps.calculateTotals(asOfKey, asOf);
+      var totals = deps.calculateTotals({
+        ledger: source.ledger,
+        asOfKey: asOfKey,
+        asOf: asOf,
+        financialInputs: source.financialInputs || null,
+        calculationOptions: source.calculationOptions || null
+      });
       var principal = Number(totals && totals.principal);
       var penalty = Number(totals && totals.penaltyDebt);
       var total = Number(totals && totals.total);

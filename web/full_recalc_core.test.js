@@ -2,6 +2,7 @@
 
 const assert = require("assert");
 const core = require("./full_recalc_core.js");
+const nodeCalc = require("./calc_engine.js");
 
 const input = {
   mode: "permanent_full_recalc",
@@ -31,7 +32,7 @@ const totalsByDate = {
   "2026-02-28": { principal: 20.23, penaltyDebt: 0.02, total: 20.25 }
 };
 
-const result = core.run(input, { calculateTotals: (key) => totalsByDate[key] });
+const result = core.run(input, { calculateTotals: (request) => totalsByDate[request.asOfKey] });
 assert.equal(result.ok, true);
 assert.equal(result.status, "calculated");
 assert.deepEqual(result.rowsById, {
@@ -45,6 +46,23 @@ const source = require("fs").readFileSync(__dirname + "/full_recalc_core.js", "u
 for (const forbidden of ["window", "document", "localStorage", "sessionStorage", "fetch(", "alert(", "confirm("]) {
   assert.equal(source.includes(forbidden), false, "core body must not contain " + forbidden);
 }
+
+// Formula-bearing explicit path loads without browser globals or browser loaders.
+const nodeFinancialInputs = {
+  responsibility: { from: "2026-01-01", to: "" },
+  rates: [{ date: "2020-01-01", value: 10 }],
+  exclusions: [],
+  freeze: { to: "2026-03-15" },
+  transfer: { startDate: "2026-02-01", principal: 3, penalty: 1 },
+  paymentPeriod: null
+};
+const nodeTotals = nodeCalc.calcTotalsAsOfAdjusted([
+  { id: "jan", year: "2026", month: "01", accrued: 100, paid: 0 },
+  { id: "feb", year: "2026", month: "02", accrued: 50, paid: 40, paid_date: "2026-02-20" }
+], new Date(2026, 2, 31), {
+  abonentId: "fixture-1", applyAdvanceOffset: true, allowNegativePrincipal: true, financialInputs: nodeFinancialInputs
+});
+assert.equal(Number.isFinite(nodeTotals.total), true);
 
 // Browser compatibility golden: the existing JKHCalcEngine remains the formula
 // source; the Phase 2 core receives it only through an explicit adapter.
@@ -63,6 +81,7 @@ global.AbonentsDB = {
   links: [{ abonentId: "fixture-1", dateFrom: "2026-01-01" }]
 };
 require("./calc_engine.js");
+if (!global.JKHCalcEngine) global.JKHCalcEngine = nodeCalc;
 assert.equal(typeof global.JKHCalcEngine.calcTotalsAsOfAdjusted, "function");
 
 const financialLedger = [
@@ -73,12 +92,22 @@ const asOf = new Date(2026, 2, 31);
 const oldTotals = global.JKHCalcEngine.calcTotalsAsOfAdjusted(financialLedger, asOf, {
   abonentId: "fixture-1", applyAdvanceOffset: true, allowNegativePrincipal: true
 });
+const browserInputs = global.JKHCalcEngine.buildBrowserFinancialInputs("fixture-1");
+const explicitTotals = global.JKHCalcEngine.calcTotalsAsOfAdjusted(financialLedger, asOf, {
+  abonentId: "fixture-1", applyAdvanceOffset: true, allowNegativePrincipal: true, financialInputs: browserInputs
+});
+assert.deepEqual(explicitTotals, oldTotals);
+global.JKHStore.getRaw = () => { throw new Error("HIDDEN_BROWSER_READ"); };
+assert.deepEqual(global.JKHCalcEngine.calcTotalsAsOfAdjusted(financialLedger, asOf, {
+  abonentId: "fixture-1", applyAdvanceOffset: true, allowNegativePrincipal: true, financialInputs: browserInputs
+}), explicitTotals);
 const golden = core.run(Object.assign({}, input, {
   ledger: financialLedger,
+  financialInputs: browserInputs,
   calculatedRows: [{ rowId: "mar", asOf, asOfKey: "2026-03-31" }]
 }), {
-  calculateTotals: (_key, date) => global.JKHCalcEngine.calcTotalsAsOfAdjusted(financialLedger, date, {
-    abonentId: "fixture-1", applyAdvanceOffset: true, allowNegativePrincipal: true
+  calculateTotals: (request) => global.JKHCalcEngine.calcTotalsAsOfAdjusted(request.ledger, request.asOf, {
+    abonentId: "fixture-1", applyAdvanceOffset: true, allowNegativePrincipal: true, financialInputs: request.financialInputs
   })
 });
 assert.deepEqual(golden.rowsById.mar, {

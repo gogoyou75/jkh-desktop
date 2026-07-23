@@ -31,6 +31,7 @@
 // Включение: добавь ?dev=1 к URL или работай на localhost.
 // ===============================
 (function(){
+  if (typeof window === "undefined") return;
   if (typeof window.__DEV__ === "undefined") {
     window.__DEV__ = (
       (location && (location.hostname === "localhost" || location.hostname === "127.0.0.1")) ||
@@ -52,7 +53,8 @@
 // Использует JKHStore + AbonentsDB (если есть) для периода ответственности.
 // Платёж гасит: сначала ОСНОВНОЙ ДОЛГ (FIFO), потом ПЕНИ (если есть переплата).
 (function () {
-  if (window.JKHCalcEngine) return; // не переопределяем
+  const hasBrowserWindow = typeof window !== "undefined";
+  if (hasBrowserWindow && window.JKHCalcEngine) return; // не переопределяем
 
   function pad2(n){ return String(n).padStart(2,"0"); }
   function r2(x){ return Math.round(x * 100) / 100; }
@@ -359,8 +361,8 @@
   }
 
   // ---------- EXCLUDES + RATES ----------
-  const REFI_KEY_NORMAL = (window.JKH_CONST && window.JKH_CONST.REFI_KEY_NORMAL) ? window.JKH_CONST.REFI_KEY_NORMAL : "refinancing_rates_normal_v1";
-  const REFI_KEY_MORA   = (window.JKH_CONST && window.JKH_CONST.REFI_KEY_MORA)   ? window.JKH_CONST.REFI_KEY_MORA   : "refinancing_rates_moratorium_v1";
+  const REFI_KEY_NORMAL = (hasBrowserWindow && window.JKH_CONST && window.JKH_CONST.REFI_KEY_NORMAL) ? window.JKH_CONST.REFI_KEY_NORMAL : "refinancing_rates_normal_v1";
+  const REFI_KEY_MORA   = (hasBrowserWindow && window.JKH_CONST && window.JKH_CONST.REFI_KEY_MORA)   ? window.JKH_CONST.REFI_KEY_MORA   : "refinancing_rates_moratorium_v1";
 
   function excludePeriodsKey(abonentId){ return "exclude_periods_" + String(abonentId || getAbonentIdFromUrl()); }
   function moratoriumKey(abonentId){ return "moratorium_" + String(abonentId || getAbonentIdFromUrl()); }
@@ -743,24 +745,24 @@
     return obligations;
   }
 
-  function buildPaymentEventsFromRows(rows, abonentId){
+  function buildPaymentEventsFromRows(rows, abonentId, explicitPaymentPeriod){
     const pays = [];
     const id = abonentId || getAbonentIdFromUrl();
 
     // Global "за период" toggle (если используется)
-    let globalPeriod = null;
-    try{
-      const active = String(storeGetRaw('calc_period_active_' + id) || '0') === '1';
-      if (active){
-        const raw = storeGetRaw('calc_period_' + id);
-        if (raw){
-          const obj = JSON.parse(raw);
-          if (obj && (obj.from || obj.to)){
-            globalPeriod = { from: obj.from || '', to: obj.to || '' };
+    let globalPeriod = explicitPaymentPeriod;
+    if (arguments.length < 3) {
+      try{
+        const active = String(storeGetRaw('calc_period_active_' + id) || '0') === '1';
+        if (active){
+          const raw = storeGetRaw('calc_period_' + id);
+          if (raw){
+            const obj = JSON.parse(raw);
+            if (obj && (obj.from || obj.to)) globalPeriod = { from: obj.from || '', to: obj.to || '' };
           }
         }
-      }
-    }catch(e){ /* ignore */ }
+      }catch(e){ /* ignore */ }
+    }
 
     function toMonthKeyISO(iso){
       // iso: YYYY-MM-DD
@@ -935,9 +937,11 @@
     return window.__penaltyProfiler;
   }
 
-  function calcPenaltyForObligation(ob, asOf, excludes, rates){
-    const profiler = ensurePenaltyProfiler();
-    const tTotal = penaltyNowMs();
+  function calcPenaltyForObligation(ob, asOf, excludes, rates, runtime){
+    const pureRuntime = runtime && runtime.pure === true;
+    const now = pureRuntime ? Date.now : penaltyNowMs;
+    const profiler = pureRuntime ? null : ensurePenaltyProfiler();
+    const tTotal = now();
     let dayLoopMs = 0;
     let excludedCheckMs = 0;
     let sumAppliedMs = 0;
@@ -947,7 +951,7 @@
     const asOfDay = startOfDay(asOf);
     if (asOfDay <= ob.dueDate) {
       if (profiler && typeof profiler.record === "function") {
-        const totalMsEarly = penaltyNowMs() - tTotal;
+        const totalMsEarly = now() - tTotal;
         profiler.record(ob && ob.key, toISODateString(asOfDay), totalMsEarly, { dayLoop: 0, rateLookup: 0, excludedCheck: 0, sumApplied: 0, penaltyCalc: 0, other: totalMsEarly, days: 0 });
       }
       return 0;
@@ -963,22 +967,22 @@
     const end = (asOfDay < hardLimit) ? asOfDay : hardLimit;
 
     while (day <= end){
-      const tLoop = penaltyNowMs();
-      const tExcl = penaltyNowMs();
+      const tLoop = now();
+      const tExcl = now();
       const excluded = isExcludedDay(day, excludes);
-      excludedCheckMs += penaltyNowMs() - tExcl;
+      excludedCheckMs += now() - tExcl;
       if (!excluded){
         overdueIndex += 1;
-        const tApplied = penaltyNowMs();
+        const tApplied = now();
         const applied = sumAppliedUpTo(ob, day);
-        sumAppliedMs += penaltyNowMs() - tApplied;
+        sumAppliedMs += now() - tApplied;
         const principal = Math.max(ob.amount - applied, 0);
 
         if (principal > 0.0000001 && overdueIndex > 30){
           const denom = (overdueIndex <= 90) ? 300 : 130;
-          const tRate = penaltyNowMs();
+          const tRate = now();
           const rawRate = rateOnDate(day, rates);
-          rateLookupMs += penaltyNowMs() - tRate;
+          rateLookupMs += now() - tRate;
           if (!Number.isFinite(rawRate)) {
             const err = makeRatesFatalError("MISSING_REQUIRED_RATE", "", {
               date: toISODateString(day),
@@ -986,7 +990,7 @@
             });
             logRatesFatal(err);
 
-            if (window.JKHCalcEngine && typeof window.JKHCalcEngine.onMissingRate === "function"){
+            if (!pureRuntime && hasBrowserWindow && window.JKHCalcEngine && typeof window.JKHCalcEngine.onMissingRate === "function"){
               window.JKHCalcEngine.onMissingRate({
                 date: toISODateString(day),
                 reason: "MISSING_REQUIRED_RATE"
@@ -998,17 +1002,17 @@
 
           // CRITICAL: применяем ограничение ставки до 01.01.2027 перед расчётом пени.
           const rate = capRateUntil2027(day, rawRate);
-          const tPen = penaltyNowMs();
+          const tPen = now();
           penalty += principal * (rate / 100) / denom;
-          penaltyCalcMs += penaltyNowMs() - tPen;
+          penaltyCalcMs += now() - tPen;
         }
       }
       day = addDays(day, 1);
       loopDays += 1;
-      dayLoopMs += penaltyNowMs() - tLoop;
+      dayLoopMs += now() - tLoop;
     }
     if (profiler && typeof profiler.record === "function") {
-      const totalMs = penaltyNowMs() - tTotal;
+      const totalMs = now() - tTotal;
       const measured = excludedCheckMs + sumAppliedMs + rateLookupMs + penaltyCalcMs;
       profiler.record(ob && ob.key, toISODateString(asOfDay), totalMs, {
         dayLoop: dayLoopMs,
@@ -1023,15 +1027,70 @@
     return penalty;
   }
 
+  function _isoOrEmpty(value){
+    const date = parseDateAnyToDate(value);
+    return date ? toISODateString(date) : "";
+  }
+
+  function buildBrowserFinancialInputs(abonentId){
+    const id = String(abonentId || getAbonentIdFromUrl());
+    const responsibility = getActiveResponsibilityRangeISO(id) || {};
+    const rates = loadRates(id).map(function(rate){ return { date: toISODateString(rate.from), value: rate.rate }; });
+    const exclusions = loadExcludes(id).map(function(item){ return { from: toISODateString(item.from), to: toISODateString(item.to) }; });
+    const freezeTo = getFreezeToISO(id);
+    const transfer = getTransferBalance(id);
+    let paymentPeriod = null;
+    try{
+      const active = String(storeGetRaw('calc_period_active_' + id) || '0') === '1';
+      if (active) {
+        const raw = storeGetRaw('calc_period_' + id);
+        const parsed = raw ? JSON.parse(raw) : null;
+        if (parsed && (parsed.from || parsed.to)) paymentPeriod = { from: parsed.from || '', to: parsed.to || '' };
+      }
+    }catch(e){}
+    return {
+      responsibility: { from: String(responsibility.from || ''), to: String(responsibility.to || '') },
+      rates: rates,
+      exclusions: exclusions,
+      freeze: freezeTo ? { to: freezeTo } : null,
+      transfer: transfer ? Object.assign({}, transfer) : null,
+      paymentPeriod: paymentPeriod
+    };
+  }
+
+  function normalizeFinancialInputs(financialInputs){
+    const source = financialInputs && typeof financialInputs === "object" ? financialInputs : {};
+    const responsibility = source.responsibility && typeof source.responsibility === "object" ? source.responsibility : {};
+    const rates = Array.isArray(source.rates) ? source.rates.map(function(rate){
+      return { from: parseDateAnyToDate(rate && (rate.date || rate.from)), rate: Number(String(rate && (rate.value ?? rate.rate ?? '')).replace(',', '.')) };
+    }).filter(function(rate){ return rate.from && Number.isFinite(rate.rate); }).sort(function(a,b){ return a.from - b.from; }) : [];
+    const exclusions = Array.isArray(source.exclusions) ? source.exclusions.map(function(item){
+      const from = parseDateAnyToDate(item && item.from);
+      const to = parseDateAnyToDate(item && item.to);
+      return from && to ? { from: startOfDay(from), to: new Date(to.getFullYear(), to.getMonth(), to.getDate(), 23,59,59,999) } : null;
+    }).filter(Boolean) : [];
+    const freezeTo = _isoOrEmpty(source.freeze && source.freeze.to);
+    const transfer = source.transfer && typeof source.transfer === "object" ? Object.assign({}, source.transfer) : null;
+    const paymentPeriod = source.paymentPeriod && typeof source.paymentPeriod === "object" ? { from: source.paymentPeriod.from || '', to: source.paymentPeriod.to || '' } : null;
+    return { responsibility: { from: String(responsibility.from || ''), to: String(responsibility.to || '') }, rates: rates, exclusions: exclusions, freezeTo: freezeTo, transfer: transfer, paymentPeriod: paymentPeriod };
+  }
+
   // --------- CORE TOTALS ----------
   function calcTotalsAsOfCore(rows, asOfDate, opts){
-    const abonentId = opts?.abonentId || getAbonentIdFromUrl();
-    const excludes = loadExcludes(abonentId);
-    const rates = loadRates(abonentId);
+    let effectiveOpts = opts || {};
+    let explicit = Object.prototype.hasOwnProperty.call(effectiveOpts, 'financialInputs');
+    const abonentId = effectiveOpts.abonentId || (explicit ? '' : getAbonentIdFromUrl());
+    if (!explicit) {
+      effectiveOpts = Object.assign({}, effectiveOpts, { financialInputs: buildBrowserFinancialInputs(abonentId) });
+      explicit = true;
+    }
+    const financial = normalizeFinancialInputs(effectiveOpts.financialInputs);
+    const excludes = financial.exclusions;
+    const rates = financial.rates;
 
     // ✅ FREEZE: если абонент "закрыт", пеня и итоги считаются только до freezeTo
     let asOfEff = asOfDate;
-    const freezeISO = getFreezeToISO(abonentId);
+    const freezeISO = financial.freezeTo;
     if (freezeISO){
       const fd = parseDateAnyToDate(freezeISO);
       if (fd) asOfEff = minDateObj(asOfEff, fd);
@@ -1041,7 +1100,7 @@
 
     let allowedYm = null;
     try{
-      const range = getActiveResponsibilityRangeISO(abonentId);
+      const range = financial.responsibility;
       if (range?.from){
         const ms = monthIter(range.from, range.to);
         allowedYm = new Set(ms.map(m => `${m.year}-${m.month}`));
@@ -1052,7 +1111,7 @@
     const asOfYm = `${asOfEff.getFullYear()}-${pad2(asOfEff.getMonth()+1)}`;
     const obligations = allObligations.filter(ob => String(ob.key || "") <= asOfYm);
 
-    const paymentsAll = buildPaymentEventsFromRows(rows, abonentId);
+    const paymentsAll = explicit ? buildPaymentEventsFromRows(rows, abonentId, financial.paymentPeriod) : buildPaymentEventsFromRows(rows, abonentId);
     // asOfDay computed above
     const payments = paymentsAll.filter(p => p && p.date && p.date.getTime() <= asOfDay.getTime());
     const advances = allocatePaymentsFIFO(obligations, payments);
@@ -1071,10 +1130,10 @@
       const principal = Math.max(ob.amount - applied, 0);
       principalTotal += principal;
 
-      penaltyTotal += calcPenaltyForObligation(ob, asOfEff, excludes, rates);
+      penaltyTotal += calcPenaltyForObligation(ob, asOfEff, excludes, rates, explicit ? { pure:true } : null);
     }
 
-    const applyAdvanceOffset = !!(opts && opts.applyAdvanceOffset);
+    const applyAdvanceOffset = !!effectiveOpts.applyAdvanceOffset;
     const principalAdj = applyAdvanceOffset ? r2(principalTotal - advanceUpTo) : r2(principalTotal);
 
     return { principalAdj, penaltyAccruedTotal: r2(penaltyTotal), advanceUpTo: r2(advanceUpTo) };
@@ -1082,12 +1141,17 @@
 
   // правило: переплата сначала гасит основной, потом пени
   function calcTotalsAsOfAdjusted(rows, asOfDate, opts){
-    const core = calcTotalsAsOfCore(rows, asOfDate, opts);
+    let effectiveOpts = opts || {};
+    if (!Object.prototype.hasOwnProperty.call(effectiveOpts, 'financialInputs')) {
+      const browserAbonentId = effectiveOpts.abonentId || getAbonentIdFromUrl();
+      effectiveOpts = Object.assign({}, effectiveOpts, { financialInputs: buildBrowserFinancialInputs(browserAbonentId) });
+    }
+    const core = calcTotalsAsOfCore(rows, asOfDate, effectiveOpts);
     let principal = core.principalAdj;              // может быть отрицательным (аванс)
     let penaltyDebt = core.penaltyAccruedTotal;
 
     // ✅ TRANSFER BALANCE: стартовый долг + стартовая пеня у нового владельца
-    const tb = getTransferBalance(opts?.abonentId || getAbonentIdFromUrl());
+    const tb = normalizeFinancialInputs(effectiveOpts.financialInputs).transfer;
     if (tb){
       const asOfISO = `${asOfDate.getFullYear()}-${pad2(asOfDate.getMonth()+1)}-${pad2(asOfDate.getDate())}`;
       if (asOfISO >= tb.startDate){
@@ -1096,7 +1160,7 @@
       }
     }
 
-    const allowNeg = !!(opts && opts.allowNegativePrincipal);
+    const allowNeg = !!effectiveOpts.allowNegativePrincipal;
 
     // CRITICAL: если образовался аванс (principal < 0), этот аванс должен сначала погасить пеню,
     // и только остаток остаётся авансом (отрицательным основным долгом).
@@ -1696,7 +1760,7 @@
   }
 
 
-  window.JKHCalcEngine = {
+  const api = {
     pad2, r2, toNum,
     parseDateAnyToDate,
     startOfDay,
@@ -1709,6 +1773,8 @@
     isExcludesFatalError,
     logExcludesFatal,
     loadRates,
+    buildBrowserFinancialInputs,
+    normalizeFinancialInputs,
     buildObligationsFromRows,
     buildPaymentEventsFromRows,
     allocatePaymentsFIFO,
@@ -1726,4 +1792,6 @@
     calculateFrozenDebt,
     getTransferredDebtOnDate,
   };
+  if (hasBrowserWindow) window.JKHCalcEngine = api;
+  if (typeof module === "object" && module.exports) module.exports = api;
 })();
