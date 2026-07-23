@@ -1,84 +1,507 @@
-# HANDOFF
+# HANDOFF — переход к серверному Full Recalc
 
-Date: 2026-07-08
+## 1. ПРОЕКТ
 
-## Current Task
+Проект:
 
-Stabilize the abonent card lifecycle:
+```text
+ПАПА ЖКХ
+```
 
-- make card snapshot freshness and dirty detection explicit;
-- prevent full recalc from starting only because the card was opened;
-- keep showing the last successful snapshot when data is dirty;
-- require a manual recalc unless a future task explicitly enables an allowed auto-flow.
-- stabilize manual card recalc after auto-recalc was disabled on open;
-- prevent index from showing false `fresh` without a valid snapshot and rows.
+Рабочая ветка:
 
-## Current Branch / Commits
+```text
+2307_pereschet_01
+```
 
-- Branch: `lab-card-ab-01`
-- Baseline HEAD at start of this task: `a628434 fix: persist fresh card status after auto recalc`
-- Current lifecycle baseline: `4240c92 fix: make card snapshot freshness explicit and update handoff`
-- Relevant earlier commit: `18773e1 fix: auto recalc abonent card when snapshot is not fresh`
+Текущий стабильный baseline:
 
-## What Was Discovered
+```text
+b5c4cf5baa4dc180a1bda185ae66c37cdcbd4690
+```
 
-- `index.html` and `abonent_card.html` are related but use different state surfaces:
-  - index reads `abonent_summary`;
-  - card opening reads `card_snapshot`.
-- A successful card recalc updating index/summary is expected behavior.
-- The root issue is not in `web/calc_engine.js`.
-- The problem is lifecycle/state handling: when snapshot/status is dirty or missing, the card must diagnose and display state, not immediately start heavy full recalc.
-- `temporary_court_period` and period report totals are separate from full summary and must not mark full summary fresh.
-- Manual card recalc can hit `PAYMENT_LEDGER_WRITE_BLOCKED` when autoaccrual proposed rows would overwrite existing positive accruals with zero accrual rows.
-- The concrete local block is `ZERO_ACCRUAL_OVERWRITE_BLOCKED` in `Data.writePaymentLedger`.
-- Index batch previously could complete a UID as `fresh` from summary status alone, without proving snapshot save/readback and non-empty `rowsById`.
+Среда:
 
-## What Was Fixed
+```text
+LOCAL / LAB
+```
 
-- Manual card recalc treats `ZERO_ACCRUAL_OVERWRITE_BLOCKED` as non-fatal: it does not overwrite the ledger, and continues full recalc using the existing ledger rows.
-- Other ledger write failures still return `PAYMENT_LEDGER_WRITE_BLOCKED`.
-- Index batch now uses the rows/snapshot pipeline before completing a UID as `fresh`.
-- `summaryBatchResultStatus` requires non-empty `rowsById` for `fresh`.
-- Backend `complete_uid` now downgrades `fresh` to `error` unless the client summary has valid totals and a fresh saved `card_snapshot` with non-empty `rowsById`.
+Ограничение:
 
-## Not Yet Resolved
+```text
+PROD НЕ ОТКРЫВАТЬ
+PROD НЕ ИЗМЕНЯТЬ
+PROD НЕ ДЕПЛОИТЬ
+```
 
-- LAB must confirm whether abonent `1009` has a legitimate data issue that makes autoaccrual propose zero accrual rows.
-- No formula, FIFO, transfer, merge, split, or `calc_engine.js` changes were made.
+---
 
-## Desired Behavior
+## 2. ЧТО УЖЕ РЕАЛИЗОВАНО
 
-- Fresh snapshot: show calculated totals, status "Итог актуален", no auto recalc.
-- Dirty snapshot: show the last saved totals, status "Требуется пересчёт. Показан последний сохранённый расчёт", no auto recalc.
-- Missing snapshot: show "Нет сохранённого расчёта. Нажмите 'Пересчитать'", no auto recalc.
-- Invalid/error snapshot: show error/diagnostic status, no infinite auto-recalc loop.
-- Manual full recalc continues through `fullRecalcForCurrentAbonent` / `Data.recalculateAbonentCard`, saves `card_snapshot` with readback, and updates `abonent_summary` for index.
+На странице Index реализован browser-side sequential batch Full Recalc.
 
-## What Not To Do
+Сценарий:
 
-- Do not change `web/calc_engine.js`.
-- Do not create a second calculation engine.
-- Do not change penalty formula, FIFO, transfer, merge, or split financial logic.
-- Do not clear old totals only because snapshot is dirty.
-- Do not run full recalc on every card open.
-- Do not mix `period_report_totals` / `temporary_court_period` with full summary freshness.
-- Do not run recalc for all abonents as part of this lifecycle fix.
+```text
+пользователь выбирает нерассчитанных абонентов
+→ Index последовательно запускает существующий JavaScript Full Recalc
+→ одновременно рассчитывается один UID
+→ результат сохраняется
+→ запускается следующий UID
+```
 
-## Next Step
+Добавлен wrapper:
 
-Manual LAB verification:
+```text
+Data.runPermanentFullRecalcForUid()
+```
 
-1. Open fresh abonent `1008` repeatedly and confirm full recalc does not start.
-2. Open dirty abonent `1008` or another dirty test abonent and confirm it shows stale saved totals plus manual recalc prompt, without auto start.
-3. Open abonent `1007` to verify existing period/full summary isolation still holds.
-4. Click `Пересчитать` manually and confirm snapshot is saved with readback, card status becomes fresh, and index shows fresh.
-5. Make a financial change and confirm the card becomes dirty while still showing the last saved calculation.
-6. For abonent `1009`, click manual `Пересчитать` from the card and confirm `PAYMENT_LEDGER_WRITE_BLOCKED` no longer aborts the card recalc when the detailed block is `ZERO_ACCRUAL_OVERWRITE_BLOCKED`.
-7. From index, recalc abonent `1009` and confirm it cannot become false `fresh` with missing snapshot or zero/empty rows.
+Он использует существующий расчётный путь:
 
-## Tools Note
+```text
+Data.recalculateAbonentCardWithRows()
+→ Data.recalculateAbonentCard()
+```
 
-- Graphify is configured; post-commit hook runs `graphify update .`.
-- Use Continue Chat/Plan for diagnostics and architecture analysis.
-- Use Agent mode only for explicit file modifications.
-- DeepSeek through Continue may print raw DSML `tool_calls`; for evidence-based audits, prefer Codex plus `rg`/grep and source verification.
+Отдельный расчётный алгоритм для Index не создавался.
+
+---
+
+## 3. ИСПРАВЛЁННАЯ ОШИБКА FALSE-FRESH
+
+Ранее browser batch сохранял summary как `fresh` до проверки ledger, rowsById и snapshot.
+
+Из-за этого абоненты с пустым ledger становились ложными `fresh`.
+
+Исправлено в commit:
+
+```text
+b5c4cf5baa4dc180a1bda185ae66c37cdcbd4690
+```
+
+Новый порядок:
+
+```text
+Full Recalc с saveSummary: false
+→ проверка ledger
+→ проверка rowsById
+→ сохранение snapshot
+→ snapshot readback
+→ сохранение summary
+→ проверка persisted summary
+→ complete_uid
+```
+
+Пустой ledger теперь даёт:
+
+```text
+LEDGER_ROWS_EMPTY
+```
+
+и не создаёт `fresh`.
+
+---
+
+## 4. LAB-ПРОВЕРКА BROWSER BATCH
+
+Подтверждено:
+
+```text
+последовательная очередь — PASS
+empty ledger skip — PASS
+false-fresh protection — PASS
+valid success — PASS
+Index update без F5 — PASS
+soft stop — PASS
+lock release — PASS
+beforeunload logic — PASS
+Card F5 — PASS
+temporary period/reset — PASS
+spravka_sud UID isolation — PASS
+```
+
+Не доказаны из-за отсутствия безопасных тестовых данных:
+
+```text
+manual → batch skipped_locked при реальной гонке
+batch → manual lock refusal при реальной гонке
+три успешных UID подряд с непустыми ledger
+нативное визуальное окно beforeunload
+```
+
+Это не подтверждённые ошибки, а непроверенные сценарии.
+
+---
+
+## 5. ПОДТВЕРЖДЁННАЯ ПРОБЛЕМА СКОРОСТИ
+
+Для абонента:
+
+```text
+ЛС 1038
+UID uid_mqmgnatj_dnj81p
+ledger rows: 229
+```
+
+полный browser batch занял:
+
+```text
+293 412 ms
+```
+
+Этап:
+
+```text
+buildRowsByIdFromLedgerForSnapshot
+```
+
+занял:
+
+```text
+289 467 ms
+```
+
+Причина:
+
+```text
+для 229 уникальных дат
+229 раз вызывается полный
+JKHCalcEngine.calcTotalsAsOfAdjusted(...)
+```
+
+Каждый вызов повторно:
+
+```text
+фильтрует обязательства;
+фильтрует платежи;
+распределяет FIFO;
+считает пени;
+обрабатывает финансовые правила.
+```
+
+Проблема является CPU-проблемой JavaScript, а не сетью или сервером.
+
+---
+
+## 6. ПРОАНАЛИЗИРОВАННЫЕ INCREMENTAL-ПУТИ
+
+В проекте уже найдены:
+
+```text
+experimentalBuildRowsByIdIncremental
+JKHCalcEngine.computeRowsStateIncremental
+experimentalBuildRowsByIdIncrementalV2
+JKHCalcEngine.computeRowsStateIncrementalV2
+```
+
+Но они не являются настоящим rolling-state решением.
+
+Они всё ещё для каждой даты повторно:
+
+```text
+фильтруют данные;
+копируют обязательства;
+выполняют FIFO;
+считают пени.
+```
+
+V2 является экспериментальным skeleton и делегирует итоговую работу V1.
+
+Простое включение существующих флагов не решит проблему.
+
+---
+
+## 7. ПРИНЯТОЕ СТРАТЕГИЧЕСКОЕ НАПРАВЛЕНИЕ
+
+Обсуждались два пути:
+
+### Вариант 1
+
+Продолжать оптимизировать только browser batch.
+
+### Вариант 2
+
+Перенести Full Recalc на сервер и сделать качественную конечную архитектуру.
+
+Принято направление:
+
+```text
+текущий browser batch оставить как стабильную Version 1;
+не удалять и не ломать;
+начать проектирование единого JavaScript Full Recalc Engine;
+движок должен запускаться и браузером, и Node server worker;
+не переписывать финансовые формулы на Python;
+после серверного перехода оптимизировать единый движок один раз.
+```
+
+Перенос на сервер решает:
+
+```text
+независимость от открытой вкладки;
+persistent jobs;
+восстановление после сбоя;
+серверные блокировки;
+массовые фоновые расчёты;
+единый источник результата.
+```
+
+Оптимизация rolling-state отдельно решает скорость.
+
+Перенос на сервер сам по себе не устранит медленный алгоритм, но создаст правильную основу для общей оптимизации.
+
+---
+
+## 8. ПРЕДЛАГАЕМАЯ КОНЕЧНАЯ АРХИТЕКТУРА
+
+```text
+Index / Card
+    ↓
+Flask API
+    ↓
+persistent recalculation job
+    ↓
+Node Full Recalc Worker
+    ↓
+единый JavaScript Calc Engine
+    ↓
+verified full result
+    ↓
+ledger + snapshot + summary
+```
+
+Index и карточка должны стать панелями запуска и отображения.
+
+Финансовые формулы должны остаться в одном JavaScript-движке.
+
+---
+
+## 9. ТЕКУЩАЯ ЗАДАЧА НОВОГО ЧАТА
+
+Подготовить для CODEX read-only задание:
+
+```text
+Архитектура единого environment-neutral JavaScript Full Recalc Engine,
+который можно запускать:
+
+1. в браузере;
+2. в Node server worker.
+```
+
+На первом этапе:
+
+```text
+CHANGES MADE: NONE
+```
+
+Нельзя сразу переносить код или создавать worker.
+
+Сначала требуется архитектурный анализ.
+
+---
+
+## 10. ЧТО ДОЛЖЕН УСТАНОВИТЬ CODEX
+
+CODEX должен определить:
+
+1. Какие части Full Recalc уже независимы от браузера.
+
+2. Какие части зависят от:
+
+```text
+window;
+document;
+DOM;
+localStorage;
+fetch;
+глобального current UID;
+runtime cache;
+UI карточки.
+```
+
+3. Полный текущий call graph:
+
+```text
+fullRecalcForCurrentAbonent
+recalculateAbonentCardWithRows
+recalculateAbonentCard
+calc_engine
+autoaccrual_engine
+ledger
+snapshot
+summary
+```
+
+4. Какие финансовые функции являются каноническими.
+
+5. Какие browser-зависимости нужно заменить явными адаптерами.
+
+6. Как должен выглядеть единый input contract:
+
+```text
+abonent;
+owner;
+UID;
+ledger;
+payments;
+tariffs;
+refinancing;
+exclusions;
+responsibility;
+freeze;
+transfer;
+versions;
+input hashes;
+calculation date.
+```
+
+7. Как должен выглядеть единый result object:
+
+```text
+ledger;
+rows;
+rowsById;
+snapshot;
+summary;
+totals;
+versions;
+metadata;
+diagnostics.
+```
+
+8. Как запускать тот же JS engine из Node без копирования формул.
+
+9. Нужен ли отдельный Node worker container.
+
+10. Как Flask будет создавать и контролировать persistent jobs.
+
+11. Как реализовать единый permanent lock:
+
+```text
+owner/namespace + canonical UID + permanent_full_recalc
+```
+
+12. Как выполнить атомарный verified result commit:
+
+```text
+ledger + snapshot + summary
+```
+
+13. Как сохранить temporary period отдельным и не смешать его с permanent Full Recalc.
+
+14. Как переводить ручную карточку на серверный сервис без резкого отключения старого пути.
+
+15. Как сравнивать browser OLD и server candidate в shadow mode.
+
+16. Какие файлы и Docker-компоненты будут затронуты.
+
+17. Какие миграции потребуются.
+
+18. Какой rollback будет возможен.
+
+19. Какие риски появятся для:
+
+```text
+карточки;
+Index;
+temporary period;
+spravka_sud;
+ledger;
+snapshot;
+summary;
+owner isolation.
+```
+
+---
+
+## 11. БЕЗОПАСНЫЙ ПОРЯДОК ПЕРЕХОДА
+
+Предлагаемые этапы:
+
+```text
+Phase 1
+Read-only architecture analysis.
+
+Phase 2
+Выделение environment-neutral JS engine без изменения рабочего пути.
+
+Phase 3
+Node shadow runner для одного UID без сохранения данных.
+
+Phase 4
+Строгое сравнение browser OLD и Node candidate.
+
+Phase 5
+Server-backed verified result commit.
+
+Phase 6
+Перевод ручного permanent Full Recalc карточки на единый сервис.
+
+Phase 7
+Persistent server batch worker.
+
+Phase 8
+Перевод Index на серверный запуск и polling.
+
+Phase 9
+Оптимизация общего buildRowsById/rolling-state алгоритма.
+
+Phase 10
+Полная LAB-регрессия и только затем отдельное решение по PROD.
+```
+
+На каждом этапе старый browser path должен сохраняться до доказательства эквивалентности.
+
+---
+
+## 12. ГЛАВНЫЕ ОГРАНИЧЕНИЯ
+
+Запрещено:
+
+```text
+переписывать финансовые формулы на Python;
+создавать второй независимый расчётный движок;
+сразу отключать browser path;
+сразу менять карточку;
+смешивать temporary и permanent;
+сохранять частичный результат как fresh;
+включать новый путь в PROD;
+менять формулы FIFO, пени, тарифов или округления.
+```
+
+---
+
+## 13. WORKFLOW
+
+Использовать Workflow Standard проекта «ПАПА ЖКХ».
+
+Сначала CODEX должен вернуть:
+
+```text
+CONFIRMED
+NOT PROVEN
+Root Cause
+First Divergence Point
+CURRENT CALL GRAPH
+BROWSER DEPENDENCIES
+CANONICAL ENGINE BOUNDARY
+INPUT CONTRACT
+OUTPUT CONTRACT
+NODE EXECUTION OPTIONS
+WORKER DESIGN
+ATOMIC COMMIT DESIGN
+MIGRATION PLAN
+ROLLBACK PLAN
+AFFECTED FILES
+REGRESSION RISKS
+IMPLEMENTATION PHASES
+CHANGES MADE: NONE
+PROD NOT TOUCHED
+```
+
+До анализа изменений кода не разрешать.
+
+---
+
+## 14. ПЕРВАЯ ФРАЗА В НОВОМ ЧАТЕ
+
+Продолжаем работу по хендофу. Подготовь единое задание CODEX на read-only архитектурный анализ выделения environment-neutral JavaScript Full Recalc Engine для запуска в браузере и Node server worker. Изменения кода пока запрещены.
