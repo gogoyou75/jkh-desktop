@@ -8,6 +8,9 @@ services:
       - "80:80"
     volumes:
       - ./web:/usr/share/nginx/html:ro
+      # Browser assets shared with the local Node shadow runner are served under
+      # /shared without duplicating their source into web/.
+      - ./shared:/usr/share/nginx/html/shared:ro
       - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
     depends_on:
       - api

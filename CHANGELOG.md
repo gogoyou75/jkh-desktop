@@ -1,5 +1,10 @@
 # CHANGELOG
 
+## LAB static Shadow Export dependency
+
+- Nginx now mounts the canonical `shared/` directory at `/shared` alongside `web/`, so the card can load `full_recalc_shadow_compare.js` without a duplicate browser copy.
+- Added a static asset contract test for the canonical source, card script URL, Nginx mount, and static root. Financial calculations, Shadow payload/diff contracts, Node runner, and persistence are unchanged.
+
 ## Phase 3 — no-write Node shadow runner
 
 - Added local `scripts/run_full_recalc_shadow.js`: it accepts an exported explicit input, runs the shared Core plus explicit `JKHCalcEngine`, emits PASS/BLOCKED/ERROR and never imports persistence or network code.
