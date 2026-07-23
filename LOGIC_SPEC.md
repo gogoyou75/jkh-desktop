@@ -43,6 +43,12 @@
 - Card opening remains readonly. Fresh snapshots can be displayed; dirty/missing/error/invalid states require an explicit recalculation action.
 - Period/report calculations are runtime-only unless a report is explicitly saved. They do not dirty the full `card_snapshot` or `abonent_summary`.
 
+### Index browser permanent batch
+
+- `Data.runPermanentFullRecalcForUid(uid)` is a wrapper around the canonical permanent full-summary/rows path. It does not implement formulas.
+- It saves and reads back the snapshot before the caller may mark the item fresh, then clears only the derived runtime cache for that UID.
+- The execution is strictly sequential and requires the Index tab to remain open; it must not be represented as a server-side calculation worker.
+
 ## Stage 16 - bulk-calc-verify
 
 - `POST /api/abonent_summary/bulk_calc_verify` accepts only an explicit `uids` list. It must not infer "all abonents" from an empty request.

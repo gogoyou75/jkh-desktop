@@ -370,6 +370,15 @@ let summaryBatchSelectedUids = {};
 let summaryBatchRunning = false;
 let summaryBatchStopRequested = false;
 let summaryBatchJobState = { jobId: null, timer: null, retries: 0, total: 0, mode: "summary" };
+const summaryBatchBeforeUnload = function(event){
+    event.preventDefault();
+    event.returnValue = "Массовый расчёт выполняется в браузере. Не закрывайте и не обновляйте страницу Index.";
+    return event.returnValue;
+};
+function setSummaryBatchUnloadProtection(active){
+    window.removeEventListener("beforeunload", summaryBatchBeforeUnload);
+    if (active) window.addEventListener("beforeunload", summaryBatchBeforeUnload);
+}
 let summaryBatchErrorsVisible = false;
 let summaryBatchProgressState = { jobId: null, total: 0, processed: 0, fresh: 0, error: 0, skipped: 0, errors: [], finished: false, paused: false };
 let summaryBatchPerfStats = [];
@@ -1541,7 +1550,9 @@ function initSorting() {
 function isSummaryBatchStatus(status){
     if (String(status || "").trim().toLowerCase() === "legacy") return false;
     const s = normalizeSummaryStatus(status);
-    return s === "dirty" || s === "missing" || s === "error" || s === "invalid";
+    // Index permanent batch v1 only initializes absent/failed calculations.
+    // A dirty result is a separate stale-recalc workflow and must not enter it.
+    return s === "missing" || s === "error" || s === "invalid";
 }
 
 function getSummaryBatchUid(row){
@@ -1780,6 +1791,8 @@ async function loadLatestSummaryBatchStatus(){
 }
 
 async function runSelectedSummaryBatch(options){
+    // Snapshot compatibility mode retains Data.recalculateAbonentCardWithRows(uid, ...).
+    // Permanent mode delegates that canonical path to Data.runPermanentFullRecalcForUid.
     const runOptions = options || {};
     const batchMode = String(runOptions.mode || "summary").toLowerCase() === "snapshot" ? "snapshot" : "summary";
     const progress = document.getElementById("summaryBatchProgress");
@@ -1790,9 +1803,9 @@ async function runSelectedSummaryBatch(options){
         alert("Batch job API недоступен: Data API не загружен.");
         return;
     }
-    if (typeof Data.recalculateAbonentCardWithRows !== "function" || typeof Data.buildCardSnapshotFromCurrentResult !== "function" || typeof Data.saveCardSnapshotAndWait !== "function") {
-        if (progress) progress.textContent = "Snapshot API unavailable: Data snapshot API is not loaded.";
-        alert("Snapshot API недоступен: Data snapshot API не загружен.");
+    if (typeof Data.runPermanentFullRecalcForUid !== "function" || (batchMode === "snapshot" && typeof Data.recalculateAbonentCardWithRows !== "function")) {
+        if (progress) progress.textContent = "Permanent Full Recalc API unavailable.";
+        alert("Постоянный Full Recalc API недоступен.");
         return;
     }
     let selected = Object.keys(summaryBatchSelectedUids).filter(function(uid){ return summaryBatchSelectedUids[uid]; });
@@ -1830,6 +1843,7 @@ async function runSelectedSummaryBatch(options){
     summaryBatchPerfStats = [];
     summaryBatchRunning = true;
     summaryBatchStopRequested = false;
+    setSummaryBatchUnloadProtection(true);
     updateSummaryBatchPanel();
     if (progress) progress.textContent = "Проверка выбранных UID на сервере: " + selected.length + "...";
 
@@ -1841,7 +1855,7 @@ async function runSelectedSummaryBatch(options){
             return;
         }
         resetSummaryBatchProgress();
-        const created = await Data.createAbonentSummaryRecalcBatchJob(selected, batchMode === "snapshot" ? "SNAPSHOT_BACKFILL" : "CLIENT_RECALC");
+        const created = await Data.createAbonentSummaryRecalcBatchJob(selected, batchMode === "snapshot" ? "SNAPSHOT_BACKFILL" : "INDEX_PERMANENT_FULL_RECALC");
         if (!created || !created.job_id) throw new Error("job_create_failed");
         summaryBatchJobState.jobId = created.job_id;
         summaryBatchJobState.total = Number(created.accepted || selected.length || 0);
@@ -1859,6 +1873,7 @@ async function runSelectedSummaryBatch(options){
         if (progress && detail) progress.textContent = String(progress.textContent || "") + detail;
         summaryBatchRunning = false;
         summaryBatchStopRequested = false;
+        setSummaryBatchUnloadProtection(false);
         summaryBatchJobState.jobId = null;
         summaryBatchJobState.total = 0;
         summaryBatchJobState.mode = "summary";
@@ -2138,8 +2153,8 @@ async function processClientSummaryBatchJob(jobId, totalAccepted, mode){
             let reason = "CLIENT_RECALC_FAILED";
             let summary = {};
             try {
-                result = await Data.recalculateAbonentCardWithRows(uid, {
-                    saveSummary: false,
+                result = await (batchMode === "snapshot" ? Data.recalculateAbonentCardWithRows : Data.runPermanentFullRecalcForUid)(uid, {
+                    saveSummary: true,
                     summaryScope: "full",
                     recalcMode: "FULL_SUMMARY_REBUILD",
                     mode: "FULL_SUMMARY_REBUILD",
@@ -2183,7 +2198,7 @@ async function processClientSummaryBatchJob(jobId, totalAccepted, mode){
             } else {
                 summary = { account_uid: uid, summary_status: "error", summary_reason: reason };
             }
-            if (status === "fresh") {
+            if (status === "fresh" && !(result && result.snapshotSave)) {
                 const snapshot = Data.buildCardSnapshotFromCurrentResult(uid, result, {
                     rowsById: result && result.rowsById
                 });
@@ -2280,6 +2295,7 @@ async function processClientSummaryBatchJob(jobId, totalAccepted, mode){
     } finally {
         summaryBatchRunning = false;
         summaryBatchStopRequested = false;
+        setSummaryBatchUnloadProtection(false);
         if (!pausedByOperator) {
             summaryBatchJobState.jobId = null;
             summaryBatchJobState.total = 0;

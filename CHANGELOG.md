@@ -61,3 +61,9 @@
 - Updated stale abonent summary rebuild assertions to the current readonly/report-period and explicit full-summary contracts.
 - Fixed Windows SQLite test teardown to close SQLAlchemy connections before deleting temporary database files.
 - No changes to `web/calc_engine.js`, penalty formula, FIFO, payment allocation, bulk verify endpoint behavior, or backend financial logic.
+
+## Index browser permanent recalculation batch
+
+- Index selected batch now calls `Data.runPermanentFullRecalcForUid()` sequentially; it reuses the existing permanent summary/ledger/rows path and persists the canonical snapshot before item completion.
+- The first version accepts only missing/error/invalid results. Fresh and dirty/stale results are not queued.
+- The batch is browser-bound: an active run installs a `beforeunload` warning and clears it when the run ends.

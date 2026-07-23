@@ -6886,6 +6886,44 @@
     });
   }
 
+  // Index batch entry point.  Keep the permanent calculation in the canonical
+  // card path above: this wrapper only owns the browser batch boundary
+  // (snapshot persistence, verification data and per-UID runtime cleanup).
+  async function runPermanentFullRecalcForUid(abonentOrId, options) {
+    var opts = options || {};
+    var result = null;
+    var uid = "";
+    try {
+      result = await recalculateAbonentCardWithRows(abonentOrId, Object.assign({}, opts, {
+        saveSummary: true,
+        summaryScope: "full",
+        recalcMode: SUMMARY_RECALC_MODE_FULL,
+        mode: SUMMARY_RECALC_MODE_FULL,
+        periodActive: false
+      }));
+      uid = String(result && result.uid || "").trim();
+      if (!result || result.ok !== true || String(result.summary_status || result.status || "").toLowerCase() !== "fresh") {
+        return Object.assign({}, result || {}, { ok: false, uid: uid, reason: String(result && (result.reason || result.summary_reason) || "CLIENT_RECALC_FAILED") });
+      }
+      if (!result.rowsById || typeof result.rowsById !== "object" || !Object.keys(result.rowsById).length) {
+        return Object.assign({}, result, { ok: false, reason: "ROWS_BY_ID_REQUIRED_FOR_FRESH" });
+      }
+      var snapshot = buildCardSnapshotFromCurrentResult(abonentOrId, result, { rowsById: result.rowsById });
+      if (!snapshot || String(snapshot.uid || "") !== uid) {
+        return Object.assign({}, result, { ok: false, reason: "SNAPSHOT_BUILD_FAILED" });
+      }
+      var saved = await saveCardSnapshotAndWait(abonentOrId, snapshot, { runId: opts.runId || opts.recalcRunId || "" });
+      if (!saved || saved.ok !== true || saved.serverOk !== true || saved.serverReadbackOk !== true) {
+        return Object.assign({}, result, { ok: false, reason: String(saved && saved.reason || "CARD_SNAPSHOT_SAVE_FAILED"), snapshotSave: saved || null });
+      }
+      return Object.assign({}, result, { ok: true, snapshot: snapshot, snapshotSave: saved });
+    } finally {
+      // Do not remove server-backed ledger/snapshot/summary.  Only discard the
+      // per-page derived cache so UID A can never be reused for UID B.
+      try { if (uid) invalidateRuntimeCache(uid); } catch (eCleanup) {}
+    }
+  }
+
 
 
   // ============================================================
@@ -6955,6 +6993,7 @@
     recalcAbonentSummaryExplicit: recalcAbonentSummaryExplicit,
     recalculateAbonentCard: recalculateAbonentCard,
     recalculateAbonentCardWithRows: recalculateAbonentCardWithRows,
+    runPermanentFullRecalcForUid: runPermanentFullRecalcForUid,
     beginRecalcUidLock: beginRecalcUidLock,
     finishRecalcUidLock: finishRecalcUidLock,
     releaseRecalcUidLockOnUnload: releaseRecalcUidLockOnUnload,

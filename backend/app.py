@@ -2464,8 +2464,26 @@ def _recalc_batch_create_job(owner_id: str, user_id: str, raw_uids, reason: str)
         .all()
     )
     active_uids = {_norm_text(row[0]) for row in active_uid_rows if _norm_text(row[0])}
-    accepted = [uid for uid in requested if uid in targets_by_uid and uid not in active_uids]
-    skipped = len(requested) - len(accepted)
+    # The browser permanent-full-recalc batch is intentionally first-pass only.
+    # Browser input is never trusted: owner/UID existence is checked here and a
+    # valid fresh summary is never put back into its queue.
+    permanent_first_pass = reason_norm == "INDEX_PERMANENT_FULL_RECALC"
+    accepted = []
+    skipped = 0
+    for uid in requested:
+        if uid not in targets_by_uid or uid in active_uids:
+            skipped += 1
+            continue
+        if permanent_first_pass:
+            row = AbonentSummary.query.filter_by(owner_id=owner_id, account_uid=uid).first()
+            summary = _summary_from_row_or_missing(row, targets_by_uid[uid])
+            status = _summary_status_from_payload(summary)
+            # fresh and dirty/stale results are out of scope for v1.  Missing
+            # and error results remain eligible for the permanent card path.
+            if status not in {"missing", "error", "invalid"}:
+                skipped += 1
+                continue
+        accepted.append(uid)
     job = RecalcBatchJob(owner_id=owner_id, requested_by=user_id, reason=reason_norm, status="queued", total_count=len(accepted), skipped_count=skipped)
     db.session.add(job)
     db.session.flush()

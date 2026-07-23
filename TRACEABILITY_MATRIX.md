@@ -19,6 +19,7 @@
 | Index reads only `abonent_summary` | LOGIC_SPEC Stage 16 | web/index.html / backend/app.py | OK | `index.html` does not load calculation scripts or read ledgers on open; GET `/api/abonents` remains readonly. |
 | Input versions and `input_hash` invalidate derived caches | LOGIC_SPEC Stage 16 | web/data.js / backend/app.py | PARTIAL | Frontend computes component versions and persists metadata; backend stores it without introducing a second calculation engine. |
 | One active recalc per UID | LOGIC_SPEC Stage 16 | backend/app.py / web/data.js | OK | `/api/recalc_lock/<uid>/begin` returns `already_running`; explicit recalc releases the lock in `finally`. |
+| Index browser permanent batch | LOGIC_SPEC Index browser permanent batch | web/index.html / web/data.js / backend/app.py | PARTIAL | Sequential browser execution calls the canonical full path and rejects fresh/dirty input; interruption/resume remains governed by the existing job protocol. |
 | Period/report calculation does not dirty full summary | LOGIC_SPEC Stage 16 | web/data.js / web/abonent_card.html / backend/app.py | OK | Period summaries are skipped by the summary save endpoint and remain runtime-only unless explicitly persisted as a report. |
 
 ## Stage 16 - bulk-calc-verify
