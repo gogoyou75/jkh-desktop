@@ -13,6 +13,12 @@
 - `financialInputs` carries serialized responsibility, rates, exclusions, freeze, transfer and payment-period values. Its explicit calculation path does not call browser loaders.
 - The compatibility path calls `buildBrowserFinancialInputs()` before calculation, preserving current loader normalization and error behavior. Formula-bearing functions, FIFO, penalties and rounding are unchanged.
 
+## Phase 3 — no-write shadow comparison
+
+- Shadow input has schema version 1, `mode:"permanent_full_recalc"` and `executionMode:"shadow"`; it contains explicit financial inputs, canonical ledger, calculated rows and a Browser OLD reference result.
+- The local Node CLI validates input hash, calculates only through the shared Core/explicit engine, then returns `PASS` (0), `BLOCKED` (1), `ERROR` (2), or usage/configuration error (3). Timings, generated timestamps, run IDs, environment labels and memory metadata are ignored; financial fields are strict.
+- Browser export is diagnostic-only and fails closed for unknown/PROD environment. No persistence, backend API, worker, job or Node autoaccrual is part of this phase.
+
 ## Canonical payment-ledger empty-write boundary
 
 - `payments_<uid>` is the canonical financial ledger. `card_snapshot_<uid>` and `abonent_summary` are derived data and must never be used to reconstruct or silently replace it.

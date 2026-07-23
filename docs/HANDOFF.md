@@ -431,6 +431,8 @@ Phase 2B status: completed. The shared calculation call accepts explicit seriali
 Phase 3
 Node shadow runner для одного UID без сохранения данных.
 
+Status: implemented locally with no-write JSON export/CLI comparison. Browser OLD remains the canonical writer; manual LAB shadow run is NOT EXECUTED because a safe UID was not proven. No backend API, worker, job, persistence change or Node autoaccrual was added.
+
 Phase 4
 Строгое сравнение browser OLD и Node candidate.
 

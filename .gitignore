@@ -22,3 +22,5 @@ Thumbs.db
 *.sql
 /root/jkh_backups/
 graphify-out/
+shadow-inputs/
+shadow-reports/

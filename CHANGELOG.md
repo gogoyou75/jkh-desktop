@@ -1,5 +1,11 @@
 # CHANGELOG
 
+## Phase 3 — no-write Node shadow runner
+
+- Added local `scripts/run_full_recalc_shadow.js`: it accepts an exported explicit input, runs the shared Core plus explicit `JKHCalcEngine`, emits PASS/BLOCKED/ERROR and never imports persistence or network code.
+- Added strict normalized comparison, stable SHA-256 input/result hashes, anonymized fixtures and a guarded browser diagnostic exporter. Browser OLD remains the only writer.
+- Shadow inputs/reports are gitignored. Node autoaccrual, worker/container, server jobs, backend APIs and PROD changes were not created.
+
 ## Phase 2B — explicit financial inputs
 
 - `JKHCalcEngine.calcTotalsAsOfAdjusted()` now accepts `options.financialInputs`; responsibility, rates, exclusions, freeze, transfer and payment-period data are normalized from that explicit, serializable input rather than loaded during the calculation.
