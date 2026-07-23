@@ -6895,7 +6895,10 @@
     var uid = "";
     try {
       result = await recalculateAbonentCardWithRows(abonentOrId, Object.assign({}, opts, {
-        saveSummary: true,
+        // The browser batch has a stricter result contract than the card.
+        // Do not publish a fresh summary until rows and the saved snapshot have
+        // both been verified below.
+        saveSummary: false,
         summaryScope: "full",
         recalcMode: SUMMARY_RECALC_MODE_FULL,
         mode: SUMMARY_RECALC_MODE_FULL,
@@ -6906,7 +6909,10 @@
         return Object.assign({}, result || {}, { ok: false, uid: uid, reason: String(result && (result.reason || result.summary_reason) || "CLIENT_RECALC_FAILED") });
       }
       if (!result.rowsById || typeof result.rowsById !== "object" || !Object.keys(result.rowsById).length) {
-        return Object.assign({}, result, { ok: false, reason: "ROWS_BY_ID_REQUIRED_FOR_FRESH" });
+        return Object.assign({}, result, {
+          ok: false,
+          reason: Number(result.ledgerRowsCount || 0) === 0 ? "LEDGER_ROWS_EMPTY" : "EMPTY_ROWS_BY_ID"
+        });
       }
       var snapshot = buildCardSnapshotFromCurrentResult(abonentOrId, result, { rowsById: result.rowsById });
       if (!snapshot || String(snapshot.uid || "") !== uid) {
@@ -6916,7 +6922,28 @@
       if (!saved || saved.ok !== true || saved.serverOk !== true || saved.serverReadbackOk !== true) {
         return Object.assign({}, result, { ok: false, reason: String(saved && saved.reason || "CARD_SNAPSHOT_SAVE_FAILED"), snapshotSave: saved || null });
       }
-      return Object.assign({}, result, { ok: true, snapshot: snapshot, snapshotSave: saved });
+      var summarySave = await saveAbonentSummaryAfterRecalc(abonentOrId, result.summary);
+      var persistedSummary = summarySave && summarySave.summary && typeof summarySave.summary === "object" ? summarySave.summary : null;
+      var persistedUid = String(persistedSummary && (persistedSummary.account_uid || persistedSummary.uid) || "").trim();
+      var persistedStatus = String(summarySave && (summarySave.summary_status || summarySave.status) || persistedSummary && (persistedSummary.summary_status || persistedSummary.status) || "").toLowerCase();
+      if (!summarySave || summarySave.ok !== true || !persistedSummary || persistedUid !== uid || persistedStatus !== "fresh") {
+        return Object.assign({}, result, {
+          ok: false,
+          reason: String(summarySave && (summarySave.summary_reason || summarySave.reason || summarySave.error) || "SUMMARY_SAVE_READBACK_FAILED"),
+          snapshot: snapshot,
+          snapshotSave: saved,
+          summarySave: summarySave || null
+        });
+      }
+      return Object.assign({}, result, {
+        ok: true,
+        summary: persistedSummary,
+        summary_status: "fresh",
+        status: "fresh",
+        snapshot: snapshot,
+        snapshotSave: saved,
+        summarySave: summarySave
+      });
     } finally {
       // Do not remove server-backed ledger/snapshot/summary.  Only discard the
       // per-page derived cache so UID A can never be reused for UID B.

@@ -2549,6 +2549,20 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         calc_after = hashlib.sha256(calc_engine_path.read_bytes()).hexdigest()
         self.assertEqual(calc_before, calc_after)
 
+    def test_browser_batch_defers_fresh_summary_until_snapshot_validation(self):
+        data_path = self._find_repo_file("web", "data.js")
+        self.assertIsNotNone(data_path)
+        source = data_path.read_text(encoding="utf-8")
+        wrapper = source.split("async function runPermanentFullRecalcForUid", 1)[1].split("// ============================================================", 1)[0]
+
+        self.assertIn("saveSummary: false", wrapper)
+        self.assertIn('reason: Number(result.ledgerRowsCount || 0) === 0 ? "LEDGER_ROWS_EMPTY" : "EMPTY_ROWS_BY_ID"', wrapper)
+        self.assertIn("var saved = await saveCardSnapshotAndWait", wrapper)
+        self.assertIn("var summarySave = await saveAbonentSummaryAfterRecalc", wrapper)
+        self.assertLess(wrapper.index("var saved = await saveCardSnapshotAndWait"), wrapper.index("var summarySave = await saveAbonentSummaryAfterRecalc"))
+        self.assertIn("persistedUid !== uid", wrapper)
+        self.assertIn('persistedStatus !== "fresh"', wrapper)
+
     def test_manual_card_recalc_rates_fatal_preserves_payment_rows_contract(self):
         payment_path = self._find_repo_file("web", "payment_table.js")
         card_path = self._find_repo_file("web", "abonent_card.html")

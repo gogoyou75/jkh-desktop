@@ -48,6 +48,7 @@
 - `Data.runPermanentFullRecalcForUid(uid)` is a wrapper around the canonical permanent full-summary/rows path. It does not implement formulas.
 - It saves and reads back the snapshot before the caller may mark the item fresh, then clears only the derived runtime cache for that UID.
 - The execution is strictly sequential and requires the Index tab to remain open; it must not be represented as a server-side calculation worker.
+- Browser batch must not save a fresh summary before validating permanent ledger, non-empty `rowsById`, snapshot UID, and snapshot readback. A failed validation leaves a missing result non-fresh.
 
 ## Stage 16 - bulk-calc-verify
 

@@ -67,3 +67,4 @@
 - Index selected batch now calls `Data.runPermanentFullRecalcForUid()` sequentially; it reuses the existing permanent summary/ledger/rows path and persists the canonical snapshot before item completion.
 - The first version accepts only missing/error/invalid results. Fresh and dirty/stale results are not queued.
 - The batch is browser-bound: an active run installs a `beforeunload` warning and clears it when the run ends.
+- Fresh summary persistence is deferred until permanent ledger/rows, snapshot save, and snapshot readback succeed; an empty ledger/`rowsById` cannot convert `missing` to `fresh`.

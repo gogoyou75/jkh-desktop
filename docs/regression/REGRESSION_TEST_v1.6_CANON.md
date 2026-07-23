@@ -205,3 +205,7 @@ Manual verification after deployment of `de6468b` passed: the card displayed cal
 - импорт не в тот namespace  
 
 ✅ Только при полном прохождении всех пунктов версия считается допустимой.
+# Browser batch false-fresh regression
+
+- A missing UID with an empty ledger or empty `rowsById` must complete as non-fresh and must not persist `summary_status=fresh` / `summary_reason=OK`.
+- Browser batch may persist a fresh summary only after snapshot save and readback validation with the matching canonical UID.
