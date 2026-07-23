@@ -2,6 +2,12 @@
 
 ## Full Recalc and Temporary Period Calculation
 
+## Phase 2 — shared Core boundary
+
+- `web/full_recalc_core.js` is a pure rows-by-id orchestration boundary. It accepts an explicit `permanent_full_recalc` input and an injected totals calculator; it neither reads browser state nor persists a result.
+- The browser adapter in `web/data.js` preserves the existing as-of-date enumeration and calls the unchanged `window.JKHCalcEngine.calcTotalsAsOfAdjusted()` through that injected dependency.
+- This is not a second financial engine and is not a Node Worker. The browser path remains canonical; ledger, snapshot, summary, lock, false-fresh, temporary-period and UI contracts are unchanged.
+
 ## Canonical payment-ledger empty-write boundary
 
 - `payments_<uid>` is the canonical financial ledger. `card_snapshot_<uid>` and `abonent_summary` are derived data and must never be used to reconstruct or silently replace it.

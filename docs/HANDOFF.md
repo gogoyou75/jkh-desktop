@@ -424,6 +424,8 @@ Read-only architecture analysis.
 Phase 2
 Выделение environment-neutral JS engine без изменения рабочего пути.
 
+Status: completed for the safe first slice. `web/full_recalc_core.js` owns pure permanent rows-by-id orchestration and receives the unchanged browser totals calculator by injection. Browser Full Recalc and Batch V1 remain primary; persistence and temporary mode are unchanged. Node Worker is not created. Next phase remains a no-write Node shadow runner, subject to separate authorization.
+
 Phase 3
 Node shadow runner для одного UID без сохранения данных.
 
@@ -504,4 +506,4 @@ PROD NOT TOUCHED
 
 ## 14. ПЕРВАЯ ФРАЗА В НОВОМ ЧАТЕ
 
-Продолжаем работу по хендофу. Подготовь единое задание CODEX на read-only архитектурный анализ выделения environment-neutral JavaScript Full Recalc Engine для запуска в браузере и Node server worker. Изменения кода пока запрещены.
+Продолжаем работу по хендофу. Подготовь единое задание CODEX на Phase 3: Node shadow runner для одного LAB UID без persistence и со строгим сравнением Browser OLD против общего JavaScript Core. PROD не открывать и не затрагивать.

@@ -1,5 +1,12 @@
 # CHANGELOG
 
+## Phase 2 — environment-neutral Full Recalc Core
+
+- Added `web/full_recalc_core.js`: a pure, dependency-injected rows-by-id Core with no persistence, transport, UI, browser-cache, or browser-data reads.
+- The existing browser `JKHCalcEngine.calcTotalsAsOfAdjusted()` remains the only financial calculator. `data.js` now supplies it to the Core as an explicit adapter dependency; FIFO, penalties, rates, exclusions, responsibility, transfer, freeze, and rounding were not changed.
+- Browser Full Recalc and Browser Batch V1 retain their existing wrappers and snapshot → summary persistence sequence. Temporary-period behavior is unchanged.
+- Node Worker, server jobs, migrations, Docker changes, and PROD changes were not created.
+
 ## Canonical payment-ledger write history
 
 - Added `payment_ledger_store_audit` metadata history for every canonical `payments_<uid>` POST/DELETE operation, including successful writes, blocked empty overwrites, invalid payloads, initial empty creation, and missing-key deletes.

@@ -5054,6 +5054,7 @@
       return value;
     }
     rowsStep("loop rows", function() {
+      var calculatedRows = [];
       for (var i = 0; i < filteredRows.length; i++) {
         var row = filteredRows[i] || {};
         var rowId = String(row.id || "").trim();
@@ -5066,7 +5067,32 @@
           asOfKeys[asOfKey] = true;
           asOfKeyCount += 1;
         }
-        var totals = getAdjustedTotalsCached(asOfKey, function() {
+        calculatedRows.push({ rowId: rowId, asOf: asOf, asOfKey: asOfKey });
+      }
+      if (!window.JKHFullRecalcCore || typeof window.JKHFullRecalcCore.buildRowsById !== "function") {
+        throw new Error("FULL_RECALC_CORE_UNAVAILABLE");
+      }
+      var coreResult = window.JKHFullRecalcCore.buildRowsById({
+        mode: "permanent_full_recalc",
+        ownerId: null,
+        namespace: null,
+        abonentId: abonentId,
+        uid: uid,
+        calculationDate: null,
+        responsibilityPeriod: period,
+        ledger: filteredRows,
+        tariffs: null,
+        rates: null,
+        exclusions: null,
+        transfer: null,
+        freeze: null,
+        versions: { ledgerVersion: ledgerVersion, inputHash: inputHash },
+        rounding: null,
+        diagnostics: null,
+        calculatedRows: calculatedRows
+      }, {
+        calculateTotals: function(asOfKey, asOf) {
+          return getAdjustedTotalsCached(asOfKey, function() {
           var calcStart = rowsNow();
           var computed = window.JKHCalcEngine.calcTotalsAsOfAdjusted(filteredRows, asOf, {
             abonentId: abonentId,
@@ -5078,19 +5104,13 @@
           calcAdjustedCalls += 1;
           if (calcMs > calcAdjustedMaxMs) calcAdjustedMaxMs = calcMs;
           return computed;
-        });
-        var principal = Number(totals && totals.principal);
-        var penalty = Number(totals && totals.penaltyDebt);
-        var total = Number(totals && totals.total);
-        if (!Number.isFinite(principal) || !Number.isFinite(penalty) || !Number.isFinite(total)) continue;
-        var assembleStart = rowsNow();
-        rowsById[rowId] = {
-          pay_main: principal,
-          pay_penalty: penalty,
-          total: total
-        };
-        assembleMs += Math.round(rowsNow() - assembleStart);
-      }
+          });
+        }
+      });
+      if (!coreResult || coreResult.ok !== true) return coreResult && coreResult.rowsById || {};
+      var assembleStart = rowsNow();
+      rowsById = coreResult.rowsById;
+      assembleMs += Math.round(rowsNow() - assembleStart);
       return rowsById;
     });
     rowProfileSteps.push({

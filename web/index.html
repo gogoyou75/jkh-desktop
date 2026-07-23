@@ -1898,18 +1898,28 @@ async function ensureCalcEngineForManualBatch(){
             return;
         }
 
-        const script = document.createElement("script");
-        script.src = "calc_engine.js";
-        script.async = false;
-        script.dataset.indexLazyCalcEngine = "1";
-        script.onload = function(){
-            if (window.JKHCalcEngine) resolve(true);
-            else reject(new Error("CALC_ENGINE_UNAVAILABLE_AFTER_LOAD"));
-        };
-        script.onerror = function(){
-            reject(new Error("CALC_ENGINE_LOAD_FAILED"));
-        };
-        document.head.appendChild(script);
+        function loadScript(src, marker, errorCode, done){
+            const script = document.createElement("script");
+            script.src = src;
+            script.async = false;
+            script.dataset[marker] = "1";
+            script.onload = done;
+            script.onerror = function(){ reject(new Error(errorCode)); };
+            document.head.appendChild(script);
+        }
+        if (window.JKHFullRecalcCore) {
+            loadScript("calc_engine.js", "indexLazyCalcEngine", "CALC_ENGINE_LOAD_FAILED", function(){
+                if (window.JKHCalcEngine) resolve(true);
+                else reject(new Error("CALC_ENGINE_UNAVAILABLE_AFTER_LOAD"));
+            });
+            return;
+        }
+        loadScript("full_recalc_core.js", "indexLazyFullRecalcCore", "FULL_RECALC_CORE_LOAD_FAILED", function(){
+            loadScript("calc_engine.js", "indexLazyCalcEngine", "CALC_ENGINE_LOAD_FAILED", function(){
+                if (window.JKHCalcEngine) resolve(true);
+                else reject(new Error("CALC_ENGINE_UNAVAILABLE_AFTER_LOAD"));
+            });
+        });
     });
     return window.__indexCalcEngineLoadPromise;
 }
