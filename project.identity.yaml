@@ -1,0 +1,4 @@
+schema_version: "1.0"
+project_id: jkh-desktop
+display_name: "ЖКХ Desktop"
+repository_identity: "github.com/gogoyou75/jkh-desktop"
