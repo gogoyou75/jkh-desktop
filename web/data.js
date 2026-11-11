@@ -697,6 +697,10 @@
   }
 
   async function _serverStoreDelete(ownerId, key) {
+    if (key === KEY_DB) {
+      if (!window.JKHDbCas) return { ok: false, state: "unknown", error: "DB_VERSION_NOT_LOADED" };
+      return window.JKHDbCas.remove(ownerId);
+    }
     var res = await fetch("/api/store", {
       method: "DELETE",
       headers: { "Content-Type": "application/json" },
@@ -718,6 +722,10 @@
   }
 
   async function _serverStoreSet(ownerId, key, value, options) {
+    if (key === KEY_DB) {
+      if (!window.JKHDbCas) return { ok: false, state: "unknown", error: "DB_VERSION_NOT_LOADED" };
+      return window.JKHDbCas.write(ownerId, value);
+    }
     var opts = options || {};
     var valueText = String(value == null ? "" : value);
     if (_isCardSnapshotStorageKey(key)) {
@@ -765,6 +773,12 @@
   }
 
   async function _serverStoreGet(ownerId, key) {
+    if (key === KEY_DB) {
+      if (!window.JKHDbCas) return { ok: false, reason: "DB_VERSION_NOT_LOADED" };
+      var dbRead = await window.JKHDbCas.read(ownerId);
+      return { ok: dbRead.ok && dbRead.value !== null, missing: dbRead.ok && dbRead.value === null,
+        raw: dbRead.value, version: dbRead.version, key: key };
+    }
     var url = "/api/store?key=" + encodeURIComponent(key) + "&client_owner_hint=" + encodeURIComponent(ownerId);
     if (_isCardSnapshotStorageKey(key)) {
       try {
@@ -7127,7 +7141,12 @@
         throw new Error("JKHRemoteSync.uploadNow is not available");
       }
       var ok = await window.JKHRemoteSync.uploadNow();
-      if (ok !== true) throw new Error("SERVER_UPLOAD_FAILED");
+      if (ok !== true) {
+        var uploadError = new Error("SERVER_UPLOAD_FAILED");
+        uploadError.syncOutcome = typeof window.JKHRemoteSync.lastDbUpload === "function"
+          ? window.JKHRemoteSync.lastDbUpload() : null;
+        throw uploadError;
+      }
       return true;
     },
     ensurePremise: function (premiseObj) {

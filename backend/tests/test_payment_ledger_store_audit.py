@@ -135,6 +135,26 @@ class PaymentLedgerStoreAuditTest(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(self._audit_rows(), [])
 
+    def test_cas_and_payment_audit_coexist(self):
+        self._login(self.owner)
+        cas = self.client.post("/api/store", json={
+            "key": "abonents_db_v1", "value": '{"abonents":{}}', "expected_version": 0,
+        })
+        self.assertEqual(cas.status_code, 200)
+        self.assertEqual(cas.get_json()["version"], 1)
+        self.assertEqual(self._audit_rows(), [])
+
+        payment = self._post(json.dumps([{"id": "payment"}]))
+        self.assertEqual(payment.status_code, 200)
+        removed = self.client.delete("/api/store", json={"key": self.key, "source": "audit-test"})
+        self.assertEqual(removed.status_code, 200)
+        self.assertEqual([row.action for row in self._audit_rows()], ["POST", "DELETE"])
+
+        readback = self.client.get("/api/store?key=abonents_db_v1")
+        self.assertEqual(readback.status_code, 200)
+        self.assertEqual(readback.get_json()["version"], 1)
+        self.assertEqual(readback.get_json()["value"], '{"abonents":{}}')
+
     def test_admin_get_filters_uid_and_rejects_regular_user(self):
         self._post("[]")
         self._login(self.owner)

@@ -20,6 +20,7 @@ Thumbs.db
 .idea/
 .env
 *.sql
+!backend/migrations/008_kv_store_version.sql
 /root/jkh_backups/
 graphify-out/
 shadow-inputs/
