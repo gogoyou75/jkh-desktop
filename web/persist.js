@@ -30,6 +30,16 @@
   }
 
   async function postStore(ownerId, key, value) {
+    if (key === 'abonents_db_v1') {
+      if (!window.JKHDbCas) throw new Error('DB_VERSION_NOT_LOADED');
+      var cas = await window.JKHDbCas.write(ownerId, value);
+      if (!cas.ok) {
+        var casError = new Error(cas.error || 'DB_SAVE_FAILED');
+        casError.syncState = cas.state;
+        throw casError;
+      }
+      return cas;
+    }
     var res = await fetch('/api/store', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -131,8 +141,18 @@
       ensureStore();
 
       console.log('[persist][set] key=' + key + ' owner=' + owner);
-      JKHStore.setRaw(key, '', owner);
-      await postStore(owner, key, '');
+      if (key === 'abonents_db_v1') {
+        if (!window.JKHDbCas) throw new Error('DB_VERSION_NOT_LOADED');
+        var removed = await window.JKHDbCas.remove(owner);
+        if (!removed.ok) {
+          var removeError = new Error(removed.error || 'DB_DELETE_FAILED');
+          removeError.syncState = removed.state;
+          throw removeError;
+        }
+      } else {
+        JKHStore.setRaw(key, '', owner);
+        await postStore(owner, key, '');
+      }
 
       if (typeof JKHStore.removeRaw === 'function') JKHStore.removeRaw(key, owner);
       verifyLocal(key, '', owner);
