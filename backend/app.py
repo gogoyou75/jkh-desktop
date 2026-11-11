@@ -11,7 +11,7 @@ from datetime import datetime, date
 
 from flask import Flask, jsonify, request, session, Response
 from flask_sqlalchemy import SQLAlchemy
-from sqlalchemy import inspect as sa_inspect, text
+from sqlalchemy import inspect as sa_inspect, text, update
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from werkzeug.security import generate_password_hash, check_password_hash
 from openpyxl import load_workbook, Workbook
@@ -124,6 +124,7 @@ class KVStore(db.Model):
     owner = db.Column(db.String(128), nullable=False)
     k = db.Column(db.String(255), nullable=False)
     v = db.Column(db.Text, nullable=False)
+    version = db.Column(db.BigInteger, nullable=False, default=0, server_default=text("0"))
     updated_at = db.Column(
         db.DateTime,
         server_default=text("CURRENT_TIMESTAMP"),
@@ -5202,11 +5203,22 @@ def store_get():
                 ensure_ascii=False,
             ),
         )
-    if not row:
+    if not row or (key == "abonents_db_v1" and row.v == ""):
         _sync_log("load", owner_eff, server_owner=owner, client_owner_hint=client_owner_hint, key=key, status="not_found")
-        return jsonify(ok=False, error="not_found", value=None), 404
+        return jsonify(ok=False, error="not_found", value=None, **({"version": row.version if row else 0} if key == "abonents_db_v1" else {})), 404
     _sync_log("load", owner_eff, server_owner=owner, client_owner_hint=client_owner_hint, key=key, size=len(row.v or ""), status="ok")
-    return jsonify(ok=True, value=row.v, owner=owner_eff)
+    return jsonify(ok=True, value=row.v, owner=owner_eff, **({"version": row.version} if key == "abonents_db_v1" else {}))
+
+
+def _expected_db_version(data):
+    value = data.get("expected_version")
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0 or value >= 9223372036854775807:
+        return None
+    return value
+
+
+def _db_version_conflict():
+    return jsonify(ok=False, error="version_conflict"), 409
 
 
 @app.post("/api/store")
@@ -5231,6 +5243,26 @@ def store_set():
         return access_err
 
     owner_eff = _effective_owner_for_key(owner, key)
+    if key == "abonents_db_v1":
+        expected = _expected_db_version(data)
+        if expected is None:
+            return jsonify(ok=False, error="expected_version_required"), 428
+        result = db.session.execute(
+            update(KVStore).where(KVStore.owner == owner_eff, KVStore.k == key, KVStore.version == expected)
+            .values(v=value, version=KVStore.version + 1)
+        )
+        if result.rowcount == 1:
+            db.session.commit()
+            return jsonify(ok=True, owner=owner_eff, version=expected + 1)
+        db.session.rollback()
+        if expected == 0 and KVStore.query.filter_by(owner=owner_eff, k=key).first() is None:
+            try:
+                db.session.add(KVStore(owner=owner_eff, k=key, v=value, version=1))
+                db.session.commit()
+                return jsonify(ok=True, owner=owner_eff, version=1)
+            except IntegrityError:
+                db.session.rollback()
+        return _db_version_conflict()
     row = KVStore.query.filter_by(owner=owner_eff, k=key).first()
     ledger_uid = _canonical_payment_ledger_uid(key)
     if ledger_uid:
@@ -5299,6 +5331,21 @@ def store_delete():
         return access_err
 
     owner_eff = _effective_owner_for_key(owner, key)
+    if key == "abonents_db_v1":
+        expected = _expected_db_version(data)
+        if expected is None:
+            return jsonify(ok=False, error="expected_version_required"), 428
+        result = db.session.execute(
+            update(KVStore).where(KVStore.owner == owner_eff, KVStore.k == key, KVStore.version == expected)
+            .values(v="", version=KVStore.version + 1)
+        )
+        if result.rowcount == 1:
+            db.session.commit()
+            return jsonify(ok=True, deleted=True, version=expected + 1)
+        db.session.rollback()
+        if expected == 0 and KVStore.query.filter_by(owner=owner_eff, k=key).first() is None:
+            return jsonify(ok=True, deleted=False, version=0)
+        return _db_version_conflict()
     row = KVStore.query.filter_by(owner=owner_eff, k=key).first()
     request_id = uuid.uuid4().hex[:12]
     source_or_action = data.get("source") or data.get("action") or data.get("mode") or "store_delete"
@@ -5320,21 +5367,22 @@ def store_dump():
         return err
 
     rows_owner = db.session.execute(
-        text("SELECT k, v FROM kv_store WHERE owner=:owner ORDER BY k"),
+        text("SELECT k, v, version FROM kv_store WHERE owner=:owner ORDER BY k"),
         {"owner": owner},
     ).all()
     rows_global = db.session.execute(
         text(
-            "SELECT k, v FROM kv_store WHERE owner=:owner "
+            "SELECT k, v, version FROM kv_store WHERE owner=:owner "
             "AND k IN ('refinancing_rates_normal_v1','refinancing_rates_moratorium_v1') ORDER BY k"
         ),
         {"owner": GLOBAL_OWNER},
     ).all()
-    data = {r[0]: r[1] for r in rows_owner}
+    data = {r[0]: r[1] for r in rows_owner if r[0] != "abonents_db_v1" or r[1] != ""}
+    db_version = next((r[2] for r in rows_owner if r[0] == "abonents_db_v1"), 0)
     for r in rows_global:
         data[r[0]] = r[1]
     _sync_log("dump", owner, server_owner=owner, client_owner_hint=client_owner_hint, keys=len(data), status="ok")
-    return jsonify(ok=True, owner=owner, env_type=ENV_TYPE, data=data)
+    return jsonify(ok=True, owner=owner, env_type=ENV_TYPE, data=data, abonents_db_version=db_version)
 
 
 @app.get("/api/admin/session_debug")

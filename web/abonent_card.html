@@ -2380,7 +2380,35 @@ function openAbonentEdit() {
 
     document.getElementById("ae_uid").value = a.uid || "";
 
+    try {
+        const draft = JSON.parse(sessionStorage.getItem(__abonentEditDraftKey(id)) || 'null');
+        if (draft && draft.fields) {
+            Object.keys(draft.fields).forEach((fieldId) => {
+                const field = document.getElementById(fieldId);
+                if (field && !field.disabled) field.value = draft.fields[fieldId];
+            });
+            alert('Найден незавершённый черновик изменений. Сравните его со свежими данными сервера перед сохранением.');
+        }
+    } catch (e) {}
+
     document.getElementById("abonentEditModal").style.display = "flex";
+}
+
+function __abonentEditDraftKey(id) {
+    const owner = window.JKHStore && JKHStore.getOwnerId ? JKHStore.getOwnerId() : '';
+    const env = window.JKHStore && JKHStore.getEnvType ? JKHStore.getEnvType() : '';
+    return 'jkh_abonent_edit_draft::' + env + '::' + owner + '::' + String(id);
+}
+
+function __saveAbonentEditDraft(id) {
+    try {
+        const fields = {};
+        ['ae_ls', 'ae_last', 'ae_first', 'ae_mid', 'ae_square', 'ae_rooms', 'ae_share', 'ae_phone'].forEach((fieldId) => {
+            const field = document.getElementById(fieldId);
+            if (field) fields[fieldId] = field.value;
+        });
+        sessionStorage.setItem(__abonentEditDraftKey(id), JSON.stringify({ fields }));
+    } catch (e) {}
 }
 
 function closeAbonentEdit() {
@@ -2607,8 +2635,6 @@ async function saveAbonentEdit() {
         updated.regnum = activeRegnum;
     }
 
-    const __localSnapshot = { db: __deepCloneJSONSafe(getDb()) };
-
     try {
     if (activeRegnum) {
         const premisesDb = getPremisesDb();
@@ -2658,7 +2684,21 @@ async function saveAbonentEdit() {
 
     await Data.flushDbToServer();
 
+    const serverAreaState = await __checkEditedAreaOnServer(String(newId), activeRegnum, updated.square);
+    if (serverAreaState !== 'confirmed') {
+        __saveAbonentEditDraft(oldId);
+        if (isIdChanged) __saveAbonentEditDraft(newId);
+        alert(serverAreaState === 'conflict'
+            ? 'Серверная площадь отличается от введённой. Изменения оставлены в форме; обновите данные и проверьте правки других сотрудников.'
+            : 'Не удалось проверить площадь на сервере. Введённые изменения сохранены локально; повторное сохранение пока не выполняйте.');
+        return;
+    }
+
     closeAbonentEdit();
+    try {
+        sessionStorage.removeItem(__abonentEditDraftKey(oldId));
+        if (isIdChanged) sessionStorage.removeItem(__abonentEditDraftKey(newId));
+    } catch (e) {}
     fillAbonentCard();
 
     loadMoratoriumUI();
@@ -2669,8 +2709,47 @@ async function saveAbonentEdit() {
     if (activeRegnum) renderResponsibilityHistory(activeRegnum);
     } catch (e) {
         console.error(e);
-        alert('Ошибка сохранения на сервер. Локальные изменения будут откатаны.');
-        await __rollbackAfterFlushError(__localSnapshot, { reason: 'save_abonent_edit_flush_error', reload: true });
+        const outcome = e && e.syncOutcome;
+        if (outcome && outcome.state === 'partial') {
+            const areaState = await __checkEditedAreaOnServer(String(newId), activeRegnum, updated.square);
+            if (areaState !== 'confirmed') {
+                __saveAbonentEditDraft(oldId);
+                if (isIdChanged) __saveAbonentEditDraft(newId);
+            } else {
+                try {
+                    sessionStorage.removeItem(__abonentEditDraftKey(oldId));
+                    if (isIdChanged) sessionStorage.removeItem(__abonentEditDraftKey(newId));
+                } catch (eDraft) {}
+            }
+            alert(areaState === 'confirmed'
+                ? 'Площадь сохранена на сервере, но последующий ключ синхронизировать не удалось. Проверьте состояние синхронизации.'
+                : 'Синхронизация завершилась частично; состояние площади требует проверки. Введённые изменения оставлены в форме.');
+        } else if (outcome && outcome.state === 'conflict') {
+            __saveAbonentEditDraft(oldId);
+            if (isIdChanged) __saveAbonentEditDraft(newId);
+            alert('Другой сотрудник изменил базу. Ваши введённые значения оставлены в форме. Обновите данные и сравните изменения перед повторным сохранением.');
+        } else {
+            __saveAbonentEditDraft(oldId);
+            if (isIdChanged) __saveAbonentEditDraft(newId);
+            alert('Результат сохранения на сервере не подтверждён. Введённые значения оставлены в форме; не повторяйте сохранение до проверки серверных данных.');
+        }
+    }
+}
+
+async function __checkEditedAreaOnServer(abonentId, regnum, square) {
+    try {
+        const ownerId = window.JKHStore && JKHStore.getOwnerId();
+        const current = window.JKHDbCas && await window.JKHDbCas.read(ownerId);
+        if (!current || !current.ok || !current.value) return 'unknown';
+        const db = JSON.parse(current.value);
+        const abonent = db && db.abonents && db.abonents[abonentId];
+        const premise = regnum && db && db.premises && db.premises[regnum];
+        if (!abonent) return 'conflict';
+        if (String(abonent.square) !== String(square)) return 'conflict';
+        if (regnum && (!premise || String(premise.square) !== String(square))) return 'conflict';
+        return 'confirmed';
+    } catch (e) {
+        return 'unknown';
     }
 }
 

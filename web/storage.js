@@ -981,6 +981,64 @@
   var K_STATUS = "jkh_sync_status_v1";
   var K_LAST_SIG_DB = "jkh_sync_last_sig_db_v1";
   var K_LAST_SIG_ALL = "jkh_sync_last_sig_all_v1";
+  var __dbCasVersions = {};
+  var __lastSavedDbRaw = {};
+  function _dbCasScope(ownerId) {
+    return String(getEnvType() || "") + "|" + String(normalizeOwnerId(ownerId || _ownerId()));
+  }
+  function _dbCasVersion(ownerId) {
+    var key = _dbCasScope(ownerId);
+    return Object.prototype.hasOwnProperty.call(__dbCasVersions, key) ? __dbCasVersions[key] : null;
+  }
+  function _setDbCasVersion(ownerId, version) {
+    if (Number.isSafeInteger(version) && version >= 0) __dbCasVersions[_dbCasScope(ownerId)] = version;
+  }
+  async function _readDbCas(ownerId) {
+    var res = await _apiGet("/api/store?key=" + encodeURIComponent(KEY_DB) + "&client_owner_hint=" + encodeURIComponent(ownerId));
+    if ((res.status === 200 || res.status === 404) && res.data && Number.isSafeInteger(res.data.version)) {
+      return { ok: true, value: res.status === 404 ? null : res.data.value, version: res.data.version };
+    }
+    return { ok: false };
+  }
+  async function _writeDbCas(ownerId, raw, method) {
+    var expected = _dbCasVersion(ownerId);
+    if (expected === null) return { ok: false, state: "unknown", error: "DB_VERSION_NOT_LOADED" };
+    var body = { client_owner_hint: ownerId, key: KEY_DB, expected_version: expected };
+    if (method !== "DELETE") body.value = String(raw);
+    try {
+      var res = method === "DELETE"
+        ? await (async function () {
+            var response = await fetch("/api/store", { method: "DELETE", headers: { "Content-Type": "application/json" }, credentials: "include", body: JSON.stringify(body) });
+            var data = await response.json().catch(function () { return null; });
+            return { status: response.status, data: data };
+          })()
+        : await _apiPost("/api/store", body);
+      if (res.status === 409) return { ok: false, state: "conflict", error: "version_conflict" };
+      if (res.status >= 200 && res.status < 300 && res.data && res.data.ok === true &&
+          Number.isSafeInteger(res.data.version) &&
+          res.data.version === expected + (method === "DELETE" && res.data.deleted === false ? 0 : 1)) {
+        _setDbCasVersion(ownerId, res.data.version);
+        return { ok: true, state: "confirmed", version: res.data.version };
+      }
+      if (res.status === 428) return { ok: false, state: "conflict", error: "expected_version_required" };
+      return { ok: false, state: "failed", error: res.data && res.data.error || "HTTP " + res.status };
+    } catch (e) {
+      try {
+        var current = await _readDbCas(ownerId);
+        if (current.ok && current.version > expected && (method === "DELETE" ? current.value === null : current.value === String(raw))) {
+          _setDbCasVersion(ownerId, current.version);
+          return { ok: true, state: "confirmed", version: current.version, verifiedAfterNetworkError: true };
+        }
+      } catch (readError) {}
+      return { ok: false, state: "unknown", error: "SERVER_OUTCOME_UNKNOWN" };
+    }
+  }
+  window.JKHDbCas = {
+    version: _dbCasVersion,
+    write: function (ownerId, raw) { return _writeDbCas(ownerId, raw, "POST"); },
+    remove: function (ownerId) { return _writeDbCas(ownerId, "", "DELETE"); },
+    read: _readDbCas
+  };
 
   var SYNC_STATIC_KEYS = [
     "abonents_db_v1",
@@ -1119,10 +1177,13 @@
 }
 
   function _sigForDB(ownerId) {
-    var obj = window.JKHStore ? window.JKHStore.getJSON(KEY_DB, null, ownerId) : null;
-    var ab = (obj && obj.abonents) ? Object.keys(obj.abonents).length : 0;
-    var pr = (obj && obj.premises) ? Object.keys(obj.premises).length : 0;
-    return String(ab) + ":" + String(pr);
+    var raw = window.JKHStore ? String(window.JKHStore.getRaw(KEY_DB, ownerId) || "") : "";
+    var h1 = 2166136261, h2 = 2166136261;
+    for (var i = 0; i < raw.length; i++) {
+      h1 = Math.imul(h1 ^ raw.charCodeAt(i), 16777619);
+      h2 = Math.imul(h2 ^ raw.charCodeAt(raw.length - 1 - i), 16777619);
+    }
+    return "v2:" + raw.length + ":" + (h1 >>> 0) + ":" + (h2 >>> 0);
   }
 
   function _sigForALL(ownerId) {
@@ -1140,7 +1201,7 @@
       cnt++;
       sum += String(raw).length;
     }
-    return String(cnt) + ":" + String(sum);
+    return "v2:" + String(cnt) + ":" + String(sum) + ":" + _sigForDB(ownerId);
   }
 
   function _getLastSigKey(scopeNorm) {
@@ -1809,7 +1870,15 @@
   }
   }
 
-  async function upload(scope) {
+  var _uploadInFlight = null;
+  function upload(scope) {
+    if (_uploadInFlight) return _uploadInFlight;
+    _uploadInFlight = _uploadImpl(scope).finally(function () { _uploadInFlight = null; });
+    return _uploadInFlight;
+  }
+  async function _uploadImpl(scope) {
+    var outcome = { ok: false, state: "failed", dbSaved: false };
+    window.__JKH_LAST_DB_UPLOAD = outcome;
     if (!isOnlineMode()) {
       _setStatus({ lastAction: "Сохранение пропущено: OFFLINE режим", lastError: null });
       return false;
@@ -1836,8 +1905,11 @@
     var scopeNorm = (scope === "all") ? "all" : "db";
     var sig = (scopeNorm === "all") ? _sigForALL(ownerId) : _sigForDB(ownerId);
     var lastSig = _lsGet(_getLastSigKey(scopeNorm), "");
-    if (onlyIfChanged && lastSig && sig === lastSig) {
+    if (onlyIfChanged && lastSig && sig === lastSig && _dbCasVersion(ownerId) !== null &&
+        __lastSavedDbRaw[_dbCasScope(ownerId)] === _readLocalCompat(KEY_DB, ownerId)) {
       _setStatus({ lastAction: "Изменений нет — сохранение пропущено", lastError: null });
+      outcome.ok = true;
+      outcome.state = "unchanged";
       return true;
     }
 
@@ -1878,9 +1950,18 @@
           return false;
         }
 
-        var resSet = await _apiPost("/api/store", { client_owner_hint: ownerId, key: baseKey, value: raw });
-        if (!(resSet.okHttp && resSet.data && resSet.data.ok === true)) {
-          _setStatus({ lastAction: "Ошибка сохранения ключа " + baseKey, lastError: (resSet.data && resSet.data.error) ? resSet.data.error : ("HTTP " + resSet.status) });
+        var resSet = baseKey === KEY_DB
+          ? await _writeDbCas(ownerId, raw, "POST")
+          : await _apiPost("/api/store", { client_owner_hint: ownerId, key: baseKey, value: raw });
+        if (baseKey === KEY_DB && resSet.ok) {
+          outcome.dbSaved = true;
+          __lastSavedDbRaw[_dbCasScope(ownerId)] = raw;
+        }
+        if (baseKey === KEY_DB && !resSet.ok) outcome.state = resSet.state;
+        if (baseKey !== KEY_DB && !(resSet.okHttp && resSet.data && resSet.data.ok === true) && outcome.dbSaved) outcome.state = "partial";
+        if (!(baseKey === KEY_DB ? resSet.ok : (resSet.okHttp && resSet.data && resSet.data.ok === true))) {
+          delete __lastSavedDbRaw[_dbCasScope(ownerId)];
+          _setStatus({ lastAction: "Ошибка сохранения ключа " + baseKey, lastError: resSet.error || (resSet.data && resSet.data.error) || ("HTTP " + resSet.status) });
           console.warn("[JKH sync][save] owner=%s key=%s size=%s status=error", ownerId, baseKey, String(raw || "").length);
           return false;
         }
@@ -1888,9 +1969,13 @@
       }
 
       _lsSet(_getLastSigKey(scopeNorm), sig);
+      outcome.ok = true;
+      outcome.state = "confirmed";
       _setStatus({ lastSaveAt: _nowISO(), lastAction: "✅ Сохранено на сервер", lastError: null, ownerId: ownerId, loadSource: "server" });
       return true;
     } catch (e) {
+      delete __lastSavedDbRaw[_dbCasScope(ownerId)];
+      if (outcome.dbSaved) outcome.state = "partial";
       _setStatus({ lastAction: "Ошибка сохранения", lastError: String(e && e.message ? e.message : e) });
       return false;
     }
@@ -2104,6 +2189,11 @@
           _setStatus({ lastAction: "Ошибка загрузки", lastError: "INVALID_ABONENTS_DB_SCHEMA_FROM_SERVER" });
           return { ok: false, status: "invalid", serverStatus: "online", message: "INVALID_ABONENTS_DB_SCHEMA_FROM_SERVER" };
         }
+        delete __dbCasVersions[_dbCasScope(ownerId)];
+        delete __lastSavedDbRaw[_dbCasScope(ownerId)];
+        if (Number.isSafeInteger(resDump.data.abonents_db_version) && resDump.data.abonents_db_version >= 0) {
+          _setDbCasVersion(ownerId, resDump.data.abonents_db_version);
+        }
         var cacheWarning = replaced.cacheError ? _serverLoadCacheWarning(replaced.cacheError, {
           ownerId: ownerId,
           envType: responseEnv,
@@ -2262,11 +2352,15 @@
     readServerDumpRuntimeValue: _readServerDumpRuntimeValue,
     resetLocalProjectScope: function (ownerId) {
       var targetOwner = String(ownerId || _ownerId());
+      delete __dbCasVersions[_dbCasScope(targetOwner)];
+      delete __lastSavedDbRaw[_dbCasScope(targetOwner)];
       if (__serverDumpRuntime && String(__serverDumpRuntime.ownerId || "") === targetOwner) _clearServerDumpRuntime();
       var removed = _clearOwnerProjectScope(targetOwner);
       return { ok: true, ownerId: targetOwner, removed: removed };
     },
     resetAllLocalProjectScopes: function () {
+      __dbCasVersions = {};
+      __lastSavedDbRaw = {};
       _clearServerDumpRuntime();
       return { ok: true, removed: _clearAllProjectScopes() };
     }
@@ -2280,6 +2374,7 @@
     // public
     pingServer: pingServer,
     uploadNow: uploadNow,
+    lastDbUpload: function () { return window.__JKH_LAST_DB_UPLOAD || null; },
     downloadNow: downloadNow,
     applySettingsFromUI: applySettingsFromUI,
     getSettings: getSettings,
