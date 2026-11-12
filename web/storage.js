@@ -1918,6 +1918,12 @@
       for (var i = 0; i < keysToSave.length; i++) {
         var baseKey = keysToSave[i];
         var raw = _readLocalCompat(baseKey, ownerId);
+        // Older databases can contain an empty canonical payment-ledger placeholder.
+        // It is not a JSON array and must not be resent during an unrelated DB save.
+        if (/^payments_uid_[a-z0-9][a-z0-9_-]*$/i.test(baseKey) && raw === "") {
+          console.warn("[JKH sync][skip-empty-payment-ledger]", baseKey);
+          continue;
+        }
         if (String(baseKey || "").indexOf("tariffs_") === 0) {
           try {
             console.log("[diagnose][tariffs-storage]", {
