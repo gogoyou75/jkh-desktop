@@ -24,7 +24,7 @@ function response(data, status = 200) {
 }
 
 function server() {
-  return { value: JSON.stringify(initialDb), version: 1, posts: 0, failLater: false, loseResponse: false };
+  return { value: JSON.stringify(initialDb), version: 1, posts: 0, postKeys: [], extraData: {}, failLater: false, loseResponse: false };
 }
 
 function contextFor(state) {
@@ -36,13 +36,14 @@ function contextFor(state) {
     addEventListener: () => {}, dispatchEvent: () => {}, JKHBoot: { markReady: () => {} }
   };
   async function fetch(url, options = {}) {
-    if (String(url).startsWith('/api/store_dump')) return response({ ok: true, owner: 'owner1', env_type: 'LAB', data: { abonents_db_v1: state.value }, abonents_db_version: state.version });
+    if (String(url).startsWith('/api/store_dump')) return response({ ok: true, owner: 'owner1', env_type: 'LAB', data: Object.assign({ abonents_db_v1: state.value }, state.extraData), abonents_db_version: state.version });
     if (String(url).startsWith('/api/store?')) {
       if (state.readFail) throw new Error('read unavailable');
       return response({ ok: true, value: state.value, version: state.version });
     }
     if (url === '/api/store' && options.method === 'POST') {
       const body = JSON.parse(options.body);
+      state.postKeys.push(body.key);
       if (body.key === 'abonents_db_v1') {
         state.posts++;
         if (body.expected_version !== state.version) return response({ ok: false, error: 'version_conflict' }, 409);
@@ -50,6 +51,11 @@ function contextFor(state) {
         state.version++;
         if (state.loseResponse) { state.loseResponse = false; throw new Error('response lost'); }
         return response({ ok: true, version: state.version });
+      }
+      if (/^payments_uid_[a-z0-9][a-z0-9_-]*$/i.test(body.key)) {
+        let ledger;
+        try { ledger = JSON.parse(body.value); } catch (_) { return response({ ok: false, error: 'payment_ledger_value_must_be_json_array' }, 422); }
+        if (!Array.isArray(ledger)) return response({ ok: false, error: 'payment_ledger_value_must_be_json_array' }, 422);
       }
       if (state.failLater && body.key === 'abonent_notes_v1') return response({ ok: false, error: 'later_key_failed' }, 500);
       return response({ ok: true });
@@ -92,6 +98,20 @@ async function loaded(state) {
   assert.strictEqual(await context.window.JKHRemoteSync.uploadNow(), true);
   assert.strictEqual(state.posts, beforeAreaOnly + 1, 'area-only change must trigger POST');
   assert.strictEqual(JSON.parse(state.value).abonents['1006'].square, 46);
+
+  const legacyLedgerState = server();
+  const emptyLedgerKey = 'payments_uid_legacy';
+  const validLedgerKey = 'payments_uid_valid';
+  legacyLedgerState.extraData = { [emptyLedgerKey]: '', [validLedgerKey]: '[]' };
+  const legacyLedgerContext = await loaded(legacyLedgerState);
+  const legacyChanged = JSON.parse(legacyLedgerState.value);
+  legacyChanged.abonents['1006'].square = 47;
+  legacyChanged.premises.P1.square = 47;
+  legacyLedgerContext.window.JKHStore.setRaw('abonents_db_v1', JSON.stringify(legacyChanged));
+  assert.strictEqual(await legacyLedgerContext.window.JKHRemoteSync.uploadNow(), true);
+  assert.strictEqual(JSON.parse(legacyLedgerState.value).abonents['1006'].square, 47);
+  assert.strictEqual(legacyLedgerState.postKeys.includes(emptyLedgerKey), false, 'empty legacy ledger must not be resent');
+  assert.strictEqual(legacyLedgerState.postKeys.includes(validLedgerKey), true, 'valid ledger must still sync');
 
   const stale = await cas.write('owner1', JSON.stringify(modified));
   assert.strictEqual(stale.ok, true);
