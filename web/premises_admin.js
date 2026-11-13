@@ -889,22 +889,13 @@ window.PremisesAdmin = (function () {
         if (!oid || oid === 'guest' || oid === 'ALL') throw new Error('SERVER_UPLOAD_FAILED');
         const raw = JSON.stringify(window.AbonentsDB || { premises: {}, links: [], abonents: {} });
 
-        let res = null;
-        try {
-            res = await fetch('/api/store', {
-                method: 'POST',
-                credentials: 'include',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ client_owner_hint: oid, key: KEY_DB, value: String(raw || '') })
-            });
-        } catch (e) {
-            throw new Error('SERVER_UPLOAD_FAILED');
+        if (!window.JKHDbCas || typeof window.JKHDbCas.write !== 'function') {
+            throw new Error('DB_VERSION_NOT_LOADED');
         }
-        if (!res || !res.ok) throw new Error('SERVER_UPLOAD_FAILED');
-
-        let data = null;
-        try { data = await res.json(); } catch (e) { data = null; }
-        if (!(data && data.ok === true)) throw new Error('SERVER_UPLOAD_FAILED');
+        const result = await window.JKHDbCas.write(oid, raw);
+        if (!result.ok) throw new Error(result.error === 'expected_version_required'
+            ? 'Сервер требует обновить вкладку перед сохранением.'
+            : result.error || 'SERVER_UPLOAD_FAILED');
     }
 
     async function flushDbToServerStrict(ownerId) {

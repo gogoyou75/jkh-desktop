@@ -291,8 +291,12 @@
     } catch (eDiagTariffServerRead) {}
   }
 
+  var __verifiedServerValues = {};
   function getItem(key, ownerId) {
-    var raw = _isProjectDataKey(key) ? _cacheGet(key, ownerId) : _lsGetDirect(k(key, ownerId));
+    var scoped = k(key, ownerId);
+    var raw = Object.prototype.hasOwnProperty.call(__verifiedServerValues, scoped)
+      ? __verifiedServerValues[scoped]
+      : (_isProjectDataKey(key) ? _cacheGet(key, ownerId) : _lsGetDirect(scoped));
     _diagnoseTariffServerRead(key, ownerId, raw);
     return raw;
   }
@@ -317,6 +321,7 @@
     if (_isProjectDataKey(key)) {
       try {
         _cacheSet(key, value, ownerId);
+        delete __verifiedServerValues[k(key, ownerId)];
       } catch (eCacheSet) {
         _logManualRecalcProjectRaw({ stage:"storage._cacheSet.exception", requestPayloadSize:String(value == null ? "" : value).length, storageKey:String(key || ""), owner:ownerId || getActiveOwnerId(), uid:_projectRawDiagnosticUid(key), exception:eCacheSet });
         throw eCacheSet;
@@ -335,7 +340,7 @@
     if (isGuestMode()) throw new Error("GUEST_READONLY");
     if (isAllMode()) throw new Error("ALLMODE_READONLY");
     if (isGlobalProjectKey(key) && !_isAdmin()) throw new Error("GLOBAL_ADMIN_ONLY");
-    if (_isProjectDataKey(key)) { _cacheRemove(key, ownerId); return; }
+    if (_isProjectDataKey(key)) { _cacheRemove(key, ownerId); delete __verifiedServerValues[k(key, ownerId)]; return; }
     _lsRemoveDirect(k(key, ownerId));
   }
 
@@ -983,6 +988,47 @@
   var K_LAST_SIG_ALL = "jkh_sync_last_sig_all_v1";
   var __dbCasVersions = {};
   var __lastSavedDbRaw = {};
+  var __financialCasVersions = {};
+  var __financialCasLoaded = {};
+  function _financialCasScope(ownerId, key) {
+    return _dbCasScope(ownerId) + "|" + String(key || "");
+  }
+  function _isVersionedFinancialKey(key) {
+    var value = String(key || "");
+    return /^payments_uid_[a-z0-9][a-z0-9_-]*$/i.test(value) || value === "jkh_financial_events_v1" ||
+      /^(jkh_freeze_to_v1:|jkh_frozen_debt_v1:|jkh_transfer_to_v1:|jkh_transfer_balance_v1:|exclude_periods_)/.test(value);
+  }
+  function _financialCasVersion(ownerId, key) {
+    var scope = _financialCasScope(ownerId, key);
+    return Object.prototype.hasOwnProperty.call(__financialCasVersions, scope) ? __financialCasVersions[scope] : (__financialCasLoaded[_dbCasScope(ownerId)] ? 0 : null);
+  }
+  function _setFinancialCasVersion(ownerId, key, version) {
+    if (Number.isSafeInteger(version) && version >= 0) __financialCasVersions[_financialCasScope(ownerId, key)] = version;
+  }
+  function _installVerifiedServerValues(ownerId, values, versions) {
+    var owner = normalizeOwnerId(ownerId);
+    Object.keys(values || {}).forEach(function(key) {
+      var value = values[key];
+      try {
+        if (value === null) _cacheRemove(key, owner);
+        else _cacheSet(key, value, owner);
+      } catch (e) {
+        console.warn("[JKH storage][verified-cache-quota]", { key: key, error: e });
+      }
+      __verifiedServerValues[k(key, owner)] = value;
+      if (key === KEY_DB) {
+        _setDbCasVersion(owner, versions[key]);
+        __lastSavedDbRaw[_dbCasScope(owner)] = value;
+      } else if (_isVersionedFinancialKey(key)) {
+        _setFinancialCasVersion(owner, key, versions[key]);
+      }
+    });
+  }
+  window.JKHFinancialCas = {
+    version: _financialCasVersion,
+    setVersion: _setFinancialCasVersion,
+    installVerified: _installVerifiedServerValues
+  };
   function _dbCasScope(ownerId) {
     return String(getEnvType() || "") + "|" + String(normalizeOwnerId(ownerId || _ownerId()));
   }
@@ -1035,6 +1081,9 @@
   }
   window.JKHDbCas = {
     version: _dbCasVersion,
+    isVerifiedRaw: function(ownerId, raw) {
+      return _dbCasVersion(ownerId) !== null && __lastSavedDbRaw[_dbCasScope(ownerId)] === String(raw);
+    },
     write: function (ownerId, raw) { return _writeDbCas(ownerId, raw, "POST"); },
     remove: function (ownerId) { return _writeDbCas(ownerId, "", "DELETE"); },
     read: _readDbCas
@@ -1871,7 +1920,14 @@
   }
 
   var _uploadInFlight = null;
+  var _uploadRequiresRefresh = false;
+  function _blockUploadUntilRefresh() {
+    _uploadRequiresRefresh = true;
+    _stopTimer();
+    _setStatus({ lastAction: "Сохранение остановлено: обновите вкладку", lastError: "EXPECTED_VERSION_REQUIRED_REFRESH" });
+  }
   function upload(scope) {
+    if (_uploadRequiresRefresh) return Promise.resolve(false);
     if (_uploadInFlight) return _uploadInFlight;
     _uploadInFlight = _uploadImpl(scope).finally(function () { _uploadInFlight = null; });
     return _uploadInFlight;
@@ -1956,16 +2012,33 @@
           return false;
         }
 
+        var financialExpected = _isVersionedFinancialKey(baseKey) ? _financialCasVersion(ownerId, baseKey) : null;
+        if (_isVersionedFinancialKey(baseKey) && financialExpected === null) {
+          outcome.state = "unknown";
+          _setStatus({ lastAction: "Сохранение остановлено", lastError: "FINANCIAL_VERSION_NOT_LOADED" });
+          return false;
+        }
         var resSet = baseKey === KEY_DB
           ? await _writeDbCas(ownerId, raw, "POST")
-          : await _apiPost("/api/store", { client_owner_hint: ownerId, key: baseKey, value: raw });
+          : await _apiPost("/api/store", Object.assign({ client_owner_hint: ownerId, key: baseKey, value: raw },
+              financialExpected === null ? {} : { expected_version: financialExpected }));
+        if (financialExpected !== null && resSet.okHttp && resSet.data && resSet.data.ok === true &&
+            resSet.data.version === financialExpected + 1) {
+          _setFinancialCasVersion(ownerId, baseKey, resSet.data.version);
+        }
         if (baseKey === KEY_DB && resSet.ok) {
           outcome.dbSaved = true;
           __lastSavedDbRaw[_dbCasScope(ownerId)] = raw;
         }
         if (baseKey === KEY_DB && !resSet.ok) outcome.state = resSet.state;
+        if (resSet.status === 428 || resSet.error === "expected_version_required") {
+          outcome.state = "conflict";
+          _blockUploadUntilRefresh();
+          return false;
+        }
         if (baseKey !== KEY_DB && !(resSet.okHttp && resSet.data && resSet.data.ok === true) && outcome.dbSaved) outcome.state = "partial";
-        if (!(baseKey === KEY_DB ? resSet.ok : (resSet.okHttp && resSet.data && resSet.data.ok === true))) {
+        if (!(baseKey === KEY_DB ? resSet.ok : (resSet.okHttp && resSet.data && resSet.data.ok === true &&
+            (financialExpected === null || resSet.data.version === financialExpected + 1)))) {
           delete __lastSavedDbRaw[_dbCasScope(ownerId)];
           _setStatus({ lastAction: "Ошибка сохранения ключа " + baseKey, lastError: resSet.error || (resSet.data && resSet.data.error) || ("HTTP " + resSet.status) });
           console.warn("[JKH sync][save] owner=%s key=%s size=%s status=error", ownerId, baseKey, String(raw || "").length);
@@ -2016,6 +2089,7 @@
 
   function _startTimer() {
     _stopTimer();
+    if (_uploadRequiresRefresh) return;
 
     var s = getSettings();
     if (!s.enabled) {
@@ -2197,6 +2271,17 @@
         }
         delete __dbCasVersions[_dbCasScope(ownerId)];
         delete __lastSavedDbRaw[_dbCasScope(ownerId)];
+        Object.keys(__financialCasVersions).forEach(function(scope) {
+          if (scope.indexOf(_dbCasScope(ownerId) + "|") === 0) delete __financialCasVersions[scope];
+        });
+        Object.keys(__verifiedServerValues).forEach(function(scopedKey) {
+          if (scopedKey.indexOf(scopePrefixFor(ownerId)) === 0) delete __verifiedServerValues[scopedKey];
+        });
+        var dumpVersions = resDump.data.key_versions || {};
+        __financialCasLoaded[_dbCasScope(ownerId)] = !!(resDump.data.key_versions && typeof resDump.data.key_versions === "object");
+        Object.keys(dumpVersions).forEach(function(key) {
+          if (_isVersionedFinancialKey(key)) _setFinancialCasVersion(ownerId, key, dumpVersions[key]);
+        });
         if (Number.isSafeInteger(resDump.data.abonents_db_version) && resDump.data.abonents_db_version >= 0) {
           _setDbCasVersion(ownerId, resDump.data.abonents_db_version);
         }

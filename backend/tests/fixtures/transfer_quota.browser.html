@@ -1,0 +1,58 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Synthetic transfer quota check</title>
+<pre id="result">RUNNING</pre>
+<script>
+const rows = Array.from({ length: 227 }, (_, i) => ({
+  id: i + 1, year: 2001 + Math.floor(i / 12), month: i % 12 + 1,
+  accrued: 10, paid: i % 10 === 0 ? 5 : 0,
+  paid_date: i % 10 === 0 ? '2019-12-01' : ''
+}));
+const original = JSON.stringify(rows);
+const tariffs = [{ id: 'synthetic-fixed', type: 'fixed_month', active: true,
+  rates: [{ from: '2001-01-01', value: 10 }] }];
+const db = {
+  abonents: { '100': { uid: 'uid_synthetic_old', regnum: 'synthetic-80', calcStartDate: '2001-01-01' } },
+  premises: { 'synthetic-80': { square: 20 } },
+  links: [{ abonentId: '100', regnum: 'synthetic-80', dateFrom: '2001-01-01', dateTo: '2019-11-30' }]
+};
+let quotaReached = false;
+try {
+  for (let i = 0; i < 100; i++) localStorage.setItem('synthetic_quota_' + i, 'x'.repeat(256 * 1024));
+} catch (e) {
+  quotaReached = e.name === 'QuotaExceededError';
+}
+let writes = 0;
+window.JKH_DATA_READY = true;
+window.JKHStore = {
+  getOwnerId: () => 'synthetic-owner',
+  getRaw: key => key === 'tariffs_synthetic-owner' ? JSON.stringify(tariffs) : null,
+  getJSON: key => key === 'tariffs_synthetic-owner' ? tariffs : null,
+  setRaw: () => { writes++; localStorage.setItem('synthetic_blocked_write', 'x'); },
+  key: key => key
+};
+window.JKHStorage = { getActiveOwnerId: () => 'synthetic-owner' };
+window.Data = {
+  getDb: () => db,
+  readPaymentLedger: () => rows,
+  resolvePaymentLedgerKey: () => 'payments_uid_synthetic_old',
+  writePaymentLedger: () => { writes++; localStorage.setItem('synthetic_blocked_write', 'x'); },
+  writePaymentLedgerServerBacked: () => { writes++; localStorage.setItem('synthetic_blocked_write', 'x'); }
+};
+</script>
+<script src="../../../web/autoaccrual_engine.js"></script>
+<script>
+(async () => {
+  try {
+    const result = await window.JKHAutoAccrual.dryRunForAbonent('100');
+    if (!quotaReached || !result.ok || !result.dryRun || result.rows.length !== 227 ||
+        result.proposedRows.length !== 227 || JSON.stringify(rows) !== original || writes !== 0) {
+      throw new Error(JSON.stringify({ quotaReached, resultOk: result.ok, dryRun: result.dryRun,
+        before: result.rows.length, after: result.proposedRows.length, writes }));
+    }
+    document.getElementById('result').textContent = 'PASS: browser quota, 227 rows, zero local writes';
+  } catch (e) {
+    document.getElementById('result').textContent = 'FAIL: ' + e.message;
+  }
+})();
+</script>

@@ -61,7 +61,10 @@ class PaymentLedgerStoreAuditTest(unittest.TestCase):
 
     def _post(self, value, **extra):
         self._login(self.owner)
-        payload = {"key": self.key, "value": value, "source": "audit-test"}
+        with app_module.app.app_context():
+            row = app_module.KVStore.query.filter_by(owner=self.owner, k=self.key).first()
+            expected = row.version if row else 0
+        payload = {"key": self.key, "value": value, "source": "audit-test", "expected_version": expected}
         payload.update(extra)
         return self.client.post("/api/store", json=payload)
 
@@ -120,14 +123,14 @@ class PaymentLedgerStoreAuditTest(unittest.TestCase):
         self.assertEqual((row.old_rows_count, row.new_rows_count), (1, 0))
 
     def test_delete_existing_and_missing_are_audited(self):
-        self._seed(json.dumps([{"id": "old"}]))
+        self._seed("[]")
         self._login(self.owner)
-        existing = self.client.delete("/api/store", json={"key": self.key, "source": "audit-test"})
-        missing = self.client.delete("/api/store", json={"key": self.key, "source": "audit-test"})
+        existing = self.client.delete("/api/store", json={"key": self.key, "source": "audit-test", "expected_version": 0})
+        missing = self.client.delete("/api/store", json={"key": self.key, "source": "audit-test", "expected_version": 1})
         self.assertEqual((existing.status_code, missing.status_code), (200, 200))
         rows = self._audit_rows()
-        self.assertEqual((rows[0].action, rows[0].old_rows_count, rows[0].new_value_present), ("DELETE", 1, False))
-        self.assertEqual((rows[1].action, rows[1].guard_reason, rows[1].old_value_present), ("DELETE", "NOT_FOUND", False))
+        self.assertEqual((rows[0].action, rows[0].old_rows_count, rows[0].new_value_present), ("DELETE", 0, False))
+        self.assertEqual((rows[1].action, rows[1].guard_reason), ("DELETE", ""))
 
     def test_nonpayment_key_has_no_payment_ledger_audit(self):
         self._login(self.owner)
@@ -146,9 +149,9 @@ class PaymentLedgerStoreAuditTest(unittest.TestCase):
 
         payment = self._post(json.dumps([{"id": "payment"}]))
         self.assertEqual(payment.status_code, 200)
-        removed = self.client.delete("/api/store", json={"key": self.key, "source": "audit-test"})
-        self.assertEqual(removed.status_code, 200)
-        self.assertEqual([row.action for row in self._audit_rows()], ["POST", "DELETE"])
+        removed = self.client.delete("/api/store", json={"key": self.key, "source": "audit-test", "expected_version": 1})
+        self.assertEqual(removed.status_code, 409)
+        self.assertEqual([row.action for row in self._audit_rows()], ["POST"])
 
         readback = self.client.get("/api/store?key=abonents_db_v1")
         self.assertEqual(readback.status_code, 200)
@@ -176,7 +179,7 @@ class PaymentLedgerStoreAuditTest(unittest.TestCase):
         self._seed(original)
         self._login(self.owner)
         with app_module.app.app_context(), patch.object(app_module.db.session, "commit", side_effect=SQLAlchemyError("audit failure")):
-            response = self.client.post("/api/store", json={"key": self.key, "value": json.dumps([{"id": "new"}])})
+            response = self.client.post("/api/store", json={"key": self.key, "value": json.dumps([{"id": "new"}]), "expected_version": 0})
         self.assertEqual(response.status_code, 500)
         with app_module.app.app_context():
             current = app_module.KVStore.query.filter_by(owner=self.owner, k=self.key).first()

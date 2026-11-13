@@ -13,6 +13,7 @@ class _Row:
         self.owner = owner
         self.k = key
         self.v = value
+        self.version = 0
 
 
 class _Query:
@@ -30,6 +31,9 @@ class _Query:
                 return row
         return None
 
+    def with_for_update(self):
+        return self
+
 
 class _Session:
     def __init__(self, rows):
@@ -45,6 +49,9 @@ class _Session:
     def commit(self):
         self.commits += 1
 
+    def rollback(self):
+        pass
+
 
 class PaymentLedgerEmptyOverwriteGuardTest(unittest.TestCase):
     owner = "u_test"
@@ -58,7 +65,7 @@ class PaymentLedgerEmptyOverwriteGuardTest(unittest.TestCase):
         locks = [] if lock is None else [lock]
         lock_query = _Query(locks)
         user = type("User", (), {"id": self.owner, "role": "user"})()
-        payload = {"key": key, "value": incoming_value}
+        payload = {"key": key, "value": incoming_value, "expected_version": 0}
         if contract is not None:
             payload["payment_ledger_contract"] = contract
         db_stub = type("DB", (), {"session": session})()

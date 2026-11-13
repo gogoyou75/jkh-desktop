@@ -818,7 +818,7 @@ function findDraftRowByLs(draft, ls){
   const key = String(ls || '').trim();
   return draft.rows.find(r => String(r?.ls || '').trim() === key) || null;
 }
-function importPaymentsFromDraftForNewAbonent(ls, abonentObj){
+function importPaymentsFromDraftForNewAbonent(ls, abonentObj, staged){
   const draft = loadImportDraft();
   const row = findDraftRowByLs(draft, ls);
   if (!row) return { ok: true, imported: 0, reason: 'no_draft_row' };
@@ -827,7 +827,7 @@ function importPaymentsFromDraftForNewAbonent(ls, abonentObj){
   if (!pays.length) return { ok: true, imported: 0, reason: 'no_payments' };
 
   const uidForKey = String(abonentObj?.uid || '').trim();
-  const payArr = uidForKey ? loadPaymentsForUid(uidForKey) : [];
+  const payArr = staged ? [] : (uidForKey ? loadPaymentsForUid(uidForKey) : []);
   let idCounter = nextPaymentIdForArray(payArr);
   let addedPays = 0;
 
@@ -867,7 +867,7 @@ function importPaymentsFromDraftForNewAbonent(ls, abonentObj){
   }
 
   if (addedPays){
-    if (uidForKey) savePaymentsForUid(uidForKey, payArr);
+    if (uidForKey && !staged) savePaymentsForUid(uidForKey, payArr);
   }
 
   try {
@@ -902,7 +902,7 @@ function importPaymentsFromDraftForNewAbonent(ls, abonentObj){
     console.warn('[new_abonent] debts append error', e);
   }
 
-  return { ok: true, imported: addedPays, reason: 'ok' };
+  return { ok: true, imported: addedPays, reason: 'ok', rows: staged ? payArr : null };
 }
 
 /* =========================
@@ -1135,6 +1135,8 @@ async function createAbonent() {
 
     if (!Array.isArray(dbRoot.links)) dbRoot.links = [];
     const prevActive = activeLinkForRegnumLocal(dbRoot, regnum);
+    const isTransfer = !!(prevActive && __jkhTransferConfirmed && __transferCtx && __transferCtx.oldId);
+    const src = String(document.getElementById("na_src").value || "").trim();
 
     // если квартира занята — требуем явную передачу кнопкой
     if (prevActive && String(prevActive.abonentId || '').trim() && String(prevActive.abonentId || '').trim() !== String(ls).trim()){
@@ -1178,16 +1180,20 @@ async function createAbonent() {
     };
 
 
-    try {
-      if (window.Data && typeof window.Data.writeCanonicalExcludePeriods === 'function') {
-        window.Data.writeCanonicalExcludePeriods(String(ls), []);
-      } else if (window.JKHStore && typeof window.JKHStore.setRaw === 'function') {
-        window.JKHStore.setRaw('exclude_periods_' + String(ls), JSON.stringify([]));
-      }
-    } catch(e) {}
+    if (!isTransfer) {
+      try {
+        if (window.Data && typeof window.Data.writeCanonicalExcludePeriods === 'function') {
+          window.Data.writeCanonicalExcludePeriods(String(ls), []);
+        } else if (window.JKHStore && typeof window.JKHStore.setRaw === 'function') {
+          window.JKHStore.setRaw('exclude_periods_' + String(ls), JSON.stringify([]));
+        }
+      } catch(e) {}
+    }
 
     const newPaymentsKey = (window.Data && typeof window.Data.resolvePaymentLedgerKey === 'function') ? window.Data.resolvePaymentLedgerKey(String(ls)) : ('payments_' + String(uid || '').trim());
-    if (window.Data && typeof window.Data.createEmptyPaymentLedger === 'function') {
+    if (isTransfer) {
+      // The ledger is created together with the responsibility transaction.
+    } else if (window.Data && typeof window.Data.createEmptyPaymentLedger === 'function') {
       const createdLedger = window.Data.createEmptyPaymentLedger(String(ls));
       if (createdLedger === false) {
         window.AbonentsDB = dbSnapshotBeforeCreate;
@@ -1201,7 +1207,10 @@ async function createAbonent() {
     }
     try { console.log('[payment-key] create-empty', { abonentId: String(ls), uid: String(uid), key: newPaymentsKey, mode: 'uid' }); } catch(e) {}
 
-    if (prevActive && __jkhTransferConfirmed && __transferCtx && __transferCtx.oldId){
+    if (isTransfer){
+      const stagedImport = src === 'import_xls'
+        ? importPaymentsFromDraftForNewAbonent(String(ls), dbRoot.abonents[ls], true)
+        : null;
       if (!(window.Data && typeof window.Data.transferResponsibility === 'function')) {
         window.AbonentsDB = dbSnapshotBeforeCreate;
         setCreateStatus('Сервис передачи ответственности недоступен. Абонент не создан.');
@@ -1213,15 +1222,28 @@ async function createAbonent() {
         newAbonentId: String(ls),
         regnum: String(regnum),
         transferDate: String(respStart),
-        transferMode: String(__transferMode || 'NO_DEBT')
+        transferMode: String(__transferMode || 'NO_DEBT'),
+        initialRows: stagedImport ? (stagedImport.rows || []) : undefined
       });
 
       if (transferred !== true) {
         window.AbonentsDB = dbSnapshotBeforeCreate;
-        try { if (window.saveAbonentsDB) window.saveAbonentsDB(); } catch(e) {}
-        setCreateStatus('Передача ответственности не выполнена. Абонент не создан. Проверьте дату и расчёт frozen debt.');
+        setCreateStatus(window.__JKH_TRANSFER_OUTCOME_UNKNOWN
+          ? 'Результат передачи на сервере не определён. Обновите данные с сервера перед повтором.'
+          : 'Передача ответственности не выполнена. Абонент не создан. Проверьте дату и расчёт frozen debt.');
         return;
       }
+      if (src === 'import_xls') saveImportCreatedUid(String(window.AbonentsDB?.abonents?.[ls]?.uid || uid));
+      const transferReturn = safeReturnUrl(String(document.getElementById("na_return").value || "").trim());
+      if (isImportReturnScenario()) {
+        clearDraftNewAbonent();
+        setCreateStatus("Передача сохранена. Строка Excel восстановится после возврата в импорт.");
+        goBackToImport();
+        return;
+      }
+      clearDraftNewAbonent();
+      location.href = transferReturn || ("abonent_card.html?abonent=" + encodeURIComponent(ls));
+      return;
     } else {
       if (!(window.Data && typeof window.Data.linkAbonentToPremise === 'function')) {
         window.AbonentsDB = dbSnapshotBeforeCreate;
@@ -1232,7 +1254,6 @@ async function createAbonent() {
     }
 
     // ✅ если из импорта — переносим оплаты
-    const src = String(document.getElementById("na_src").value || "").trim();
     if (src === 'import_xls') {
       try { importPaymentsFromDraftForNewAbonent(String(ls), dbRoot.abonents[ls]); } catch (e) {}
     }
