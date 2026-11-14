@@ -24,7 +24,7 @@ function response(data, status = 200) {
 }
 
 function server() {
-  return { value: JSON.stringify(initialDb), version: 1, posts: 0, postKeys: [], extraData: {}, failLater: false, loseResponse: false };
+  return { value: JSON.stringify(initialDb), version: 1, keyVersions: {}, posts: 0, postKeys: [], extraData: {}, failLater: false, loseResponse: false };
 }
 
 function contextFor(state) {
@@ -36,7 +36,7 @@ function contextFor(state) {
     addEventListener: () => {}, dispatchEvent: () => {}, JKHBoot: { markReady: () => {} }
   };
   async function fetch(url, options = {}) {
-    if (String(url).startsWith('/api/store_dump')) return response({ ok: true, owner: 'owner1', env_type: 'LAB', data: Object.assign({ abonents_db_v1: state.value }, state.extraData), abonents_db_version: state.version });
+    if (String(url).startsWith('/api/store_dump')) return response({ ok: true, owner: 'owner1', env_type: 'LAB', data: Object.assign({ abonents_db_v1: state.value }, state.extraData), abonents_db_version: state.version, key_versions: { ...state.keyVersions } });
     if (String(url).startsWith('/api/store?')) {
       if (state.readFail) throw new Error('read unavailable');
       return response({ ok: true, value: state.value, version: state.version });
@@ -52,12 +52,19 @@ function contextFor(state) {
         if (state.loseResponse) { state.loseResponse = false; throw new Error('response lost'); }
         return response({ ok: true, version: state.version });
       }
+      const financial = /^payments_uid_[a-z0-9][a-z0-9_-]*$/i.test(body.key) || body.key === 'jkh_financial_events_v1' || /^(jkh_freeze_to_v1:|jkh_frozen_debt_v1:|jkh_transfer_to_v1:|jkh_transfer_balance_v1:|exclude_periods_)/.test(body.key);
+      if (financial && (!Number.isSafeInteger(body.expected_version) || body.expected_version < 0)) return response({ ok: false, error: 'expected_version_required' }, 428);
+      if (financial && body.expected_version !== (state.keyVersions[body.key] || 0)) return response({ ok: false, error: 'version_conflict' }, 409);
       if (/^payments_uid_[a-z0-9][a-z0-9_-]*$/i.test(body.key)) {
         let ledger;
         try { ledger = JSON.parse(body.value); } catch (_) { return response({ ok: false, error: 'payment_ledger_value_must_be_json_array' }, 422); }
         if (!Array.isArray(ledger)) return response({ ok: false, error: 'payment_ledger_value_must_be_json_array' }, 422);
       }
       if (state.failLater && body.key === 'abonent_notes_v1') return response({ ok: false, error: 'later_key_failed' }, 500);
+      if (financial) {
+        state.keyVersions[body.key] = body.expected_version + 1;
+        return response({ ok: true, version: state.keyVersions[body.key] });
+      }
       return response({ ok: true });
     }
     throw new Error('unexpected request: ' + url);
@@ -103,6 +110,7 @@ async function loaded(state) {
   const emptyLedgerKey = 'payments_uid_legacy';
   const validLedgerKey = 'payments_uid_valid';
   legacyLedgerState.extraData = { [emptyLedgerKey]: '', [validLedgerKey]: '[]' };
+  legacyLedgerState.keyVersions = { [emptyLedgerKey]: 1, [validLedgerKey]: 1 };
   const legacyLedgerContext = await loaded(legacyLedgerState);
   const legacyChanged = JSON.parse(legacyLedgerState.value);
   legacyChanged.abonents['1006'].square = 47;

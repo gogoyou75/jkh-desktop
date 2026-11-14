@@ -9,10 +9,11 @@ import app as app_module
 
 
 class _Row:
-    def __init__(self, owner, key, value):
+    def __init__(self, owner, key, value, version=1):
         self.owner = owner
         self.k = key
         self.v = value
+        self.version = version
 
 
 class _Query:
@@ -22,6 +23,9 @@ class _Query:
 
     def filter_by(self, **kwargs):
         self.filters = kwargs
+        return self
+
+    def with_for_update(self):
         return self
 
     def first(self):
@@ -36,13 +40,21 @@ class _Session:
         self.rows = rows
         self.added = []
         self.commits = 0
+        self._last_kv_state = self._kv_state()
+
+    def _kv_state(self):
+        return [(row.owner, row.k, row.v, row.version) for row in self.rows]
 
     def add(self, row):
         self.added.append(row)
-        self.rows.append(row)
+        if isinstance(row, app_module.KVStore):
+            self.rows.append(row)
 
     def commit(self):
-        self.commits += 1
+        current = self._kv_state()
+        if current != self._last_kv_state:
+            self.commits += 1
+            self._last_kv_state = current
 
 
 class PaymentLedgerEmptyOverwriteGuardTest(unittest.TestCase):
@@ -58,6 +70,8 @@ class PaymentLedgerEmptyOverwriteGuardTest(unittest.TestCase):
         lock_query = _Query(locks)
         user = type("User", (), {"id": self.owner, "role": "user"})()
         payload = {"key": key, "value": incoming_value}
+        if app_module._is_versioned_financial_key(key):
+            payload["expected_version"] = rows[0].version if rows else 0
         if contract is not None:
             payload["payment_ledger_contract"] = contract
         db_stub = type("DB", (), {"session": session})()

@@ -234,7 +234,11 @@
       throw makeLedgerJsonInvalidError(key, e);
     }
   }
-  function savePayments(abonentId, arr, ownerId){
+  async function savePayments(abonentId, arr, ownerId){
+    if (window.location && /^https?:$/.test(String(window.location.protocol || '')) &&
+        window.Data && typeof window.Data.writePaymentLedgerServerBacked === 'function') {
+      return await window.Data.writePaymentLedgerServerBacked(abonentId, arr || [], { eventType: 'AUTOACCRUAL_WRITE' });
+    }
     if (window.Data && typeof window.Data.writePaymentLedger === 'function') {
       return window.Data.writePaymentLedger(abonentId, arr || [], { eventType: 'AUTOACCRUAL_WRITE' });
     }
@@ -1014,13 +1018,13 @@
 
     if (res.changed){
       console.log('[autoaccrual][apply]', { id, len: rows.length });
-      const saved = savePayments(id, rows, ownerId);
-      if (saved === false){
+      const saved = await savePayments(id, rows, ownerId);
+      if (saved === false || (saved && typeof saved === 'object' && saved.ok !== true)){
         const block = window.__JKH_LAST_AUTOACCRUAL_BLOCK || null;
         return {
           ok:false,
           changed:true,
-          reason: block && block.reason ? block.reason : 'PAYMENT_LEDGER_WRITE_BLOCKED',
+          reason: saved && saved.reason || (block && block.reason ? block.reason : 'PAYMENT_LEDGER_WRITE_BLOCKED'),
           blocked: block || null,
           ls:id,
           rows: rows

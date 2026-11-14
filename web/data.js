@@ -193,6 +193,9 @@
     if (!overrideKey) return;
     __projectRawRuntimeOverrides[overrideKey] = String(value == null ? "" : value);
   }
+  function _clearProjectRawRuntimeOverride(key) {
+    delete __projectRawRuntimeOverrides[String(key || "")];
+  }
 
   function _projectRawDiagnosticUid(key) {
     var m = String(key || "").match(/^payments_(uid_[a-z0-9][a-z0-9_-]*)$/i);
@@ -745,7 +748,8 @@
       method: "POST",
       headers: { "Content-Type": "application/json" },
       credentials: "include",
-      body: JSON.stringify(Object.assign({ client_owner_hint: ownerId, key: key, value: valueText }, opts.paymentLedgerContract ? {
+      body: JSON.stringify(Object.assign({ client_owner_hint: ownerId, key: key, value: valueText },
+        Number.isSafeInteger(opts.expectedVersion) ? { expected_version: opts.expectedVersion } : {}, opts.paymentLedgerContract ? {
         payment_ledger_contract: opts.paymentLedgerContract
       } : {}))
     });
@@ -777,7 +781,9 @@
       if (!window.JKHDbCas) return { ok: false, reason: "DB_VERSION_NOT_LOADED" };
       var dbRead = await window.JKHDbCas.read(ownerId);
       return { ok: dbRead.ok && dbRead.value !== null, missing: dbRead.ok && dbRead.value === null,
-        raw: dbRead.value, version: dbRead.version, key: key };
+        raw: dbRead.value, version: dbRead.version, key: key,
+        status: dbRead.ok ? (dbRead.value === null ? 404 : 200) : undefined,
+        data: dbRead.ok ? { version: dbRead.version } : undefined };
     }
     var url = "/api/store?key=" + encodeURIComponent(key) + "&client_owner_hint=" + encodeURIComponent(ownerId);
     if (_isCardSnapshotStorageKey(key)) {
@@ -2656,15 +2662,19 @@
       };
     }
     var serverResult = null;
+    var expectedVersion = window.JKHFinancialCas && typeof window.JKHFinancialCas.version === "function"
+      ? window.JKHFinancialCas.version(_ownerId(), key) : null;
+    if (expectedVersion === null) return { ok:false, reason:"FINANCIAL_VERSION_NOT_LOADED", serverOk:false, localOk:false };
     try {
       serverResult = await _serverStoreSet(_ownerId(), key, payload, {
-        paymentLedgerContract: calculatedFinalEmptyContract
+        paymentLedgerContract: calculatedFinalEmptyContract,
+        expectedVersion: expectedVersion
       });
     } catch (eServerSet) {
       try { console.log("[manual-recalc][project-raw]", { stage:"writePaymentLedgerServerBacked.serverSet.exception", httpStatus:null, responseBody:null, exception:eServerSet, requestUrl:"/api/store", requestPayloadSize:payload.length, storageKey:key, owner:_ownerId(), uid:uid }); } catch(eServerSetLog) {}
       return { ok:false, reason:"SERVER_PERSIST_REQUIRED", serverOk:false, localOk:false, serverResult:null, exception:eServerSet };
     }
-    if (!(serverResult && serverResult.ok === true)) {
+    if (!(serverResult && serverResult.ok === true && serverResult.data && serverResult.data.version === expectedVersion + 1)) {
       try { console.log("[manual-recalc][project-raw]", { stage:"writePaymentLedgerServerBacked.serverSet.failed", httpStatus:serverResult && serverResult.status, responseBody:serverResult && (serverResult.data || serverResult.text), exception:null, requestUrl:"/api/store", requestPayloadSize:payload.length, storageKey:key, owner:_ownerId(), uid:uid }); } catch(eServerFailedLog) {}
       return { ok:false, reason:"SERVER_PERSIST_REQUIRED", serverOk:false, localOk:false, serverResult:serverResult || null };
     }
@@ -2679,6 +2689,8 @@
       try { console.log("[manual-recalc][project-raw]", { stage:"writePaymentLedgerServerBacked.serverReadback.failed", httpStatus:readback && readback.status, responseBody:readback && (readback.data || readback.text), exception:null, requestUrl:"/api/store", requestPayloadSize:payload.length, storageKey:key, owner:_ownerId(), uid:uid }); } catch(eReadbackFailedLog) {}
       return { ok:false, reason:"SERVER_PERSIST_REQUIRED", serverOk:true, serverReadbackOk:false, localOk:false, serverResult:serverResult, readback:readback || null };
     }
+    if (readback.data.version !== serverResult.data.version) return { ok:false, reason:"SERVER_READBACK_VERSION_MISMATCH", serverOk:true, serverReadbackOk:false };
+    window.JKHFinancialCas.setVersion(_ownerId(), key, serverResult.data.version);
     _setProjectRawRuntimeOverride(key, payload);
     var localOk = true;
     try {
@@ -7042,7 +7054,10 @@
     // local save -> upload to server. Throws on upload error.
     flushDbToServer: async function () {
       if (!this.ensureWriteOrExplain()) return false;
-      var saved = !!(window.saveAbonentsDB && window.saveAbonentsDB());
+      var currentRaw = JSON.stringify(window.AbonentsDB || {});
+      var dbAlreadyVerified = window.JKHDbCas && typeof window.JKHDbCas.isVerifiedRaw === "function" &&
+        window.JKHDbCas.isVerifiedRaw(_ownerId(), currentRaw);
+      var saved = dbAlreadyVerified || !!(window.saveAbonentsDB && window.saveAbonentsDB());
       if (!saved) throw new Error("LOCAL_SAVE_FAILED");
       if (!(window.JKHRemoteSync && typeof window.JKHRemoteSync.uploadNow === "function")) {
         throw new Error("JKHRemoteSync.uploadNow is not available");
@@ -7509,7 +7524,7 @@
     };
   }
 
-  function prepareDebtTransfer(oldAbonentId, newAbonentId, regnum, transferDate, transferMode){
+  function prepareDebtTransfer(oldAbonentId, newAbonentId, regnum, transferDate, transferMode, staged){
     if (!Data.ensureWriteOrExplain()) return false;
 
     try{
@@ -7528,6 +7543,18 @@
 
       var frozenDebt = null;
       var frozenKey = "jkh_frozen_debt_v1:" + oldId + ":" + freezeISO;
+      function writeTransferKey(key, value) {
+        if (staged) { staged.values[key] = value; return true; }
+        return _setProjectRaw(key, value);
+      }
+      function removeTransferKey(key) {
+        if (staged) { staged.values[key] = null; return true; }
+        return _removeProjectRaw(key);
+      }
+      function transferEvent(event) {
+        if (staged) { staged.event = event; return event; }
+        return recordFinancialEvent(event);
+      }
 
       // 1) В режиме WITH_DEBT долг старого должен быть рассчитан явно.
       if (mode === "WITH_DEBT"){
@@ -7561,23 +7588,23 @@
           __abortDebtTransfer("FROZEN_DEBT_CALC_FAILED", { key: frozenKey, reason: "CALCULATED_AT_MISMATCH", calculatedAt: frozenDebt.calculatedAt, freezeISO: freezeISO });
         }
 
-        _setProjectRaw(frozenKey, JSON.stringify({
+        writeTransferKey(frozenKey, JSON.stringify({
           success: true,
           principal: frozenDebt.principal,
           penalty: frozenDebt.penalty,
           calculatedAt: freezeISO
         }));
 
-        var frozenRaw = _getProjectRaw(frozenKey);
+        var frozenRaw = staged ? staged.values[frozenKey] : _getProjectRaw(frozenKey);
         frozenDebt = __validateFrozenDebt(__parseDebtJson(frozenRaw, "FROZEN_DEBT_JSON_INVALID", frozenKey), "FROZEN_DEBT_JSON_INVALID", frozenKey);
       }
 
       // 2) Установить дату заморозки расчёта у старого
-      _setProjectRaw("jkh_freeze_to_v1:" + oldId, freezeISO);
+      writeTransferKey("jkh_freeze_to_v1:" + oldId, freezeISO);
 
       // 3) Записать метаданные переноса
       if (mode === "WITH_DEBT"){
-        _setProjectRaw("jkh_transfer_to_v1:" + newId, JSON.stringify({
+        writeTransferKey("jkh_transfer_to_v1:" + newId, JSON.stringify({
           fromAbonentId: oldId,
           regnum: rn,
           transferDate: td,
@@ -7587,7 +7614,7 @@
 
         // 3a) КАНОН: transfer_balance для движка (по regnum)
         var transferBalanceKey = "jkh_transfer_balance_v1:" + newId + ":" + rn;
-        _setProjectRaw(transferBalanceKey, JSON.stringify({
+        writeTransferKey(transferBalanceKey, JSON.stringify({
           success: true,
           startDate: td,
           principal: frozenDebt.principal,
@@ -7597,8 +7624,8 @@
           mode: "WITH_DEBT"
         }));
 
-        __validateFrozenDebt(__parseDebtJson(_getProjectRaw(transferBalanceKey), "TRANSFER_BALANCE_JSON_INVALID", transferBalanceKey), "TRANSFER_BALANCE_JSON_INVALID", transferBalanceKey);
-        recordFinancialEvent({
+        __validateFrozenDebt(__parseDebtJson(staged ? staged.values[transferBalanceKey] : _getProjectRaw(transferBalanceKey), "TRANSFER_BALANCE_JSON_INVALID", transferBalanceKey), "TRANSFER_BALANCE_JSON_INVALID", transferBalanceKey);
+        transferEvent({
           type: "TRANSFER_WITH_DEBT",
           mode: "WITH_DEBT",
           sourceAbonentId: oldId,
@@ -7611,9 +7638,9 @@
         });
       } else {
         // NO_DEBT: снимаем возможные хвосты переноса на нового (на всякий случай)
-        try{ _removeProjectRaw("jkh_transfer_to_v1:" + newId); }catch(e){}
-        try{ _removeProjectRaw("jkh_transfer_balance_v1:" + newId + ":" + rn); }catch(e){}
-        recordFinancialEvent({
+        try{ removeTransferKey("jkh_transfer_to_v1:" + newId); }catch(e){}
+        try{ removeTransferKey("jkh_transfer_balance_v1:" + newId + ":" + rn); }catch(e){}
+        transferEvent({
           type: "TRANSFER_WITHOUT_DEBT",
           mode: "WITHOUT_DEBT",
           sourceAbonentId: oldId,
@@ -7638,7 +7665,7 @@
           db.abonents[newId].calcEndDate = "";
           db.abonents[newId].debtTransferredFrom = (mode === "WITH_DEBT") ? oldId : null;
         }
-        window.saveAbonentsDB && window.saveAbonentsDB();
+        if (!staged) window.saveAbonentsDB && window.saveAbonentsDB();
       }
 
       return true;
@@ -7663,11 +7690,12 @@
       if (v && unique.indexOf(v) < 0) unique.push(v);
     });
     if (!unique.length) return { ok:true, changed:false, results:[] };
-    if (!(window.JKHAutoAccrual && typeof window.JKHAutoAccrual.recalcForMany === "function")) {
+    if (!(window.JKHAutoAccrual && typeof window.JKHAutoAccrual.dryRunForAbonent === "function")) {
       console.warn("[transfer-responsibility][ledger-recalc-skipped]", { reason:"AUTOACCRUAL_ENGINE_UNAVAILABLE", abonentIds: unique });
       return { ok:false, reason:"AUTOACCRUAL_ENGINE_UNAVAILABLE", results:[] };
     }
-    var results = await window.JKHAutoAccrual.recalcForMany(unique) || [];
+    var results = [];
+    for (var i = 0; i < unique.length; i++) results.push(await window.JKHAutoAccrual.dryRunForAbonent(unique[i]));
     var failed = results.filter(function(r){ return !r || r.ok !== true; });
     if (failed.length) {
       console.warn("[transfer-responsibility][ledger-recalc-failed]", { abonentIds: unique, failed: failed });
@@ -7705,13 +7733,13 @@
     return "";
   }
 
-  function __verifyNoAccrualBeforeTransferMonth(abonentId, transferDate){
+  function __verifyNoAccrualBeforeTransferMonth(abonentId, transferDate, proposedRows){
     var id = String(abonentId || "").trim();
     var td = String(transferDate || "").trim();
     var transferYm = /^\d{4}-\d{2}-\d{2}$/.test(td) ? td.slice(0, 7) : "";
     if (!id || !transferYm) return { ok:false, reason:"INVALID_ARGUMENTS" };
 
-    var rows = readPaymentLedger(id) || [];
+    var rows = Array.isArray(proposedRows) ? proposedRows : readPaymentLedger(id) || [];
     var badAccrual = [];
     var badPayments = [];
     rows.forEach(function(r){
@@ -7754,6 +7782,95 @@
     } catch(e) {}
   }
 
+  async function __transferOperationId(oldId, newId, regnum, date, mode) {
+    if (!(window.crypto && window.crypto.subtle && window.TextEncoder)) throw new Error("TRANSFER_CRYPTO_UNAVAILABLE");
+    var input = [_ownerId(), oldId, newId, regnum, date, mode].join("\u001f");
+    var bytes = new TextEncoder().encode(input);
+    var digest = await window.crypto.subtle.digest("SHA-256", bytes);
+    return "responsibility:" + Array.from(new Uint8Array(digest)).map(function(v){ return v.toString(16).padStart(2, "0"); }).join("");
+  }
+
+  async function __transferServerSnapshot(keys) {
+    var values = {};
+    var versions = {};
+    for (var i = 0; i < keys.length; i++) {
+      var key = keys[i];
+      var result = await _serverStoreGet(_ownerId(), key);
+      if (result.status !== 200 && result.status !== 404) throw new Error("TRANSFER_SERVER_READ_FAILED:" + key);
+      if (!result.data || !Number.isSafeInteger(result.data.version)) throw new Error("TRANSFER_VERSION_MISSING:" + key);
+      values[key] = result.status === 404 ? null : String(result.raw);
+      versions[key] = result.data.version;
+    }
+    return { values: values, versions: versions };
+  }
+
+  async function __commitStagedTransfer(args) {
+    var oldId = args.oldId, newId = args.newId, rn = args.regnum, td = args.date, mode = args.mode;
+    var oldKey = args.oldKey, newKey = args.newKey, frozenKey = args.frozenKey;
+    var keys = ["abonents_db_v1", oldKey, newKey, "jkh_freeze_to_v1:" + oldId, frozenKey,
+      "jkh_transfer_to_v1:" + newId, "jkh_transfer_balance_v1:" + newId + ":" + rn,
+      excludePeriodsStorageKey(oldId), excludePeriodsStorageKey(newId), "jkh_financial_events_v1"];
+    var snapshot = await __transferServerSnapshot(keys);
+    var dbVersion = window.JKHDbCas && window.JKHDbCas.version(_ownerId());
+    if (dbVersion === null || dbVersion !== snapshot.versions.abonents_db_v1) throw new Error("TRANSFER_DB_VERSION_CONFLICT");
+    var beforeOld = args.recalc.results[0] && args.recalc.results[0].rows || [];
+    var beforeNew = args.recalc.results[1] && args.recalc.results[1].rows || [];
+    var serverOld = snapshot.values[oldKey] ? JSON.parse(snapshot.values[oldKey]) : [];
+    var serverNew = snapshot.values[newKey] ? JSON.parse(snapshot.values[newKey]) : [];
+    if (JSON.stringify(beforeOld) !== JSON.stringify(serverOld) ||
+        (!args.initialRows && JSON.stringify(beforeNew) !== JSON.stringify(serverNew)) ||
+        (args.initialRows && serverNew.length)) throw new Error("TRANSFER_LEDGER_VERSION_CONFLICT");
+    var operationId = args.operationId;
+    var lastEvent = window.AbonentsDB.premiseEvents[window.AbonentsDB.premiseEvents.length - 1];
+    lastEvent.operationId = operationId;
+    var financialEvents = snapshot.values.jkh_financial_events_v1 ? JSON.parse(snapshot.values.jkh_financial_events_v1) : [];
+    if (!Array.isArray(financialEvents)) throw new Error("TRANSFER_FINANCIAL_EVENTS_INVALID");
+    var financialEvent = Object.assign({
+      ownerId:_ownerId(), createdAt:(new Date()).toISOString(), operationId:operationId
+    }, args.staged.event);
+    financialEvents.push(financialEvent);
+    var values = Object.assign({}, args.staged.values);
+    values["abonents_db_v1"] = JSON.stringify(window.AbonentsDB);
+    values[oldKey] = JSON.stringify(args.recalc.results[0].proposedRows);
+    values[newKey] = JSON.stringify(args.recalc.results[1].proposedRows);
+    values[excludePeriodsStorageKey(oldId)] = snapshot.values[excludePeriodsStorageKey(oldId)];
+    values[excludePeriodsStorageKey(newId)] = "[]";
+    values.jkh_financial_events_v1 = JSON.stringify(financialEvents);
+    if (!Object.prototype.hasOwnProperty.call(values, frozenKey)) values[frozenKey] = null;
+    var writes = {};
+    keys.forEach(function(key){ writes[key] = { expected_version:snapshot.versions[key], value:values[key] }; });
+    var payload = { client_owner_hint:_ownerId(), operation_id:operationId, old_id:oldId,
+      new_id:newId, regnum:rn, transfer_date:td, freeze_date:args.freezeDate,
+      mode:mode, writes:writes };
+    var response = null;
+    try {
+      var http = await fetch("/api/responsibility_transfer", { method:"POST", credentials:"include",
+        headers:{ "Content-Type":"application/json" }, body:JSON.stringify(payload) });
+      response = { status:http.status, data:await http.json() };
+    } catch (networkError) {
+      var statusHttp = await fetch("/api/responsibility_transfer?operation_id=" + encodeURIComponent(operationId) +
+        "&client_owner_hint=" + encodeURIComponent(_ownerId()), { credentials:"include" });
+      var statusData = await statusHttp.json();
+      if (!(statusHttp.ok && statusData && statusData.committed === true)) throw new Error("TRANSFER_SERVER_OUTCOME_UNKNOWN");
+      response = { status:200, data:{ ok:true, committed:true, replay:true } };
+    }
+    if (!(response.status === 200 && response.data && response.data.ok === true && response.data.committed === true)) {
+      throw new Error(response.status === 409 ? "TRANSFER_VERSION_CONFLICT" : "TRANSFER_SERVER_REJECTED");
+    }
+    var confirmed = await __transferServerSnapshot(keys);
+    keys.forEach(function(key) {
+      if (confirmed.values[key] !== values[key] ||
+          confirmed.versions[key] < snapshot.versions[key] + 1) throw new Error("TRANSFER_READBACK_MISMATCH:" + key);
+    });
+    if (window.JKHFinancialCas && typeof window.JKHFinancialCas.installVerified === "function") {
+      window.JKHFinancialCas.installVerified(_ownerId(), confirmed.values, confirmed.versions);
+    }
+    keys.forEach(function(key){
+      if (key !== "abonents_db_v1") _setProjectRawRuntimeOverride(key, confirmed.values[key]);
+    });
+    return true;
+  }
+
   async function transferResponsibility(options){
     if (!Data.ensureWriteOrExplain()) return false;
     var db = window.AbonentsDB;
@@ -7781,27 +7898,26 @@
     if (alreadyNewActive) return false;
 
     var snapshot = deepClone(db);
-    var transferKeys = [
-      "jkh_freeze_to_v1:" + oldId,
-      "jkh_frozen_debt_v1:" + oldId + ":" + freezeISO,
-      "jkh_transfer_to_v1:" + newId,
-      "jkh_transfer_balance_v1:" + newId + ":" + rn,
-      excludePeriodsStorageKey(newId),
-      excludePeriodsStorageKey(oldId)
-    ];
-    try {
-      var oldLedgerKey = resolvePaymentLedgerKey(oldId);
-      var newLedgerKey = resolvePaymentLedgerKey(newId);
-      if (oldLedgerKey) transferKeys.push(oldLedgerKey);
-      if (newLedgerKey && transferKeys.indexOf(newLedgerKey) < 0) transferKeys.push(newLedgerKey);
-    } catch(e) {}
-    var transferRawSnapshot = {};
-    transferKeys.forEach(function(k){ transferRawSnapshot[k] = _getProjectRaw(k); });
+    var oldLedgerKey = resolvePaymentLedgerKey(oldId);
+    var newLedgerKey = resolvePaymentLedgerKey(newId);
+    if (!oldLedgerKey || !newLedgerKey) return false;
+    var staged = { values:{}, event:null };
+    if (Array.isArray(opts.initialRows)) _setProjectRawRuntimeOverride(newLedgerKey, JSON.stringify(opts.initialRows));
     try{
-      if (prepareDebtTransfer(oldId, newId, rn, td, legacyMode) !== true) throw new Error("TRANSFER_PREPARE_FAILED");
+      var operationId = await __transferOperationId(oldId, newId, rn, td, mode);
+      var priorStatus = await fetch("/api/responsibility_transfer?operation_id=" + encodeURIComponent(operationId) +
+        "&client_owner_hint=" + encodeURIComponent(_ownerId()), { credentials:"include" });
+      if (!priorStatus.ok) throw new Error("TRANSFER_STATUS_READ_FAILED");
+      var priorData = await priorStatus.json();
+      if (priorData && priorData.committed === true) {
+        if (!(window.JKHDataLoader && typeof window.JKHDataLoader.loadFromServer === "function")) throw new Error("TRANSFER_RELOAD_UNAVAILABLE");
+        var loaded = await window.JKHDataLoader.loadFromServer({ force:true, reason:"transfer_replay" });
+        if (!(loaded && loaded.ok)) throw new Error("TRANSFER_RELOAD_FAILED");
+        return true;
+      }
+      if (prepareDebtTransfer(oldId, newId, rn, td, legacyMode, staged) !== true) throw new Error("TRANSFER_PREPARE_FAILED");
 
-      readCanonicalExcludePeriods(oldId);
-      console.log("[transfer][excludes] old migrated", { abonentId: oldId });
+      console.log("[transfer][excludes] old preserved", { abonentId: oldId });
 
       activeLinks.forEach(function(l){
         l.dateTo = freezeISO;
@@ -7825,9 +7941,7 @@
       var newA = db.abonents[newId];
       removeLegacyExcludeFields(newA);
       console.log("[transfer][excludes] skipped legacy copy", { abonentId: newId });
-      writeCanonicalExcludePeriods(newId, []);
-      console.log("[transfer][excludes] new initialized empty", { abonentId: newId });
-      if (createEmptyPaymentLedger(newId) !== true) throw new Error("TRANSFER_LEDGER_INIT_FAILED");
+      console.log("[transfer][excludes] new staged empty", { abonentId: newId });
       var premise = db.premises && db.premises[rn] ? db.premises[rn] : {};
       newA.regnum = rn;
       newA.premiseRegnum = rn;
@@ -7878,31 +7992,29 @@
         oldRespTo: freezeISO,
         newRespFrom: td,
         createdAt: (new Date()).toISOString(),
-        createdBy: _ownerId()
+        createdBy: _ownerId(),
+        operationId: operationId
       });
 
       var recalc = await __forceResponsibilityLedgerRecalc([oldId, newId]);
       if (!recalc || recalc.ok !== true) throw new Error("TRANSFER_LEDGER_RECALC_FAILED");
 
-      var newLedgerRangeCheck = __verifyNoAccrualBeforeTransferMonth(newId, td);
+      var newLedgerRangeCheck = __verifyNoAccrualBeforeTransferMonth(newId, td, recalc.results[1].proposedRows);
       if (!newLedgerRangeCheck || newLedgerRangeCheck.ok !== true) throw new Error("TRANSFER_NEW_LEDGER_RANGE_INVALID");
 
-      var saved = !!window.saveAbonentsDB && window.saveAbonentsDB();
-      if (saved) {
-        __scheduleTransferFlushToServer();
-        markAbonentSummaryDirtyLater(oldId, "RESPONSIBILITY_CHANGED");
-        markAbonentSummaryDirtyLater(newId, "RESPONSIBILITY_CHANGED");
-      }
+      var saved = await __commitStagedTransfer({ oldId:oldId, newId:newId, regnum:rn, date:td,
+        freezeDate:freezeISO, frozenKey:"jkh_frozen_debt_v1:" + oldId + ":" + freezeISO,
+        mode:mode, oldKey:oldLedgerKey, newKey:newLedgerKey, staged:staged, recalc:recalc,
+        operationId:operationId, initialRows:Array.isArray(opts.initialRows) });
+      markAbonentSummaryDirtyLater(oldId, "RESPONSIBILITY_CHANGED");
+      markAbonentSummaryDirtyLater(newId, "RESPONSIBILITY_CHANGED");
       return saved;
     }catch(e){
       window.AbonentsDB = snapshot;
-      transferKeys.forEach(function(k){
-        try{
-          if (transferRawSnapshot[k] === null || transferRawSnapshot[k] === undefined) _removeProjectRaw(k);
-          else _setProjectRaw(k, transferRawSnapshot[k]);
-        }catch(storageErr){}
-      });
-      try{ if (window.saveAbonentsDB) window.saveAbonentsDB(); }catch(saveErr){}
+      if (Array.isArray(opts.initialRows)) _clearProjectRawRuntimeOverride(newLedgerKey);
+      if (String(e && e.message || "") === "TRANSFER_SERVER_OUTCOME_UNKNOWN") {
+        window.__JKH_TRANSFER_OUTCOME_UNKNOWN = true;
+      }
       if (__isDebtTransferError(e)) {
         __logDebtTransferAbort(e);
       } else {

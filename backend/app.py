@@ -246,6 +246,38 @@ class PaymentAuditLog(db.Model):
     created_at = db.Column(db.DateTime, nullable=False, server_default=text("CURRENT_TIMESTAMP"))
 
 
+class PaymentLedgerStoreAudit(db.Model):
+    """Immutable diagnostics for canonical payments_<uid> store operations.
+
+    This intentionally records only metadata.  Ledger rows themselves can contain
+    financial and personal data and are never copied into the audit trail.
+    """
+
+    __tablename__ = "payment_ledger_store_audit"
+
+    id = db.Column(sqlite_autoincrement_bigint_pk(), primary_key=True, autoincrement=True)
+    created_at = db.Column(db.DateTime, nullable=False, server_default=text("CURRENT_TIMESTAMP"), index=True)
+    owner_id = db.Column(db.String(128), nullable=False, index=True)
+    actor_id = db.Column(db.String(128), nullable=False, default="", index=True)
+    storage_key = db.Column(db.String(255), nullable=False, index=True)
+    account_uid = db.Column(db.String(128), nullable=False, index=True)
+    action = db.Column(db.String(16), nullable=False, index=True)
+    endpoint = db.Column(db.String(128), nullable=False)
+    request_id = db.Column(db.String(64), nullable=False, unique=True, index=True)
+    source = db.Column(db.String(128), nullable=False, default="UNKNOWN")
+    old_rows_count = db.Column(db.Integer, nullable=True)
+    new_rows_count = db.Column(db.Integer, nullable=True)
+    old_value_present = db.Column(db.Boolean, nullable=False, default=False)
+    new_value_present = db.Column(db.Boolean, nullable=False, default=False)
+    guard_result = db.Column(db.String(32), nullable=False, default="NOT_APPLICABLE")
+    guard_reason = db.Column(db.String(128), nullable=False, default="")
+    http_status = db.Column(db.Integer, nullable=False)
+    full_recalc_lock_present = db.Column(db.Boolean, nullable=False, default=False)
+    calculated_final_empty = db.Column(db.Boolean, nullable=False, default=False)
+    payload_size = db.Column(db.Integer, nullable=False, default=0)
+    details_json = db.Column(db.Text, nullable=False, default="{}")
+
+
 class AbonentSummary(db.Model):
     __tablename__ = "abonent_summary"
 
@@ -350,6 +382,88 @@ def _verified_calculated_final_empty_contract(data, owner, uid):
         return False
     lock = RecalcUidLock.query.filter_by(owner_id=owner, abonent_uid=uid, status="running").first()
     return bool(lock and secrets.compare_digest(_norm_text(lock.lock_token), token))
+
+
+def _payment_ledger_audit_value_meta(raw_value):
+    """Return non-sensitive shape metadata without retaining ledger content."""
+    meta = {"present": raw_value is not None, "is_array": False, "rows_count": None, "valid_json": True}
+    if raw_value is None:
+        return meta
+    try:
+        parsed = json.loads(raw_value)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        meta["valid_json"] = False
+        return meta
+    if isinstance(parsed, list):
+        meta["is_array"] = True
+        meta["rows_count"] = len(parsed)
+    return meta
+
+
+def _payment_ledger_audit_contract_meta(data, owner, uid):
+    contract = data.get("payment_ledger_contract") if isinstance(data, dict) else None
+    calculated_final_empty = bool(
+        isinstance(contract, dict)
+        and contract.get("action") == "CALCULATED_FINAL_EMPTY"
+        and contract.get("completed") is True
+        and contract.get("finalLedgerEmpty") is True
+        and _norm_text(contract.get("uid")) == uid
+    )
+    lock_present = False
+    if calculated_final_empty and _norm_text(contract.get("recalcLockToken")):
+        lock = RecalcUidLock.query.filter_by(owner_id=owner, abonent_uid=uid, status="running").first()
+        lock_present = bool(lock)
+    return calculated_final_empty, lock_present
+
+
+def _add_payment_ledger_store_audit(*, owner, actor, key, uid, action, request_id, source,
+                                    old_meta, new_meta, guard_result, guard_reason,
+                                    http_status, lock_present, calculated_final_empty,
+                                    payload_size, operation_id=None):
+    details = {
+        "old_array": bool(old_meta["is_array"]),
+        "new_array": bool(new_meta["is_array"]),
+        "old_valid_json": bool(old_meta["valid_json"]),
+        "new_valid_json": bool(new_meta["valid_json"]),
+        "source": source,
+        "contract": {
+            "calculated_final_empty": bool(calculated_final_empty),
+            "full_recalc_lock_present": bool(lock_present),
+        },
+    }
+    if operation_id is not None:
+        details["operation_id"] = operation_id
+    db.session.add(PaymentLedgerStoreAudit(
+        owner_id=owner,
+        actor_id=_norm_text(getattr(actor, "id", "")),
+        storage_key=key,
+        account_uid=uid,
+        action=action,
+        endpoint="/api/store",
+        request_id=request_id,
+        source=source or "UNKNOWN",
+        old_rows_count=old_meta["rows_count"],
+        new_rows_count=new_meta["rows_count"],
+        old_value_present=bool(old_meta["present"]),
+        new_value_present=bool(new_meta["present"]),
+        guard_result=guard_result,
+        guard_reason=guard_reason or "",
+        http_status=http_status,
+        full_recalc_lock_present=bool(lock_present),
+        calculated_final_empty=bool(calculated_final_empty),
+        payload_size=max(0, int(payload_size or 0)),
+        details_json=json.dumps(details, ensure_ascii=False, sort_keys=True),
+    ))
+
+
+def _payment_ledger_audit_commit_or_error(request_id):
+    try:
+        db.session.commit()
+    except SQLAlchemyError:
+        db.session.rollback()
+        app.logger.exception("[payment-ledger-audit] commit failed request_id=%s", request_id)
+        return _json_error("payment_ledger_audit_persist_failed", 500)
+    return None
 
 
 class RecalcBatchJob(db.Model):
@@ -3897,6 +4011,77 @@ def audit_snapshot_summary_endpoint():
         return jsonify(ok=False, error="snapshot_summary_audit_failed", details=str(exc)), 500
 
 
+def _payment_ledger_store_audit_payload(row):
+    try:
+        details = json.loads(row.details_json or "{}")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        details = {"details_valid_json": False}
+    return {
+        "id": row.id,
+        "created_at": row.created_at.isoformat() if row.created_at else "",
+        "owner_id": row.owner_id,
+        "actor_id": row.actor_id,
+        "storage_key": row.storage_key,
+        "account_uid": row.account_uid,
+        "action": row.action,
+        "endpoint": row.endpoint,
+        "request_id": row.request_id,
+        "source": row.source,
+        "old_rows_count": row.old_rows_count,
+        "new_rows_count": row.new_rows_count,
+        "old_value_present": bool(row.old_value_present),
+        "new_value_present": bool(row.new_value_present),
+        "guard_result": row.guard_result,
+        "guard_reason": row.guard_reason,
+        "http_status": row.http_status,
+        "full_recalc_lock_present": bool(row.full_recalc_lock_present),
+        "calculated_final_empty": bool(row.calculated_final_empty),
+        "payload_size": row.payload_size,
+        "details": details,
+    }
+
+
+@app.get("/api/audit/payment-ledger-store")
+def payment_ledger_store_audit_endpoint():
+    admin, err = _require_admin()
+    if err:
+        return err
+    requested_owner = _norm_text(request.args.get("owner_id") or request.args.get("owner"))
+    owner = _environment_owner_id(requested_owner) if requested_owner else _environment_owner_id(admin.id)
+    if not _owner_belongs_to_current_environment(owner):
+        return _json_error("owner_invalid", 400)
+    try:
+        limit = int(request.args.get("limit", "100"))
+    except (TypeError, ValueError):
+        return _json_error("limit_invalid", 400)
+    limit = max(1, min(limit, 500))
+    query = PaymentLedgerStoreAudit.query.filter_by(owner_id=owner)
+    account_uid = _norm_text(request.args.get("account_uid"))
+    storage_key = _norm_text(request.args.get("storage_key"))
+    action = _norm_text(request.args.get("action")).upper()
+    request_id = _norm_text(request.args.get("request_id"))
+    if account_uid:
+        query = query.filter_by(account_uid=account_uid)
+    if storage_key:
+        query = query.filter_by(storage_key=storage_key)
+    if action:
+        query = query.filter_by(action=action)
+    if request_id:
+        query = query.filter_by(request_id=request_id)
+    for arg_name, operator in (("date_from", ">="), ("date_to", "<=")):
+        raw_date = _norm_text(request.args.get(arg_name))
+        if not raw_date:
+            continue
+        try:
+            parsed_date = datetime.fromisoformat(raw_date)
+        except ValueError:
+            return _json_error(f"{arg_name}_invalid", 400)
+        column = PaymentLedgerStoreAudit.created_at
+        query = query.filter(column >= parsed_date) if operator == ">=" else query.filter(column <= parsed_date)
+    rows = query.order_by(PaymentLedgerStoreAudit.created_at.desc(), PaymentLedgerStoreAudit.id.desc()).limit(limit).all()
+    return jsonify(ok=True, owner_id=owner, limit=limit, items=[_payment_ledger_store_audit_payload(row) for row in rows])
+
+
 @app.get("/api/card_snapshot/<account_uid>")
 def card_snapshot_get(account_uid: str):
     user, err = _require_user()
@@ -4855,8 +5040,9 @@ def import_payments_apply(batch_id):
             incoming_ledger_value = json.dumps(ledger, ensure_ascii=False)
             if kv:
                 kv.v = incoming_ledger_value
+                kv.version += 1
             else:
-                db.session.add(KVStore(owner=batch.owner_id, k=key, v=incoming_ledger_value))
+                db.session.add(KVStore(owner=batch.owner_id, k=key, v=incoming_ledger_value, version=1))
 
             payment_id = f"{normalized_account_number}:{next_id}"
             fingerprint_row.payment_id = payment_id
@@ -5203,11 +5389,12 @@ def store_get():
                 ensure_ascii=False,
             ),
         )
-    if not row or (key == "abonents_db_v1" and row.v == ""):
+    versioned = key == "abonents_db_v1" or _is_versioned_financial_key(key)
+    if not row or (versioned and row.v == ""):
         _sync_log("load", owner_eff, server_owner=owner, client_owner_hint=client_owner_hint, key=key, status="not_found")
-        return jsonify(ok=False, error="not_found", value=None, **({"version": row.version if row else 0} if key == "abonents_db_v1" else {})), 404
+        return jsonify(ok=False, error="not_found", value=None, **({"version": row.version if row else 0} if versioned else {})), 404
     _sync_log("load", owner_eff, server_owner=owner, client_owner_hint=client_owner_hint, key=key, size=len(row.v or ""), status="ok")
-    return jsonify(ok=True, value=row.v, owner=owner_eff, **({"version": row.version} if key == "abonents_db_v1" else {}))
+    return jsonify(ok=True, value=row.v, owner=owner_eff, **({"version": row.version} if versioned else {}))
 
 
 def _expected_db_version(data):
@@ -5219,6 +5406,196 @@ def _expected_db_version(data):
 
 def _db_version_conflict():
     return jsonify(ok=False, error="version_conflict"), 409
+
+
+def _is_versioned_financial_key(key):
+    return bool(_canonical_payment_ledger_uid(key)) or key == "jkh_financial_events_v1" or key.startswith((
+        "jkh_freeze_to_v1:", "jkh_frozen_debt_v1:", "jkh_transfer_to_v1:",
+        "jkh_transfer_balance_v1:", "exclude_periods_",
+    ))
+
+
+def _transfer_event(db_value, operation_id):
+    events = db_value.get("premiseEvents") if isinstance(db_value, dict) else None
+    return next((event for event in events if isinstance(event, dict) and event.get("operationId") == operation_id), None) if isinstance(events, list) else None
+
+
+def _transfer_payment_signatures(rows):
+    signatures = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            raise ValueError("payment_ledger_row_invalid")
+        if row.get("paid") in (None, "", 0, 0.0, "0"):
+            continue
+        signature = json.dumps([row.get(k) for k in ("id", "paid", "paid_date", "payment_period", "fingerprint")], ensure_ascii=False, sort_keys=True)
+        signatures[signature] = signatures.get(signature, 0) + 1
+    return signatures
+
+
+@app.get("/api/responsibility_transfer")
+def responsibility_transfer_status():
+    client_owner_hint = _client_owner_hint_from_request()
+    user, owner, err = _session_store_owner(client_owner_hint)
+    if err:
+        return err
+    operation_id = str(request.args.get("operation_id") or "").strip()
+    if not operation_id or len(operation_id) > 255:
+        return _json_error("operation_id_required", 400)
+    row = KVStore.query.filter_by(owner=owner, k="abonents_db_v1").first()
+    try:
+        current = json.loads(row.v) if row and row.v else {}
+    except (TypeError, ValueError):
+        return _json_error("abonents_db_invalid", 409)
+    event = _transfer_event(current, operation_id)
+    return jsonify(ok=True, committed=bool(event), event=event if event else None)
+
+
+@app.post("/api/responsibility_transfer")
+def responsibility_transfer_commit():
+    data = request.get_json(silent=True) or {}
+    client_owner_hint = _client_owner_hint_from_request(data)
+    user, owner, err = _session_store_owner(client_owner_hint)
+    if err:
+        return err
+    operation_id = str(data.get("operation_id") or "").strip()
+    old_id = str(data.get("old_id") or "").strip()
+    new_id = str(data.get("new_id") or "").strip()
+    regnum = str(data.get("regnum") or "").strip()
+    transfer_date = str(data.get("transfer_date") or "").strip()
+    mode = str(data.get("mode") or "").strip()
+    writes = data.get("writes")
+    if not operation_id or len(operation_id) > 255 or not old_id or not new_id or old_id == new_id or not regnum or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", transfer_date) or mode not in ("WITH_DEBT", "WITHOUT_DEBT") or not isinstance(writes, dict):
+        return _json_error("invalid_transfer_request", 400)
+
+    # The DB row is the owner-scoped serialization point, including concurrent
+    # creation of absent ledger and metadata keys.
+    db_row = KVStore.query.filter_by(owner=owner, k="abonents_db_v1").with_for_update().first()
+    if not db_row or not db_row.v:
+        db.session.rollback()
+        return _db_version_conflict()
+    try:
+        current_db = json.loads(db_row.v)
+        proposed_db = json.loads(writes["abonents_db_v1"]["value"])
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        db.session.rollback()
+        return _json_error("abonents_db_invalid", 422)
+    prior_event = _transfer_event(current_db, operation_id)
+    if prior_event:
+        db.session.rollback()
+        if all(str(prior_event.get(k) or "") == v for k, v in (("oldAbonentId", old_id), ("newAbonentId", new_id), ("date", transfer_date))):
+            return jsonify(ok=True, committed=True, replay=True, operation_id=operation_id)
+        return _db_version_conflict()
+
+    db_write = writes["abonents_db_v1"]
+    if not isinstance(db_write, dict) or _expected_db_version(db_write) is None or not isinstance(db_write.get("value"), str):
+        db.session.rollback()
+        return _json_error("transfer_write_invalid", 422)
+    if db_row.version != db_write["expected_version"]:
+        db.session.rollback()
+        return jsonify(ok=False, error="version_conflict", key="abonents_db_v1"), 409
+
+    old_a = current_db.get("abonents", {}).get(old_id) if isinstance(current_db, dict) else None
+    new_a = proposed_db.get("abonents", {}).get(new_id) if isinstance(proposed_db, dict) else None
+    if not isinstance(current_db, dict) or not isinstance(proposed_db, dict) or not isinstance(current_db.get("abonents"), dict) or not isinstance(proposed_db.get("abonents"), dict):
+        db.session.rollback()
+        return _json_error("abonents_db_invalid", 422)
+    if any(proposed_db["abonents"].get(k) != v for k, v in current_db["abonents"].items() if k not in (old_id, new_id)):
+        db.session.rollback()
+        return _json_error("unrelated_abonent_changed", 422)
+    if new_id in current_db["abonents"] and (not isinstance(new_a, dict) or current_db["abonents"][new_id].get("uid") != new_a.get("uid")):
+        db.session.rollback()
+        return _json_error("new_abonent_conflict", 409)
+    old_uid = str(old_a.get("uid") or "") if isinstance(old_a, dict) else ""
+    new_uid = str(new_a.get("uid") or "") if isinstance(new_a, dict) else ""
+    if not old_uid or not new_uid or not _canonical_payment_ledger_uid("payments_" + old_uid) or not _canonical_payment_ledger_uid("payments_" + new_uid) or old_uid == new_uid or any(str(a.get("uid") or "") == new_uid for k, a in current_db["abonents"].items() if k != new_id and isinstance(a, dict)):
+        db.session.rollback()
+        return _json_error("transfer_uid_invalid", 422)
+    active_before = [link for link in current_db.get("links", []) if isinstance(link, dict) and str(link.get("regnum") or "") == regnum and not str(link.get("dateTo") or "").strip()]
+    active_after = [link for link in proposed_db.get("links", []) if isinstance(link, dict) and str(link.get("regnum") or "") == regnum and not str(link.get("dateTo") or "").strip()]
+    event = _transfer_event(proposed_db, operation_id)
+    if len(active_before) != 1 or str(active_before[0].get("abonentId") or "") != old_id or len(active_after) != 1 or str(active_after[0].get("abonentId") or "") != new_id or not event or str(event.get("oldAbonentId") or "") != old_id or str(event.get("newAbonentId") or "") != new_id or str(event.get("date") or "") != transfer_date or str(event.get("transferMode") or "") != mode:
+        db.session.rollback()
+        return _json_error("transfer_state_invalid", 422)
+    expected_keys = {
+        "abonents_db_v1", "payments_" + old_uid, "payments_" + new_uid,
+        "jkh_freeze_to_v1:" + old_id, "jkh_frozen_debt_v1:" + old_id + ":" + str(data.get("freeze_date") or ""),
+        "jkh_transfer_to_v1:" + new_id, "jkh_transfer_balance_v1:" + new_id + ":" + regnum,
+        "exclude_periods_" + old_id, "exclude_periods_" + new_id,
+        "jkh_financial_events_v1",
+    }
+    if set(writes) != expected_keys:
+        db.session.rollback()
+        return _json_error("transfer_keys_invalid", 422)
+    if str(data.get("freeze_date") or "") != str(event.get("oldRespTo") or "") or writes["jkh_freeze_to_v1:" + old_id].get("value") != str(data.get("freeze_date") or ""):
+        db.session.rollback()
+        return _json_error("freeze_date_invalid", 422)
+    for key in sorted(expected_keys):
+        access_err, reason = _require_write_access_for_key(owner, key)
+        if access_err:
+            db.session.rollback()
+            return access_err
+    rows = {"abonents_db_v1": db_row}
+    for key in sorted(expected_keys - {"abonents_db_v1"}):
+        rows[key] = KVStore.query.filter_by(owner=owner, k=key).with_for_update().first()
+    for key in sorted(expected_keys):
+        item = writes[key]
+        if not isinstance(item, dict) or _expected_db_version(item) is None or (item.get("value") is not None and not isinstance(item.get("value"), str)):
+            db.session.rollback()
+            return _json_error("transfer_write_invalid", 422)
+        if (rows[key].version if rows[key] else 0) != item["expected_version"]:
+            db.session.rollback()
+            return jsonify(ok=False, error="version_conflict", key=key), 409
+    for key in ("payments_" + old_uid, "payments_" + new_uid):
+        try:
+            previous = json.loads(rows[key].v) if rows[key] and rows[key].v else []
+            incoming = json.loads(writes[key]["value"])
+            if not isinstance(previous, list) or not isinstance(incoming, list) or (previous and not incoming):
+                raise ValueError("payment_ledger_value_must_be_json_array")
+            before_paid = _transfer_payment_signatures(previous)
+            after_paid = _transfer_payment_signatures(incoming)
+            if any(after_paid.get(signature, 0) < count for signature, count in before_paid.items()):
+                raise ValueError("payment_rows_lost")
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            db.session.rollback()
+            return _json_error(str(exc) or "payment_ledger_invalid", 422)
+    try:
+        old_events = json.loads(rows["jkh_financial_events_v1"].v) if rows["jkh_financial_events_v1"] and rows["jkh_financial_events_v1"].v else []
+        new_events = json.loads(writes["jkh_financial_events_v1"]["value"])
+        if not isinstance(old_events, list) or not isinstance(new_events, list) or new_events[:len(old_events)] != old_events or len(new_events) != len(old_events) + 1 or new_events[-1].get("operationId") != operation_id:
+            raise ValueError()
+    except (TypeError, ValueError, AttributeError, json.JSONDecodeError):
+        db.session.rollback()
+        return _json_error("financial_event_invalid", 422)
+    try:
+        ledger_old_meta = {key: _payment_ledger_audit_value_meta(rows[key].v if rows[key] else None)
+                           for key in expected_keys if _canonical_payment_ledger_uid(key)}
+        for key in sorted(expected_keys):
+            item = writes[key]
+            value = item["value"] if item["value"] is not None else ""
+            row = rows[key]
+            if row:
+                row.v = value
+                row.version += 1
+            else:
+                db.session.add(KVStore(owner=owner, k=key, v=value, version=1))
+            if _canonical_payment_ledger_uid(key):
+                _add_payment_ledger_store_audit(
+                    owner=owner, actor=user, key=key, uid=_canonical_payment_ledger_uid(key), action="POST",
+                    request_id=uuid.uuid4().hex, source="RESPONSIBILITY_TRANSFER", operation_id=operation_id,
+                    old_meta=ledger_old_meta[key],
+                    new_meta=_payment_ledger_audit_value_meta(value), guard_result="ALLOWED", guard_reason="",
+                    http_status=200, lock_present=False, calculated_final_empty=False, payload_size=len(value),
+                )
+        db.session.commit()
+    except IntegrityError:
+        db.session.rollback()
+        return _db_version_conflict()
+    except SQLAlchemyError:
+        db.session.rollback()
+        app.logger.exception("[transfer] atomic commit failed operation_id=%s", operation_id)
+        return _json_error("transfer_persist_failed", 500)
+    return jsonify(ok=True, committed=True, replay=False, operation_id=operation_id,
+                   versions={key: writes[key]["expected_version"] + 1 for key in expected_keys})
 
 
 @app.post("/api/store")
@@ -5263,15 +5640,45 @@ def store_set():
             except IntegrityError:
                 db.session.rollback()
         return _db_version_conflict()
-    row = KVStore.query.filter_by(owner=owner_eff, k=key).first()
+    versioned_financial = _is_versioned_financial_key(key)
+    expected_financial = _expected_db_version(data) if versioned_financial else None
+    if versioned_financial and expected_financial is None:
+        return jsonify(ok=False, error="expected_version_required"), 428
+    row = KVStore.query.filter_by(owner=owner_eff, k=key).with_for_update().first() if versioned_financial else KVStore.query.filter_by(owner=owner_eff, k=key).first()
+    if versioned_financial and (row.version if row else 0) != expected_financial:
+        db.session.rollback()
+        return _db_version_conflict()
     ledger_uid = _canonical_payment_ledger_uid(key)
+    request_id = uuid.uuid4().hex[:12]
+    source_or_action = _norm_text(data.get("source") or data.get("action") or data.get("mode")) or "UNKNOWN"
     if ledger_uid:
+        old_meta = _payment_ledger_audit_value_meta(row.v if row else None)
+        new_meta = _payment_ledger_audit_value_meta(value)
+        calculated_final_empty, lock_present = _payment_ledger_audit_contract_meta(data, owner_eff, ledger_uid)
         try:
             incoming_ledger = json.loads(value)
         except (TypeError, ValueError, json.JSONDecodeError):
-            return _json_error("payment_ledger_value_must_be_json_array", 422)
+            _add_payment_ledger_store_audit(
+                owner=owner_eff, actor=user, key=key, uid=ledger_uid, action="POST", request_id=request_id,
+                source=source_or_action, old_meta=old_meta, new_meta=new_meta, guard_result="REJECTED",
+                guard_reason="payment_ledger_value_must_be_json_array", http_status=422,
+                lock_present=lock_present, calculated_final_empty=calculated_final_empty, payload_size=len(value or ""),
+            )
+            audit_error = _payment_ledger_audit_commit_or_error(request_id)
+            if audit_error:
+                return audit_error
+            return jsonify(ok=False, error="payment_ledger_value_must_be_json_array", request_id=request_id), 422
         if not isinstance(incoming_ledger, list):
-            return _json_error("payment_ledger_value_must_be_json_array", 422)
+            _add_payment_ledger_store_audit(
+                owner=owner_eff, actor=user, key=key, uid=ledger_uid, action="POST", request_id=request_id,
+                source=source_or_action, old_meta=old_meta, new_meta=new_meta, guard_result="REJECTED",
+                guard_reason="payment_ledger_value_must_be_json_array", http_status=422,
+                lock_present=lock_present, calculated_final_empty=calculated_final_empty, payload_size=len(value or ""),
+            )
+            audit_error = _payment_ledger_audit_commit_or_error(request_id)
+            if audit_error:
+                return audit_error
+            return jsonify(ok=False, error="payment_ledger_value_must_be_json_array", request_id=request_id), 422
         if row:
             try:
                 existing_ledger = json.loads(row.v)
@@ -5279,20 +5686,45 @@ def store_set():
                 existing_ledger = None
             if isinstance(existing_ledger, list) and existing_ledger and not incoming_ledger:
                 if not _verified_calculated_final_empty_contract(data, owner_eff, ledger_uid):
+                    _add_payment_ledger_store_audit(
+                        owner=owner_eff, actor=user, key=key, uid=ledger_uid, action="POST", request_id=request_id,
+                        source=source_or_action, old_meta=old_meta, new_meta=new_meta, guard_result="BLOCKED",
+                        guard_reason=PAYMENT_LEDGER_EMPTY_OVERWRITE_BLOCKED, http_status=409,
+                        lock_present=lock_present, calculated_final_empty=calculated_final_empty, payload_size=len(value or ""),
+                    )
+                    audit_error = _payment_ledger_audit_commit_or_error(request_id)
+                    if audit_error:
+                        return audit_error
                     return jsonify(
                         ok=False,
                         error=PAYMENT_LEDGER_EMPTY_OVERWRITE_BLOCKED,
                         oldRowsCount=len(existing_ledger),
                         newRowsCount=0,
+                        request_id=request_id,
                     ), 409
-    request_id = uuid.uuid4().hex[:12]
-    source_or_action = data.get("source") or data.get("action") or data.get("mode") or "store_set"
     existed = bool(row)
-    if row:
-        row.v = value
-    else:
-        db.session.add(KVStore(owner=owner_eff, k=key, v=value))
-    db.session.commit()
+    try:
+        if ledger_uid:
+            _add_payment_ledger_store_audit(
+                owner=owner_eff, actor=user, key=key, uid=ledger_uid, action="POST", request_id=request_id,
+                source=source_or_action, old_meta=old_meta, new_meta=new_meta, guard_result="ALLOWED",
+                guard_reason="", http_status=200, lock_present=lock_present,
+                calculated_final_empty=calculated_final_empty, payload_size=len(value or ""),
+            )
+        if row:
+            row.v = value
+            if versioned_financial:
+                row.version += 1
+        else:
+            db.session.add(KVStore(owner=owner_eff, k=key, v=value, **({"version": 1} if versioned_financial else {})))
+        db.session.commit()
+    except IntegrityError:
+        db.session.rollback()
+        return _db_version_conflict() if versioned_financial else _json_error("store_insert_conflict", 409)
+    except SQLAlchemyError:
+        db.session.rollback()
+        app.logger.exception("[payment-ledger-audit] store set failed request_id=%s key=%s", request_id, key)
+        return _json_error("payment_ledger_audit_persist_failed", 500)
     if key.startswith("card_snapshot_"):
         app.logger.info(
             "[diagnose][card-snapshot-kv-set] %s",
@@ -5310,8 +5742,8 @@ def store_set():
                 ensure_ascii=False,
             ),
         )
-    _sync_log("save", owner_eff, server_owner=owner, client_owner_hint=client_owner_hint, key=key, size=len(value or ""), status="ok")
-    return jsonify(ok=True, owner=owner_eff)
+    _sync_log("save", owner_eff, server_owner=owner, client_owner_hint=client_owner_hint, key=key, size=len(value or ""), status="ok", request_id=request_id, source=source_or_action)
+    return jsonify(ok=True, owner=owner_eff, request_id=request_id, **({"version": expected_financial + 1} if versioned_financial else {}))
 
 
 @app.delete("/api/store")
@@ -5346,17 +5778,50 @@ def store_delete():
         if expected == 0 and KVStore.query.filter_by(owner=owner_eff, k=key).first() is None:
             return jsonify(ok=True, deleted=False, version=0)
         return _db_version_conflict()
-    row = KVStore.query.filter_by(owner=owner_eff, k=key).first()
+    versioned_financial = _is_versioned_financial_key(key)
+    expected_financial = _expected_db_version(data) if versioned_financial else None
+    if versioned_financial and expected_financial is None:
+        return jsonify(ok=False, error="expected_version_required"), 428
+    row = KVStore.query.filter_by(owner=owner_eff, k=key).with_for_update().first() if versioned_financial else KVStore.query.filter_by(owner=owner_eff, k=key).first()
+    if versioned_financial and (row.version if row else 0) != expected_financial:
+        db.session.rollback()
+        return _db_version_conflict()
     request_id = uuid.uuid4().hex[:12]
-    source_or_action = data.get("source") or data.get("action") or data.get("mode") or "store_delete"
+    source_or_action = _norm_text(data.get("source") or data.get("action") or data.get("mode")) or "UNKNOWN"
+    ledger_uid = _canonical_payment_ledger_uid(key)
+    if ledger_uid and row and row.v not in ("", "[]"):
+        db.session.rollback()
+        return jsonify(ok=False, error=PAYMENT_LEDGER_EMPTY_OVERWRITE_BLOCKED), 409
+    if ledger_uid:
+        old_meta = _payment_ledger_audit_value_meta(row.v if row else None)
+        new_meta = _payment_ledger_audit_value_meta(None)
+        _add_payment_ledger_store_audit(
+            owner=owner_eff, actor=user, key=key, uid=ledger_uid, action="DELETE", request_id=request_id,
+            source=source_or_action, old_meta=old_meta, new_meta=new_meta, guard_result="NOT_APPLICABLE",
+            guard_reason="NOT_FOUND" if not row else "", http_status=200, lock_present=False,
+            calculated_final_empty=False, payload_size=0,
+        )
     if not row:
-        _sync_log("delete", owner_eff, server_owner=owner, client_owner_hint=client_owner_hint, key=key, status="not_found")
-        return jsonify(ok=True, deleted=False)
+        if ledger_uid:
+            audit_error = _payment_ledger_audit_commit_or_error(request_id)
+            if audit_error:
+                return audit_error
+        _sync_log("delete", owner_eff, server_owner=owner, client_owner_hint=client_owner_hint, key=key, status="not_found", request_id=request_id, source=source_or_action)
+        return jsonify(ok=True, deleted=False, request_id=request_id, **({"version": 0} if versioned_financial else {}))
 
-    db.session.delete(row)
-    db.session.commit()
-    _sync_log("delete", owner_eff, server_owner=owner, client_owner_hint=client_owner_hint, key=key, status="ok")
-    return jsonify(ok=True, deleted=True)
+    try:
+        if versioned_financial:
+            row.v = ""
+            row.version += 1
+        else:
+            db.session.delete(row)
+        db.session.commit()
+    except SQLAlchemyError:
+        db.session.rollback()
+        app.logger.exception("[payment-ledger-audit] store delete failed request_id=%s key=%s", request_id, key)
+        return _json_error("payment_ledger_audit_persist_failed", 500)
+    _sync_log("delete", owner_eff, server_owner=owner, client_owner_hint=client_owner_hint, key=key, status="ok", request_id=request_id, source=source_or_action)
+    return jsonify(ok=True, deleted=True, request_id=request_id, **({"version": expected_financial + 1} if versioned_financial else {}))
 
 
 @app.get("/api/store_dump")
@@ -5377,12 +5842,13 @@ def store_dump():
         ),
         {"owner": GLOBAL_OWNER},
     ).all()
-    data = {r[0]: r[1] for r in rows_owner if r[0] != "abonents_db_v1" or r[1] != ""}
+    data = {r[0]: r[1] for r in rows_owner if r[1] != "" or not (r[0] == "abonents_db_v1" or _is_versioned_financial_key(r[0]))}
     db_version = next((r[2] for r in rows_owner if r[0] == "abonents_db_v1"), 0)
+    key_versions = {r[0]: r[2] for r in rows_owner if _is_versioned_financial_key(r[0])}
     for r in rows_global:
         data[r[0]] = r[1]
     _sync_log("dump", owner, server_owner=owner, client_owner_hint=client_owner_hint, keys=len(data), status="ok")
-    return jsonify(ok=True, owner=owner, env_type=ENV_TYPE, data=data, abonents_db_version=db_version)
+    return jsonify(ok=True, owner=owner, env_type=ENV_TYPE, data=data, abonents_db_version=db_version, key_versions=key_versions)
 
 
 @app.get("/api/admin/session_debug")
