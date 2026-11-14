@@ -781,7 +781,9 @@
       if (!window.JKHDbCas) return { ok: false, reason: "DB_VERSION_NOT_LOADED" };
       var dbRead = await window.JKHDbCas.read(ownerId);
       return { ok: dbRead.ok && dbRead.value !== null, missing: dbRead.ok && dbRead.value === null,
-        raw: dbRead.value, version: dbRead.version, key: key };
+        raw: dbRead.value, version: dbRead.version, key: key,
+        status: dbRead.ok ? (dbRead.value === null ? 404 : 200) : undefined,
+        data: dbRead.ok ? { version: dbRead.version } : undefined };
     }
     var url = "/api/store?key=" + encodeURIComponent(key) + "&client_owner_hint=" + encodeURIComponent(ownerId);
     if (_isCardSnapshotStorageKey(key)) {
