@@ -93,7 +93,7 @@ cleanup_lock() {
 trap cleanup_lock EXIT INT TERM
 
 acquire_lock() {
-  if [ -f "$LOCK_FILE" ]; then
+  if ! ( set -C; printf '%s\n' "pid=$$ env=$ENVIRONMENT dir=$PROJECT_DIR date=$(date '+%F %T')" > "$LOCK_FILE" ) 2>/dev/null; then
     echo "ОШИБКА: найден lock-файл: $LOCK_FILE"
     echo "Это защита от одновременного запуска двух операций."
     echo
@@ -105,7 +105,6 @@ acquire_lock() {
     return 1
   fi
 
-  printf '%s\n' "pid=$$ env=$ENVIRONMENT dir=$PROJECT_DIR date=$(date '+%F %T')" > "$LOCK_FILE"
   LOCK_HELD=1
 }
 
@@ -786,6 +785,72 @@ run_git_preserving_infra() {
 
   return 0
 }
+
+# Align only the index entries for protected LAB files before switching branches.
+# Their server-local working copies remain untouched throughout the checkout.
+lab_checkout_test_branch_preserving_infra() (
+  local target="origin/$SELECTED_BRANCH"
+  local path current_entry target_entry mode current_mode oid stage kind listed_path
+  local original_head original_branch completed=0
+  local -a protected_paths=(docker-compose.yml nginx/default.conf)
+  local -a original_entries=() target_entries=()
+  local i
+
+  [ "$ENVIRONMENT" = "LAB" ] || return 1
+  original_head="$(git rev-parse HEAD)" || return 1
+  original_branch="$(git symbolic-ref --quiet --short HEAD)" || return 1
+  git rev-parse --verify --quiet "$target^{commit}" >/dev/null || return 1
+
+  if [ -n "$(git ls-files -- .env)" ]; then
+    protected_paths+=(.env)
+  fi
+
+  for path in "${protected_paths[@]}"; do
+    current_entry="$(git ls-files --stage -- "$path")" || return 1
+    target_entry="$(git ls-tree "$target" -- "$path")" || return 1
+    read -r mode oid stage listed_path <<< "$current_entry"
+    if [ -z "$current_entry" ] || [ "$stage" != 0 ] || [ "$listed_path" != "$path" ]; then
+      block_operation "BLOCKED: индекс LAB infra-файла не готов: $path"
+      return 1
+    fi
+    if ! git diff --cached --quiet HEAD -- "$path"; then
+      block_operation "BLOCKED: LAB infra-файл подготовлен к коммиту: $path"
+      return 1
+    fi
+    current_mode="$mode"
+    original_entries+=("$mode,$oid,$path")
+    read -r mode kind oid listed_path <<< "$target_entry"
+    if [ "$kind" != blob ] || [ "$listed_path" != "$path" ] ||
+       [ "$mode" != "$current_mode" ]; then
+      block_operation "BLOCKED: LAB infra-файл отсутствует или сменил тип в целевой ветке: $path"
+      return 1
+    fi
+    target_entries+=("$mode,$oid,$path")
+  done
+
+  restore_lab_index_on_failure() {
+    if [ "$completed" -eq 0 ]; then
+      for i in "${!protected_paths[@]}"; do
+        git update-index --cacheinfo "${original_entries[$i]}" &&
+          git update-index --skip-worktree "${protected_paths[$i]}" ||
+          echo "BLOCKED: не удалось восстановить индекс для ${protected_paths[$i]}"
+      done
+      if [ "$(git rev-parse HEAD)" != "$original_head" ] ||
+         [ "$(git symbolic-ref --quiet --short HEAD)" != "$original_branch" ]; then
+        echo "BLOCKED: Git изменил HEAD при неудачном checkout; требуется ручная проверка."
+      fi
+    fi
+  }
+  trap restore_lab_index_on_failure EXIT
+
+  for i in "${!protected_paths[@]}"; do
+    git update-index --cacheinfo "${target_entries[$i]}" || return 1
+    git update-index --skip-worktree "${protected_paths[$i]}" || return 1
+  done
+
+  git checkout -B test-pr "$target" || return 1
+  completed=1
+)
 
 infra_files_guard() {
   local config_file env_type db_name pattern
@@ -2192,7 +2257,7 @@ deploy_test_branch() {
   select_branch || return 1
   infra_snapshot="$(mktemp)" || return 1
   infra_snapshot_before_git "$infra_snapshot" || return 1
-  run_git_preserving_infra "$infra_snapshot" git checkout -B test-pr "origin/$SELECTED_BRANCH" || return 1
+  run_git_preserving_infra "$infra_snapshot" lab_checkout_test_branch_preserving_infra || return 1
   environment_compose_guard_only || return 1
 
   if [ "$with_build" = "yes" ]; then
