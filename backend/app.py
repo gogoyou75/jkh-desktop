@@ -5420,14 +5420,26 @@ def _transfer_event(db_value, operation_id):
     return next((event for event in events if isinstance(event, dict) and event.get("operationId") == operation_id), None) if isinstance(events, list) else None
 
 
-def _transfer_payment_signatures(rows):
+def _transfer_payment_signatures(rows, raw_value):
+    exact_rows = json.loads(raw_value, parse_float=Decimal)
+    if not isinstance(exact_rows, list) or len(exact_rows) != len(rows):
+        raise ValueError("payment_ledger_value_must_be_json_array")
     signatures = {}
-    for row in rows:
-        if not isinstance(row, dict):
+    for row, exact_row in zip(rows, exact_rows):
+        if not isinstance(row, dict) or not isinstance(exact_row, dict):
             raise ValueError("payment_ledger_row_invalid")
-        if row.get("paid") in (None, "", 0, 0.0, "0"):
+        paid = exact_row.get("paid")
+        if paid in (None, "", 0, 0.0, "0"):
             continue
-        signature = json.dumps([row.get(k) for k in ("id", "paid", "paid_date", "payment_period", "fingerprint")], ensure_ascii=False, sort_keys=True)
+        if isinstance(paid, (int, float, Decimal)) and not isinstance(paid, bool):
+            amount = Decimal(str(paid))
+            if not amount.is_finite():
+                raise ValueError("payment_ledger_row_invalid")
+            paid_signature = ("number", amount)
+        else:
+            paid_signature = ("other", json.dumps(paid, ensure_ascii=False, sort_keys=True))
+        identity = json.dumps([row.get(k) for k in ("id", "paid_date", "payment_period", "fingerprint")], ensure_ascii=False, sort_keys=True)
+        signature = (identity, paid_signature)
         signatures[signature] = signatures.get(signature, 0) + 1
     return signatures
 
@@ -5547,12 +5559,14 @@ def responsibility_transfer_commit():
             return jsonify(ok=False, error="version_conflict", key=key), 409
     for key in ("payments_" + old_uid, "payments_" + new_uid):
         try:
-            previous = json.loads(rows[key].v) if rows[key] and rows[key].v else []
-            incoming = json.loads(writes[key]["value"])
+            previous_raw = rows[key].v if rows[key] and rows[key].v else "[]"
+            incoming_raw = writes[key]["value"]
+            previous = json.loads(previous_raw)
+            incoming = json.loads(incoming_raw)
             if not isinstance(previous, list) or not isinstance(incoming, list) or (previous and not incoming):
                 raise ValueError("payment_ledger_value_must_be_json_array")
-            before_paid = _transfer_payment_signatures(previous)
-            after_paid = _transfer_payment_signatures(incoming)
+            before_paid = _transfer_payment_signatures(previous, previous_raw)
+            after_paid = _transfer_payment_signatures(incoming, incoming_raw)
             if any(after_paid.get(signature, 0) < count for signature, count in before_paid.items()):
                 raise ValueError("payment_rows_lost")
         except (TypeError, ValueError, json.JSONDecodeError) as exc:
