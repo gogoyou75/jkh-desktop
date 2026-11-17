@@ -1352,7 +1352,9 @@ window.PremisesAdmin = (function () {
                 // rows
                 list.forEach(p => {
                     const link = activeLinkForRegnum(db, p.regnum);
-                    const fio = link ? fioById(db, link.abonentId) : '';
+                    const fio = link && link.technicalType === 'NO_NAME'
+                        ? 'No Name — Требуется назначить ответственного'
+                        : (link ? fioById(db, link.abonentId) : '');
                     const fioText = fio ? fio : '—';
 
                     const tr = document.createElement('tr');
@@ -1402,7 +1404,9 @@ window.PremisesAdmin = (function () {
             if (filter && !hay.includes(filter)) return;
 
             const link = activeLinkForRegnum(db, p.regnum);
-            const fio = link ? fioById(db, link.abonentId) : '';
+            const fio = link && link.technicalType === 'NO_NAME'
+                ? 'No Name — Требуется назначить ответственного'
+                : (link ? fioById(db, link.abonentId) : '');
             const fioText = fio ? fio : '—';
 
             const tr = document.createElement('tr');

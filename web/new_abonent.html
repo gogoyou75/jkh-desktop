@@ -469,7 +469,10 @@ function formatPremiseOption(regnum, p) {
 
   const addr = [city, street, house, flat].filter(Boolean).join(", ");
   const sqTxt = sq ? (" (" + sq + " м²)") : "";
-  return (String(regnum || "").trim() || "—") + " — " + (addr || "адрес не заполнен") + sqTxt;
+  const needsResponsible = (window.AbonentsDB?.links || []).some(l =>
+    l?.technicalType === 'NO_NAME' && String(l.regnum || '') === String(regnum) && !String(l.dateTo || '').trim());
+  return (String(regnum || "").trim() || "—") + " — " + (addr || "адрес не заполнен") + sqTxt +
+    (needsResponsible ? ' — Требуется назначить ответственного' : '');
 }
 
 function populatePremiseSelect(selectedRegnum) {
@@ -536,7 +539,10 @@ function applyPremiseByRegnum(regnum) {
   if (warn) warn.style.display = "none";
 
   const df = document.getElementById("na_date_from");
-  if (df && !df.value) df.value = getDefaultCalcStartDate();
+  const activeGap = (window.AbonentsDB?.links || []).find(l => l?.technicalType === 'NO_NAME' &&
+    String(l.regnum || '') === String(regnum) && !String(l.dateTo || '').trim());
+  if (df && activeGap) df.value = String(activeGap.dateFrom || '');
+  else if (df && !df.value) df.value = getDefaultCalcStartDate();
 
   refreshDebtTransferBox();
 }
@@ -623,7 +629,9 @@ function __updateNewDebtStartPreview(){
   const el = document.getElementById('newDebtStart');
   if (!el) return;
   const checked = (String(__transferMode||'NO_DEBT') === 'WITH_DEBT');
-  el.textContent = (__transferCtx && checked) ? 'будет рассчитан сервисом transfer' : '0.00';
+  el.textContent = (__transferCtx && checked)
+    ? (__transferCtx.noName ? 'из сохранённого frozen_debt' : 'будет рассчитан сервисом transfer')
+    : '0.00';
 }
 
 function refreshDebtTransferBox() {
@@ -638,14 +646,31 @@ function refreshDebtTransferBox() {
   const regnum = String(document.getElementById('na_regnum')?.value || '').trim();
   if (!db || !regnum){ box.style.display='none'; return; }
 
+  const df0 = String(document.getElementById('na_date_from')?.value || '').trim() || getDefaultCalcStartDate();
   const active = activeLinkForRegnumLocal(db, regnum);
+  const gap = (db.links || []).find(l => l?.technicalType === 'NO_NAME' &&
+    String(l.regnum || '') === regnum && String(l.dateFrom || '') === df0);
+  if (gap || active?.technicalType === 'NO_NAME') {
+    if (!gap) {
+      info.textContent = 'Для замены No Name укажите точную дату начала периода: ' + String(active.dateFrom || '');
+      box.style.display = 'none';
+      return;
+    }
+    __transferCtx = { noName:true, regnum, gap:gap, transferDate:df0 };
+    info.textContent = 'No Name — Требуется назначить ответственного. Выберите режим для всего периода ' +
+      df0 + ' — ' + (gap.dateTo || 'по настоящее время') + '.';
+    document.getElementById('transferStartPreview').textContent = df0;
+    document.getElementById('transferEndPreview').textContent = gap.dateTo || 'открытый период';
+    __updateNewDebtStartPreview();
+    box.style.display = 'block';
+    return;
+  }
   if (!active){ box.style.display='none'; return; }
 
   const oldObj = findAbonentByLinkId(db, active.abonentId);
   const oldA = oldObj && oldObj.abonent;
   if (!oldA){ box.style.display='none'; return; }
 
-  const df0 = String(document.getElementById('na_date_from')?.value || '').trim() || getDefaultCalcStartDate();
   const closeTo0 = getYesterdayIso(df0);
 
   const oldId = String(oldObj.id || '').trim();
@@ -1063,6 +1088,9 @@ async function prefillFromQueryParams() {
 }
 
 let __createAbonentBusy = false;
+let __noNameAssignOperationId = '';
+let __noNameAssignUid = '';
+let __noNameAssignContext = '';
 function setCreateStatus(msg){
   const el = document.getElementById("createStatusText");
   if (el) el.textContent = String(msg || "");
@@ -1136,7 +1164,15 @@ async function createAbonent() {
     if (!Array.isArray(dbRoot.links)) dbRoot.links = [];
     const prevActive = activeLinkForRegnumLocal(dbRoot, regnum);
     const isTransfer = !!(prevActive && __jkhTransferConfirmed && __transferCtx && __transferCtx.oldId);
+    const noNameGap = (dbRoot.links || []).find(l => l?.technicalType === 'NO_NAME' &&
+      String(l.regnum || '') === regnum && String(l.dateFrom || '') === respStart);
+    const isNoNameAssign = !!(noNameGap && __jkhTransferConfirmed && __transferCtx?.noName);
     const src = String(document.getElementById("na_src").value || "").trim();
+
+    if (prevActive?.technicalType === 'NO_NAME' && !isNoNameAssign) {
+      setCreateStatus('Для замены No Name укажите начало его периода и выберите «С долгом» или «Без долга».');
+      return;
+    }
 
     // если квартира занята — требуем явную передачу кнопкой
     if (prevActive && String(prevActive.abonentId || '').trim() && String(prevActive.abonentId || '').trim() !== String(ls).trim()){
@@ -1147,7 +1183,13 @@ async function createAbonent() {
     }
 
     // UID
-    const uid = generateUid();
+    const assignmentContext = isNoNameAssign ? [ls, regnum, respStart, __transferMode].join('|') : '';
+    if (isNoNameAssign && __noNameAssignContext !== assignmentContext) {
+      __noNameAssignContext = assignmentContext;
+      __noNameAssignOperationId = '';
+      __noNameAssignUid = '';
+    }
+    const uid = isNoNameAssign ? (__noNameAssignUid || (__noNameAssignUid = generateUid())) : generateUid();
 
     // создаём нового с нулевым долгом (как и было)
     dbRoot.abonents[ls] = {
@@ -1172,7 +1214,7 @@ async function createAbonent() {
       uid: uid,
 
       calcStartDate: respStart,
-      calcEndDate: "",
+      calcEndDate: isNoNameAssign ? String(noNameGap.dateTo || '') : "",
 
       calcDate: "",
       stateDate: "",
@@ -1180,7 +1222,7 @@ async function createAbonent() {
     };
 
 
-    if (!isTransfer) {
+    if (!isTransfer && !isNoNameAssign) {
       try {
         if (window.Data && typeof window.Data.writeCanonicalExcludePeriods === 'function') {
           window.Data.writeCanonicalExcludePeriods(String(ls), []);
@@ -1191,7 +1233,7 @@ async function createAbonent() {
     }
 
     const newPaymentsKey = (window.Data && typeof window.Data.resolvePaymentLedgerKey === 'function') ? window.Data.resolvePaymentLedgerKey(String(ls)) : ('payments_' + String(uid || '').trim());
-    if (isTransfer) {
+    if (isTransfer || isNoNameAssign) {
       // The ledger is created together with the responsibility transaction.
     } else if (window.Data && typeof window.Data.createEmptyPaymentLedger === 'function') {
       const createdLedger = window.Data.createEmptyPaymentLedger(String(ls));
@@ -1207,7 +1249,30 @@ async function createAbonent() {
     }
     try { console.log('[payment-key] create-empty', { abonentId: String(ls), uid: String(uid), key: newPaymentsKey, mode: 'uid' }); } catch(e) {}
 
-    if (isTransfer){
+    if (isNoNameAssign) {
+      const stagedImport = src === 'import_xls'
+        ? importPaymentsFromDraftForNewAbonent(String(ls), dbRoot.abonents[ls], true) : null;
+      try {
+        if (!(window.Data && typeof Data.assignNoNameAtomic === 'function')) throw new Error('NO_NAME_ASSIGN_UNAVAILABLE');
+        if (!__noNameAssignOperationId) __noNameAssignOperationId = 'responsibility:' + crypto.randomUUID();
+        const assigned = await Data.assignNoNameAtomic({ abonentId:String(ls), regnum:String(regnum),
+          dateFrom:String(noNameGap.dateFrom || ''), dateTo:String(noNameGap.dateTo || ''),
+          mode:String(__transferMode || 'NO_DEBT'), operationId:__noNameAssignOperationId,
+          abonent:dbRoot.abonents[ls],
+          initialRows:stagedImport ? (stagedImport.rows || []) : [] });
+        if (assigned !== true) throw new Error('NO_NAME_ASSIGN_NOT_COMMITTED');
+      } catch (e) {
+        window.AbonentsDB = dbSnapshotBeforeCreate;
+        setCreateStatus('Назначение No Name не подтверждено: ' + String(e && e.message || e) + '. Обновите данные с сервера перед повтором.');
+        return;
+      }
+      if (src === 'import_xls') saveImportCreatedUid(String(window.AbonentsDB?.abonents?.[ls]?.uid || uid));
+      const returnUrl = safeReturnUrl(String(document.getElementById('na_return').value || '').trim());
+      clearDraftNewAbonent();
+      if (isImportReturnScenario()) { goBackToImport(); return; }
+      location.href = returnUrl || ('abonent_card.html?abonent=' + encodeURIComponent(ls));
+      return;
+    } else if (isTransfer){
       const stagedImport = src === 'import_xls'
         ? importPaymentsFromDraftForNewAbonent(String(ls), dbRoot.abonents[ls], true)
         : null;

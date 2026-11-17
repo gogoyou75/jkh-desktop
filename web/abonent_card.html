@@ -1937,7 +1937,8 @@ function renderResponsibilityHistory(regnum){
   const db = getDb();
   links.forEach(l => {
     const aid = String(l?.abonentId || '').trim();
-    const fio = String(db[aid]?.fio || '').trim();
+    const isNoName = l?.technicalType === 'NO_NAME';
+    const fio = isNoName ? 'No Name — Требуется назначить ответственного' : String(db[aid]?.fio || '').trim();
     const df = String(l?.dateFrom || '').trim();
     const dt = String(l?.dateTo || '').trim();
     const active = !dt;
@@ -1952,7 +1953,7 @@ function renderResponsibilityHistory(regnum){
         ${active ? 'текущий' : 'закрыт'}
       </td>
       <td style="border:2px solid #000; padding:6px;">
-        <a href="abonent_card.html?abonent=${encodeURIComponent(aid)}" style="text-decoration:underline;">открыть</a>
+        ${isNoName ? 'Требуется назначить ответственного' : `<a href="abonent_card.html?abonent=${encodeURIComponent(aid)}" style="text-decoration:underline;">открыть</a>`}
       </td>
     `;
     body.appendChild(tr);
@@ -2555,42 +2556,34 @@ function __restoreDeletedRuntimeState(snapshot){
     }
 }
 
+let __deleteAbonentBusy = false;
+let __deleteAbonentOperationId = "";
 async function deleteAbonentFromCard(){
+    if (__deleteAbonentBusy) return;
     if (!canWriteOrExplainLocal()) return;
     const { id: abonentId, a } = getCurrentAbonent();
     if (!a) { alert('Абонент не найден'); return; }
 
-    const uid = String(a.uid || '').trim();
-    const account = String(a.account || a.ls || abonentId || '').trim();
-    const ownerId = (window.JKHStore && typeof JKHStore.getOwnerId === 'function') ? JKHStore.getOwnerId() : 'guest';
-
-    console.log('[abonent][delete] start', { ownerId: ownerId, abonentId: String(abonentId), uid: uid, account: account });
-
-    const ok = window.confirm('Точно удалить абонента? Будут удалены карточка абонента, начисления, платежи, примечания и связанные данные. Действие нельзя отменить.');
+    const ok = window.confirm('Безвозвратно удалить абонента, ВСЕ его платежи, начисления, примечания и снимки? Период квартиры станет «No Name — Требуется назначить ответственного». Действие нельзя отменить.');
     if (!ok) return;
-
-    const keysToDelete = __collectAbonentScopedKeysForDelete(String(abonentId), uid, account);
-    const keySnapshot = {};
-    for (let i = 0; i < keysToDelete.length; i++) keySnapshot[keysToDelete[i]] = storeGet(keysToDelete[i]);
-
-    const __localSnapshot = { db: __deepCloneJSONSafe(getDb()), keys: keySnapshot };
-
+    __deleteAbonentBusy = true;
     try {
-        if (window.Data && typeof window.Data.deleteAbonent === 'function') {
-            window.Data.deleteAbonent(String(abonentId));
-        }
-        for (let i = 0; i < keysToDelete.length; i++) storeRemove(keysToDelete[i]);
-
-        await Data.flushDbToServer();
-
-        console.log('[abonent][delete] success', { ownerId: ownerId, abonentId: String(abonentId) });
+        if (!__deleteAbonentOperationId) __deleteAbonentOperationId = 'responsibility:' + crypto.randomUUID();
+        if (!(window.Data && typeof Data.deleteAbonentAtomic === 'function')) throw new Error('ATOMIC_DELETE_UNAVAILABLE');
+        const deleted = await Data.deleteAbonentAtomic(String(abonentId), __deleteAbonentOperationId);
+        if (deleted !== true) throw new Error('ATOMIC_DELETE_NOT_COMMITTED');
         alert('Абонент удалён');
         closeAbonentEdit();
         window.location.href = 'index.html';
     } catch (err) {
         console.error('[abonent][delete] failed', err);
-        __restoreDeletedRuntimeState(__localSnapshot);
-        alert('Ошибка удаления абонента: не удалось сохранить изменения на сервере. Данные восстановлены.');
+        if (err && err.code === 'dependent_recipient') {
+            alert('Удаление заблокировано. Сначала вручную удалите зависимого абонента: ' + err.dependentAbonentId);
+        } else {
+            alert('Удаление не подтверждено: ' + String(err && err.message || err) + '. Обновите данные с сервера перед повтором.');
+        }
+    } finally {
+        __deleteAbonentBusy = false;
     }
 }
 

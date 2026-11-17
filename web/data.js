@@ -3727,7 +3727,7 @@
 
     // чистим битые links
     db.links = db.links.filter((l) => {
-      const abonentOk = !!db.abonents?.[String(l?.abonentId)];
+      const abonentOk = l?.technicalType === "NO_NAME" || !!db.abonents?.[String(l?.abonentId)];
       const premiseOk = !!db.premises?.[String(l?.regnum || "").trim()];
       return abonentOk && premiseOk;
     });
@@ -7870,6 +7870,68 @@
     });
     return true;
   }
+
+  function __responsibilityMutationOperationId() {
+    if (!(window.crypto && typeof window.crypto.randomUUID === "function")) throw new Error("RESPONSIBILITY_CRYPTO_UNAVAILABLE");
+    return "responsibility:" + window.crypto.randomUUID();
+  }
+
+  async function __responsibilityMutationPost(path, payload, deletedId, deletedUid) {
+    var result;
+    try {
+      var http = await fetch(path, { method:"POST", credentials:"include",
+        headers:{ "Content-Type":"application/json" }, body:JSON.stringify(payload) });
+      result = { status:http.status, data:await http.json() };
+    } catch (networkError) {
+      var statusHttp = await fetch(path + "?operation_id=" + encodeURIComponent(payload.operation_id) +
+        "&client_owner_hint=" + encodeURIComponent(_ownerId()), { credentials:"include" });
+      var statusData = await statusHttp.json();
+      if (!(statusHttp.ok && statusData && statusData.committed === true)) throw new Error("RESPONSIBILITY_OUTCOME_UNKNOWN");
+      result = { status:200, data:{ok:true, committed:true, replay:true} };
+    }
+    if (!(result.status === 200 && result.data && result.data.ok === true && result.data.committed === true)) {
+      var error = new Error(result.data && result.data.error || "RESPONSIBILITY_SERVER_REJECTED");
+      error.code = result.data && result.data.error || "RESPONSIBILITY_SERVER_REJECTED";
+      error.dependentAbonentId = result.data && result.data.dependent_abonent_id || "";
+      throw error;
+    }
+    if (!(window.JKHDataLoader && typeof window.JKHDataLoader.refreshAfterResponsibilityMutation === "function")) {
+      throw new Error("RESPONSIBILITY_RELOAD_UNAVAILABLE");
+    }
+    var loaded = await window.JKHDataLoader.refreshAfterResponsibilityMutation(deletedId, deletedUid);
+    if (!(loaded && loaded.ok)) throw new Error("RESPONSIBILITY_COMMITTED_RELOAD_FAILED");
+    return true;
+  }
+
+  Data.deleteAbonentAtomic = async function(abonentId, operationId) {
+    if (!Data.ensureWriteOrExplain()) return false;
+    var id = String(abonentId || "").trim();
+    var db = window.AbonentsDB || {};
+    var a = db.abonents && db.abonents[id];
+    var links = Array.isArray(db.links) ? db.links.filter(function(l){ return String(l && l.abonentId || "") === id; }) : [];
+    var version = window.JKHDbCas && window.JKHDbCas.version(_ownerId());
+    if (!a || links.length !== 1 || !Number.isSafeInteger(version)) throw new Error("RESPONSIBILITY_LOCAL_STATE_INVALID");
+    return __responsibilityMutationPost("/api/abonent_delete", {
+      client_owner_hint:_ownerId(), operation_id:operationId || __responsibilityMutationOperationId(),
+      expected_version:version, abonent_id:id, uid:String(a.uid || ""),
+      regnum:String(links[0].regnum || ""), date_from:String(links[0].dateFrom || ""),
+      date_to:String(links[0].dateTo || "")
+    }, id, String(a.uid || ""));
+  };
+
+  Data.assignNoNameAtomic = async function(options) {
+    if (!Data.ensureWriteOrExplain()) return false;
+    var opts = options || {};
+    var version = window.JKHDbCas && window.JKHDbCas.version(_ownerId());
+    if (!Number.isSafeInteger(version)) throw new Error("RESPONSIBILITY_VERSION_MISSING");
+    return __responsibilityMutationPost("/api/no_name_assign", {
+      client_owner_hint:_ownerId(), operation_id:opts.operationId || __responsibilityMutationOperationId(),
+      expected_version:version, abonent_id:String(opts.abonentId || ""),
+      regnum:String(opts.regnum || ""), date_from:String(opts.dateFrom || ""),
+      date_to:String(opts.dateTo || ""), mode:String(opts.mode || ""),
+      abonent:opts.abonent, initial_rows:Array.isArray(opts.initialRows) ? opts.initialRows : []
+    }, "", "");
+  };
 
   async function transferResponsibility(options){
     if (!Data.ensureWriteOrExplain()) return false;

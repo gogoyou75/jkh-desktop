@@ -2434,6 +2434,24 @@
 
   window.JKHDataLoader = {
     loadFromServer: _loadFromServerServerFirst,
+    refreshAfterResponsibilityMutation: async function (deletedId, deletedUid) {
+      var id = String(deletedId || "").trim();
+      var uid = String(deletedUid || "").trim();
+      var owner = _ownerId();
+      // The regular dump loader deliberately preserves local card snapshots.
+      // A deleted person's snapshot must be removed before that preservation pass.
+      if (id || uid) {
+        var prefix = scopePrefixFor(owner);
+        (window.JKHStore.keysForOwner(owner) || []).forEach(function(scoped) {
+          var key = String(scoped || "");
+          if (key.indexOf(prefix) === 0) key = key.slice(prefix.length);
+          if (key === "card_snapshot_" + id || key === "card_snapshot_" + uid) {
+            window.JKHStore.removeRaw(key, owner);
+          }
+        });
+      }
+      return _loadFromServerServerFirst({ force: true, reason: "responsibility_mutation" });
+    },
     __testHooks: {
       isQuotaExceededError: _isQuotaExceededError,
       serverLoadCacheWarning: _serverLoadCacheWarning,
