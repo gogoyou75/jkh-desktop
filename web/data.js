@@ -8235,6 +8235,93 @@
   Data.transferResponsibility = transferResponsibility;
   Data.getAbonentTransferInfo = getAbonentTransferInfo;
   Data.getFinancialTransferInfo = getFinancialTransferInfo;
+  Data.inspectClosedTransferRetry = function(abonentId, regnum) {
+    var db = window.AbonentsDB || {};
+    var id = String(abonentId || "").trim(), rn = normalizeRegnumValue(regnum);
+    var events = Array.isArray(db.premiseEvents) ? db.premiseEvents : [];
+    var prior = events.filter(function(e){ return e &&
+      String(e.oldAbonentId || e.sourceAbonentId || "") === id &&
+      (e.regnum === rn || (e.fromRegnums || []).includes(rn)) &&
+      ["RESPONSIBILITY_TRANSFER", "NO_NAME_ASSIGNED", "CLOSED_RESPONSIBILITY_ASSIGNED"].includes(e.type); });
+    if (!prior.length) return { eligible:true, priorOperationId:"", deletedRecipients:[] };
+    var reject = function(reason){ return { eligible:false, reason:reason, priorOperationId:"", deletedRecipients:[] }; };
+    if (prior.length !== 1 || prior[0].type !== "RESPONSIBILITY_TRANSFER") return reject("Ранее выполненная операция требует проверки истории.");
+    var financial;
+    try { financial = JSON.parse(_getProjectRaw("jkh_financial_events_v1") || "[]"); }
+    catch (e) { return reject("Финансовый журнал недоступен."); }
+    if (!Array.isArray(financial)) return reject("Финансовый журнал недоступен.");
+    var source = id, seen = new Set([id]), operations = new Set(), deleted = [];
+    while (true) {
+      var steps = events.filter(function(e){ return e && e.type === "RESPONSIBILITY_TRANSFER" &&
+        String(e.oldAbonentId || "") === source && (e.fromRegnums || [e.regnum]).includes(rn); });
+      if (steps.length !== 1) return reject("Цепочка ответственности неоднозначна.");
+      var step = steps[0], target = String(step.newAbonentId || ""), op = String(step.operationId || "");
+      if (!target || seen.has(target) || !op || !["NO_DEBT", "WITHOUT_DEBT"].includes(step.transferMode))
+        return reject("Историческая передача с долгом или неизвестным режимом требует проверки.");
+      var matches = financial.filter(function(e){ return e && e.type === "TRANSFER_WITHOUT_DEBT" &&
+        e.operationId === op && String(e.sourceAbonentId || "") === source &&
+        String(e.targetAbonentId || "") === target && normalizeRegnumValue(e.regnum || e.premiseId) === rn &&
+        ["NO_DEBT", "WITHOUT_DEBT"].includes(e.mode) && Number(e.debtAmount || 0) === 0 &&
+        Number(e.balanceAmount || 0) === 0 && Number(e.principal || 0) === 0 && Number(e.penalty || 0) === 0; });
+      var deletions = events.filter(function(e){ return e && e.type === "ABONENT_DELETED" &&
+        String(e.abonentId || "") === target && String(e.regnum || "") === rn; });
+      if (matches.length !== 1 || deletions.length !== 1 || db.abonents?.[target] ||
+          (db.links || []).some(function(l){ return String(l?.abonentId || "") === target; }) ||
+          !deletions[0].uid || _getProjectRaw("payments_" + deletions[0].uid) ||
+          _getProjectRaw("jkh_transfer_to_v1:" + target) || getFinancialTransferInfo(target, rn).incoming)
+        return reject("Получатель или его данные удалены не полностью.");
+      if (getFinancialTransferInfo(source, rn).outgoing.some(function(o){ return o.regnum === rn; }))
+        return reject("Сохранилась исходящая финансовая зависимость.");
+      operations.add(op); seen.add(target); deleted.push(target); source = target;
+      if (!events.some(function(e){ return e && e.type === "RESPONSIBILITY_TRANSFER" &&
+          String(e.oldAbonentId || "") === source && (e.fromRegnums || [e.regnum]).includes(rn); })) break;
+    }
+    if (financial.some(function(e){ return e && seen.has(String(e.sourceAbonentId || "")) &&
+        normalizeRegnumValue(e.regnum || e.premiseId) === rn && !operations.has(String(e.operationId || "")); }))
+      return reject("Есть другая финансовая операция в цепочке.");
+    if (events.some(function(e){ return e && ["NO_NAME_ASSIGNED", "CLOSED_RESPONSIBILITY_ASSIGNED"].includes(e.type) &&
+        seen.has(String(e.sourceAbonentId || "")) && String(e.regnum || "") === rn; }))
+      return reject("Есть другая операция ответственности в цепочке.");
+    return { eligible:true, priorOperationId:String(prior[0].operationId), deletedRecipients:deleted };
+  };
+  Data.getFinancialTransferHistory = function(abonentId, regnum) {
+    var id = String(abonentId || ""), rn = normalizeRegnumValue(regnum);
+    var db = window.AbonentsDB || {};
+    try {
+      var events = JSON.parse(_getProjectRaw("jkh_financial_events_v1") || "[]");
+      if (!Array.isArray(events)) return [];
+      return events.filter(function(e){ return e && ["TRANSFER_WITH_DEBT", "TRANSFER_WITHOUT_DEBT"].includes(e.type) &&
+        normalizeRegnumValue(e.regnum || e.premiseId) === rn &&
+        (String(e.sourceAbonentId || "") === id || String(e.targetAbonentId || "") === id); }).map(function(e){
+        var sourceId = String(e.sourceAbonentId || ""), targetId = String(e.targetAbonentId || "");
+        var premiseEvent = (db.premiseEvents || []).find(function(item){ return item &&
+          String(item.operationId || "") === String(e.operationId || ""); });
+        var freezeDate = String(e.freezeDate || premiseEvent?.oldRespTo || premiseEvent?.sourceCloseDate || "");
+        var sourceSnapshot = null;
+        if (freezeDate) {
+          try { sourceSnapshot = JSON.parse(_getProjectRaw("jkh_frozen_debt_v1:" + sourceId + ":" +
+            freezeDate) || "null"); } catch (_) {}
+        }
+        var balance = null;
+        try { balance = JSON.parse(_getProjectRaw("jkh_transfer_balance_v1:" + targetId + ":" + rn) || "null"); } catch (_) {}
+        var transferred = e.type === "TRANSFER_WITH_DEBT";
+        var validBalance = transferred && balance && String(balance.fromAbonentId || "") === sourceId &&
+          String(balance.startDate || "") === String(e.date || "");
+        return { operationId:String(e.operationId || ""), replacesOperationId:String(e.replacesOperationId || ""),
+          date:String(e.date || ""), freezeDate:freezeDate,
+          sourceId:sourceId, targetId:targetId, sourceName:String(db.abonents?.[sourceId]?.fio || ""),
+          targetName:String(db.abonents?.[targetId]?.fio || ""), mode:transferred ? "WITH_DEBT" : "NO_DEBT",
+          sourcePrincipal:Number.isFinite(Number(e.sourcePrincipal)) && e.sourcePrincipal != null ? Number(e.sourcePrincipal) :
+            (sourceSnapshot?.success && sourceSnapshot.calculatedAt === freezeDate ? Number(sourceSnapshot.principal) : null),
+          sourcePenalty:Number.isFinite(Number(e.sourcePenalty)) && e.sourcePenalty != null ? Number(e.sourcePenalty) :
+            (sourceSnapshot?.success && sourceSnapshot.calculatedAt === freezeDate ? Number(sourceSnapshot.penalty) : null),
+          transferredPrincipal:transferred ? (validBalance ? Number(balance.principal) : Number(e.principal ?? NaN)) : 0,
+          transferredPenalty:transferred ? (validBalance ? Number(balance.penalty) : Number(e.penalty ?? NaN)) : 0,
+          status:!db.abonents?.[targetId] ? (transferred && validBalance ? "UNVERIFIED" : "DELETED_RECIPIENT") :
+            (transferred && !validBalance ? "UNVERIFIED" : "CONFIRMED") };
+      });
+    } catch (e) { return []; }
+  };
   Data.getConfirmedClosedOutgoingTransfer = function(abonentId, regnum) {
     var id = String(abonentId || "").trim();
     var rn = normalizeRegnumValue(regnum);

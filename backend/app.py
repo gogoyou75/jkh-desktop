@@ -5455,6 +5455,92 @@ def _responsibility_periods_valid(links, regnum):
     return all(periods[i - 1][1] < periods[i][0] for i in range(1, len(periods)))
 
 
+def _closed_no_debt_retry(current, owner, source_id, regnum, financial_events, balances):
+    """Return the original operation only for a fully deleted NO_DEBT chain."""
+    events = current.get("premiseEvents", [])
+    relevant = [event for event in events if isinstance(event, dict) and
+                str(event.get("regnum") or (event.get("fromRegnums") or [""])[0]) == regnum and
+                str(event.get("oldAbonentId") or event.get("sourceAbonentId") or "") == source_id and
+                event.get("type") in ("RESPONSIBILITY_TRANSFER", "CLOSED_RESPONSIBILITY_ASSIGNED", "NO_NAME_ASSIGNED")]
+    if not relevant:
+        return ""
+    if len(relevant) != 1 or relevant[0].get("type") != "RESPONSIBILITY_TRANSFER":
+        raise ValueError("retry_prior_operation_conflict")
+    first_operation = str(relevant[0].get("operationId") or "")
+    visited = {source_id}
+    current_source = source_id
+    matched = set()
+    while True:
+        steps = [event for event in events if isinstance(event, dict) and
+                 event.get("type") == "RESPONSIBILITY_TRANSFER" and
+                 str(event.get("oldAbonentId") or "") == current_source and
+                 regnum in (event.get("fromRegnums") or [event.get("regnum")])]
+        if len(steps) != 1:
+            raise ValueError("retry_chain_conflict")
+        step = steps[0]
+        target = str(step.get("newAbonentId") or "")
+        operation = str(step.get("operationId") or "")
+        if (not target or target in visited or not operation or
+                str(step.get("transferMode") or "") not in ("NO_DEBT", "WITHOUT_DEBT")):
+            raise ValueError("retry_with_debt_or_unknown_mode")
+        matches = [event for event in financial_events if isinstance(event, dict) and
+                   str(event.get("operationId") or "") == operation and
+                   str(event.get("sourceAbonentId") or "") == current_source and
+                   str(event.get("targetAbonentId") or "") == target and
+                   str(event.get("regnum") or event.get("premiseId") or "") == regnum and
+                   event.get("type") == "TRANSFER_WITHOUT_DEBT" and
+                   str(event.get("mode") or "") in ("NO_DEBT", "WITHOUT_DEBT") and
+                   Decimal(str(event.get("debtAmount") or 0)) == 0 and
+                   Decimal(str(event.get("balanceAmount") or 0)) == 0 and
+                   Decimal(str(event.get("principal") or 0)) == 0 and
+                   Decimal(str(event.get("penalty") or 0)) == 0]
+        deleted = [event for event in events if isinstance(event, dict) and
+                   event.get("type") == "ABONENT_DELETED" and
+                   str(event.get("abonentId") or "") == target and
+                   str(event.get("regnum") or "") == regnum]
+        if (len(matches) != 1 or len(deleted) != 1 or target in current.get("abonents", {}) or
+                any(isinstance(link, dict) and str(link.get("abonentId") or "") == target
+                    for link in current.get("links", []))):
+            raise ValueError("retry_recipient_not_safely_deleted")
+        recipient_uid = str(deleted[0].get("uid") or "")
+        if not _canonical_payment_ledger_uid("payments_" + recipient_uid):
+            raise ValueError("retry_recipient_uid_invalid")
+        recipient_ledger = KVStore.query.filter_by(owner=owner, k="payments_" + recipient_uid).with_for_update().first()
+        if recipient_ledger and recipient_ledger.v:
+            raise ValueError("retry_recipient_ledger_present")
+        recipient_compatibility = KVStore.query.filter_by(owner=owner, k="jkh_transfer_to_v1:" + target).with_for_update().first()
+        if recipient_compatibility and recipient_compatibility.v:
+            raise ValueError("retry_recipient_transfer_present")
+        matched.add(operation)
+        visited.add(target)
+        current_source = target
+        next_steps = [event for event in events if isinstance(event, dict) and
+                      event.get("type") == "RESPONSIBILITY_TRANSFER" and
+                      str(event.get("oldAbonentId") or "") == current_source and
+                      regnum in (event.get("fromRegnums") or [event.get("regnum")])]
+        if not next_steps:
+            break
+    for balance in balances:
+        if not balance.v:
+            continue
+        payload = json.loads(balance.v)
+        recipient = balance.k.split(":", 2)[1]
+        if ((str(payload.get("fromAbonentId") or "") in visited or recipient in visited) and
+                (str(payload.get("regnum") or "") == regnum or balance.k.endswith(":" + regnum))):
+            raise ValueError("retry_live_transfer_balance")
+    for event in financial_events:
+        if (isinstance(event, dict) and
+                str(event.get("sourceAbonentId") or "") in visited and
+                str(event.get("regnum") or event.get("premiseId") or "") == regnum and
+                str(event.get("operationId") or "") not in matched):
+            raise ValueError("retry_other_financial_operation")
+    if any(isinstance(event, dict) and event.get("type") in ("NO_NAME_ASSIGNED", "CLOSED_RESPONSIBILITY_ASSIGNED") and
+           str(event.get("sourceAbonentId") or "") in visited and
+           str(event.get("regnum") or "") == regnum for event in events):
+        raise ValueError("retry_other_responsibility_operation")
+    return first_operation
+
+
 def _personal_abonent_key(key, abonent_id, uid):
     suffixes = {abonent_id, uid}
     for prefix in ("payments_", "note_", "exclude_periods_", "calc_period_",
@@ -5574,9 +5660,8 @@ def abonent_delete_atomic():
             return _json_error("transfer_data_invalid", 409)
         if str(transfer.get("fromAbonentId") or "") == abonent_id:
             recipient_id = row.k.split(":", 2)[1]
-            if recipient_id in abonents:
-                db.session.rollback()
-                return jsonify(ok=False, error="dependent_recipient", dependent_abonent_id=recipient_id), 409
+            db.session.rollback()
+            return jsonify(ok=False, error="dependent_recipient", dependent_abonent_id=recipient_id), 409
     # Historical events cannot substitute for a canonical transfer key, but reveal a broken dependency.
     for event in current.get("premiseEvents", []):
         if isinstance(event, dict) and event.get("type") == "RESPONSIBILITY_TRANSFER" and str(event.get("oldAbonentId") or "") == abonent_id and str(event.get("transferMode") or "") == "WITH_DEBT" and str(event.get("newAbonentId") or "") in abonents:
@@ -5733,6 +5818,7 @@ def no_name_assign_atomic():
         return _json_error("assignment_identity_conflict", 409)
     gaps = [link for link in links if isinstance(link, dict) and link.get("technicalType") == "NO_NAME" and str(link.get("regnum") or "") == regnum and str(link.get("dateFrom") or "") == gap_from and str(link.get("dateTo") or "") == gap_to]
     source_id = ""
+    retry_operation = ""
     source_debt = None
     principal = penalty = Decimal(0)
     source_ledger = freeze_row = debt_row = None
@@ -5757,26 +5843,37 @@ def no_name_assign_atomic():
                                    str(existing_gap[0].get("dateTo") or "")))):
             db.session.rollback()
             return _json_error("closed_source_conflict", 409)
-        for event in current.get("premiseEvents", []):
-            if isinstance(event, dict) and str(event.get("regnum") or (event.get("fromRegnums") or [""])[0]) == regnum and (
-                    str(event.get("oldAbonentId") or "") == closed_source_id or
-                    str(event.get("sourceAbonentId") or "") == closed_source_id) and event.get("type") in (
-                        "RESPONSIBILITY_TRANSFER", "CLOSED_RESPONSIBILITY_ASSIGNED", "NO_NAME_ASSIGNED"):
-                db.session.rollback()
-                return _json_error("source_already_transferred", 409)
         source_id, freeze_date = closed_source_id, source_close
-        for transfer_row in KVStore.query.filter(KVStore.owner == owner, KVStore.k.like("jkh_transfer_balance_v1:%")).with_for_update().all():
-            if not transfer_row.v:
-                continue
-            try:
-                prior_balance = json.loads(transfer_row.v)
-            except (TypeError, ValueError):
-                db.session.rollback()
-                return _json_error("transfer_data_invalid", 409)
-            if (str(prior_balance.get("fromAbonentId") or "") == source_id and
-                    str(prior_balance.get("regnum") or "") == regnum):
-                db.session.rollback()
-                return _json_error("source_already_transferred", 409)
+        balances = KVStore.query.filter(KVStore.owner == owner, KVStore.k.like("jkh_transfer_balance_v1:%")).with_for_update().all()
+        financial_row = KVStore.query.filter_by(owner=owner, k="jkh_financial_events_v1").with_for_update().first()
+        try:
+            prior_financial = json.loads(financial_row.v) if financial_row and financial_row.v else []
+            if not isinstance(prior_financial, list):
+                raise ValueError()
+            retry_operation = _closed_no_debt_retry(current, owner, source_id, regnum, prior_financial, balances)
+            if retry_operation and any(isinstance(event, dict) and
+                    event.get("type") == "ABONENT_DELETED" and
+                    str(event.get("abonentId") or "") == new_id and
+                    str(event.get("regnum") or "") == regnum
+                    for event in current.get("premiseEvents", [])):
+                raise ValueError("retry_deleted_identity_reused")
+            if not retry_operation:
+                for transfer_row in balances:
+                    if not transfer_row.v:
+                        continue
+                    prior_balance = json.loads(transfer_row.v)
+                    if (str(prior_balance.get("fromAbonentId") or "") == source_id and
+                            str(prior_balance.get("regnum") or "") == regnum):
+                        raise ValueError("source_already_transferred")
+                if any(isinstance(event, dict) and
+                       str(event.get("sourceAbonentId") or "") == source_id and
+                       str(event.get("regnum") or event.get("premiseId") or "") == regnum and
+                       event.get("type") in ("TRANSFER_WITH_DEBT", "TRANSFER_WITHOUT_DEBT")
+                       for event in prior_financial):
+                    raise ValueError("source_already_transferred")
+        except (TypeError, ValueError, InvalidOperation):
+            db.session.rollback()
+            return _json_error("source_already_transferred_or_retry_unsafe", 409)
         source_a = abonents.get(source_id)
         source_uid = str(source_a.get("uid") or "") if isinstance(source_a, dict) else ""
         if not _canonical_payment_ledger_uid("payments_" + source_uid):
@@ -5820,6 +5917,35 @@ def no_name_assign_atomic():
         if len(gaps) != 1:
             db.session.rollback()
             return _json_error("no_name_period_missing", 409)
+        earlier = [link for link in links if isinstance(link, dict) and
+                   str(link.get("regnum") or "") == regnum and str(link.get("dateTo") or "") and
+                   str(link.get("dateTo") or "") < gap_from and
+                   str(link.get("abonentId") or "") in abonents]
+        earlier.sort(key=lambda link: str(link.get("dateTo") or ""), reverse=True)
+        if earlier:
+            previous_id = str(earlier[0].get("abonentId") or "")
+            if any(isinstance(event, dict) and
+                   str(event.get("oldAbonentId") or event.get("sourceAbonentId") or "") == previous_id and
+                   str(event.get("regnum") or (event.get("fromRegnums") or [""])[0]) == regnum and
+                   event.get("type") in ("RESPONSIBILITY_TRANSFER", "NO_NAME_ASSIGNED", "CLOSED_RESPONSIBILITY_ASSIGNED")
+                   for event in current.get("premiseEvents", [])):
+                db.session.rollback()
+                return _json_error("assignment_requires_closed_retry_review", 409)
+            previous_financial_row = KVStore.query.filter_by(owner=owner, k="jkh_financial_events_v1").with_for_update().first()
+            try:
+                previous_financial = json.loads(previous_financial_row.v) if previous_financial_row and previous_financial_row.v else []
+                if not isinstance(previous_financial, list):
+                    raise ValueError()
+                if any(isinstance(event, dict) and
+                       str(event.get("sourceAbonentId") or "") == previous_id and
+                       str(event.get("regnum") or event.get("premiseId") or "") == regnum and
+                       event.get("type") in ("TRANSFER_WITH_DEBT", "TRANSFER_WITHOUT_DEBT")
+                       for event in previous_financial):
+                    db.session.rollback()
+                    return _json_error("assignment_requires_closed_retry_review", 409)
+            except (TypeError, ValueError):
+                db.session.rollback()
+                return _json_error("financial_events_invalid", 409)
         if mode == "WITH_DEBT":
             previous = [link for link in links if isinstance(link, dict) and str(link.get("regnum") or "") == regnum and str(link.get("dateTo") or "") and str(link.get("dateTo")) < gap_from and str(link.get("abonentId") or "") in abonents]
             previous.sort(key=lambda link: str(link.get("dateTo")), reverse=True)
@@ -5887,7 +6013,8 @@ def no_name_assign_atomic():
     current.setdefault("premiseEvents", []).append({"type": event_type, "operationId": operation_id,
         "abonentId": new_id, "uid": uid, "regnum": regnum, "dateFrom": gap_from, "dateTo": gap_to,
         "mode": mode, "sourceAbonentId": source_id,
-        "sourceCloseDate": freeze_date if closed_source else ""})
+        "sourceCloseDate": freeze_date if closed_source else "",
+        "replacesOperationId": retry_operation})
     ledger_key = "payments_" + uid
     excludes_key = "exclude_periods_" + new_id
     transfer_key = "jkh_transfer_balance_v1:" + new_id + ":" + regnum
@@ -5909,17 +6036,16 @@ def no_name_assign_atomic():
         financial_events = json.loads(rows["jkh_financial_events_v1"].v) if rows["jkh_financial_events_v1"] and rows["jkh_financial_events_v1"].v else []
         if not isinstance(financial_events, list):
             raise ValueError()
-        if closed_source and any(isinstance(event, dict) and
-                str(event.get("sourceAbonentId") or "") == source_id and
-                str(event.get("regnum") or event.get("premiseId") or "") == regnum and
-                event.get("type") in ("TRANSFER_WITH_DEBT", "TRANSFER_WITHOUT_DEBT")
-                for event in financial_events):
+        if closed_source and financial_events != prior_financial:
             db.session.rollback()
-            return _json_error("source_already_transferred", 409)
+            return _json_error("financial_events_changed", 409)
         financial_events.append({"type": "TRANSFER_WITH_DEBT" if mode == "WITH_DEBT" else "TRANSFER_WITHOUT_DEBT",
             "operationId": operation_id, "sourceAbonentId": source_id, "targetAbonentId": new_id,
             "premiseId": regnum, "regnum": regnum, "date": gap_from, "mode": mode,
             "freezeDate": freeze_date, "closedSource": closed_source,
+            "replacesOperationId": retry_operation,
+            "sourcePrincipal": float(principal) if closed_source else None,
+            "sourcePenalty": float(penalty) if closed_source else None,
             "principal": float(principal) if mode == "WITH_DEBT" else 0,
             "penalty": float(penalty) if mode == "WITH_DEBT" else 0,
             "debtAmount": float(principal + penalty) if mode == "WITH_DEBT" else 0})

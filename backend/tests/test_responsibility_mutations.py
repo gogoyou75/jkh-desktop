@@ -106,6 +106,46 @@ class ResponsibilityMutationTest(unittest.TestCase):
                 "source_debt": debt if debt is not None else {"success": True, "principal": 10000,
                     "penalty": 100, "calculatedAt": "2025-01-31"}})
 
+    def retry_base(self, mode="NO_DEBT", live=False, downstream=False):
+        operation = "old-a-b"
+        events = [{"type": "RESPONSIBILITY_TRANSFER", "operationId": operation,
+                   "oldAbonentId": "A", "newAbonentId": "B", "transferMode": mode,
+                   "date": "2025-02-01", "fromRegnums": ["p73"]}]
+        if not live:
+            events.append({"type": "ABONENT_DELETED", "operationId": "delete-b",
+                           "abonentId": "B", "uid": "uid_b", "regnum": "p73",
+                           "dateFrom": "2025-02-01", "dateTo": ""})
+        financial = [{"type": "TRANSFER_WITHOUT_DEBT" if mode == "NO_DEBT" else "TRANSFER_WITH_DEBT",
+                      "mode": "WITHOUT_DEBT" if mode == "NO_DEBT" else "WITH_DEBT",
+                      "operationId": operation, "sourceAbonentId": "A", "targetAbonentId": "B",
+                      "regnum": "p73", "date": "2025-02-01", "debtAmount": 0 if mode == "NO_DEBT" else 10000}]
+        abonents = {"A": {"uid": "uid_a", "regnum": "p73", "calcEndDate": "2025-01-31"}}
+        links = [{"abonentId": "A", "regnum": "p73", "dateFrom": "2025-01-01", "dateTo": "2025-01-31"}]
+        if live:
+            abonents["B"] = {"uid": "uid_b", "regnum": "p73"}
+            links.append({"abonentId": "B", "regnum": "p73", "dateFrom": "2025-02-01", "dateTo": ""})
+        else:
+            links.append({"technicalType": "NO_NAME", "abonentId": "", "regnum": "p73",
+                          "dateFrom": "2025-02-01", "dateTo": ""})
+        if downstream:
+            events.extend([
+                {"type": "RESPONSIBILITY_TRANSFER", "operationId": "old-b-d", "oldAbonentId": "B",
+                 "newAbonentId": "D", "transferMode": "NO_DEBT", "fromRegnums": ["p73"]},
+                {"type": "ABONENT_DELETED", "operationId": "delete-d", "abonentId": "D",
+                 "uid": "uid_d", "regnum": "p73"}])
+            financial.append({"type": "TRANSFER_WITHOUT_DEBT", "mode": "WITHOUT_DEBT",
+                              "operationId": "old-b-d", "sourceAbonentId": "B", "targetAbonentId": "D",
+                              "regnum": "p73", "debtAmount": 0})
+        self.seed(abonents, links, {"payments_uid_a": json.dumps([{"id": "old", "year": 2025,
+                  "month": 1, "accrued": 10000, "paid": 0}]),
+                  "jkh_financial_events_v1": json.dumps(financial)})
+        with app_module.app.app_context():
+            row = app_module.KVStore.query.filter_by(owner="owner1", k="abonents_db_v1").first()
+            state = json.loads(row.v)
+            state["premiseEvents"] = events
+            row.v = json.dumps(state)
+            app_module.db.session.commit()
+
     def base(self):
         self.seed({"A": {"uid": "uid_a", "regnum": "p73"}, "B": {"uid": "uid_b", "regnum": "p73"}},
             [{"abonentId": "A", "regnum": "p73", "dateFrom": "2025-01-01", "dateTo": "2025-01-31"},
@@ -297,6 +337,19 @@ class ResponsibilityMutationTest(unittest.TestCase):
         self.assertEqual([link["technicalType"] for link in state["links"]], ["NO_NAME", "NO_NAME"])
         self.assertEqual(values["jkh_transfer_balance_v1:D:p73"], "")
 
+    def test_orphan_outgoing_balance_still_blocks_source_deletion(self):
+        self.seed({"A": {"uid": "uid_a", "regnum": "p73"}},
+            [{"abonentId": "A", "regnum": "p73", "dateFrom": "2025-01-01", "dateTo": ""}],
+            {"payments_uid_a": "[]", "jkh_transfer_balance_v1:B:p73": json.dumps({
+                "fromAbonentId": "A", "regnum": "p73", "principal": 10000})})
+        with app_module.app.test_client() as client:
+            response = client.post("/api/abonent_delete", json={"operation_id": "delete-a",
+                "expected_version": 1, "abonent_id": "A", "uid": "uid_a", "regnum": "p73",
+                "date_from": "2025-01-01", "date_to": ""})
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json["dependent_abonent_id"], "B")
+        self.assertEqual(self.state()[2], 1)
+
     def test_database_failure_rolls_back_all_changes(self):
         self.base()
         with patch.object(app_module.db.session, "commit", side_effect=app_module.SQLAlchemyError("synthetic failure")):
@@ -475,6 +528,77 @@ class ResponsibilityMutationTest(unittest.TestCase):
         self.assertEqual([status for status, _ in results], [200, 200], results)
         self.assertEqual(sorted(body["replay"] for _, body in results), [False, True])
         self.assertEqual(self.state()[2], 2)
+
+    def test_retry_deleted_no_debt_with_debt_records_linked_event(self):
+        self.retry_base()
+        original = self.state()[1]["payments_uid_a"]
+        self.assertEqual(self.closed_assign().status_code, 200)
+        state, values, version = self.state()
+        self.assertEqual(version, 2)
+        self.assertEqual(values["payments_uid_a"], original)
+        self.assertEqual(state["links"][0]["dateTo"], "2025-01-31")
+        self.assertEqual(json.loads(values["jkh_transfer_balance_v1:C:p73"])["principal"], 10000)
+        events = json.loads(values["jkh_financial_events_v1"])
+        self.assertEqual(len(events), 2)
+        self.assertEqual(events[1]["replacesOperationId"], "old-a-b")
+        self.assertEqual((events[1]["sourcePrincipal"], events[1]["sourcePenalty"]), (10000, 100))
+        self.assertEqual(self.closed_assign().json["replay"], True)
+
+    def test_retry_deleted_no_debt_without_debt_keeps_old_obligation(self):
+        self.retry_base(downstream=True)
+        self.assertEqual(self.closed_assign(mode="NO_DEBT").status_code, 200)
+        state, values, _ = self.state()
+        self.assertNotIn("jkh_transfer_balance_v1:C:p73", values)
+        self.assertEqual(len(json.loads(values["jkh_financial_events_v1"])), 3)
+        self.assertEqual(json.loads(values["jkh_financial_events_v1"])[-1]["replacesOperationId"], "old-a-b")
+        self.assertIn("A", state["abonents"])
+
+    def test_retry_blocks_with_debt_history_and_live_recipient(self):
+        for mode, live in (("WITH_DEBT", False), ("NO_DEBT", True)):
+            with self.subTest(mode=mode, live=live):
+                self.retry_base(mode=mode, live=live)
+                before = self.state()
+                self.assertEqual(self.closed_assign().status_code, 409)
+                self.assertEqual(self.state(), before)
+                with app_module.app.app_context():
+                    app_module.KVStore.query.filter_by(owner="owner1").delete()
+                    app_module.db.session.commit()
+
+    def test_retry_rollback_keeps_historical_operation(self):
+        self.retry_base()
+        before = self.state()
+        with patch.object(app_module.db.session, "commit", side_effect=app_module.SQLAlchemyError("synthetic retry failure")):
+            self.assertEqual(self.closed_assign().status_code, 500)
+        self.assertEqual(self.state(), before)
+
+    def test_retry_requires_deletion_evidence(self):
+        self.retry_base()
+        with app_module.app.app_context():
+            row = app_module.KVStore.query.filter_by(owner="owner1", k="abonents_db_v1").first()
+            state = json.loads(row.v)
+            state["premiseEvents"] = [e for e in state["premiseEvents"] if e["type"] != "ABONENT_DELETED"]
+            row.v = json.dumps(state)
+            app_module.db.session.commit()
+        self.assertEqual(self.closed_assign().status_code, 409)
+        self.assertEqual(self.state()[2], 1)
+
+    def test_no_name_route_cannot_bypass_retry_review(self):
+        self.retry_base()
+        response = self.assign("NO_DEBT", version=1)
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json["error"], "assignment_requires_closed_retry_review")
+        self.assertEqual(self.state()[2], 1)
+
+    def test_retry_concurrent_operations_have_one_winner(self):
+        self.retry_base()
+        barrier = threading.Barrier(2)
+        def request(operation):
+            barrier.wait(timeout=5)
+            return self.closed_assign(operation=operation)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(request, ("retry-one", "retry-two")))
+        self.assertEqual(sorted(response.status_code for response in results), [200, 409])
+        self.assertEqual(len(json.loads(self.state()[1]["jkh_financial_events_v1"])), 2)
 
 
 if __name__ == "__main__":

@@ -2043,7 +2043,7 @@ function renderTransferInfo(abonentId, regnum){
   const incoming = __getIncomingTransfer(abonentId, regnum);
   const freezeISO = __getFreezeToISO(abonentId);
   const outgoing = __findOutgoingTransfers(abonentId);
-  const closedTransfer = window.Data?.getConfirmedClosedOutgoingTransfer?.(abonentId, regnum) || null;
+  const transferHistory = window.Data?.getFinancialTransferHistory?.(abonentId, regnum) || [];
 
   let any = false;
 
@@ -2090,17 +2090,46 @@ function renderTransferInfo(abonentId, regnum){
     frzBox.style.display = "block";
     document.getElementById("tf_freeze").textContent = freezeISO;
   }
-  if (closedTransfer && closedNotice){
+  if (transferHistory.length && closedNotice){
     any = true;
-    const toId = String(closedTransfer.targetAbonentId || '');
-    const recipient = getDb()[toId];
-    closedNotice.textContent = 'Задолженность передана новому абоненту. Остаток определён на ' +
-      String(closedTransfer.freezeDate || '—') + '; передача с ' + String(closedTransfer.date || '—') +
-      '; получатель: ' + toId + (recipient?.fio ? ' — ' + recipient.fio : '') +
-      '; основной долг: ' + __fmt2(closedTransfer.principal) +
-      '; пеня: ' + __fmt2(closedTransfer.penalty) +
-      '; всего: ' + __fmt2(closedTransfer.debtAmount) +
-      '. Исторические начисления и платежи сохранены. Переданная задолженность не является действующим обязательством прежнего абонента.';
+    closedNotice.replaceChildren();
+    for (const operation of transferHistory){
+      const outgoing = operation.sourceId === String(abonentId);
+      const otherId = outgoing ? operation.targetId : operation.sourceId;
+      const otherName = outgoing ? operation.targetName : operation.sourceName;
+      const row = document.createElement('div');
+      row.className = 'transfer-item';
+      const heading = document.createElement('b');
+      heading.textContent = outgoing ? 'Передача задолженности' : 'Полученная задолженность';
+      row.appendChild(heading);
+      const details = document.createElement('div');
+      const sourcePrincipal = operation.sourcePrincipal == null || !Number.isFinite(operation.sourcePrincipal)
+        ? 'не зафиксирован' : __fmt2(operation.sourcePrincipal);
+      const sourcePenalty = operation.sourcePenalty == null || !Number.isFinite(operation.sourcePenalty)
+        ? 'не зафиксирована' : __fmt2(operation.sourcePenalty);
+      const receivedPrincipal = Number.isFinite(operation.transferredPrincipal) ? __fmt2(operation.transferredPrincipal) : 'не подтверждён';
+      const receivedPenalty = Number.isFinite(operation.transferredPenalty) ? __fmt2(operation.transferredPenalty) : 'не подтверждена';
+      const total = Number.isFinite(operation.transferredPrincipal + operation.transferredPenalty)
+        ? __fmt2(operation.transferredPrincipal + operation.transferredPenalty) : 'не подтверждён';
+      details.textContent = 'Дата передачи: ' + (operation.date || '—') +
+        '; остаток на: ' + (operation.freezeDate || 'не зафиксирована') +
+        '; ' + (outgoing ? 'получатель: ' : 'отправитель: ') + otherId + (otherName ? ' — ' + otherName : '') +
+        '; режим: ' + operation.mode +
+        '; основной долг на дату закрытия: ' + sourcePrincipal + '; пеня: ' + sourcePenalty +
+        '; фактически переданы: основной долг ' + receivedPrincipal + ', пеня ' + receivedPenalty +
+        ', всего ' + total +
+        '; статус: ' + (operation.status === 'DELETED_RECIPIENT' ? 'историческая операция, получатель удалён' :
+          operation.status === 'UNVERIFIED' ? 'финансовый остаток не подтверждён' : 'подтверждена') +
+        (operation.replacesOperationId ? '; связана с операцией ' + operation.replacesOperationId : '');
+      row.appendChild(details);
+      if (getDb()[otherId]) {
+        const link = document.createElement('a');
+        link.href = 'abonent_card.html?abonent=' + encodeURIComponent(otherId);
+        link.textContent = 'Открыть карточку ' + otherId;
+        row.appendChild(link);
+      }
+      closedNotice.appendChild(row);
+    }
     closedNotice.style.display = 'block';
   }
 

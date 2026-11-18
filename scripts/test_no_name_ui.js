@@ -144,6 +144,7 @@ vm.runInContext("__jkhTransferConfirmed = true; __transferMode = 'WITH_DEBT'; __
     return closedOutcome;
   };
   Data.getFinancialTransferInfo = () => ({ outgoing: [] });
+  Data.inspectClosedTransferRetry = () => ({ eligible: true, priorOperationId: '', deletedRecipients: [] });
   context.window.JKHCalcEngine = { calculateFrozenDebt: () => ({
     success: true, principal: 10000, penalty: 100, calculatedAt: '2025-01-31'
   }) };
@@ -173,9 +174,105 @@ vm.runInContext("__jkhTransferConfirmed = true; __transferMode = 'WITH_DEBT'; __
   assert.equal(legacyCalls, 0);
   assert.equal(context.location.href, 'abonent_card.html?abonent=0101');
 
+  context.window.AbonentsDB = { abonents: { A: { uid: 'uid_a', fio: 'A' } },
+    premises: { p73: { flat: '73', status: 'active' } },
+    links: [{ abonentId: 'A', regnum: 'p73', dateFrom: '2025-01-01', dateTo: '2025-01-31' },
+      { technicalType: 'NO_NAME', abonentId: '', regnum: 'p73', dateFrom: '2025-02-01', dateTo: '' }],
+    premiseEvents: [{ type: 'RESPONSIBILITY_TRANSFER', oldAbonentId: 'A', newAbonentId: 'B',
+      transferMode: 'NO_DEBT', fromRegnums: ['p73'], operationId: 'old-a-b' }] };
+  elements.na_date_from.value = '2025-02-01';
+  Data.inspectClosedTransferRetry = () => ({ eligible: true, priorOperationId: 'old-a-b', deletedRecipients: ['B'] });
+  vm.runInContext('refreshDebtTransferBox()', context);
+  assert.equal(vm.runInContext('__transferCtx.closed', context), true);
+  assert.match(elements.debtTransferInfo.textContent, /ранее удалённого/);
+  assert.match(elements.debtTransferInfo.textContent, /ЛС B/);
+  assert.match(elements.debtTransferInfo.textContent, /2025-01-31/);
+  Data.inspectClosedTransferRetry = () => ({ eligible: false, reason: 'Есть действующий получатель' });
+  vm.runInContext('refreshDebtTransferBox()', context);
+  assert.equal(elements.btnTransferWithDebt.disabled, true);
+  assert.equal(elements.btnTransferNoDebt.disabled, true);
+  assert.match(elements.debtTransferInfo.textContent, /Есть действующий получатель/);
+
   const sourceData = fs.readFileSync('web/data.js', 'utf8');
   assert.match(sourceData, /getConfirmedClosedOutgoingTransfer/);
-  assert.match(cardHtml, /Задолженность передана новому абоненту/);
+  assert.match(sourceData, /getFinancialTransferHistory/);
+  assert.match(sourceData, /inspectClosedTransferRetry/);
+  const retrySource = sourceData.match(/Data\.inspectClosedTransferRetry = function\(abonentId, regnum\) \{[\s\S]*?\n  \};\n  Data\.getFinancialTransferHistory/);
+  assert.ok(retrySource);
+  const retryDb = { abonents: { A: { uid: 'uid_a' } }, links: [], premiseEvents: [
+    { type: 'RESPONSIBILITY_TRANSFER', oldAbonentId: 'A', newAbonentId: 'B',
+      transferMode: 'NO_DEBT', fromRegnums: ['p73'], operationId: 'old-a-b' },
+    { type: 'ABONENT_DELETED', abonentId: 'B', uid: 'uid_b', regnum: 'p73' }] };
+  const retryFinancial = [{ type: 'TRANSFER_WITHOUT_DEBT', mode: 'WITHOUT_DEBT',
+    sourceAbonentId: 'A', targetAbonentId: 'B', regnum: 'p73', operationId: 'old-a-b', debtAmount: 0 }];
+  const retryContext = vm.createContext({ Data: {}, window: { AbonentsDB: retryDb }, Set,
+    normalizeRegnumValue: value => String(value || ''),
+    _getProjectRaw: key => key === 'jkh_financial_events_v1' ? JSON.stringify(retryFinancial) : '',
+    getFinancialTransferInfo: () => ({ outgoing: [], incoming: null }) });
+  vm.runInContext(retrySource[0].replace(/\n  Data\.getFinancialTransferHistory$/, ''), retryContext);
+  assert.equal(vm.runInContext("Data.inspectClosedTransferRetry('A', 'p73').eligible", retryContext), true);
+  retryFinancial[0].type = 'TRANSFER_WITH_DEBT';
+  assert.equal(vm.runInContext("Data.inspectClosedTransferRetry('A', 'p73').eligible", retryContext), false);
+  const historySource = sourceData.match(/Data\.getFinancialTransferHistory = function\(abonentId, regnum\) \{[\s\S]*?\n  \};\n  Data\.getConfirmedClosedOutgoingTransfer/);
+  assert.ok(historySource);
+  const financialHistory = [
+    { ...retryFinancial[0], type: 'TRANSFER_WITHOUT_DEBT', mode: 'WITHOUT_DEBT', date: '2025-02-01' },
+    { type: 'TRANSFER_WITH_DEBT', mode: 'WITH_DEBT', sourceAbonentId: 'A', targetAbonentId: 'C',
+      regnum: 'p73', date: '2025-03-01', freezeDate: '2025-01-31', operationId: 'new-a-c',
+      replacesOperationId: 'old-a-b', sourcePrincipal: 10000, sourcePenalty: 100,
+      principal: 10000, penalty: 100 }];
+  const historyContext = vm.createContext({ Data: {}, window: { AbonentsDB: {
+    abonents: { A: { fio: 'A Name' }, C: { fio: 'C Name' } },
+    premiseEvents: [{ operationId: 'old-a-b', oldRespTo: '2025-01-31' }] } },
+    normalizeRegnumValue: value => String(value || ''),
+    _getProjectRaw: key => key === 'jkh_financial_events_v1' ? JSON.stringify(financialHistory) :
+      key === 'jkh_frozen_debt_v1:A:2025-01-31' ? JSON.stringify({ success: true, calculatedAt: '2025-01-31', principal: 10000, penalty: 100 }) :
+      key === 'jkh_transfer_balance_v1:C:p73' ? JSON.stringify({ fromAbonentId: 'A', startDate: '2025-03-01', principal: 10000, penalty: 100 }) : null });
+  vm.runInContext(historySource[0].replace(/\n  Data\.getConfirmedClosedOutgoingTransfer$/, ''), historyContext);
+  const oldHistory = vm.runInContext("Data.getFinancialTransferHistory('A', 'p73')", historyContext);
+  assert.equal(oldHistory.length, 2);
+  assert.equal(oldHistory[0].status, 'DELETED_RECIPIENT');
+  assert.equal(oldHistory[1].sourcePrincipal, 10000);
+  assert.equal(oldHistory[1].replacesOperationId, 'old-a-b');
+  const newHistory = vm.runInContext("Data.getFinancialTransferHistory('C', 'p73')", historyContext);
+  assert.equal(newHistory.length, 1);
+  assert.equal(newHistory[0].transferredPrincipal, 10000);
+  retryFinancial[0].type = 'TRANSFER_WITHOUT_DEBT';
+  retryDb.abonents.B = { uid: 'uid_b' };
+  assert.equal(vm.runInContext("Data.inspectClosedTransferRetry('A', 'p73').eligible", retryContext), false);
+  assert.match(cardHtml, /Передача задолженности/);
+  assert.match(cardHtml, /Полученная задолженность/);
+  const renderSource = cardHtml.match(/function renderTransferInfo\(abonentId, regnum\)\{[\s\S]*?\n\}\n\nfunction openResponsibilityReport/);
+  assert.ok(renderSource);
+  const cardElements = new Map();
+  const createElement = () => ({ children: [], style: {}, textContent: '', appendChild(node) { this.children.push(node); },
+    replaceChildren() { this.children = []; } });
+  for (const id of ['transferCard', 'transferIncoming', 'transferFreeze', 'transferOutgoing', 'transferClosedNotice']) {
+    cardElements.set(id, createElement());
+  }
+  const oldTransfer = { operationId: 'old-a-b', date: '2025-02-01', sourceId: 'A', targetId: 'B',
+    sourceName: 'A Name', targetName: '', mode: 'NO_DEBT', sourcePrincipal: null, sourcePenalty: null,
+    transferredPrincipal: 0, transferredPenalty: 0, status: 'DELETED_RECIPIENT', replacesOperationId: '' };
+  const newTransfer = { operationId: 'new-a-c', date: '2025-03-01', sourceId: 'A', targetId: 'C',
+    sourceName: 'A Name', targetName: 'C Name', mode: 'WITH_DEBT', sourcePrincipal: 10000, sourcePenalty: 100,
+    transferredPrincipal: 10000, transferredPenalty: 100, status: 'CONFIRMED', replacesOperationId: 'old-a-b' };
+  const cardContext = vm.createContext({ window: { Data: { getFinancialTransferHistory: id =>
+      id === 'A' ? [oldTransfer, newTransfer] : [newTransfer] } },
+    document: { getElementById: id => cardElements.get(id) || null, createElement },
+    __getIncomingTransfer: () => null, __getFreezeToISO: () => '', __findOutgoingTransfers: () => [],
+    getDb: () => ({ A: { fio: 'A Name' }, C: { fio: 'C Name' } }),
+    __fmt2: value => Number(value).toFixed(2), encodeURIComponent });
+  vm.runInContext(renderSource[0].replace(/\n\nfunction openResponsibilityReport$/, ''), cardContext);
+  vm.runInContext("renderTransferInfo('A', 'p73')", cardContext);
+  const history = cardElements.get('transferClosedNotice');
+  assert.equal(history.children.length, 2);
+  assert.match(history.children[0].children[1].textContent, /получатель удалён/);
+  assert.match(history.children[1].children[1].textContent, /10000\.00/);
+  assert.match(history.children[1].children[1].textContent, /old-a-b/);
+  vm.runInContext("renderTransferInfo('C', 'p73')", cardContext);
+  assert.equal(history.children.length, 1);
+  assert.match(history.children[0].children[0].textContent, /Полученная задолженность/);
+  assert.equal(history.children[0].children[2].href, 'abonent_card.html?abonent=A');
   const courtHtml = fs.readFileSync('web/spravka_sud.html', 'utf8');
   const courtScript = fs.readFileSync('web/spravka_sud.js', 'utf8');
   assert.match(courtHtml, /id="transferredDebtNotice"/);

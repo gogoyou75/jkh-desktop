@@ -673,12 +673,27 @@ function refreshDebtTransferBox() {
   const active = activeLinkForRegnumLocal(db, regnum);
   const gap = (db.links || []).find(l => l?.technicalType === 'NO_NAME' &&
     String(l.regnum || '') === regnum && String(l.dateFrom || '') === df0);
+  const closedCandidate = closedPredecessorForRegnum(db, regnum);
+  const retry = closedCandidate && window.Data?.inspectClosedTransferRetry?.(closedCandidate.id, regnum);
   if (gap || active?.technicalType === 'NO_NAME') {
-    if (gap) {
+    if (closedCandidate && (!retry || !retry.eligible)) {
+      if (title) title.textContent = 'Назначение на период No Name заблокировано';
+      info.textContent = retry?.reason || 'История передачи требует проверки.';
+      for (const id of ['btnTransferWithDebt', 'btnTransferNoDebt']) {
+        const button = document.getElementById(id);
+        if (button) button.disabled = true;
+      }
+      box.style.display = 'block';
+      return;
+    }
+    if (gap && !retry?.priorOperationId) {
       __transferCtx = { noName:true, regnum, gap:gap, transferDate:df0 };
       if (title) title.textContent = 'Назначение на период No Name';
-      info.textContent = 'No Name — Требуется назначить ответственного. Выберите режим для всего периода ' +
-        df0 + ' — ' + (gap.dateTo || 'по настоящее время') + '.';
+      const priorName = closedCandidate ? String(db.abonents[closedCandidate.id]?.fio || closedCandidate.id) : 'не установлен';
+      info.textContent = 'No Name — Требуется назначить ответственного. Предыдущий абонент: ' +
+        priorName + (closedCandidate ? ' (ЛС ' + closedCandidate.id + '), закрыт ' + closedCandidate.closeDate : '') +
+        '. Новый абонент займёт место ранее удалённого на период ' + df0 + ' — ' +
+        (gap.dateTo || 'открытый период') + '. Выберите режим передачи.';
       document.getElementById('transferStartPreview').textContent = df0;
       document.getElementById('transferEndPreview').textContent = gap.dateTo || 'открытый период';
       __updateNewDebtStartPreview();
@@ -687,7 +702,7 @@ function refreshDebtTransferBox() {
     }
   }
   if (!active || active?.technicalType === 'NO_NAME') {
-    const closed = closedPredecessorForRegnum(db, regnum);
+    const closed = closedCandidate;
     if (!closed) { box.style.display='none'; return; }
     if (title) title.textContent = 'Передача после закрытого периода';
     box.style.display = 'block';
@@ -708,13 +723,10 @@ function refreshDebtTransferBox() {
       block('Период No Name не совпадает с датой закрытия. Обновите данные и проверьте историю.');
       return;
     }
-    const previousEvent = (db.premiseEvents || []).some(e => e &&
-      (e.oldAbonentId === closed.id || e.sourceAbonentId === closed.id) &&
-      (e.regnum === regnum || (e.fromRegnums || []).includes(regnum)) &&
-      ['RESPONSIBILITY_TRANSFER', 'NO_NAME_ASSIGNED', 'CLOSED_RESPONSIBILITY_ASSIGNED'].includes(e.type));
-    const outgoing = window.Data?.getFinancialTransferInfo?.(closed.id, regnum)?.outgoing || [];
-    if (previousEvent || outgoing.length) {
-      block('Для прежнего абонента уже зафиксирована передача. Повторная передача заблокирована.');
+    const outgoing = (window.Data?.getFinancialTransferInfo?.(closed.id, regnum)?.outgoing || [])
+      .filter(o => String(o.regnum || '') === regnum);
+    if (!retry || !retry.eligible || outgoing.length) {
+      block(retry?.reason || 'Для прежнего абонента есть действующая передача или не подтверждена история.');
       return;
     }
     try {
@@ -724,7 +736,13 @@ function refreshDebtTransferBox() {
       __transferCtx = { closed:true, oldId:closed.id, closeDate:closed.closeDate,
         regnum, transferDate:df0 };
       info.textContent = 'Предыдущий абонент: ' + String(db.abonents[closed.id]?.fio || closed.id) +
-        '. Период закрыт ' + closed.closeDate + '. Подтверждённый остаток: долг ' +
+        ' (ЛС ' + closed.id + '). Период закрыт ' + closed.closeDate +
+        '. Новый абонент займёт место ранее удалённого' +
+        (closed.gap ? ' на период ' + closed.gap.dateFrom + ' — ' + (closed.gap.dateTo || 'открытый период') :
+          ' с ' + df0) + '.' +
+        (retry.deletedRecipients?.length ? ' Удалённые получатели: ЛС ' + retry.deletedRecipients.join(', ЛС ') +
+          '; прежняя операция ' + retry.priorOperationId + '.' : '') +
+        ' Подтверждённый остаток: долг ' +
         Number(quote.principal).toFixed(2) + ', пеня ' + Number(quote.penalty).toFixed(2) + '.';
       __updateNewDebtStartPreview();
     } catch (e) {
