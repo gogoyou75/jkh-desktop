@@ -651,7 +651,9 @@ function __updateNewDebtStartPreview(){
     : '0.00';
 }
 
-function refreshDebtTransferBox() {
+let __debtTransferRefreshId = 0;
+async function refreshDebtTransferBox() {
+  const refreshId = ++__debtTransferRefreshId;
   __jkhTransferConfirmed = false;
   __transferCtx = null;
 
@@ -674,7 +676,25 @@ function refreshDebtTransferBox() {
   const gap = (db.links || []).find(l => l?.technicalType === 'NO_NAME' &&
     String(l.regnum || '') === regnum && String(l.dateFrom || '') === df0);
   const closedCandidate = closedPredecessorForRegnum(db, regnum);
-  const retry = closedCandidate && window.Data?.inspectClosedTransferRetry?.(closedCandidate.id, regnum);
+  let retry = null;
+  if (closedCandidate && (!active || active?.technicalType === 'NO_NAME')) {
+    info.textContent = 'Проверяем финансовый журнал на сервере…';
+    box.style.display = 'block';
+    for (const id of ['btnTransferWithDebt', 'btnTransferNoDebt']) {
+      const button = document.getElementById(id);
+      if (button) button.disabled = true;
+    }
+    try {
+      if (typeof window.Data?.inspectClosedTransferRetry !== 'function') throw new Error('RETRY_CHECK_UNAVAILABLE');
+      retry = await window.Data.inspectClosedTransferRetry(closedCandidate.id, regnum);
+    }
+    catch (e) { retry = { eligible:false, reason:'Не удалось загрузить финансовый журнал с сервера. Повторите попытку позже.' }; }
+    if (refreshId !== __debtTransferRefreshId) return;
+    for (const id of ['btnTransferWithDebt', 'btnTransferNoDebt']) {
+      const button = document.getElementById(id);
+      if (button) button.disabled = false;
+    }
+  }
   if (gap || active?.technicalType === 'NO_NAME') {
     if (closedCandidate && (!retry || !retry.eligible)) {
       if (title) title.textContent = 'Назначение на период No Name заблокировано';

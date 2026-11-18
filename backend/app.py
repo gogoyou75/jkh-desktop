@@ -5555,6 +5555,58 @@ def _personal_abonent_key(key, abonent_id, uid):
                            "jkh_transfer_v1:" + abonent_id + ":"))
 
 
+def _store_db_transition_allowed(previous_raw, proposed_raw):
+    """Generic KV writes may edit or rename a UID, but may not delete its owner."""
+    try:
+        previous = json.loads(previous_raw) if previous_raw else {}
+        proposed = json.loads(proposed_raw)
+    except (TypeError, ValueError):
+        return False
+    if not isinstance(previous, dict) or not isinstance(proposed, dict):
+        return False
+    old_abonents, new_abonents = previous.get("abonents", {}), proposed.get("abonents", {})
+    old_links, new_links = previous.get("links", []), proposed.get("links", [])
+    if not isinstance(old_abonents, dict) or not isinstance(new_abonents, dict) or not isinstance(old_links, list) or not isinstance(new_links, list):
+        return False
+    old_events, new_events = previous.get("premiseEvents", []), proposed.get("premiseEvents", [])
+    if not isinstance(old_events, list) or not isinstance(new_events, list):
+        return False
+    if any(isinstance(link, dict) and link.get("technicalType") == "NO_NAME" and link not in new_links
+           for link in old_links):
+        return False
+    if any(isinstance(event, dict) and event.get("type") == "ABONENT_DELETED" and event not in new_events
+           for event in old_events):
+        return False
+    renamed = False
+    for old_id, old_record in old_abonents.items():
+        if not isinstance(old_record, dict):
+            return False
+        uid = str(old_record.get("uid") or "")
+        if old_id in new_abonents:
+            if not isinstance(new_abonents[old_id], dict) or str(new_abonents[old_id].get("uid") or "") != uid:
+                return False
+            continue
+        if not uid or not _canonical_payment_ledger_uid("payments_" + uid):
+            return False
+        target_ids = [new_id for new_id, record in new_abonents.items()
+                      if isinstance(record, dict) and str(record.get("uid") or "") == uid]
+        if len(target_ids) != 1 or target_ids[0] in old_abonents:
+            return False
+        new_id = target_ids[0]
+        if any(isinstance(link, dict) and str(link.get("abonentId") or "") == str(old_id) for link in new_links):
+            return False
+        for link in old_links:
+            if not isinstance(link, dict) or str(link.get("abonentId") or "") != str(old_id):
+                continue
+            expected = dict(link, abonentId=new_id)
+            if expected not in new_links:
+                return False
+        renamed = True
+    if renamed and old_events != new_events:
+        return False
+    return True
+
+
 @app.get("/api/abonent_delete")
 @app.get("/api/no_name_assign")
 @app.get("/api/closed_responsibility_assign")
@@ -6143,6 +6195,7 @@ def responsibility_transfer_commit():
         return jsonify(ok=False, error="version_conflict", key="abonents_db_v1"), 409
 
     old_a = current_db.get("abonents", {}).get(old_id) if isinstance(current_db, dict) else None
+    proposed_old = proposed_db.get("abonents", {}).get(old_id) if isinstance(proposed_db, dict) else None
     new_a = proposed_db.get("abonents", {}).get(new_id) if isinstance(proposed_db, dict) else None
     if not isinstance(current_db, dict) or not isinstance(proposed_db, dict) or not isinstance(current_db.get("abonents"), dict) or not isinstance(proposed_db.get("abonents"), dict):
         db.session.rollback()
@@ -6150,6 +6203,9 @@ def responsibility_transfer_commit():
     if any(proposed_db["abonents"].get(k) != v for k, v in current_db["abonents"].items() if k not in (old_id, new_id)):
         db.session.rollback()
         return _json_error("unrelated_abonent_changed", 422)
+    if not isinstance(old_a, dict) or not isinstance(proposed_old, dict) or str(proposed_old.get("uid") or "") != str(old_a.get("uid") or ""):
+        db.session.rollback()
+        return _json_error("old_abonent_removed", 409)
     if new_id in current_db["abonents"] and (not isinstance(new_a, dict) or current_db["abonents"][new_id].get("uid") != new_a.get("uid")):
         db.session.rollback()
         return _json_error("new_abonent_conflict", 409)
@@ -6274,9 +6330,14 @@ def store_set():
             return jsonify(ok=False, error="expected_version_required"), 428
         result = db.session.execute(
             update(KVStore).where(KVStore.owner == owner_eff, KVStore.k == key, KVStore.version == expected)
-            .values(v=value, version=KVStore.version + 1)
+            .values(version=KVStore.version + 1)
         )
         if result.rowcount == 1:
+            row = KVStore.query.filter_by(owner=owner_eff, k=key).with_for_update().one()
+            if not _store_db_transition_allowed(row.v, value):
+                db.session.rollback()
+                return _json_error("abonent_delete_requires_atomic_api", 409)
+            row.v = value
             db.session.commit()
             return jsonify(ok=True, owner=owner_eff, version=expected + 1)
         db.session.rollback()
@@ -6417,9 +6478,19 @@ def store_delete():
             return jsonify(ok=False, error="expected_version_required"), 428
         result = db.session.execute(
             update(KVStore).where(KVStore.owner == owner_eff, KVStore.k == key, KVStore.version == expected)
-            .values(v="", version=KVStore.version + 1)
+            .values(version=KVStore.version + 1)
         )
         if result.rowcount == 1:
+            row = KVStore.query.filter_by(owner=owner_eff, k=key).with_for_update().one()
+            try:
+                current = json.loads(row.v) if row.v else {}
+            except (TypeError, ValueError):
+                current = None
+            if not isinstance(current, dict) or not isinstance(current.get("abonents", {}), dict) or any(
+                    current.get(field) for field in ("abonents", "premises", "links", "premiseEvents")):
+                db.session.rollback()
+                return _json_error("abonent_delete_requires_atomic_api", 409)
+            row.v = ""
             db.session.commit()
             return jsonify(ok=True, deleted=True, version=expected + 1)
         db.session.rollback()

@@ -159,6 +159,20 @@ class ResponsibilityMutationTest(unittest.TestCase):
     def test_delete_and_assign_with_original_debt(self):
         self.base()
         with app_module.app.app_context():
+            for key, value in {
+                "payments_uid_a": '[{"id":"previous-payment","paid":500}]',
+                "payments_B": '[{"id":"legacy-payment"}]',
+                "calc_period_uid_b": '{"from":"2025-02-01"}',
+                "calc_period_active_uid_b": "true",
+                "report_period_uid_b": '{"from":"2025-02-01"}',
+                "exclude_periods_uid_b": "[]",
+                "payments_ui_collapsed_B": "{}",
+                "moratorium_B": "true",
+                "jkh_transfer_to_v1:B": '{"fromAbonentId":"A"}',
+                "jkh_frozen_debt_v1:B:2025-02-28": '{"principal":1}',
+                "jkh_financial_events_v1": '[{"type":"TRANSFER_WITH_DEBT","sourceAbonentId":"A"}]',
+            }.items():
+                app_module.db.session.add(app_module.KVStore(owner="owner1", k=key, v=value, version=1))
             app_module.db.session.add(app_module.AbonentSummary(owner_id="owner1", abonent_id="B", account_uid="uid_b"))
             app_module.db.session.add(app_module.CardSnapshot(owner_id="owner1", abonent_id="B", abonent_uid="uid_b"))
             app_module.db.session.commit()
@@ -169,6 +183,15 @@ class ResponsibilityMutationTest(unittest.TestCase):
         self.assertEqual(values["payments_uid_b"], "")
         self.assertEqual(values["jkh_transfer_balance_v1:B:p73"], "")
         self.assertNotIn("note_B", values)
+        for key in ("payments_B", "calc_period_uid_b", "calc_period_active_uid_b",
+                    "report_period_uid_b", "payments_ui_collapsed_B", "moratorium_B"):
+            self.assertNotIn(key, values)
+        for key in ("exclude_periods_uid_b", "jkh_transfer_to_v1:B",
+                    "jkh_frozen_debt_v1:B:2025-02-28"):
+            self.assertEqual(values[key], "")
+        self.assertEqual(values["payments_uid_a"], '[{"id":"previous-payment","paid":500}]')
+        self.assertEqual(values["jkh_financial_events_v1"],
+                         '[{"type":"TRANSFER_WITH_DEBT","sourceAbonentId":"A"}]')
         with app_module.app.app_context():
             self.assertEqual(app_module.AbonentSummary.query.filter_by(owner_id="owner1", account_uid="uid_b").count(), 0)
             self.assertEqual(app_module.CardSnapshot.query.filter_by(owner_id="owner1", abonent_uid="uid_b").count(), 0)
@@ -191,6 +214,24 @@ class ResponsibilityMutationTest(unittest.TestCase):
         state, values, version = self.state()
         self.assertNotIn("jkh_transfer_balance_v1:C:p73", values)
         self.assertEqual(values["jkh_freeze_to_v1:A"], "2025-01-31")
+
+    def test_generic_store_cannot_erase_no_name_or_deletion_audit(self):
+        self.base()
+        self.assertEqual(self.delete().status_code, 200)
+        state, values, version = self.state()
+        for field in ("links", "premiseEvents"):
+            proposed = json.loads(json.dumps(state))
+            proposed[field] = []
+            with app_module.app.test_client() as client:
+                response = client.post("/api/store", json={"key": "abonents_db_v1",
+                    "value": json.dumps(proposed), "expected_version": version})
+            self.assertEqual(response.status_code, 409, response.json)
+        with app_module.app.test_client() as client:
+            response = client.delete("/api/store", json={"key": "abonents_db_v1",
+                "expected_version": version})
+        self.assertEqual(response.status_code, 409, response.json)
+        self.assertEqual(self.state()[0], state)
+        self.assertEqual(self.state()[2], version)
 
     def test_concurrent_delete_operation_ids_have_one_winner(self):
         self.base()
@@ -295,6 +336,15 @@ class ResponsibilityMutationTest(unittest.TestCase):
                    "freeze_date": "2025-01-31", "mode": "WITH_DEBT",
                    "writes": {key: {"expected_version": 1 if key in values else 0,
                                     "value": value} for key, value in writes.items()}}
+        removed_source = json.loads(json.dumps(proposed))
+        del removed_source["abonents"]["A"]
+        unsafe_payload = json.loads(json.dumps(payload))
+        unsafe_payload["writes"]["abonents_db_v1"]["value"] = json.dumps(removed_source)
+        with app_module.app.test_client() as client:
+            rejected = client.post("/api/responsibility_transfer", json=unsafe_payload)
+        self.assertEqual(rejected.status_code, 409, rejected.json)
+        self.assertEqual(rejected.json["error"], "old_abonent_removed")
+        self.assertEqual(self.state()[2], 1)
         with app_module.app.test_client() as client:
             created = client.post("/api/responsibility_transfer", json=payload)
             replay = client.post("/api/responsibility_transfer", json=payload)

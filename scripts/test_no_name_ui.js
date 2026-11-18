@@ -21,6 +21,7 @@ const context = vm.createContext({
 });
 vm.runInContext(mainScript, context);
 
+(async () => {
 const activeGap = { technicalType: 'NO_NAME', abonentId: '', regnum: 'p73',
   dateFrom: '2025-02-01', dateTo: '' };
 context.window.AbonentsDB.links = [activeGap];
@@ -28,13 +29,13 @@ elements.na_regnum.value = 'p73';
 elements.na_date_from.value = '2025-02-01';
 assert.match(vm.runInContext("formatPremiseOption('p73', window.AbonentsDB.premises.p73)", context),
   /Требуется назначить ответственного/);
-vm.runInContext('refreshDebtTransferBox()', context);
+await vm.runInContext('refreshDebtTransferBox()', context);
 assert.equal(elements.debtTransferBox.style.display, 'block');
 assert.equal(vm.runInContext('__transferCtx.noName', context), true);
 assert.match(elements.debtTransferInfo.textContent, /No Name/);
 
 elements.na_date_from.value = '2025-02-02';
-vm.runInContext('refreshDebtTransferBox()', context);
+await vm.runInContext('refreshDebtTransferBox()', context);
 assert.equal(elements.debtTransferBox.style.display, 'none');
 assert.match(elements.debtTransferInfo.textContent, /2025-02-01/);
 
@@ -44,7 +45,7 @@ context.window.AbonentsDB.links = [
   { abonentId: 'D', regnum: 'p73', dateFrom: '2025-03-01', dateTo: '' }
 ];
 elements.na_date_from.value = '2025-02-01';
-vm.runInContext('refreshDebtTransferBox()', context);
+await vm.runInContext('refreshDebtTransferBox()', context);
 assert.equal(vm.runInContext('__transferCtx.noName', context), true);
 assert.equal(elements.transferEndPreview.textContent, '2025-02-28');
 
@@ -112,7 +113,6 @@ context.window.AbonentsDB = { abonents: {}, premises: { p73: { flat: '73', statu
   links: [activeGap], premiseEvents: [] };
 vm.runInContext("__jkhTransferConfirmed = true; __transferMode = 'WITH_DEBT'; __transferCtx = { noName:true, gap:window.AbonentsDB.links[0] };", context);
 
-(async () => {
   await vm.runInContext('createAbonent()', context);
   assert.equal(assignCalls, 1);
   assert.equal(legacyCalls, 0);
@@ -155,7 +155,7 @@ vm.runInContext("__jkhTransferConfirmed = true; __transferMode = 'WITH_DEBT'; __
   elements.na_ls.value = '0101';
   elements.na_date_from.value = '2025-03-01';
   context.location.href = '';
-  vm.runInContext('refreshDebtTransferBox()', context);
+  await vm.runInContext('refreshDebtTransferBox()', context);
   assert.equal(elements.debtTransferBox.style.display, 'block');
   assert.equal(vm.runInContext('__transferCtx.closed', context), true);
   assert.match(elements.debtTransferInfo.textContent, /10000\.00/);
@@ -182,22 +182,39 @@ vm.runInContext("__jkhTransferConfirmed = true; __transferMode = 'WITH_DEBT'; __
       transferMode: 'NO_DEBT', fromRegnums: ['p73'], operationId: 'old-a-b' }] };
   elements.na_date_from.value = '2025-02-01';
   Data.inspectClosedTransferRetry = () => ({ eligible: true, priorOperationId: 'old-a-b', deletedRecipients: ['B'] });
-  vm.runInContext('refreshDebtTransferBox()', context);
+  await vm.runInContext('refreshDebtTransferBox()', context);
   assert.equal(vm.runInContext('__transferCtx.closed', context), true);
   assert.match(elements.debtTransferInfo.textContent, /ранее удалённого/);
   assert.match(elements.debtTransferInfo.textContent, /ЛС B/);
   assert.match(elements.debtTransferInfo.textContent, /2025-01-31/);
   Data.inspectClosedTransferRetry = () => ({ eligible: false, reason: 'Есть действующий получатель' });
-  vm.runInContext('refreshDebtTransferBox()', context);
+  await vm.runInContext('refreshDebtTransferBox()', context);
   assert.equal(elements.btnTransferWithDebt.disabled, true);
   assert.equal(elements.btnTransferNoDebt.disabled, true);
   assert.match(elements.debtTransferInfo.textContent, /Есть действующий получатель/);
+  Data.inspectClosedTransferRetry = async () => { throw new Error('synthetic network failure'); };
+  await vm.runInContext('refreshDebtTransferBox()', context);
+  assert.equal(elements.btnTransferWithDebt.disabled, true);
+  assert.equal(elements.btnTransferNoDebt.disabled, true);
+  assert.match(elements.debtTransferInfo.textContent, /Не удалось загрузить финансовый журнал/);
+  let resolveStaleRead;
+  Data.inspectClosedTransferRetry = () => new Promise(resolve => { resolveStaleRead = resolve; });
+  const staleRefresh = vm.runInContext('refreshDebtTransferBox()', context);
+  assert.equal(elements.btnTransferWithDebt.disabled, true);
+  assert.match(elements.debtTransferInfo.textContent, /Проверяем финансовый журнал/);
+  elements.na_regnum.value = '';
+  await vm.runInContext('refreshDebtTransferBox()', context);
+  resolveStaleRead({ eligible: true, priorOperationId: 'old-a-b', deletedRecipients: ['B'] });
+  await staleRefresh;
+  assert.equal(elements.debtTransferBox.style.display, 'none');
+  assert.equal(vm.runInContext('__transferCtx', context), null);
+  elements.na_regnum.value = 'p73';
 
   const sourceData = fs.readFileSync('web/data.js', 'utf8');
   assert.match(sourceData, /getConfirmedClosedOutgoingTransfer/);
   assert.match(sourceData, /getFinancialTransferHistory/);
   assert.match(sourceData, /inspectClosedTransferRetry/);
-  const retrySource = sourceData.match(/Data\.inspectClosedTransferRetry = function\(abonentId, regnum\) \{[\s\S]*?\n  \};\n  Data\.getFinancialTransferHistory/);
+  const retrySource = sourceData.match(/Data\.inspectClosedTransferRetry = async function\(abonentId, regnum\) \{[\s\S]*?\n  \};\n  Data\.getFinancialTransferHistory/);
   assert.ok(retrySource);
   const retryDb = { abonents: { A: { uid: 'uid_a' } }, links: [], premiseEvents: [
     { type: 'RESPONSIBILITY_TRANSFER', oldAbonentId: 'A', newAbonentId: 'B',
@@ -205,14 +222,40 @@ vm.runInContext("__jkhTransferConfirmed = true; __transferMode = 'WITH_DEBT'; __
     { type: 'ABONENT_DELETED', abonentId: 'B', uid: 'uid_b', regnum: 'p73' }] };
   const retryFinancial = [{ type: 'TRANSFER_WITHOUT_DEBT', mode: 'WITHOUT_DEBT',
     sourceAbonentId: 'A', targetAbonentId: 'B', regnum: 'p73', operationId: 'old-a-b', debtAmount: 0 }];
+  let journalResult = { ok: true, status: 200, data: { version: 2 }, raw: JSON.stringify(retryFinancial) };
+  let journalReads = 0;
   const retryContext = vm.createContext({ Data: {}, window: { AbonentsDB: retryDb }, Set,
     normalizeRegnumValue: value => String(value || ''),
-    _getProjectRaw: key => key === 'jkh_financial_events_v1' ? JSON.stringify(retryFinancial) : '',
+    _ownerId: () => 'synthetic-owner',
+    _serverStoreGet: async (owner, key) => {
+      assert.equal(owner, 'synthetic-owner');
+      assert.equal(key, 'jkh_financial_events_v1');
+      journalReads++;
+      if (journalResult instanceof Error) throw journalResult;
+      return journalResult;
+    },
+    _getProjectRaw: key => key === 'jkh_financial_events_v1' ? '[]' : '',
     getFinancialTransferInfo: () => ({ outgoing: [], incoming: null }) });
   vm.runInContext(retrySource[0].replace(/\n  Data\.getFinancialTransferHistory$/, ''), retryContext);
-  assert.equal(vm.runInContext("Data.inspectClosedTransferRetry('A', 'p73').eligible", retryContext), true);
+  assert.equal((await vm.runInContext("Data.inspectClosedTransferRetry('A', 'p73')", retryContext)).eligible, true);
+  assert.equal(journalReads, 1);
   retryFinancial[0].type = 'TRANSFER_WITH_DEBT';
-  assert.equal(vm.runInContext("Data.inspectClosedTransferRetry('A', 'p73').eligible", retryContext), false);
+  journalResult = { ok: true, status: 200, data: { version: 3 }, raw: JSON.stringify(retryFinancial) };
+  assert.equal((await vm.runInContext("Data.inspectClosedTransferRetry('A', 'p73')", retryContext)).eligible, false);
+  retryFinancial[0].type = 'TRANSFER_WITHOUT_DEBT';
+  for (const failedRead of [new Error('network unavailable'), null,
+    { ok: false, status: 503, data: null }, { ok: false, status: 404, data: { version: 0 } },
+    { ok: true, status: 200, data: {}, raw: '[]' },
+    { ok: true, status: 200, data: { version: 4 }, raw: '{bad json' }]) {
+    journalResult = failedRead;
+    const result = await vm.runInContext("Data.inspectClosedTransferRetry('A', 'p73')", retryContext);
+    assert.equal(result.eligible, false);
+    assert.match(result.reason, /финансовый журнал/i);
+  }
+  journalResult = { ok: true, status: 200, data: { version: 5 }, raw: JSON.stringify(retryFinancial) };
+  const deletionAudit = retryDb.premiseEvents.pop();
+  assert.equal((await vm.runInContext("Data.inspectClosedTransferRetry('A', 'p73')", retryContext)).eligible, false);
+  retryDb.premiseEvents.push(deletionAudit);
   const historySource = sourceData.match(/Data\.getFinancialTransferHistory = function\(abonentId, regnum\) \{[\s\S]*?\n  \};\n  Data\.getConfirmedClosedOutgoingTransfer/);
   assert.ok(historySource);
   const financialHistory = [
@@ -221,25 +264,24 @@ vm.runInContext("__jkhTransferConfirmed = true; __transferMode = 'WITH_DEBT'; __
       regnum: 'p73', date: '2025-03-01', freezeDate: '2025-01-31', operationId: 'new-a-c',
       replacesOperationId: 'old-a-b', sourcePrincipal: 10000, sourcePenalty: 100,
       principal: 10000, penalty: 100 }];
-  const historyContext = vm.createContext({ Data: {}, window: { AbonentsDB: {
+  const financialHistoryContext = vm.createContext({ Data: {}, window: { AbonentsDB: {
     abonents: { A: { fio: 'A Name' }, C: { fio: 'C Name' } },
     premiseEvents: [{ operationId: 'old-a-b', oldRespTo: '2025-01-31' }] } },
     normalizeRegnumValue: value => String(value || ''),
     _getProjectRaw: key => key === 'jkh_financial_events_v1' ? JSON.stringify(financialHistory) :
       key === 'jkh_frozen_debt_v1:A:2025-01-31' ? JSON.stringify({ success: true, calculatedAt: '2025-01-31', principal: 10000, penalty: 100 }) :
       key === 'jkh_transfer_balance_v1:C:p73' ? JSON.stringify({ fromAbonentId: 'A', startDate: '2025-03-01', principal: 10000, penalty: 100 }) : null });
-  vm.runInContext(historySource[0].replace(/\n  Data\.getConfirmedClosedOutgoingTransfer$/, ''), historyContext);
-  const oldHistory = vm.runInContext("Data.getFinancialTransferHistory('A', 'p73')", historyContext);
+  vm.runInContext(historySource[0].replace(/\n  Data\.getConfirmedClosedOutgoingTransfer$/, ''), financialHistoryContext);
+  const oldHistory = vm.runInContext("Data.getFinancialTransferHistory('A', 'p73')", financialHistoryContext);
   assert.equal(oldHistory.length, 2);
   assert.equal(oldHistory[0].status, 'DELETED_RECIPIENT');
   assert.equal(oldHistory[1].sourcePrincipal, 10000);
   assert.equal(oldHistory[1].replacesOperationId, 'old-a-b');
-  const newHistory = vm.runInContext("Data.getFinancialTransferHistory('C', 'p73')", historyContext);
+  const newHistory = vm.runInContext("Data.getFinancialTransferHistory('C', 'p73')", financialHistoryContext);
   assert.equal(newHistory.length, 1);
   assert.equal(newHistory[0].transferredPrincipal, 10000);
-  retryFinancial[0].type = 'TRANSFER_WITHOUT_DEBT';
   retryDb.abonents.B = { uid: 'uid_b' };
-  assert.equal(vm.runInContext("Data.inspectClosedTransferRetry('A', 'p73').eligible", retryContext), false);
+  assert.equal((await vm.runInContext("Data.inspectClosedTransferRetry('A', 'p73')", retryContext)).eligible, false);
   assert.match(cardHtml, /Передача задолженности/);
   assert.match(cardHtml, /Полученная задолженность/);
   const renderSource = cardHtml.match(/function renderTransferInfo\(abonentId, regnum\)\{[\s\S]*?\n\}\n\nfunction openResponsibilityReport/);
@@ -308,5 +350,29 @@ vm.runInContext("__jkhTransferConfirmed = true; __transferMode = 'WITH_DEBT'; __
   assert.equal(closeCalls, 1);
   assert.equal(deleteContext.window.location.href, 'index.html');
   assert.equal(deletionAlerts.at(-1), 'Абонент удалён');
+
+  const renameStart = sourceData.indexOf('renameAbonentIdLocal: function');
+  const renameEnd = sourceData.indexOf('    mergePremises:', renameStart);
+  assert.ok(renameStart > 0 && renameEnd > renameStart);
+  const renameContext = vm.createContext({ window: { AbonentsDB: {
+    abonents: { B: { id: 'B', uid: 'uid_b', fio: 'Before' } },
+    links: [{ abonentId: 'B', regnum: 'p73', dateFrom: '2025-02-01', dateTo: '2025-02-28', marker: 'preserve' }],
+    premiseEvents: [{ type: 'RESPONSIBILITY_TRANSFER', newAbonentId: 'B', operationId: 'historical' }]
+  }, saveAbonentsDB: () => true }, isValidUid: value => /^uid_/.test(value) });
+  vm.runInContext('var renameData = ({ ensureWriteOrExplain: () => true, ' +
+    sourceData.slice(renameStart, renameEnd) + '});', renameContext);
+  assert.throws(() => vm.runInContext('renameData.deleteAbonent("B")', renameContext), /ATOMIC_DELETE_REQUIRED/);
+  assert.equal(vm.runInContext('renameData.renameAbonentIdLocal("B", { id:"C", uid:"uid_b", fio:"After" })', renameContext), true);
+  const renamedDb = renameContext.window.AbonentsDB;
+  assert.equal(renamedDb.abonents.B, undefined);
+  assert.equal(renamedDb.abonents.C.uid, 'uid_b');
+  assert.equal(renamedDb.links[0].abonentId, 'C');
+  assert.equal(renamedDb.links[0].dateTo, '2025-02-28');
+  assert.equal(renamedDb.links[0].marker, 'preserve');
+  assert.equal(renamedDb.premiseEvents[0].operationId, 'historical');
+  renameContext.window.saveAbonentsDB = () => false;
+  assert.equal(vm.runInContext('renameData.renameAbonentIdLocal("C", { id:"D", uid:"uid_b" })', renameContext), false);
+  assert.equal(renameContext.window.AbonentsDB, renamedDb);
+  assert.match(cardHtml, /Data\.renameAbonentIdLocal\(String\(oldId\), updated\)/);
   console.log('No Name UI tests passed');
 })().catch(error => { console.error(error); process.exitCode = 1; });

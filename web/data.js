@@ -7186,22 +7186,30 @@
 
       return !!window.saveAbonentsDB && window.saveAbonentsDB();
     },
-    deleteAbonent: function (abonentId) {
+    renameAbonentIdLocal: function (oldAbonentId, updatedAbonent) {
       if (!this.ensureWriteOrExplain()) return false;
-      if (!window.AbonentsDB) return false;
-      var id = String(abonentId || "").trim();
-      if (!id) return false;
-
-      if (window.AbonentsDB.abonents && window.AbonentsDB.abonents[id]) {
-        delete window.AbonentsDB.abonents[id];
-      }
-      if (Array.isArray(window.AbonentsDB.links)) {
-        window.AbonentsDB.links = window.AbonentsDB.links.filter(function (l) {
-          return String(l && l.abonentId) !== id;
-        });
-      }
-
-      return !!window.saveAbonentsDB && window.saveAbonentsDB();
+      var db = window.AbonentsDB;
+      var oldId = String(oldAbonentId || "").trim();
+      var newId = String(updatedAbonent && updatedAbonent.id || "").trim();
+      if (!db || !db.abonents || !Array.isArray(db.links) || !oldId || !newId || oldId === newId ||
+          !db.abonents[oldId] || db.abonents[newId]) return false;
+      var uid = String(db.abonents[oldId].uid || "").trim();
+      if (!isValidUid(uid) || String(updatedAbonent.uid || "").trim() !== uid) return false;
+      var renamed = JSON.parse(JSON.stringify(db));
+      renamed.abonents[newId] = Object.assign({}, updatedAbonent, { id:newId, uid:uid });
+      delete renamed.abonents[oldId];
+      renamed.links.forEach(function(link) {
+        if (link && String(link.abonentId || "") === oldId) link.abonentId = newId;
+      });
+      window.AbonentsDB = renamed;
+      try { if (window.saveAbonentsDB && window.saveAbonentsDB()) return true; }
+      catch (e) {}
+      window.AbonentsDB = db;
+      try { if (window.saveAbonentsDB) window.saveAbonentsDB(); } catch (e) {}
+      return false;
+    },
+    deleteAbonent: function () {
+      throw new Error("ATOMIC_DELETE_REQUIRED");
     },
     mergePremises: async function (options) {
       // TODO/CRITICAL: merge changes responsibility links and creates a new abonent;
@@ -8235,7 +8243,7 @@
   Data.transferResponsibility = transferResponsibility;
   Data.getAbonentTransferInfo = getAbonentTransferInfo;
   Data.getFinancialTransferInfo = getFinancialTransferInfo;
-  Data.inspectClosedTransferRetry = function(abonentId, regnum) {
+  Data.inspectClosedTransferRetry = async function(abonentId, regnum) {
     var db = window.AbonentsDB || {};
     var id = String(abonentId || "").trim(), rn = normalizeRegnumValue(regnum);
     var events = Array.isArray(db.premiseEvents) ? db.premiseEvents : [];
@@ -8246,10 +8254,16 @@
     if (!prior.length) return { eligible:true, priorOperationId:"", deletedRecipients:[] };
     var reject = function(reason){ return { eligible:false, reason:reason, priorOperationId:"", deletedRecipients:[] }; };
     if (prior.length !== 1 || prior[0].type !== "RESPONSIBILITY_TRANSFER") return reject("Ранее выполненная операция требует проверки истории.");
-    var financial;
-    try { financial = JSON.parse(_getProjectRaw("jkh_financial_events_v1") || "[]"); }
-    catch (e) { return reject("Финансовый журнал недоступен."); }
-    if (!Array.isArray(financial)) return reject("Финансовый журнал недоступен.");
+    var financial, journal;
+    try { journal = await _serverStoreGet(_ownerId(), "jkh_financial_events_v1"); }
+    catch (e) { return reject("Не удалось загрузить финансовый журнал с сервера. Повторите попытку позже."); }
+    if (!journal || !journal.ok || journal.status !== 200 || !journal.data ||
+        !Number.isSafeInteger(journal.data.version) || typeof journal.raw !== "string")
+      return reject("Не удалось подтвердить финансовый журнал на сервере. Повторите попытку позже.");
+    try { financial = JSON.parse(journal.raw); }
+    catch (e) { return reject("Серверный финансовый журнал повреждён. Повторная передача заблокирована."); }
+    if (!Array.isArray(financial))
+      return reject("Серверный финансовый журнал повреждён. Повторная передача заблокирована.");
     var source = id, seen = new Set([id]), operations = new Set(), deleted = [];
     while (true) {
       var steps = events.filter(function(e){ return e && e.type === "RESPONSIBILITY_TRANSFER" &&

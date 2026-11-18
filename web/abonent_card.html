@@ -2694,24 +2694,10 @@ async function saveAbonentEdit() {
         console.warn('saveAbonentEdit: premiseRegnum/regnum not found, updated only abonent.square for LS', String(newId));
     }
 
-    if (window.Data && typeof window.Data.upsertAbonent === 'function') {
-        window.Data.upsertAbonent(updated);
-    }
-
     if (isIdChanged) {
-        if (window.Data && typeof window.Data.getLinksForAbonent === 'function') {
-            const oldLinks = window.Data.getLinksForAbonent(String(oldId));
-            oldLinks.forEach((l) => {
-                if (window.Data && typeof window.Data.unlinkAbonentFromPremise === 'function') {
-                    window.Data.unlinkAbonentFromPremise(String(oldId), String(l.regnum || ''));
-                }
-                if (window.Data && typeof window.Data.linkAbonentToPremise === 'function') {
-                    window.Data.linkAbonentToPremise(String(newId), String(l.regnum || ''), String(l.dateFrom || ''), String(l.dateTo || ''));
-                }
-            });
-        }
-        if (window.Data && typeof window.Data.deleteAbonent === 'function') {
-            window.Data.deleteAbonent(String(oldId));
+        if (!(window.Data && typeof Data.renameAbonentIdLocal === 'function') ||
+            Data.renameAbonentIdLocal(String(oldId), updated) !== true) {
+            throw new Error('ABONENT_RENAME_LOCAL_FAILED');
         }
 
         migrateLocalKeys(String(oldId), String(newId));
@@ -2719,6 +2705,8 @@ async function saveAbonentEdit() {
         const url = new URL(window.location.href);
         url.searchParams.set("abonent", String(newId));
         window.history.replaceState({}, "", url.toString());
+    } else if (window.Data && typeof window.Data.upsertAbonent === 'function') {
+        window.Data.upsertAbonent(updated);
     }
 
     await Data.flushDbToServer();
