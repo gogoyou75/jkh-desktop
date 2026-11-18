@@ -259,12 +259,13 @@ Doc: docs/LOGIC_SPEC_v1.5.3.md
         </tfoot>
     </table>
 
+    <div id="transferredDebtNotice" class="summary-block" style="display:none;"></div>
     <div class="summary-block">
-        По состоянию на <span id="stateDate"></span> задолженность составляет:
+        <span id="debtSummaryIntro">По состоянию на</span> <span id="stateDate"></span> <span id="debtSummaryDescription">задолженность составляет:</span>
         <table>
             <tr><td>Долг по основному платежу:</td><td class="align-right" id="mainDebt"></td></tr>
             <tr><td>Долг по пени:</td><td class="align-right" id="peniDebt"></td></tr>
-            <tr><td><b>ДОЛГ ВСЕГО:</b></td><td class="align-right" id="totalDebt"></td></tr>
+            <tr><td><b id="debtSummaryTotalLabel">ДОЛГ ВСЕГО:</b></td><td class="align-right" id="totalDebt"></td></tr>
         </table>
     </div>
 

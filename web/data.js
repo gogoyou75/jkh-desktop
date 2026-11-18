@@ -7933,6 +7933,59 @@
     }, "", "");
   };
 
+  Data.assignClosedResponsibilityAtomic = async function(options) {
+    if (!Data.ensureWriteOrExplain()) return false;
+    var opts = options || {};
+    var sourceId = String(opts.sourceAbonentId || "").trim();
+    var closeDate = String(opts.sourceCloseDate || "").trim();
+    var source = window.AbonentsDB && window.AbonentsDB.abonents && window.AbonentsDB.abonents[sourceId];
+    var version = window.JKHDbCas && window.JKHDbCas.version(_ownerId());
+    if (!source || !Number.isSafeInteger(version) || !/^\d{4}-\d{2}-\d{2}$/.test(closeDate)) {
+      throw new Error("CLOSED_SOURCE_LOCAL_STATE_INVALID");
+    }
+    if (!(window.JKHCalcEngine && typeof window.JKHCalcEngine.calculateFrozenDebt === "function")) {
+      throw new Error("CLOSED_SOURCE_CALC_UNAVAILABLE");
+    }
+    var ledgerKey = resolvePaymentLedgerKey(sourceId);
+    var freezeKey = "jkh_freeze_to_v1:" + sourceId;
+    var debtKey = "jkh_frozen_debt_v1:" + sourceId + ":" + closeDate;
+    if (!ledgerKey) throw new Error("CLOSED_SOURCE_LEDGER_MISSING");
+    var snapshot = await __transferServerSnapshot([ledgerKey, freezeKey, debtKey]);
+    var serverRows = snapshot.values[ledgerKey] ? JSON.parse(snapshot.values[ledgerKey]) : null;
+    if (!Array.isArray(serverRows) || JSON.stringify(serverRows) !== JSON.stringify(readPaymentLedger(sourceId))) {
+      throw new Error("CLOSED_SOURCE_LEDGER_STALE");
+    }
+    if (typeof window.JKHCalcEngine.loadPaymentsForAbonent !== "function" ||
+        JSON.stringify(serverRows) !== JSON.stringify(window.JKHCalcEngine.loadPaymentsForAbonent(sourceId))) {
+      throw new Error("CLOSED_SOURCE_CALC_LEDGER_STALE");
+    }
+    if (snapshot.values[freezeKey] && snapshot.values[freezeKey] !== closeDate) {
+      throw new Error("CLOSED_SOURCE_FREEZE_CONFLICT");
+    }
+    var debt = window.JKHCalcEngine.calculateFrozenDebt(sourceId, closeDate);
+    if (!debt || debt.success !== true || debt.calculatedAt !== closeDate ||
+        !Number.isFinite(Number(debt.principal)) || !Number.isFinite(Number(debt.penalty)) ||
+        Number(debt.principal) < 0 || Number(debt.penalty) < 0) {
+      throw new Error("CLOSED_SOURCE_DEBT_UNVERIFIED");
+    }
+    if (snapshot.values[debtKey]) {
+      var saved = JSON.parse(snapshot.values[debtKey]);
+      if (saved.success !== true || saved.calculatedAt !== closeDate ||
+          Number(saved.principal) !== Number(debt.principal) || Number(saved.penalty) !== Number(debt.penalty)) {
+        throw new Error("CLOSED_SOURCE_SNAPSHOT_CONFLICT");
+      }
+    }
+    return __responsibilityMutationPost("/api/closed_responsibility_assign", {
+      client_owner_hint:_ownerId(), operation_id:opts.operationId || __responsibilityMutationOperationId(),
+      expected_version:version, abonent_id:String(opts.abonentId || ""),
+      regnum:String(opts.regnum || ""), date_from:String(opts.dateFrom || ""), date_to:"",
+      mode:String(opts.mode || ""), abonent:opts.abonent,
+      initial_rows:Array.isArray(opts.initialRows) ? opts.initialRows : [],
+      source_abonent_id:sourceId, source_close_date:closeDate,
+      source_ledger_version:snapshot.versions[ledgerKey], source_debt:debt
+    }, "", "");
+  };
+
   async function transferResponsibility(options){
     if (!Data.ensureWriteOrExplain()) return false;
     var db = window.AbonentsDB;
@@ -8182,6 +8235,30 @@
   Data.transferResponsibility = transferResponsibility;
   Data.getAbonentTransferInfo = getAbonentTransferInfo;
   Data.getFinancialTransferInfo = getFinancialTransferInfo;
+  Data.getConfirmedClosedOutgoingTransfer = function(abonentId, regnum) {
+    var id = String(abonentId || "").trim();
+    var rn = normalizeRegnumValue(regnum);
+    if (!id || !rn) return null;
+    try {
+      var events = JSON.parse(_getProjectRaw("jkh_financial_events_v1") || "[]");
+      if (!Array.isArray(events)) return null;
+      for (var i = events.length - 1; i >= 0; i--) {
+        var event = events[i];
+        if (!event || event.type !== "TRANSFER_WITH_DEBT" || event.closedSource !== true ||
+            String(event.sourceAbonentId || "") !== id || normalizeRegnumValue(event.regnum) !== rn) continue;
+        var target = String(event.targetAbonentId || "").trim();
+        var balance = _getProjectRaw("jkh_transfer_balance_v1:" + target + ":" + rn);
+        if (!balance) return null;
+        var incoming = JSON.parse(balance);
+        if (String(incoming.fromAbonentId || "") !== id ||
+            String(incoming.startDate || "") !== String(event.date || "") ||
+            Number(incoming.principal) !== Number(event.principal) ||
+            Number(incoming.penalty) !== Number(event.penalty)) return null;
+        return event;
+      }
+    } catch (e) { return null; }
+    return null;
+  };
 
 window.getCalcPeriodStorageKey = resolveCalcPeriodStorageKey;
 window.getCalcPeriodActiveStorageKey = resolveCalcPeriodActiveStorageKey;

@@ -437,6 +437,7 @@ Doc: docs/LOGIC_SPEC_v1.5.3.md
         <div class="transfer-sub">Передано этим абонентом</div>
         <div id="to_list"></div>
       </div>
+      <div id="transferClosedNotice" style="display:none; margin-top:10px;"></div>
     </div>
 
 </div>
@@ -2032,14 +2033,17 @@ function renderTransferInfo(abonentId, regnum){
   const incBox = document.getElementById("transferIncoming");
   const frzBox = document.getElementById("transferFreeze");
   const outBox = document.getElementById("transferOutgoing");
+  const closedNotice = document.getElementById("transferClosedNotice");
 
   if (incBox) incBox.style.display = "none";
   if (frzBox) frzBox.style.display = "none";
   if (outBox) outBox.style.display = "none";
+  if (closedNotice) closedNotice.style.display = "none";
 
   const incoming = __getIncomingTransfer(abonentId, regnum);
   const freezeISO = __getFreezeToISO(abonentId);
   const outgoing = __findOutgoingTransfers(abonentId);
+  const closedTransfer = window.Data?.getConfirmedClosedOutgoingTransfer?.(abonentId, regnum) || null;
 
   let any = false;
 
@@ -2085,6 +2089,19 @@ function renderTransferInfo(abonentId, regnum){
     any = true;
     frzBox.style.display = "block";
     document.getElementById("tf_freeze").textContent = freezeISO;
+  }
+  if (closedTransfer && closedNotice){
+    any = true;
+    const toId = String(closedTransfer.targetAbonentId || '');
+    const recipient = getDb()[toId];
+    closedNotice.textContent = 'Задолженность передана новому абоненту. Остаток определён на ' +
+      String(closedTransfer.freezeDate || '—') + '; передача с ' + String(closedTransfer.date || '—') +
+      '; получатель: ' + toId + (recipient?.fio ? ' — ' + recipient.fio : '') +
+      '; основной долг: ' + __fmt2(closedTransfer.principal) +
+      '; пеня: ' + __fmt2(closedTransfer.penalty) +
+      '; всего: ' + __fmt2(closedTransfer.debtAmount) +
+      '. Исторические начисления и платежи сохранены. Переданная задолженность не является действующим обязательством прежнего абонента.';
+    closedNotice.style.display = 'block';
   }
 
   if (outgoing && outgoing.length && outBox){

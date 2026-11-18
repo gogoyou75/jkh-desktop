@@ -7,7 +7,7 @@ import json
 import csv
 import re
 from decimal import Decimal, InvalidOperation
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 
 from flask import Flask, jsonify, request, session, Response
 from flask_sqlalchemy import SQLAlchemy
@@ -5471,6 +5471,7 @@ def _personal_abonent_key(key, abonent_id, uid):
 
 @app.get("/api/abonent_delete")
 @app.get("/api/no_name_assign")
+@app.get("/api/closed_responsibility_assign")
 def responsibility_mutation_status():
     user, owner, err = _session_store_owner(_client_owner_hint_from_request())
     if err:
@@ -5483,7 +5484,9 @@ def responsibility_mutation_status():
         current = json.loads(row.v) if row and row.v else {}
     except (TypeError, ValueError):
         return _json_error("abonents_db_invalid", 409)
-    kind = "ABONENT_DELETED" if request.path.endswith("abonent_delete") else "NO_NAME_ASSIGNED"
+    kind = ("ABONENT_DELETED" if request.path.endswith("abonent_delete") else
+            "CLOSED_RESPONSIBILITY_ASSIGNED" if request.path.endswith("closed_responsibility_assign") else
+            "NO_NAME_ASSIGNED")
     event = _responsibility_operation(current, operation_id, kind)
     return jsonify(ok=True, committed=bool(event), event=event)
 
@@ -5645,8 +5648,11 @@ def abonent_delete_atomic():
 
 
 @app.post("/api/no_name_assign")
+@app.post("/api/closed_responsibility_assign")
 def no_name_assign_atomic():
     data = request.get_json(silent=True) or {}
+    closed_source = request.path.endswith("closed_responsibility_assign")
+    event_type = "CLOSED_RESPONSIBILITY_ASSIGNED" if closed_source else "NO_NAME_ASSIGNED"
     user, owner, err = _session_store_owner(_client_owner_hint_from_request(data))
     if err:
         return err
@@ -5657,6 +5663,8 @@ def no_name_assign_atomic():
     gap_from, gap_to = str(data.get("date_from") or ""), str(data.get("date_to") or "")
     new_abonent = data.get("abonent")
     initial_rows = data.get("initial_rows")
+    closed_source_id = str(data.get("source_abonent_id") or "").strip() if closed_source else ""
+    source_close = str(data.get("source_close_date") or "").strip() if closed_source else ""
     expected = _expected_db_version(data)
     uid = str(new_abonent.get("uid") or "").strip() if isinstance(new_abonent, dict) else ""
     if not operation_id or len(operation_id) > 255 or not new_id or not regnum or mode not in ("WITH_DEBT", "NO_DEBT") or expected is None or not isinstance(new_abonent, dict) or not isinstance(initial_rows, list) or not _canonical_payment_ledger_uid("payments_" + uid):
@@ -5666,6 +5674,26 @@ def no_name_assign_atomic():
             raise ValueError()
     except ValueError:
         return _json_error("assignment_period_invalid", 400)
+    if closed_source:
+        claimed = db.session.execute(
+            update(KVStore).where(KVStore.owner == owner, KVStore.k == "abonents_db_v1",
+                                  KVStore.version == expected)
+            .values(version=KVStore.version + 1)
+        )
+        if claimed.rowcount != 1:
+            db.session.rollback()
+            committed_row = KVStore.query.filter_by(owner=owner, k="abonents_db_v1").first()
+            try:
+                committed_db = json.loads(committed_row.v) if committed_row and committed_row.v else {}
+            except (TypeError, ValueError):
+                committed_db = {}
+            prior = _responsibility_operation(committed_db, operation_id, event_type)
+            if (prior and prior.get("abonentId") == new_id and prior.get("uid") == uid and
+                    prior.get("regnum") == regnum and prior.get("mode") == mode and
+                    prior.get("sourceAbonentId") == closed_source_id and
+                    prior.get("sourceCloseDate") == source_close and prior.get("dateFrom") == gap_from):
+                return jsonify(ok=True, committed=True, replay=True, operation_id=operation_id)
+            return _db_version_conflict()
     db_row = KVStore.query.filter_by(owner=owner, k="abonents_db_v1").with_for_update().first()
     if not db_row or not db_row.v:
         db.session.rollback()
@@ -5678,16 +5706,20 @@ def no_name_assign_atomic():
     if not isinstance(current, dict) or not isinstance(current.get("premiseEvents"), list):
         db.session.rollback()
         return _json_error("abonents_db_invalid", 409)
-    if _transfer_event(current, operation_id) and not _responsibility_operation(current, operation_id, "NO_NAME_ASSIGNED"):
+    if _transfer_event(current, operation_id) and not _responsibility_operation(current, operation_id, event_type):
         db.session.rollback()
         return _db_version_conflict()
-    prior = _responsibility_operation(current, operation_id, "NO_NAME_ASSIGNED")
+    prior = _responsibility_operation(current, operation_id, event_type)
     if prior:
         db.session.rollback()
-        if prior.get("abonentId") == new_id and prior.get("uid") == uid and prior.get("regnum") == regnum and prior.get("mode") == mode:
+        if (prior.get("abonentId") == new_id and prior.get("uid") == uid and
+                prior.get("regnum") == regnum and prior.get("mode") == mode and
+                (not closed_source or (prior.get("sourceAbonentId") == closed_source_id and
+                                       prior.get("sourceCloseDate") == source_close and
+                                       prior.get("dateFrom") == gap_from))):
             return jsonify(ok=True, committed=True, replay=True, operation_id=operation_id)
         return _db_version_conflict()
-    if db_row.version != expected:
+    if db_row.version != expected + (1 if closed_source else 0):
         db.session.rollback()
         return _db_version_conflict()
     abonents = current.get("abonents") if isinstance(current, dict) else None
@@ -5696,31 +5728,117 @@ def no_name_assign_atomic():
     if not isinstance(abonents, dict) or not isinstance(links, list) or not isinstance(premises, dict) or regnum not in premises or new_id in abonents or any(isinstance(a, dict) and str(a.get("uid") or "") == uid for a in abonents.values()) or not _responsibility_periods_valid(links, regnum):
         db.session.rollback()
         return _json_error("assignment_identity_conflict", 409)
-    gaps = [link for link in links if isinstance(link, dict) and link.get("technicalType") == "NO_NAME" and str(link.get("regnum") or "") == regnum and str(link.get("dateFrom") or "") == gap_from and str(link.get("dateTo") or "") == gap_to]
-    if len(gaps) != 1 or str(new_abonent.get("regnum") or "") != regnum or str(new_abonent.get("calcStartDate") or "") != gap_from:
+    if str(new_abonent.get("regnum") or "") != regnum or str(new_abonent.get("calcStartDate") or "") != gap_from:
         db.session.rollback()
-        return _json_error("no_name_period_missing", 409)
+        return _json_error("assignment_identity_conflict", 409)
+    gaps = [link for link in links if isinstance(link, dict) and link.get("technicalType") == "NO_NAME" and str(link.get("regnum") or "") == regnum and str(link.get("dateFrom") or "") == gap_from and str(link.get("dateTo") or "") == gap_to]
     source_id = ""
     source_debt = None
-    if mode == "WITH_DEBT":
-        previous = [link for link in links if isinstance(link, dict) and str(link.get("regnum") or "") == regnum and str(link.get("dateTo") or "") and str(link.get("dateTo")) < gap_from and str(link.get("abonentId") or "") in abonents]
-        previous.sort(key=lambda link: str(link.get("dateTo")), reverse=True)
-        if not previous:
+    principal = penalty = Decimal(0)
+    source_ledger = freeze_row = debt_row = None
+    freeze_date = ""
+    if closed_source:
+        try:
+            close_day, start_day = date.fromisoformat(source_close), date.fromisoformat(gap_from)
+            if start_day <= close_day or gap_to or not closed_source_id:
+                raise ValueError()
+        except ValueError:
             db.session.rollback()
-            return _json_error("frozen_source_missing", 409)
-        source_id = str(previous[0]["abonentId"])
-        freeze_date = str(previous[0]["dateTo"])
+            return _json_error("closed_source_period_invalid", 409)
+        own_links = [link for link in links if isinstance(link, dict) and str(link.get("regnum") or "") == regnum]
+        real_links = [link for link in own_links if str(link.get("abonentId") or "") in abonents]
+        real_links.sort(key=lambda link: str(link.get("dateTo") or ""), reverse=True)
+        existing_gap = [link for link in own_links if link.get("technicalType") == "NO_NAME"]
+        if (not real_links or str(real_links[0].get("abonentId") or "") != closed_source_id or
+                str(real_links[0].get("dateTo") or "") != source_close or
+                len(existing_gap) > 1 or any(not str(link.get("dateTo") or "") for link in real_links) or
+                any(str(link.get("dateFrom") or "") > source_close for link in real_links) or
+                (existing_gap and (str(existing_gap[0].get("dateFrom") or "") != str(close_day + timedelta(days=1)) or
+                                   str(existing_gap[0].get("dateTo") or "")))):
+            db.session.rollback()
+            return _json_error("closed_source_conflict", 409)
+        for event in current.get("premiseEvents", []):
+            if isinstance(event, dict) and str(event.get("regnum") or (event.get("fromRegnums") or [""])[0]) == regnum and (
+                    str(event.get("oldAbonentId") or "") == closed_source_id or
+                    str(event.get("sourceAbonentId") or "") == closed_source_id) and event.get("type") in (
+                        "RESPONSIBILITY_TRANSFER", "CLOSED_RESPONSIBILITY_ASSIGNED", "NO_NAME_ASSIGNED"):
+                db.session.rollback()
+                return _json_error("source_already_transferred", 409)
+        source_id, freeze_date = closed_source_id, source_close
+        for transfer_row in KVStore.query.filter(KVStore.owner == owner, KVStore.k.like("jkh_transfer_balance_v1:%")).with_for_update().all():
+            if not transfer_row.v:
+                continue
+            try:
+                prior_balance = json.loads(transfer_row.v)
+            except (TypeError, ValueError):
+                db.session.rollback()
+                return _json_error("transfer_data_invalid", 409)
+            if (str(prior_balance.get("fromAbonentId") or "") == source_id and
+                    str(prior_balance.get("regnum") or "") == regnum):
+                db.session.rollback()
+                return _json_error("source_already_transferred", 409)
+        source_a = abonents.get(source_id)
+        source_uid = str(source_a.get("uid") or "") if isinstance(source_a, dict) else ""
+        if not _canonical_payment_ledger_uid("payments_" + source_uid):
+            db.session.rollback()
+            return _json_error("closed_source_uid_invalid", 409)
+        source_ledger = KVStore.query.filter_by(owner=owner, k="payments_" + source_uid).with_for_update().first()
         freeze_row = KVStore.query.filter_by(owner=owner, k="jkh_freeze_to_v1:" + source_id).with_for_update().first()
         debt_row = KVStore.query.filter_by(owner=owner, k="jkh_frozen_debt_v1:" + source_id + ":" + freeze_date).with_for_update().first()
         try:
-            source_debt = json.loads(debt_row.v) if debt_row and debt_row.v else None
+            ledger_version = int(data.get("source_ledger_version"))
+            old_rows = json.loads(source_ledger.v) if source_ledger and source_ledger.v else None
+            source_debt = data.get("source_debt")
             principal = Decimal(str(source_debt["principal"]))
             penalty = Decimal(str(source_debt["penalty"]))
-            if not freeze_row or freeze_row.v != freeze_date or source_debt.get("success") is not True or source_debt.get("calculatedAt") != freeze_date or not principal.is_finite() or not penalty.is_finite() or principal < 0 or penalty < 0:
+            if (not source_ledger or source_ledger.version != ledger_version or
+                    not isinstance(old_rows, list) or not isinstance(source_debt, dict) or
+                    source_debt.get("success") is not True or source_debt.get("calculatedAt") != freeze_date or
+                    not principal.is_finite() or not penalty.is_finite() or principal < 0 or penalty < 0 or
+                    (freeze_row and freeze_row.v and freeze_row.v != freeze_date)):
                 raise ValueError()
+            if debt_row and debt_row.v:
+                saved_debt = json.loads(debt_row.v)
+                if (saved_debt.get("success") is not True or saved_debt.get("calculatedAt") != freeze_date or
+                        Decimal(str(saved_debt["principal"])) != principal or
+                        Decimal(str(saved_debt["penalty"])) != penalty):
+                    raise ValueError()
+            for row in old_rows:
+                if not isinstance(row, dict):
+                    raise ValueError()
+                paid_amount = Decimal(str(row.get("paid") or 0))
+                if not paid_amount.is_finite() or paid_amount < 0:
+                    raise ValueError()
+                if paid_amount > 0:
+                    paid_on = _norm_date(row.get("paid_date"))
+                    if not paid_on or paid_on > freeze_date:
+                        raise ValueError()
         except (TypeError, KeyError, ValueError, InvalidOperation):
             db.session.rollback()
-            return _json_error("frozen_source_invalid", 409)
+            return _json_error("closed_source_debt_unverified", 409)
+    else:
+        if len(gaps) != 1:
+            db.session.rollback()
+            return _json_error("no_name_period_missing", 409)
+        if mode == "WITH_DEBT":
+            previous = [link for link in links if isinstance(link, dict) and str(link.get("regnum") or "") == regnum and str(link.get("dateTo") or "") and str(link.get("dateTo")) < gap_from and str(link.get("abonentId") or "") in abonents]
+            previous.sort(key=lambda link: str(link.get("dateTo")), reverse=True)
+            if not previous:
+                db.session.rollback()
+                return _json_error("frozen_source_missing", 409)
+            source_id = str(previous[0]["abonentId"])
+            freeze_date = str(previous[0]["dateTo"])
+            freeze_row = KVStore.query.filter_by(owner=owner, k="jkh_freeze_to_v1:" + source_id).with_for_update().first()
+            debt_row = KVStore.query.filter_by(owner=owner, k="jkh_frozen_debt_v1:" + source_id + ":" + freeze_date).with_for_update().first()
+            try:
+                source_debt = json.loads(debt_row.v) if debt_row and debt_row.v else None
+                principal = Decimal(str(source_debt["principal"]))
+                penalty = Decimal(str(source_debt["penalty"]))
+                if not freeze_row or freeze_row.v != freeze_date or source_debt.get("success") is not True or source_debt.get("calculatedAt") != freeze_date or not principal.is_finite() or not penalty.is_finite() or principal < 0 or penalty < 0:
+                    raise ValueError()
+            except (TypeError, KeyError, ValueError, InvalidOperation):
+                db.session.rollback()
+                return _json_error("frozen_source_invalid", 409)
     for row in initial_rows:
         if not isinstance(row, dict):
             db.session.rollback()
@@ -5749,19 +5867,35 @@ def no_name_assign_atomic():
     new_abonent["premiseRegnum"] = regnum
     new_abonent["debtTransferredFrom"] = source_id if mode == "WITH_DEBT" else None
     abonents[new_id] = new_abonent
-    gap_index = links.index(gaps[0])
-    links[gap_index] = {"abonentId": new_id, "regnum": regnum, "dateFrom": gap_from, "dateTo": gap_to}
+    if closed_source:
+        if existing_gap:
+            if gap_from == str(close_day + timedelta(days=1)):
+                links.remove(existing_gap[0])
+            else:
+                existing_gap[0]["dateTo"] = str(start_day - timedelta(days=1))
+        elif gap_from != str(close_day + timedelta(days=1)):
+            links.append({"technicalType": "NO_NAME", "abonentId": "", "regnum": regnum,
+                          "dateFrom": str(close_day + timedelta(days=1)),
+                          "dateTo": str(start_day - timedelta(days=1))})
+        links.append({"abonentId": new_id, "regnum": regnum, "dateFrom": gap_from, "dateTo": ""})
+    else:
+        gap_index = links.index(gaps[0])
+        links[gap_index] = {"abonentId": new_id, "regnum": regnum, "dateFrom": gap_from, "dateTo": gap_to}
     if not _responsibility_periods_valid(links, regnum):
         db.session.rollback()
         return _json_error("assignment_period_overlap", 409)
-    current.setdefault("premiseEvents", []).append({"type": "NO_NAME_ASSIGNED", "operationId": operation_id,
+    current.setdefault("premiseEvents", []).append({"type": event_type, "operationId": operation_id,
         "abonentId": new_id, "uid": uid, "regnum": regnum, "dateFrom": gap_from, "dateTo": gap_to,
-        "mode": mode, "sourceAbonentId": source_id})
+        "mode": mode, "sourceAbonentId": source_id,
+        "sourceCloseDate": freeze_date if closed_source else ""})
     ledger_key = "payments_" + uid
     excludes_key = "exclude_periods_" + new_id
     transfer_key = "jkh_transfer_balance_v1:" + new_id + ":" + regnum
     compatibility_key = "jkh_transfer_to_v1:" + new_id
     keys = [ledger_key, excludes_key, transfer_key, compatibility_key, "jkh_financial_events_v1"]
+    if closed_source:
+        keys.extend(["jkh_freeze_to_v1:" + source_id,
+                     "jkh_frozen_debt_v1:" + source_id + ":" + freeze_date])
     for key in ["abonents_db_v1"] + keys:
         access_err, reason = _require_write_access_for_key(owner, key)
         if access_err:
@@ -5775,12 +5909,28 @@ def no_name_assign_atomic():
         financial_events = json.loads(rows["jkh_financial_events_v1"].v) if rows["jkh_financial_events_v1"] and rows["jkh_financial_events_v1"].v else []
         if not isinstance(financial_events, list):
             raise ValueError()
+        if closed_source and any(isinstance(event, dict) and
+                str(event.get("sourceAbonentId") or "") == source_id and
+                str(event.get("regnum") or event.get("premiseId") or "") == regnum and
+                event.get("type") in ("TRANSFER_WITH_DEBT", "TRANSFER_WITHOUT_DEBT")
+                for event in financial_events):
+            db.session.rollback()
+            return _json_error("source_already_transferred", 409)
         financial_events.append({"type": "TRANSFER_WITH_DEBT" if mode == "WITH_DEBT" else "TRANSFER_WITHOUT_DEBT",
             "operationId": operation_id, "sourceAbonentId": source_id, "targetAbonentId": new_id,
             "premiseId": regnum, "regnum": regnum, "date": gap_from, "mode": mode,
+            "freezeDate": freeze_date, "closedSource": closed_source,
+            "principal": float(principal) if mode == "WITH_DEBT" else 0,
+            "penalty": float(penalty) if mode == "WITH_DEBT" else 0,
             "debtAmount": float(principal + penalty) if mode == "WITH_DEBT" else 0})
         values = {ledger_key: json.dumps(initial_rows, ensure_ascii=False), excludes_key: "[]",
                   "jkh_financial_events_v1": json.dumps(financial_events, ensure_ascii=False)}
+        if closed_source:
+            values["jkh_freeze_to_v1:" + source_id] = freeze_date
+            if not debt_row or not debt_row.v:
+                values["jkh_frozen_debt_v1:" + source_id + ":" + freeze_date] = json.dumps({
+                    "success": True, "principal": float(principal), "penalty": float(penalty),
+                    "calculatedAt": freeze_date})
         if mode == "WITH_DEBT":
             values[transfer_key] = json.dumps({"success": True, "startDate": gap_from, "principal": float(principal),
                 "penalty": float(penalty), "regnum": regnum, "fromAbonentId": source_id, "mode": "WITH_DEBT"})
@@ -5794,7 +5944,8 @@ def no_name_assign_atomic():
             else:
                 db.session.add(KVStore(owner=owner, k=key, v=value, version=1))
         db_row.v = json.dumps(current, ensure_ascii=False)
-        db_row.version += 1
+        if not closed_source:
+            db_row.version += 1
         db.session.commit()
     except (SQLAlchemyError, TypeError, ValueError):
         db.session.rollback()

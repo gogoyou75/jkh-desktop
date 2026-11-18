@@ -10,7 +10,8 @@ assert.ok(mainScript);
 
 const elements = Object.fromEntries([
   'debtTransferBox', 'debtTransferInfo', 'na_regnum', 'na_date_from',
-  'newDebtStart', 'transferStartPreview', 'transferEndPreview'
+  'newDebtStart', 'transferStartPreview', 'transferEndPreview',
+  'debtTransferTitle', 'btnTransferWithDebt', 'btnTransferNoDebt'
 ].map(id => [id, { value: '', textContent: '', style: {} }]));
 const context = vm.createContext({
   window: { AbonentsDB: { abonents: {}, premises: { p73: { flat: '73' } }, links: [] },
@@ -131,6 +132,54 @@ vm.runInContext("__jkhTransferConfirmed = true; __transferMode = 'WITH_DEBT'; __
   assert.equal(legacyCalls, 0);
   assert.equal(context.window.AbonentsDB.abonents['0100'].uid.length > 0, true);
   assert.equal(context.location.href, 'abonent_card.html?abonent=0100');
+
+  let closedCalls = 0;
+  let closedOutcome = false;
+  Data.assignClosedResponsibilityAtomic = async options => {
+    closedCalls++;
+    assert.equal(options.sourceAbonentId, 'A');
+    assert.equal(options.sourceCloseDate, '2025-01-31');
+    assert.equal(options.dateFrom, '2025-03-01');
+    assert.equal(options.mode, 'WITH_DEBT');
+    return closedOutcome;
+  };
+  Data.getFinancialTransferInfo = () => ({ outgoing: [] });
+  context.window.JKHCalcEngine = { calculateFrozenDebt: () => ({
+    success: true, principal: 10000, penalty: 100, calculatedAt: '2025-01-31'
+  }) };
+  context.window.AbonentsDB = { abonents: { A: { uid: 'uid_a', fio: 'A' } },
+    premises: { p73: { flat: '73', status: 'active' } },
+    links: [{ abonentId: 'A', regnum: 'p73', dateFrom: '2025-01-01', dateTo: '2025-01-31' }],
+    premiseEvents: [] };
+  elements.na_ls.value = '0101';
+  elements.na_date_from.value = '2025-03-01';
+  context.location.href = '';
+  vm.runInContext('refreshDebtTransferBox()', context);
+  assert.equal(elements.debtTransferBox.style.display, 'block');
+  assert.equal(vm.runInContext('__transferCtx.closed', context), true);
+  assert.match(elements.debtTransferInfo.textContent, /10000\.00/);
+  await vm.runInContext('createAbonent()', context);
+  assert.equal(closedCalls, 0);
+  assert.match(elements.createStatusText.textContent, /обычное создание заблокировано/);
+  vm.runInContext("__jkhTransferConfirmed = true; __transferMode = 'WITH_DEBT'", context);
+  await vm.runInContext('createAbonent()', context);
+  assert.equal(closedCalls, 1);
+  assert.equal(context.window.AbonentsDB.abonents['0101'], undefined);
+  assert.equal(context.location.href, '');
+  assert.match(elements.createStatusText.textContent, /CLOSED_ASSIGN_NOT_COMMITTED/);
+  closedOutcome = true;
+  await vm.runInContext('createAbonent()', context);
+  assert.equal(closedCalls, 2);
+  assert.equal(legacyCalls, 0);
+  assert.equal(context.location.href, 'abonent_card.html?abonent=0101');
+
+  const sourceData = fs.readFileSync('web/data.js', 'utf8');
+  assert.match(sourceData, /getConfirmedClosedOutgoingTransfer/);
+  assert.match(cardHtml, /Задолженность передана новому абоненту/);
+  const courtHtml = fs.readFileSync('web/spravka_sud.html', 'utf8');
+  const courtScript = fs.readFileSync('web/spravka_sud.js', 'utf8');
+  assert.match(courtHtml, /id="transferredDebtNotice"/);
+  assert.match(courtScript, /getConfirmedClosedOutgoingTransfer/);
 
   const deleteStart = cardHtml.indexOf('let __deleteAbonentBusy = false;');
   const deleteEnd = cardHtml.indexOf('\nasync function saveAbonentEdit()', deleteStart);

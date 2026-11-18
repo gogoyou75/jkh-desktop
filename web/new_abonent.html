@@ -295,7 +295,7 @@
 
   <!-- Блок передачи квартиры -->
   <div id="debtTransferBox" class="readonly-box" style="display:none; border-color:#c77b00;">
-    <div class="title">Квартира уже занята — передача</div>
+    <div class="title" id="debtTransferTitle">Квартира уже занята — передача</div>
 
     <div class="readonly-row" id="debtTransferInfo"></div>
 
@@ -456,6 +456,12 @@ function getYesterdayIso(iso){
   d.setDate(d.getDate()-1);
   return toIsoDate(d);
 }
+function getNextDayIso(iso){
+  const d = new Date(String(iso || '') + 'T12:00:00');
+  if (!Number.isFinite(d.getTime())) return '';
+  d.setDate(d.getDate()+1);
+  return toIsoDate(d);
+}
 
 /* =========================
    КВАРТИРЫ (premises)
@@ -592,6 +598,17 @@ function activeLinkForRegnumLocal(db, regnum){
   const r = String(regnum || '').trim();
   return (db && Array.isArray(db.links) ? db.links : []).find(l => String(l?.regnum || '').trim()===r && !String(l?.dateTo || '').trim()) || null;
 }
+function closedPredecessorForRegnum(db, regnum){
+  const links = (db?.links || []).filter(l => String(l?.regnum || '').trim() === String(regnum || '').trim());
+  const real = links.filter(l => String(l?.abonentId || '').trim() && db?.abonents?.[String(l.abonentId)]);
+  real.sort((a,b) => String(b.dateTo || '').localeCompare(String(a.dateTo || '')));
+  const last = real[0];
+  if (!last || !String(last.dateTo || '').trim() || real.some(l => !String(l.dateTo || '').trim())) return null;
+  if (real.some(l => String(l.dateFrom || '') > String(last.dateTo || ''))) return null;
+  const gaps = links.filter(l => l?.technicalType === 'NO_NAME');
+  if (gaps.length > 1 || (gaps.length && String(gaps[0].dateTo || '').trim())) return null;
+  return { link:last, id:String(last.abonentId), closeDate:String(last.dateTo), gap:gaps[0] || null };
+}
 function findAbonentByLinkId(db, abonentId){
   const id = String(abonentId || '').trim();
   if (!id) return null;
@@ -640,7 +657,13 @@ function refreshDebtTransferBox() {
 
   const box = document.getElementById('debtTransferBox');
   const info = document.getElementById('debtTransferInfo');
+  const title = document.getElementById('debtTransferTitle');
   if (!box || !info) return;
+  if (title) title.textContent = 'Квартира уже занята — передача';
+  for (const id of ['btnTransferWithDebt', 'btnTransferNoDebt']) {
+    const button = document.getElementById(id);
+    if (button) button.disabled = false;
+  }
 
   const db = window.AbonentsDB;
   const regnum = String(document.getElementById('na_regnum')?.value || '').trim();
@@ -651,18 +674,62 @@ function refreshDebtTransferBox() {
   const gap = (db.links || []).find(l => l?.technicalType === 'NO_NAME' &&
     String(l.regnum || '') === regnum && String(l.dateFrom || '') === df0);
   if (gap || active?.technicalType === 'NO_NAME') {
-    if (!gap) {
-      info.textContent = 'Для замены No Name укажите точную дату начала периода: ' + String(active.dateFrom || '');
-      box.style.display = 'none';
+    if (gap) {
+      __transferCtx = { noName:true, regnum, gap:gap, transferDate:df0 };
+      if (title) title.textContent = 'Назначение на период No Name';
+      info.textContent = 'No Name — Требуется назначить ответственного. Выберите режим для всего периода ' +
+        df0 + ' — ' + (gap.dateTo || 'по настоящее время') + '.';
+      document.getElementById('transferStartPreview').textContent = df0;
+      document.getElementById('transferEndPreview').textContent = gap.dateTo || 'открытый период';
+      __updateNewDebtStartPreview();
+      box.style.display = 'block';
       return;
     }
-    __transferCtx = { noName:true, regnum, gap:gap, transferDate:df0 };
-    info.textContent = 'No Name — Требуется назначить ответственного. Выберите режим для всего периода ' +
-      df0 + ' — ' + (gap.dateTo || 'по настоящее время') + '.';
-    document.getElementById('transferStartPreview').textContent = df0;
-    document.getElementById('transferEndPreview').textContent = gap.dateTo || 'открытый период';
-    __updateNewDebtStartPreview();
+  }
+  if (!active || active?.technicalType === 'NO_NAME') {
+    const closed = closedPredecessorForRegnum(db, regnum);
+    if (!closed) { box.style.display='none'; return; }
+    if (title) title.textContent = 'Передача после закрытого периода';
     box.style.display = 'block';
+    document.getElementById('transferStartPreview').textContent = df0;
+    document.getElementById('transferEndPreview').textContent = closed.closeDate + ' (уже закрыт)';
+    const block = reason => {
+      info.textContent = reason;
+      for (const id of ['btnTransferWithDebt', 'btnTransferNoDebt']) {
+        const button = document.getElementById(id);
+        if (button) button.disabled = true;
+      }
+    };
+    if (df0 <= closed.closeDate) {
+      block('Новый период должен начаться после ' + closed.closeDate + '.');
+      return;
+    }
+    if (closed.gap && String(closed.gap.dateFrom || '') !== getNextDayIso(closed.closeDate)) {
+      block('Период No Name не совпадает с датой закрытия. Обновите данные и проверьте историю.');
+      return;
+    }
+    const previousEvent = (db.premiseEvents || []).some(e => e &&
+      (e.oldAbonentId === closed.id || e.sourceAbonentId === closed.id) &&
+      (e.regnum === regnum || (e.fromRegnums || []).includes(regnum)) &&
+      ['RESPONSIBILITY_TRANSFER', 'NO_NAME_ASSIGNED', 'CLOSED_RESPONSIBILITY_ASSIGNED'].includes(e.type));
+    const outgoing = window.Data?.getFinancialTransferInfo?.(closed.id, regnum)?.outgoing || [];
+    if (previousEvent || outgoing.length) {
+      block('Для прежнего абонента уже зафиксирована передача. Повторная передача заблокирована.');
+      return;
+    }
+    try {
+      const quote = window.JKHCalcEngine?.calculateFrozenDebt?.(closed.id, closed.closeDate);
+      if (!quote || quote.success !== true || quote.calculatedAt !== closed.closeDate ||
+          !Number.isFinite(Number(quote.principal)) || !Number.isFinite(Number(quote.penalty))) throw new Error('расчёт не подтверждён');
+      __transferCtx = { closed:true, oldId:closed.id, closeDate:closed.closeDate,
+        regnum, transferDate:df0 };
+      info.textContent = 'Предыдущий абонент: ' + String(db.abonents[closed.id]?.fio || closed.id) +
+        '. Период закрыт ' + closed.closeDate + '. Подтверждённый остаток: долг ' +
+        Number(quote.principal).toFixed(2) + ', пеня ' + Number(quote.penalty).toFixed(2) + '.';
+      __updateNewDebtStartPreview();
+    } catch (e) {
+      block('Невозможно подтвердить задолженность на ' + closed.closeDate + ': ' + String(e?.message || e));
+    }
     return;
   }
   if (!active){ box.style.display='none'; return; }
@@ -1163,14 +1230,22 @@ async function createAbonent() {
 
     if (!Array.isArray(dbRoot.links)) dbRoot.links = [];
     const prevActive = activeLinkForRegnumLocal(dbRoot, regnum);
-    const isTransfer = !!(prevActive && __jkhTransferConfirmed && __transferCtx && __transferCtx.oldId);
+    const isTransfer = !!(prevActive && __jkhTransferConfirmed && __transferCtx?.oldId && !__transferCtx?.closed);
     const noNameGap = (dbRoot.links || []).find(l => l?.technicalType === 'NO_NAME' &&
       String(l.regnum || '') === regnum && String(l.dateFrom || '') === respStart);
     const isNoNameAssign = !!(noNameGap && __jkhTransferConfirmed && __transferCtx?.noName);
+    const closedPrevious = !isNoNameAssign && closedPredecessorForRegnum(dbRoot, regnum);
+    const isClosedAssign = !!(closedPrevious && __jkhTransferConfirmed && __transferCtx?.closed &&
+      __transferCtx.oldId === closedPrevious.id && __transferCtx.closeDate === closedPrevious.closeDate &&
+      respStart > closedPrevious.closeDate);
     const src = String(document.getElementById("na_src").value || "").trim();
 
-    if (prevActive?.technicalType === 'NO_NAME' && !isNoNameAssign) {
+    if (prevActive?.technicalType === 'NO_NAME' && !isNoNameAssign && !isClosedAssign) {
       setCreateStatus('Для замены No Name укажите начало его периода и выберите «С долгом» или «Без долга».');
+      return;
+    }
+    if (closedPrevious && !isClosedAssign) {
+      setCreateStatus('Предыдущий период уже закрыт. Выберите подтверждённый вариант передачи; обычное создание заблокировано.');
       return;
     }
 
@@ -1183,13 +1258,14 @@ async function createAbonent() {
     }
 
     // UID
-    const assignmentContext = isNoNameAssign ? [ls, regnum, respStart, __transferMode].join('|') : '';
-    if (isNoNameAssign && __noNameAssignContext !== assignmentContext) {
+    const assignmentContext = (isNoNameAssign || isClosedAssign) ?
+      [isClosedAssign ? 'CLOSED' : 'NO_NAME', ls, regnum, respStart, __transferMode].join('|') : '';
+    if ((isNoNameAssign || isClosedAssign) && __noNameAssignContext !== assignmentContext) {
       __noNameAssignContext = assignmentContext;
       __noNameAssignOperationId = '';
       __noNameAssignUid = '';
     }
-    const uid = isNoNameAssign ? (__noNameAssignUid || (__noNameAssignUid = generateUid())) : generateUid();
+    const uid = (isNoNameAssign || isClosedAssign) ? (__noNameAssignUid || (__noNameAssignUid = generateUid())) : generateUid();
 
     // создаём нового с нулевым долгом (как и было)
     dbRoot.abonents[ls] = {
@@ -1222,7 +1298,7 @@ async function createAbonent() {
     };
 
 
-    if (!isTransfer && !isNoNameAssign) {
+    if (!isTransfer && !isNoNameAssign && !isClosedAssign) {
       try {
         if (window.Data && typeof window.Data.writeCanonicalExcludePeriods === 'function') {
           window.Data.writeCanonicalExcludePeriods(String(ls), []);
@@ -1233,7 +1309,7 @@ async function createAbonent() {
     }
 
     const newPaymentsKey = (window.Data && typeof window.Data.resolvePaymentLedgerKey === 'function') ? window.Data.resolvePaymentLedgerKey(String(ls)) : ('payments_' + String(uid || '').trim());
-    if (isTransfer || isNoNameAssign) {
+    if (isTransfer || isNoNameAssign || isClosedAssign) {
       // The ledger is created together with the responsibility transaction.
     } else if (window.Data && typeof window.Data.createEmptyPaymentLedger === 'function') {
       const createdLedger = window.Data.createEmptyPaymentLedger(String(ls));
@@ -1249,7 +1325,30 @@ async function createAbonent() {
     }
     try { console.log('[payment-key] create-empty', { abonentId: String(ls), uid: String(uid), key: newPaymentsKey, mode: 'uid' }); } catch(e) {}
 
-    if (isNoNameAssign) {
+    if (isClosedAssign) {
+      const stagedImport = src === 'import_xls'
+        ? importPaymentsFromDraftForNewAbonent(String(ls), dbRoot.abonents[ls], true) : null;
+      try {
+        if (!(window.Data && typeof Data.assignClosedResponsibilityAtomic === 'function')) throw new Error('CLOSED_ASSIGN_UNAVAILABLE');
+        if (!__noNameAssignOperationId) __noNameAssignOperationId = 'responsibility:' + crypto.randomUUID();
+        const assigned = await Data.assignClosedResponsibilityAtomic({ abonentId:String(ls), regnum:String(regnum),
+          dateFrom:String(respStart), mode:String(__transferMode || 'NO_DEBT'),
+          sourceAbonentId:closedPrevious.id, sourceCloseDate:closedPrevious.closeDate,
+          operationId:__noNameAssignOperationId, abonent:dbRoot.abonents[ls],
+          initialRows:stagedImport ? (stagedImport.rows || []) : [] });
+        if (assigned !== true) throw new Error('CLOSED_ASSIGN_NOT_COMMITTED');
+      } catch (e) {
+        window.AbonentsDB = dbSnapshotBeforeCreate;
+        setCreateStatus('Передача после закрытого периода не подтверждена: ' + String(e && e.message || e) + '. Обновите данные с сервера перед повтором.');
+        return;
+      }
+      if (src === 'import_xls') saveImportCreatedUid(String(window.AbonentsDB?.abonents?.[ls]?.uid || uid));
+      const returnUrl = safeReturnUrl(String(document.getElementById('na_return').value || '').trim());
+      clearDraftNewAbonent();
+      if (isImportReturnScenario()) { goBackToImport(); return; }
+      location.href = returnUrl || ('abonent_card.html?abonent=' + encodeURIComponent(ls));
+      return;
+    } else if (isNoNameAssign) {
       const stagedImport = src === 'import_xls'
         ? importPaymentsFromDraftForNewAbonent(String(ls), dbRoot.abonents[ls], true) : null;
       try {

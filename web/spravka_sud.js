@@ -1006,6 +1006,29 @@
       setText("peniDebt", moneyDot(finalTotals.penaltyDebt));
       setText("totalDebt", moneyDot(finalTotals.total));
 
+      const sourceAbonent = window.AbonentsDB?.abonents?.[String(ctx.abonentId)] || {};
+      const sourceRegnum = String(sourceAbonent.premiseRegnum || sourceAbonent.regnum || '').trim();
+      const confirmedTransfer = window.Data?.getConfirmedClosedOutgoingTransfer?.(ctx.abonentId, sourceRegnum) || null;
+      const transferNotice = $("transferredDebtNotice");
+      if (transferNotice) transferNotice.style.display = 'none';
+      if (confirmedTransfer && transferNotice &&
+          eng.toISODateString(asOfFinal) >= String(confirmedTransfer.date || '')) {
+        const recipientId = String(confirmedTransfer.targetAbonentId || '');
+        const recipient = window.AbonentsDB?.abonents?.[recipientId] || {};
+        transferNotice.textContent = 'Подтверждённая передача задолженности: остаток на ' +
+          String(confirmedTransfer.freezeDate || '—') + ', операция с ' +
+          String(confirmedTransfer.date || '—') + ', получатель ' + recipientId +
+          (recipient.fio ? ' — ' + String(recipient.fio) : '') +
+          '. Основной долг: ' + moneyDot(Number(confirmedTransfer.principal)) +
+          '; пеня: ' + moneyDot(Number(confirmedTransfer.penalty)) +
+          '; всего передано: ' + moneyDot(Number(confirmedTransfer.debtAmount)) +
+          '. Исторические начисления и платежи сохранены. Переданная задолженность не является действующим обязательством прежнего абонента.';
+        transferNotice.style.display = 'block';
+        setText('debtSummaryIntro', 'Исторический остаток по состоянию на');
+        setText('debtSummaryDescription', 'составлял:');
+        setText('debtSummaryTotalLabel', 'ИСТОРИЧЕСКИЙ ОСТАТОК:');
+      }
+
       const notesEl = $("notes");
       if (notesEl){
         const keyNotes = "notes_" + ctx.abonentId;

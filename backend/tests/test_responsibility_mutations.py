@@ -81,6 +81,31 @@ class ResponsibilityMutationTest(unittest.TestCase):
                 "abonent_id": "C", "regnum": "p73", "date_from": start, "date_to": end,
                 "mode": mode, "abonent": abonent, "initial_rows": []})
 
+    def closed_base(self, gap=False, snapshot=False):
+        rows = [{"id": "historical", "year": 2025, "month": 1, "accrued": 10000, "paid": 0}]
+        links = [{"abonentId": "A", "regnum": "p73", "dateFrom": "2025-01-01", "dateTo": "2025-01-31"}]
+        if gap:
+            links.append({"technicalType": "NO_NAME", "abonentId": "", "regnum": "p73",
+                          "dateFrom": "2025-02-01", "dateTo": ""})
+        extra = {"payments_uid_a": json.dumps(rows), "jkh_freeze_to_v1:A": "2025-01-31"}
+        if snapshot:
+            extra["jkh_frozen_debt_v1:A:2025-01-31"] = json.dumps({
+                "success": True, "principal": 10000, "penalty": 100, "calculatedAt": "2025-01-31"})
+        self.seed({"A": {"uid": "uid_a", "regnum": "p73", "calcEndDate": "2025-01-31"}}, links, extra)
+
+    def closed_assign(self, mode="WITH_DEBT", start="2025-02-01", operation="closed-a-c",
+                      version=1, ledger_version=1, debt=None):
+        with app_module.app.test_client() as client:
+            return client.post("/api/closed_responsibility_assign", json={
+                "operation_id": operation, "expected_version": version,
+                "abonent_id": "C", "regnum": "p73", "date_from": start, "date_to": "",
+                "mode": mode, "abonent": {"uid": "uid_c", "regnum": "p73", "fio": "C",
+                                               "calcStartDate": start}, "initial_rows": [],
+                "source_abonent_id": "A", "source_close_date": "2025-01-31",
+                "source_ledger_version": ledger_version,
+                "source_debt": debt if debt is not None else {"success": True, "principal": 10000,
+                    "penalty": 100, "calculatedAt": "2025-01-31"}})
+
     def base(self):
         self.seed({"A": {"uid": "uid_a", "regnum": "p73"}, "B": {"uid": "uid_b", "regnum": "p73"}},
             [{"abonentId": "A", "regnum": "p73", "dateFrom": "2025-01-01", "dateTo": "2025-01-31"},
@@ -354,6 +379,102 @@ class ResponsibilityMutationTest(unittest.TestCase):
         self.assertIn("B", state["abonents"])
         self.assertEqual(values["payments_uid_b"], "[]")
         self.assertEqual(version, 1)
+
+    def test_closed_predecessor_with_debt_preserves_history(self):
+        self.closed_base()
+        original_ledger = self.state()[1]["payments_uid_a"]
+        response = self.closed_assign()
+        self.assertEqual(response.status_code, 200, response.json)
+        state, values, version = self.state()
+        self.assertEqual(version, 2)
+        self.assertEqual(values["payments_uid_a"], original_ledger)
+        self.assertEqual(state["links"][0]["dateTo"], "2025-01-31")
+        self.assertEqual(state["links"][1]["dateFrom"], "2025-02-01")
+        self.assertEqual(len(state["links"]), 2)
+        incoming = json.loads(values["jkh_transfer_balance_v1:C:p73"])
+        self.assertEqual((incoming["principal"], incoming["penalty"]), (10000, 100))
+        self.assertEqual(json.loads(values["jkh_frozen_debt_v1:A:2025-01-31"])["principal"], 10000)
+        event = json.loads(values["jkh_financial_events_v1"])[0]
+        self.assertEqual((event["sourceAbonentId"], event["targetAbonentId"], event["freezeDate"]),
+                         ("A", "C", "2025-01-31"))
+        self.assertEqual(self.closed_assign().json["replay"], True)
+        self.assertEqual(self.state()[2], 2)
+
+    def test_closed_predecessor_no_debt_and_gap(self):
+        self.closed_base()
+        self.assertEqual(self.closed_assign(mode="NO_DEBT", start="2025-03-01").status_code, 200)
+        state, values, version = self.state()
+        self.assertEqual([(link["dateFrom"], link["dateTo"]) for link in state["links"]],
+                         [("2025-01-01", "2025-01-31"), ("2025-02-01", "2025-02-28"),
+                          ("2025-03-01", "")])
+        self.assertEqual(state["links"][1]["technicalType"], "NO_NAME")
+        self.assertNotIn("jkh_transfer_balance_v1:C:p73", values)
+        self.assertEqual(json.loads(values["jkh_financial_events_v1"])[0]["mode"], "NO_DEBT")
+        self.assertEqual(self.closed_assign(mode="NO_DEBT", start="2025-03-01",
+                                           operation="other", version=version).status_code, 409)
+
+    def test_closed_predecessor_splits_existing_no_name(self):
+        self.closed_base(gap=True)
+        self.assertEqual(self.closed_assign(start="2025-03-01").status_code, 200)
+        state, _, _ = self.state()
+        self.assertEqual(state["links"][1]["dateTo"], "2025-02-28")
+        self.assertEqual(state["links"][2]["dateFrom"], "2025-03-01")
+
+    def test_closed_predecessor_conflicts_and_rollback(self):
+        self.closed_base(snapshot=True)
+        self.assertEqual(self.closed_assign(version=0).status_code, 409)
+        self.assertEqual(self.closed_assign(ledger_version=0).status_code, 409)
+        self.assertEqual(self.closed_assign(debt={"success": True, "principal": 9999,
+            "penalty": 100, "calculatedAt": "2025-01-31"}).status_code, 409)
+        with patch.object(app_module.db.session, "commit", side_effect=app_module.SQLAlchemyError("synthetic failure")):
+            self.assertEqual(self.closed_assign().status_code, 500)
+        state, values, version = self.state()
+        self.assertEqual(version, 1)
+        self.assertNotIn("C", state["abonents"])
+        self.assertNotIn("payments_uid_c", values)
+        self.assertNotIn("jkh_transfer_balance_v1:C:p73", values)
+
+    def test_closed_predecessor_blocks_post_close_payment_in_legacy_date_format(self):
+        self.closed_base()
+        with app_module.app.app_context():
+            row = app_module.KVStore.query.filter_by(owner="owner1", k="payments_uid_a").first()
+            row.v = json.dumps([{"id": "late", "paid": 100, "paid_date": "10.02.2025"}])
+            app_module.db.session.commit()
+        response = self.closed_assign()
+        self.assertEqual(response.status_code, 409, response.json)
+        state, values, version = self.state()
+        self.assertEqual(version, 1)
+        self.assertNotIn("C", state["abonents"])
+        self.assertNotIn("jkh_transfer_balance_v1:C:p73", values)
+
+    def test_closed_predecessor_concurrent_operations_have_one_winner(self):
+        self.closed_base()
+        barrier = threading.Barrier(2)
+        def request(operation):
+            barrier.wait(timeout=5)
+            response = self.closed_assign(operation=operation)
+            return response.status_code, response.json
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(request, ("closed-first", "closed-second")))
+        self.assertEqual(sorted(status for status, _ in results), [200, 409], results)
+        state, values, version = self.state()
+        self.assertEqual(version, 2)
+        self.assertEqual(len([event for event in state["premiseEvents"]
+                              if event["type"] == "CLOSED_RESPONSIBILITY_ASSIGNED"]), 1)
+        self.assertEqual(len(json.loads(values["jkh_financial_events_v1"])), 1)
+
+    def test_closed_predecessor_concurrent_replay(self):
+        self.closed_base()
+        barrier = threading.Barrier(2)
+        def request(_):
+            barrier.wait(timeout=5)
+            response = self.closed_assign(operation="same-closed-operation")
+            return response.status_code, response.json
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(request, range(2)))
+        self.assertEqual([status for status, _ in results], [200, 200], results)
+        self.assertEqual(sorted(body["replay"] for _, body in results), [False, True])
+        self.assertEqual(self.state()[2], 2)
 
 
 if __name__ == "__main__":
