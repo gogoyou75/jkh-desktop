@@ -21,8 +21,63 @@ const context = vm.createContext({
 });
 vm.runInContext(mainScript, context);
 assert.equal(vm.runInContext('__transferMode', context), null);
+assert.doesNotMatch(newHtml.slice(newHtml.indexOf('id="debtTransferBox"'),
+  newHtml.indexOf('id="btnTransferWithDebt"')), /✅/);
 
 (async () => {
+context.crypto = { randomUUID: () => 'restore-synthetic' };
+context.window.JKH_UI_STATE = { data: { status: 'ready', source: 'server' } };
+elements.createStatusText = { textContent: '' };
+let restoreCalls = [];
+let restoreOutcome = true;
+context.window.Data = { restoreClosedTailNoNameAtomic: async options => {
+  restoreCalls.push(options);
+  if (restoreOutcome instanceof Error) throw restoreOutcome;
+  if (restoreOutcome === true) context.window.AbonentsDB.links.push({
+    technicalType: 'NO_NAME', abonentId: '', regnum: options.regnum,
+    dateFrom: '2008-01-01', dateTo: '' });
+  return restoreOutcome;
+} };
+const closed73 = { abonentId: '1073', regnum: 'p73',
+  dateFrom: '2007-06-01', dateTo: '2007-12-31' };
+const otherLink = { abonentId: 'X', regnum: 'other', dateFrom: '2020-01-01', dateTo: '' };
+context.window.AbonentsDB = { abonents: { '1073': { uid: 'uid_a' }, X: { uid: 'uid_x' } },
+  premises: { p73: { flat: '73' }, other: { flat: '74' } },
+  links: [closed73, otherLink], premiseEvents: [] };
+assert.equal(await vm.runInContext("restoreSelectedClosedTailNoName('p73')", context), true);
+assert.equal(restoreCalls.length, 1);
+assert.equal(restoreCalls[0].sourceAbonentId, '1073');
+assert.equal(restoreCalls[0].sourceCloseDate, '2007-12-31');
+assert.equal(restoreCalls[0].operationId, 'responsibility:restore-synthetic');
+assert.equal(context.window.AbonentsDB.links[1], otherLink);
+assert.equal(await vm.runInContext("restoreSelectedClosedTailNoName('p73')", context), true);
+assert.equal(restoreCalls.length, 1);
+context.window.AbonentsDB.links.pop();
+restoreOutcome = new Error('db_version_conflict');
+assert.equal(await vm.runInContext("restoreSelectedClosedTailNoName('p73')", context), false);
+assert.match(elements.createStatusText.textContent, /db_version_conflict/);
+assert.equal(restoreCalls[1].operationId, restoreCalls[0].operationId);
+elements.na_regnum.value = 'p73';
+await vm.runInContext('refreshDebtTransferBox()', context);
+assert.equal(elements.btnTransferWithDebt.disabled, true);
+assert.equal(elements.btnTransferNoDebt.disabled, true);
+restoreOutcome = false;
+assert.equal(await vm.runInContext("restoreSelectedClosedTailNoName('p73')", context), false);
+assert.match(elements.createStatusText.textContent, /NO_NAME_RESTORE_NOT_CONFIRMED/);
+assert.equal(restoreCalls[2].operationId, restoreCalls[0].operationId);
+context.window.JKH_UI_STATE.data.status = 'offline';
+assert.equal(await vm.runInContext("restoreSelectedClosedTailNoName('p73')", context), false);
+assert.equal(restoreCalls.length, 3);
+context.window.JKH_UI_STATE.data.status = 'ready';
+context.window.AbonentsDB.links.splice(0, 1, { ...closed73, dateTo: '2007-12-30' });
+context.window.AbonentsDB.links.push({ abonentId: '1073', regnum: 'p73',
+  dateFrom: '2008-01-02', dateTo: '2008-01-03' });
+assert.equal(await vm.runInContext("restoreSelectedClosedTailNoName('p73')", context), false);
+assert.equal(restoreCalls.length, 3);
+assert.equal(context.window.AbonentsDB.links[1], otherLink);
+assert.equal(await vm.runInContext("restoreSelectedClosedTailNoName('other')", context), true);
+assert.equal(restoreCalls.length, 3);
+
 const activeGap = { technicalType: 'NO_NAME', abonentId: '', regnum: 'p73',
   dateFrom: '2025-02-01', dateTo: '' };
 context.window.AbonentsDB.links = [activeGap];
@@ -219,6 +274,48 @@ vm.runInContext("__jkhTransferConfirmed = true; __transferMode = 'WITH_DEBT'; __
   elements.na_regnum.value = 'p73';
 
   const sourceData = fs.readFileSync('web/data.js', 'utf8');
+  const postSource = sourceData.match(/async function __responsibilityMutationPost\(path, payload, deletedId, deletedUid\) \{[\s\S]*?\n  \}/);
+  assert.ok(postSource);
+  let postFetchCalls = 0;
+  const postContext = vm.createContext({ window: {}, encodeURIComponent, JSON, Error,
+    _ownerId: () => 'synthetic-owner',
+    fetch: async () => {
+      postFetchCalls++;
+      if (postFetchCalls === 1) throw new Error('network failure');
+      return { ok: false, json: async () => { throw new SyntaxError('HTML status response'); } };
+    } });
+  vm.runInContext(postSource[0], postContext);
+  await assert.rejects(vm.runInContext(`__responsibilityMutationPost('/api/no_name_restore_closed_tail',
+    {operation_id:'restore-73'}, '', '')`, postContext), /RESPONSIBILITY_OUTCOME_UNKNOWN/);
+  assert.equal(postFetchCalls, 2);
+  let reloads = 0;
+  postContext.fetch = async () => ({ status: 200, json: async () => ({ ok: true, committed: true }) });
+  postContext.window.JKHDataLoader = { refreshAfterResponsibilityMutation: async () => {
+    reloads++;
+    return { ok: true };
+  } };
+  assert.equal(await vm.runInContext(`__responsibilityMutationPost('/api/no_name_restore_closed_tail',
+    {operation_id:'restore-73'}, '', '')`, postContext), true);
+  assert.equal(reloads, 1);
+  const restoreSource = sourceData.match(/Data\.restoreClosedTailNoNameAtomic = async function\(options\) \{[\s\S]*?\n  \};/);
+  assert.ok(restoreSource);
+  let restorePost;
+  const restoreContext = vm.createContext({ Data: { ensureWriteOrExplain: () => true },
+    window: { JKHDbCas: { version: () => 22 } }, Number,
+    _ownerId: () => 'synthetic-owner',
+    __responsibilityMutationOperationId: () => 'generated-restore',
+    __responsibilityMutationPost: async (...args) => { restorePost = args; return true; } });
+  vm.runInContext(restoreSource[0], restoreContext);
+  assert.equal(await vm.runInContext(`Data.restoreClosedTailNoNameAtomic({
+    regnum:'p73', sourceAbonentId:'1073', sourceCloseDate:'2007-12-31',
+    operationId:'restore-73' })`, restoreContext), true);
+  assert.equal(restorePost[0], '/api/no_name_restore_closed_tail');
+  assert.equal(restorePost[1].expected_version, 22);
+  assert.equal(restorePost[1].regnum, 'p73');
+  assert.equal(restorePost[1].operation_id, 'restore-73');
+  restoreContext.window.JKHDbCas.version = () => null;
+  await assert.rejects(vm.runInContext(`Data.restoreClosedTailNoNameAtomic({regnum:'p73'})`, restoreContext),
+    /RESPONSIBILITY_VERSION_MISSING/);
   assert.match(sourceData, /getConfirmedClosedOutgoingTransfer/);
   assert.match(sourceData, /getFinancialTransferHistory/);
   assert.match(sourceData, /inspectClosedTransferRetry/);
@@ -262,7 +359,9 @@ vm.runInContext("__jkhTransferConfirmed = true; __transferMode = 'WITH_DEBT'; __
   }
   journalResult = { ok: true, status: 200, data: { version: 5 }, raw: JSON.stringify(retryFinancial) };
   const deletionAudit = retryDb.premiseEvents.pop();
-  assert.equal((await vm.runInContext("Data.inspectClosedTransferRetry('A', 'p73')", retryContext)).eligible, false);
+  const missingAudit = await vm.runInContext("Data.inspectClosedTransferRetry('A', 'p73')", retryContext);
+  assert.equal(missingAudit.eligible, false);
+  assert.match(missingAudit.reason, /Нет подтверждённой сверки удаления получателя ЛС B/);
   const legacyAudit = { type: 'LEGACY_DELETION_RECONCILED', operationId: 'reconcile-b',
     historicalOperationId: 'old-a-b', ownerId: 'synthetic-owner',
     abonentId: 'B', uid: 'uid_b', regnum: 'p73' };

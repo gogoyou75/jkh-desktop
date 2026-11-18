@@ -313,8 +313,8 @@
     <div class="readonly-row" style="margin-top:8px;">
   <b>Выберите вариант передачи:</b>
   <div class="muted" style="margin-top:4px;">
-    ✅ <b>С долгом</b> — переносим <u>долг + пеню</u> новому абоненту (пеня продолжит расти после даты передачи).<br>
-    ✅ <b>Без долга</b> — у нового старт 0, у старого долг/пеня фиксируются и дальше не растут.
+    <b>С долгом</b> — переносим <u>долг + пеню</u> новому абоненту (пеня продолжит расти после даты передачи).<br>
+    <b>Без долга</b> — у нового старт 0, у старого долг/пеня фиксируются и дальше не растут.
   </div>
 </div>
 
@@ -609,6 +609,88 @@ function closedPredecessorForRegnum(db, regnum){
   if (gaps.length > 1 || (gaps.length && String(gaps[0].dateTo || '').trim())) return null;
   return { link:last, id:String(last.abonentId), closeDate:String(last.dateTo), gap:gaps[0] || null };
 }
+let __noNameRecoveryRegnum = '';
+let __noNameRecoveryContext = '';
+let __noNameRecoveryOperationId = '';
+let __noNameRecoveryIssue = '';
+let __noNameRecoveryPending = false;
+
+function closedTailRecoveryCandidate(db, regnum){
+  const premise = db?.premises?.[regnum];
+  if (!premise || String(premise.status || 'active').toLowerCase() !== 'active') return null;
+  const periods = (db.links || []).filter(l => String(l?.regnum || '') === regnum)
+    .sort((a,b) => String(a.dateFrom || '').localeCompare(String(b.dateFrom || '')));
+  if (!periods.length || !String(periods[periods.length - 1].dateTo || '').trim()) return null;
+  for (let i=0; i<periods.length; i++){
+    const link = periods[i];
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(String(link.dateFrom || '')) ||
+        !/^\d{4}-\d{2}-\d{2}$/.test(String(link.dateTo || '')) ||
+        String(link.dateFrom) > String(link.dateTo) ||
+        (i && getNextDayIso(periods[i-1].dateTo) !== link.dateFrom)) {
+      throw new Error('История ответственности содержит неоднозначный разрыв. Восстановление No Name заблокировано.');
+    }
+  }
+  const last = periods[periods.length - 1];
+  const sourceId = String(last.abonentId || '');
+  if (!sourceId || last.technicalType || !db.abonents?.[sourceId] || !getNextDayIso(last.dateTo)) {
+    throw new Error('Закрытый ответственный не подтверждён. Восстановление No Name заблокировано.');
+  }
+  return { regnum, sourceAbonentId:sourceId, sourceCloseDate:String(last.dateTo),
+    start:getNextDayIso(last.dateTo) };
+}
+
+async function restoreSelectedClosedTailNoName(regnum){
+  const selected = String(regnum || '').trim();
+  if (!selected) return true;
+  if (__noNameRecoveryRegnum !== selected) {
+    __noNameRecoveryRegnum = selected;
+    __noNameRecoveryContext = '';
+    __noNameRecoveryOperationId = '';
+    __noNameRecoveryIssue = '';
+  }
+  if (__noNameRecoveryPending) return false;
+  let candidate;
+  try { candidate = closedTailRecoveryCandidate(window.AbonentsDB, selected); }
+  catch (e) { __noNameRecoveryIssue = String(e.message || e); setCreateStatus(__noNameRecoveryIssue); return false; }
+  if (!candidate) { __noNameRecoveryIssue = ''; return true; }
+  const state = window.JKH_UI_STATE?.data;
+  if (!state || state.status !== 'ready' || state.source !== 'server') {
+    __noNameRecoveryIssue = 'Восстановление No Name требует подтверждённой загрузки данных с сервера.';
+    setCreateStatus(__noNameRecoveryIssue);
+    return false;
+  }
+  const context = [selected, candidate.sourceAbonentId, candidate.sourceCloseDate].join('|');
+  if (__noNameRecoveryContext !== context) {
+    __noNameRecoveryContext = context;
+    __noNameRecoveryOperationId = '';
+  }
+  if (!__noNameRecoveryOperationId) __noNameRecoveryOperationId = 'responsibility:' + crypto.randomUUID();
+  __noNameRecoveryPending = true;
+  setCreateUiBusy(true);
+  setCreateStatus('Восстанавливаем период No Name на сервере…');
+  try {
+    if (typeof window.Data?.restoreClosedTailNoNameAtomic !== 'function') throw new Error('NO_NAME_RESTORE_UNAVAILABLE');
+    const committed = await window.Data.restoreClosedTailNoNameAtomic({
+      regnum:selected, sourceAbonentId:candidate.sourceAbonentId,
+      sourceCloseDate:candidate.sourceCloseDate, operationId:__noNameRecoveryOperationId
+    });
+    if (committed !== true || !(window.AbonentsDB?.links || []).some(l =>
+        l?.technicalType === 'NO_NAME' && String(l.regnum || '') === selected &&
+        String(l.dateFrom || '') === candidate.start && !String(l.dateTo || ''))) {
+      throw new Error('NO_NAME_RESTORE_NOT_CONFIRMED');
+    }
+    __noNameRecoveryIssue = '';
+    setCreateStatus('Период No Name восстановлен с ' + candidate.start + '. Проверяем историю передачи долга.');
+    return true;
+  } catch (e) {
+    __noNameRecoveryIssue = 'No Name не восстановлен: ' + String(e?.message || e) + '. Обновите данные с сервера перед повтором.';
+    setCreateStatus(__noNameRecoveryIssue);
+    return false;
+  } finally {
+    __noNameRecoveryPending = false;
+    setCreateUiBusy(false);
+  }
+}
 function findAbonentByLinkId(db, abonentId){
   const id = String(abonentId || '').trim();
   if (!id) return null;
@@ -671,6 +753,15 @@ async function refreshDebtTransferBox() {
   const db = window.AbonentsDB;
   const regnum = String(document.getElementById('na_regnum')?.value || '').trim();
   if (!db || !regnum){ box.style.display='none'; return; }
+  if (__noNameRecoveryPending || (__noNameRecoveryIssue && __noNameRecoveryRegnum === regnum)) {
+    info.textContent = __noNameRecoveryIssue || 'Восстанавливаем период No Name на сервере…';
+    box.style.display = 'block';
+    for (const id of ['btnTransferWithDebt', 'btnTransferNoDebt']) {
+      const button = document.getElementById(id);
+      if (button) button.disabled = true;
+    }
+    return;
+  }
 
   const df0 = String(document.getElementById('na_date_from')?.value || '').trim() || getDefaultCalcStartDate();
   const active = activeLinkForRegnumLocal(db, regnum);
@@ -1184,6 +1275,7 @@ async function prefillFromQueryParams() {
     }
   }
 
+  if (regnum) await restoreSelectedClosedTailNoName(regnum);
   populatePremiseSelect(regnum);
   if (regnum) applyPremiseByRegnum(regnum);
 
@@ -1215,6 +1307,11 @@ function setCreateUiBusy(flag){
    ========================= */
 async function createAbonent() {
   if (__createAbonentBusy) return;
+  if (__noNameRecoveryPending || (__noNameRecoveryIssue &&
+      __noNameRecoveryRegnum === String(document.getElementById('na_regnum')?.value || '').trim())) {
+    setCreateStatus(__noNameRecoveryIssue || 'Дождитесь восстановления периода No Name.');
+    return;
+  }
 
   try{
     if (typeof window.canWriteOrExplain === "function" && !window.canWriteOrExplain()) return;
@@ -1652,9 +1749,14 @@ document.addEventListener("DOMContentLoaded", async () => {
 
     const ps = document.getElementById("premiseSelect");
     if (ps) {
-      ps.addEventListener("change", () => {
+      ps.addEventListener("change", async () => {
         const reg = String(ps.value || "").trim();
         applyPremiseByRegnum(reg);
+        await restoreSelectedClosedTailNoName(reg);
+        if (String(ps.value || '').trim() === reg) {
+          populatePremiseSelect(reg);
+          applyPremiseByRegnum(reg);
+        }
       });
     }
 

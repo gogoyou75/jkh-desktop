@@ -7891,9 +7891,12 @@
         headers:{ "Content-Type":"application/json" }, body:JSON.stringify(payload) });
       result = { status:http.status, data:await http.json() };
     } catch (networkError) {
-      var statusHttp = await fetch(path + "?operation_id=" + encodeURIComponent(payload.operation_id) +
-        "&client_owner_hint=" + encodeURIComponent(_ownerId()), { credentials:"include" });
-      var statusData = await statusHttp.json();
+      var statusHttp, statusData;
+      try {
+        statusHttp = await fetch(path + "?operation_id=" + encodeURIComponent(payload.operation_id) +
+          "&client_owner_hint=" + encodeURIComponent(_ownerId()), { credentials:"include" });
+        statusData = await statusHttp.json();
+      } catch (_) { throw new Error("RESPONSIBILITY_OUTCOME_UNKNOWN"); }
       if (!(statusHttp.ok && statusData && statusData.committed === true)) throw new Error("RESPONSIBILITY_OUTCOME_UNKNOWN");
       result = { status:200, data:{ok:true, committed:true, replay:true} };
     }
@@ -7925,6 +7928,19 @@
       regnum:String(links[0].regnum || ""), date_from:String(links[0].dateFrom || ""),
       date_to:String(links[0].dateTo || "")
     }, id, String(a.uid || ""));
+  };
+
+  Data.restoreClosedTailNoNameAtomic = async function(options) {
+    if (!Data.ensureWriteOrExplain()) return false;
+    var opts = options || {};
+    var version = window.JKHDbCas && window.JKHDbCas.version(_ownerId());
+    if (!Number.isSafeInteger(version)) throw new Error("RESPONSIBILITY_VERSION_MISSING");
+    return __responsibilityMutationPost("/api/no_name_restore_closed_tail", {
+      client_owner_hint:_ownerId(), operation_id:opts.operationId || __responsibilityMutationOperationId(),
+      expected_version:version, regnum:String(opts.regnum || ""),
+      source_abonent_id:String(opts.sourceAbonentId || ""),
+      source_close_date:String(opts.sourceCloseDate || "")
+    }, "", "");
   };
 
   Data.assignNoNameAtomic = async function(options) {
@@ -8285,7 +8301,10 @@
           (String(deletion.ownerId || "") !== String(_ownerId() || "") ||
            String(deletion.historicalOperationId || "") !== op))
         return reject("Историческая сверка удаления не соответствует владельцу или операции.");
-      if (matches.length !== 1 || deletions.length !== 1 || db.abonents?.[target] ||
+      if (matches.length !== 1) return reject("Историческая финансовая передача не подтверждена.");
+      if (deletions.length !== 1)
+        return reject("Нет подтверждённой сверки удаления получателя ЛС " + target + ". Передача заблокирована.");
+      if (db.abonents?.[target] ||
           (db.links || []).some(function(l){ return String(l?.abonentId || "") === target; }) ||
           !deletions[0].uid || _getProjectRaw("payments_" + deletions[0].uid) ||
           _getProjectRaw("jkh_transfer_to_v1:" + target) || getFinancialTransferInfo(target, rn).incoming)
