@@ -255,6 +255,21 @@ vm.runInContext("__jkhTransferConfirmed = true; __transferMode = 'WITH_DEBT'; __
   journalResult = { ok: true, status: 200, data: { version: 5 }, raw: JSON.stringify(retryFinancial) };
   const deletionAudit = retryDb.premiseEvents.pop();
   assert.equal((await vm.runInContext("Data.inspectClosedTransferRetry('A', 'p73')", retryContext)).eligible, false);
+  const legacyAudit = { type: 'LEGACY_DELETION_RECONCILED', operationId: 'reconcile-b',
+    historicalOperationId: 'old-a-b', ownerId: 'synthetic-owner',
+    abonentId: 'B', uid: 'uid_b', regnum: 'p73' };
+  retryDb.premiseEvents.push(legacyAudit);
+  assert.equal((await vm.runInContext("Data.inspectClosedTransferRetry('A', 'p73')", retryContext)).eligible, true);
+  legacyAudit.ownerId = 'other-owner';
+  assert.equal((await vm.runInContext("Data.inspectClosedTransferRetry('A', 'p73')", retryContext)).eligible, false);
+  legacyAudit.ownerId = 'synthetic-owner';
+  legacyAudit.historicalOperationId = 'wrong-operation';
+  assert.equal((await vm.runInContext("Data.inspectClosedTransferRetry('A', 'p73')", retryContext)).eligible, false);
+  legacyAudit.historicalOperationId = 'old-a-b';
+  retryDb.premiseEvents.push(deletionAudit);
+  assert.equal((await vm.runInContext("Data.inspectClosedTransferRetry('A', 'p73')", retryContext)).eligible, false);
+  retryDb.premiseEvents.pop();
+  retryDb.premiseEvents.pop();
   retryDb.premiseEvents.push(deletionAudit);
   const historySource = sourceData.match(/Data\.getFinancialTransferHistory = function\(abonentId, regnum\) \{[\s\S]*?\n  \};\n  Data\.getConfirmedClosedOutgoingTransfer/);
   assert.ok(historySource);

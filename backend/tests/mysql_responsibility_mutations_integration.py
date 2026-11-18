@@ -9,6 +9,7 @@ import json
 import os
 import sys
 import threading
+from types import SimpleNamespace
 import unittest
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -315,6 +316,108 @@ class MySQLResponsibilityMutationTest(unittest.TestCase):
         state, _, versions, _, _, _ = self.committed()
         self.assertIn("B", state["abonents"])
         self.assertEqual(versions["abonents_db_v1"], 1)
+
+    def seed_special_73(self):
+        import audit_legacy_deletion_73 as special
+        self.owner_id = special.OWNER
+        events = []
+        financial = []
+        for source, target, _, operation in special.TRANSFERS:
+            events.append({"type": "RESPONSIBILITY_TRANSFER", "operationId": operation,
+                "oldAbonentId": source, "newAbonentId": target,
+                "transferMode": "NO_DEBT", "fromRegnums": [special.REGNUM]})
+            financial.append({"type": "TRANSFER_WITHOUT_DEBT", "mode": "WITHOUT_DEBT",
+                "operationId": operation, "sourceAbonentId": source,
+                "targetAbonentId": target, "regnum": special.REGNUM,
+                "debtAmount": 0, "balanceAmount": 0})
+        state = {"abonents": {"1073": {"uid": "uid_1073", "regnum": special.REGNUM}},
+                 "links": [{"abonentId": "1073", "regnum": special.REGNUM,
+                            "dateFrom": "2007-06-01", "dateTo": "2007-12-31"},
+                           {"technicalType": "NO_NAME", "abonentId": "",
+                            "regnum": special.REGNUM, "dateFrom": "2008-01-01", "dateTo": ""}],
+                 "premises": {special.REGNUM: {"flat": "73"}}, "premiseEvents": events}
+        self.seed({}, [], {"jkh_financial_events_v1": json.dumps(financial),
+                         "payments_uid_1073": '[{"paid":1}]',
+                         "payments_" + special.TRANSFERS[0][2]: json.dumps([{"accrued":1}] * 120),
+                         "payments_" + special.TRANSFERS[1][2]: json.dumps([{"accrued":2}] * 107)})
+        with self.engine.begin() as connection:
+            connection.execute(app_module.KVStore.__table__.update().where(
+                app_module.KVStore.owner == self.owner_id,
+                app_module.KVStore.k == "abonents_db_v1").values(v=json.dumps(state)))
+            for index, (_, _, uid, operation) in enumerate(special.TRANSFERS):
+                for audit_uid in (("uid_1073" if index == 0 else special.TRANSFERS[0][2]), uid):
+                    connection.execute(app_module.PaymentLedgerStoreAudit.__table__.insert().values(
+                        owner_id=self.owner_id, account_uid=audit_uid,
+                        storage_key="payments_" + audit_uid,
+                        request_id=uuid.uuid4().hex, source="RESPONSIBILITY_TRANSFER",
+                        action="POST", endpoint="/api/store", http_status=200,
+                        guard_result="ALLOWED",
+                        details_json=json.dumps({"operation_id": operation})))
+        return special
+
+    def test_historical_73_reconciles_nonempty_ledgers_atomically(self):
+        special = self.seed_special_73()
+        with patch.object(app_module, "ENV_TYPE", "LAB"), patch.object(
+                app_module, "_legacy_73_lab_target", return_value=True), patch.object(
+                app_module, "_require_admin", return_value=(
+                    SimpleNamespace(id=self.owner_id, role="admin"), None)), patch.object(
+                app_module, "_resolve_owner", return_value=(self.owner_id, None)):
+            with app_module.app.test_client() as client:
+                response = client.post("/api/legacy_deletion_reconcile_73")
+        self.assertEqual(response.status_code, 200, response.get_json())
+        committed, values, versions, _, _, _ = self.committed()
+        self.assertIn("1073", committed["abonents"])
+        self.assertEqual(values["payments_uid_1073"], '[{"paid":1}]')
+        self.assertEqual(values["payments_" + special.TRANSFERS[0][2]], "")
+        self.assertEqual(values["payments_" + special.TRANSFERS[1][2]], "")
+        self.assertEqual(versions["abonents_db_v1"], 3)
+        self.assertEqual(len(json.loads(values["jkh_financial_events_v1"])), 2)
+
+    def test_historical_73_changed_ledger_same_count_rolls_back(self):
+        special = self.seed_special_73()
+        report = special.inspect_state()
+        key = "payments_" + special.TRANSFERS[1][2]
+        with self.engine.begin() as connection:
+            row = connection.execute(select(app_module.KVStore.v).where(
+                app_module.KVStore.owner == self.owner_id,
+                app_module.KVStore.k == key)).scalar_one()
+            changed = json.loads(row)
+            changed[0]["accrued"] = 999
+            connection.execute(app_module.KVStore.__table__.update().where(
+                app_module.KVStore.owner == self.owner_id,
+                app_module.KVStore.k == key).values(v=json.dumps(changed)))
+        with self.assertRaisesRegex(ValueError, "reconciliation_failed:1089"):
+            special.execute_cleanup(report, SimpleNamespace(id="synthetic-admin"), self.owner_id)
+        app_module.db.session.rollback()
+        _, values, versions, _, _, audits = self.committed()
+        self.assertEqual(versions["abonents_db_v1"], 1)
+        self.assertEqual(len(json.loads(values["payments_" + special.TRANSFERS[0][2]])), 120)
+        self.assertEqual(json.loads(values[key])[0]["accrued"], 999)
+        self.assertEqual(audits, 4)
+
+    def test_historical_73_wrong_no_name_start_blocks(self):
+        special = self.seed_special_73()
+        with self.engine.begin() as connection:
+            row = connection.execute(select(app_module.KVStore.v).where(
+                app_module.KVStore.owner == self.owner_id,
+                app_module.KVStore.k == "abonents_db_v1")).scalar_one()
+            state = json.loads(row)
+            state["links"][1]["dateFrom"] = "2008-01-02"
+            connection.execute(app_module.KVStore.__table__.update().where(
+                app_module.KVStore.owner == self.owner_id,
+                app_module.KVStore.k == "abonents_db_v1").values(v=json.dumps(state)))
+        with self.assertRaisesRegex(ValueError, "no_name_period_unverified"):
+            special.inspect_state()
+        self.assertEqual(self.committed()[2]["abonents_db_v1"], 1)
+
+    def test_historical_73_rejects_test_database_even_with_lab_label(self):
+        with patch.object(app_module, "ENV_TYPE", "LAB"), patch.object(
+                app_module, "_require_admin", return_value=(
+                    SimpleNamespace(id="synthetic-admin", role="admin"), None)):
+            with app_module.app.test_client() as client:
+                response = client.post("/api/legacy_deletion_reconcile_73",
+                                       base_url="https://lab.valvera.ru")
+        self.assertEqual(response.status_code, 403)
 
     def test_with_debt_uses_original_frozen_debt_once(self):
         self.seed_base()

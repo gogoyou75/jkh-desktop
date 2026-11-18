@@ -8277,8 +8277,14 @@
         String(e.targetAbonentId || "") === target && normalizeRegnumValue(e.regnum || e.premiseId) === rn &&
         ["NO_DEBT", "WITHOUT_DEBT"].includes(e.mode) && Number(e.debtAmount || 0) === 0 &&
         Number(e.balanceAmount || 0) === 0 && Number(e.principal || 0) === 0 && Number(e.penalty || 0) === 0; });
-      var deletions = events.filter(function(e){ return e && e.type === "ABONENT_DELETED" &&
+      var deletions = events.filter(function(e){ return e &&
+        ["ABONENT_DELETED", "LEGACY_DELETION_RECONCILED"].includes(e.type) &&
         String(e.abonentId || "") === target && String(e.regnum || "") === rn; });
+      var deletion = deletions[0];
+      if (deletions.length === 1 && deletion.type === "LEGACY_DELETION_RECONCILED" &&
+          (String(deletion.ownerId || "") !== String(_ownerId() || "") ||
+           String(deletion.historicalOperationId || "") !== op))
+        return reject("Историческая сверка удаления не соответствует владельцу или операции.");
       if (matches.length !== 1 || deletions.length !== 1 || db.abonents?.[target] ||
           (db.links || []).some(function(l){ return String(l?.abonentId || "") === target; }) ||
           !deletions[0].uid || _getProjectRaw("payments_" + deletions[0].uid) ||

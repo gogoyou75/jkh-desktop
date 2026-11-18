@@ -5,6 +5,7 @@ import sys
 import tempfile
 import unittest
 import threading
+from types import SimpleNamespace
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
 
@@ -46,6 +47,7 @@ class ResponsibilityMutationTest(unittest.TestCase):
             app_module.db.session.query(app_module.AbonentSummary).delete()
             app_module.db.session.query(app_module.CardSnapshot).delete()
             app_module.db.session.query(app_module.RecalcUidLock).delete()
+            app_module.db.session.query(app_module.PaymentLedgerStoreAudit).delete()
             app_module.db.session.commit()
         self.owner = patch.object(app_module, "_session_store_owner", return_value=(None, "owner1", None))
         self.access = patch.object(app_module, "_require_write_access_for_key", return_value=(None, None))
@@ -94,14 +96,14 @@ class ResponsibilityMutationTest(unittest.TestCase):
         self.seed({"A": {"uid": "uid_a", "regnum": "p73", "calcEndDate": "2025-01-31"}}, links, extra)
 
     def closed_assign(self, mode="WITH_DEBT", start="2025-02-01", operation="closed-a-c",
-                      version=1, ledger_version=1, debt=None):
+                      version=1, ledger_version=1, debt=None, source_id="A"):
         with app_module.app.test_client() as client:
             return client.post("/api/closed_responsibility_assign", json={
                 "operation_id": operation, "expected_version": version,
                 "abonent_id": "C", "regnum": "p73", "date_from": start, "date_to": "",
                 "mode": mode, "abonent": {"uid": "uid_c", "regnum": "p73", "fio": "C",
                                                "calcStartDate": start}, "initial_rows": [],
-                "source_abonent_id": "A", "source_close_date": "2025-01-31",
+                "source_abonent_id": source_id, "source_close_date": "2025-01-31",
                 "source_ledger_version": ledger_version,
                 "source_debt": debt if debt is not None else {"success": True, "principal": 10000,
                     "penalty": 100, "calculatedAt": "2025-01-31"}})
@@ -118,7 +120,8 @@ class ResponsibilityMutationTest(unittest.TestCase):
         financial = [{"type": "TRANSFER_WITHOUT_DEBT" if mode == "NO_DEBT" else "TRANSFER_WITH_DEBT",
                       "mode": "WITHOUT_DEBT" if mode == "NO_DEBT" else "WITH_DEBT",
                       "operationId": operation, "sourceAbonentId": "A", "targetAbonentId": "B",
-                      "regnum": "p73", "date": "2025-02-01", "debtAmount": 0 if mode == "NO_DEBT" else 10000}]
+                      "regnum": "p73", "date": "2025-02-01", "debtAmount": 0 if mode == "NO_DEBT" else 10000,
+                      "balanceAmount": 0 if mode == "NO_DEBT" else 10000}]
         abonents = {"A": {"uid": "uid_a", "regnum": "p73", "calcEndDate": "2025-01-31"}}
         links = [{"abonentId": "A", "regnum": "p73", "dateFrom": "2025-01-01", "dateTo": "2025-01-31"}]
         if live:
@@ -135,7 +138,7 @@ class ResponsibilityMutationTest(unittest.TestCase):
                  "uid": "uid_d", "regnum": "p73"}])
             financial.append({"type": "TRANSFER_WITHOUT_DEBT", "mode": "WITHOUT_DEBT",
                               "operationId": "old-b-d", "sourceAbonentId": "B", "targetAbonentId": "D",
-                              "regnum": "p73", "debtAmount": 0})
+                              "regnum": "p73", "debtAmount": 0, "balanceAmount": 0})
         self.seed(abonents, links, {"payments_uid_a": json.dumps([{"id": "old", "year": 2025,
                   "month": 1, "accrued": 10000, "paid": 0}]),
                   "jkh_financial_events_v1": json.dumps(financial)})
@@ -146,6 +149,51 @@ class ResponsibilityMutationTest(unittest.TestCase):
             row.v = json.dumps(state)
             app_module.db.session.commit()
 
+    def legacy_base(self, numeric=False):
+        self.retry_base(downstream=True)
+        with app_module.app.app_context():
+            row = app_module.KVStore.query.filter_by(owner="owner1", k="abonents_db_v1").first()
+            state = json.loads(row.v)
+            state["premiseEvents"] = [event for event in state["premiseEvents"]
+                                       if event["type"] != "ABONENT_DELETED"]
+            if numeric:
+                names = {"A": "1073", "B": "1088", "D": "1089"}
+                state["abonents"] = {names.get(key, key): value
+                                     for key, value in state["abonents"].items()}
+                for link in state["links"]:
+                    link["abonentId"] = names.get(link.get("abonentId"), link.get("abonentId"))
+                for event in state["premiseEvents"]:
+                    for field in ("oldAbonentId", "newAbonentId"):
+                        if field in event:
+                            event[field] = names.get(event[field], event[field])
+                financial_row = app_module.KVStore.query.filter_by(
+                    owner="owner1", k="jkh_financial_events_v1").first()
+                financial = json.loads(financial_row.v)
+                for event in financial:
+                    for field in ("sourceAbonentId", "targetAbonentId"):
+                        if field in event:
+                            event[field] = names.get(event[field], event[field])
+                financial_row.v = json.dumps(financial)
+            row.v = json.dumps(state)
+            for operation, source_uid, target_uid in (
+                    ("old-a-b", "uid_a", "uid_b"), ("old-b-d", "uid_b", "uid_d")):
+                for uid in (source_uid, target_uid):
+                    app_module.db.session.add(app_module.PaymentLedgerStoreAudit(
+                        owner_id="owner1", account_uid=uid, storage_key="payments_" + uid,
+                        request_id=operation + "-" + uid, source="RESPONSIBILITY_TRANSFER",
+                        action="POST", endpoint="/api/store", http_status=200,
+                        guard_result="ALLOWED",
+                        details_json=json.dumps({"operation_id": operation})))
+            app_module.db.session.commit()
+
+    def reconcile(self, abonent_id="B", uid="uid_b", historical="old-a-b",
+                  operation="reconcile-b", version=1, regnum="p73"):
+        with app_module.app.test_client() as client:
+            return client.post("/api/legacy_deletion_reconcile", json={
+                "operation_id": operation, "historical_operation_id": historical,
+                "abonent_id": abonent_id, "uid": uid, "regnum": regnum,
+                "expected_version": version})
+
     def base(self):
         self.seed({"A": {"uid": "uid_a", "regnum": "p73"}, "B": {"uid": "uid_b", "regnum": "p73"}},
             [{"abonentId": "A", "regnum": "p73", "dateFrom": "2025-01-01", "dateTo": "2025-01-31"},
@@ -155,6 +203,20 @@ class ResponsibilityMutationTest(unittest.TestCase):
              "jkh_freeze_to_v1:A": "2025-01-31",
              "jkh_frozen_debt_v1:A:2025-01-31": json.dumps({"success": True, "principal": 10000, "penalty": 0, "calculatedAt": "2025-01-31"}),
              "card_snapshot_uid_b": "personal", "note_B": "personal"})
+
+    def confirm_zero_transfer(self, source="B", target="D", operation="b-d"):
+        with app_module.app.app_context():
+            row = app_module.KVStore.query.filter_by(owner="owner1", k="abonents_db_v1").one()
+            state = json.loads(row.v)
+            state["premiseEvents"].append({"type": "RESPONSIBILITY_TRANSFER",
+                "operationId": operation, "oldAbonentId": source, "newAbonentId": target,
+                "transferMode": "NO_DEBT", "fromRegnums": ["p73"]})
+            row.v = json.dumps(state)
+            app_module.db.session.add(app_module.KVStore(owner="owner1", k="jkh_financial_events_v1",
+                v=json.dumps([{"type": "TRANSFER_WITHOUT_DEBT", "mode": "WITHOUT_DEBT",
+                    "operationId": operation, "sourceAbonentId": source, "targetAbonentId": target,
+                    "regnum": "p73", "debtAmount": 0, "balanceAmount": 0}]), version=1))
+            app_module.db.session.commit()
 
     def test_delete_and_assign_with_original_debt(self):
         self.base()
@@ -170,7 +232,10 @@ class ResponsibilityMutationTest(unittest.TestCase):
                 "moratorium_B": "true",
                 "jkh_transfer_to_v1:B": '{"fromAbonentId":"A"}',
                 "jkh_frozen_debt_v1:B:2025-02-28": '{"principal":1}',
-                "jkh_financial_events_v1": '[{"type":"TRANSFER_WITH_DEBT","sourceAbonentId":"A"}]',
+                "jkh_financial_events_v1": json.dumps([
+                    {"type": "TRANSFER_WITH_DEBT", "sourceAbonentId": "A"},
+                    {"type": "CHARGE", "abonentId": "B", "uid": "uid_b", "amount": 227},
+                    {"type": "CHARGE", "abonentId": "A", "uid": "uid_a", "amount": 50}]),
             }.items():
                 app_module.db.session.add(app_module.KVStore(owner="owner1", k=key, v=value, version=1))
             app_module.db.session.add(app_module.AbonentSummary(owner_id="owner1", abonent_id="B", account_uid="uid_b"))
@@ -190,8 +255,9 @@ class ResponsibilityMutationTest(unittest.TestCase):
                     "jkh_frozen_debt_v1:B:2025-02-28"):
             self.assertEqual(values[key], "")
         self.assertEqual(values["payments_uid_a"], '[{"id":"previous-payment","paid":500}]')
-        self.assertEqual(values["jkh_financial_events_v1"],
-                         '[{"type":"TRANSFER_WITH_DEBT","sourceAbonentId":"A"}]')
+        self.assertEqual(json.loads(values["jkh_financial_events_v1"]), [
+            {"type": "TRANSFER_WITH_DEBT", "sourceAbonentId": "A"},
+            {"type": "CHARGE", "abonentId": "A", "uid": "uid_a", "amount": 50}])
         with app_module.app.app_context():
             self.assertEqual(app_module.AbonentSummary.query.filter_by(owner_id="owner1", account_uid="uid_b").count(), 0)
             self.assertEqual(app_module.CardSnapshot.query.filter_by(owner_id="owner1", abonent_uid="uid_b").count(), 0)
@@ -445,6 +511,7 @@ class ResponsibilityMutationTest(unittest.TestCase):
                     app_module.db.session.commit()
                 self.seed({key: {"uid": "uid_" + key.lower(), "regnum": "p73"} for key in {link["abonentId"] for link in links}}, links,
                     {"payments_uid_b": "[]"})
+                self.confirm_zero_transfer()
                 self.assertEqual(self.delete(start=start, end=end, operation="delete-" + start).status_code, 200)
                 state, values, version = self.state()
                 self.assertEqual([(l["dateFrom"], l["dateTo"]) for l in state["links"]],
@@ -461,6 +528,7 @@ class ResponsibilityMutationTest(unittest.TestCase):
             {"payments_uid_b": "[]", "jkh_freeze_to_v1:A": "2025-01-31",
              "jkh_frozen_debt_v1:A:2025-01-31": json.dumps({"success": True, "principal": 10000,
                  "penalty": 100, "calculatedAt": "2025-01-31"})})
+        self.confirm_zero_transfer()
         self.assertEqual(self.delete(end="2025-02-28").status_code, 200)
         self.assertEqual(self.assign("WITH_DEBT", start="2025-02-01", end="2025-02-28").status_code, 200)
         state, values, version = self.state()
@@ -649,6 +717,403 @@ class ResponsibilityMutationTest(unittest.TestCase):
             results = list(pool.map(request, ("retry-one", "retry-two")))
         self.assertEqual(sorted(response.status_code for response in results), [200, 409])
         self.assertEqual(len(json.loads(self.state()[1]["jkh_financial_events_v1"])), 2)
+
+    def test_legacy_reconciliation_chain_allows_closed_retry(self):
+        self.legacy_base(numeric=True)
+        self.assertEqual(self.closed_assign(source_id="1073").status_code, 409)
+        self.assertEqual(self.reconcile("1088").status_code, 200)
+        self.assertEqual(self.closed_assign(version=2, source_id="1073").status_code, 409)
+        self.assertEqual(self.reconcile("1089", "uid_d", "old-b-d", "reconcile-d", 2).status_code, 200)
+        state, values, version = self.state()
+        self.assertEqual(version, 3)
+        reconciled = [e for e in state["premiseEvents"] if e["type"] == "LEGACY_DELETION_RECONCILED"]
+        self.assertEqual([(e["abonentId"], e["uid"], e["historicalOperationId"], e["ownerId"])
+                          for e in reconciled], [
+                          ("1088", "uid_b", "old-a-b", "owner1"),
+                          ("1089", "uid_d", "old-b-d", "owner1")])
+        self.assertFalse(any(e["type"] == "ABONENT_DELETED" for e in state["premiseEvents"]))
+        self.assertEqual(self.closed_assign(version=3, source_id="1073").status_code, 200)
+        state, values, version = self.state()
+        self.assertEqual(version, 4)
+        self.assertEqual(json.loads(values["jkh_transfer_balance_v1:C:p73"])["principal"], 10000)
+        self.assertEqual(json.loads(values["jkh_financial_events_v1"])[-1]["replacesOperationId"], "old-a-b")
+        self.assertIn("1073", state["abonents"])
+
+    def test_legacy_reconciliation_cleans_only_deleted_identity(self):
+        self.legacy_base()
+        with app_module.app.app_context():
+            for key, value in (("payments_uid_b", "[]"),
+                               ("note_B", "old note")):
+                app_module.db.session.add(app_module.KVStore(owner="owner1", k=key, v=value, version=1))
+            app_module.db.session.add(app_module.AbonentSummary(
+                owner_id="owner1", account_uid="uid_b", abonent_id="B"))
+            app_module.db.session.commit()
+        self.assertEqual(self.reconcile().status_code, 200)
+        state, values, _ = self.state()
+        self.assertEqual(values["payments_uid_b"], "")
+        self.assertNotIn("note_B", values)
+        self.assertNotIn("B", state["abonents"])
+        self.assertEqual(len(json.loads(values["jkh_financial_events_v1"])), 2)
+        with app_module.app.app_context():
+            self.assertIsNone(app_module.AbonentSummary.query.filter_by(
+                owner_id="owner1", account_uid="uid_b").first())
+
+    def test_legacy_reconciliation_does_not_infer_balance_from_zero_transfer(self):
+        self.legacy_base()
+        with app_module.app.app_context():
+            app_module.db.session.add(app_module.KVStore(
+                owner="owner1", k="payments_uid_b",
+                v=json.dumps([{"accrued": 227, "paid": 0}]), version=1))
+            app_module.db.session.commit()
+        before = self.state()
+        self.assertEqual(self.reconcile().status_code, 409)
+        self.assertEqual(self.state(), before)
+
+    def special_73_base(self, second_audit=True):
+        import audit_legacy_deletion_73 as special
+        owner = special.OWNER
+        uid_a = "uid_1073"
+        state = {"abonents": {"1073": {"uid": uid_a, "regnum": special.REGNUM,
+                                          "fio": "Tarasenko"}},
+                 "links": [{"abonentId": "1073", "regnum": special.REGNUM,
+                            "dateFrom": "2007-06-01", "dateTo": "2007-12-31"},
+                           {"technicalType": "NO_NAME", "abonentId": "",
+                            "regnum": special.REGNUM, "dateFrom": "2008-01-01",
+                            "dateTo": ""}],
+                 "premises": {special.REGNUM: {"flat": "73"}, "other": {"flat": "74"}},
+                 "premiseEvents": []}
+        financial = []
+        for source, target, _, operation in special.TRANSFERS:
+            state["premiseEvents"].append({"type": "RESPONSIBILITY_TRANSFER",
+                "operationId": operation, "oldAbonentId": source, "newAbonentId": target,
+                "transferMode": "NO_DEBT", "fromRegnums": [special.REGNUM]})
+            financial.append({"type": "TRANSFER_WITHOUT_DEBT", "mode": "WITHOUT_DEBT",
+                "operationId": operation, "sourceAbonentId": source,
+                "targetAbonentId": target, "regnum": special.REGNUM,
+                "debtAmount": 0, "balanceAmount": 0})
+        with app_module.app.app_context():
+            for key, value in {
+                "abonents_db_v1": json.dumps(state),
+                "jkh_financial_events_v1": json.dumps(financial),
+                "payments_" + uid_a: '[{"paid":500}]',
+                "payments_" + special.TRANSFERS[0][2]: json.dumps([{"accrued": 1}] * 120),
+                "payments_" + special.TRANSFERS[1][2]: json.dumps([{"accrued": 2}] * 107),
+                "note_1088": "old note",
+                "jkh_frozen_debt_v1:1088:2025-02-28": '{"principal": 100}',
+            }.items():
+                app_module.db.session.add(app_module.KVStore(
+                    owner=owner, k=key, v=value, version=1))
+            for index, (_, _, target_uid, operation) in enumerate(special.TRANSFERS):
+                app_module.db.session.add(app_module.AbonentSummary(
+                    owner_id=owner, account_uid=target_uid,
+                    abonent_id=special.TRANSFERS[index][1],
+                    total_accrued=227, total_debt=227))
+                app_module.db.session.add(app_module.CardSnapshot(
+                    owner_id=owner, abonent_uid=target_uid,
+                    abonent_id=special.TRANSFERS[index][1]))
+                if index == 1 and not second_audit:
+                    continue
+                source_uid = uid_a if index == 0 else special.TRANSFERS[0][2]
+                for uid in (source_uid, target_uid):
+                    app_module.db.session.add(app_module.PaymentLedgerStoreAudit(
+                        owner_id=owner, account_uid=uid, storage_key="payments_" + uid,
+                        request_id=operation + uid, source="RESPONSIBILITY_TRANSFER",
+                        action="POST", endpoint="/api/store", http_status=200,
+                        guard_result="ALLOWED",
+                        details_json=json.dumps({"operation_id": operation})))
+            app_module.db.session.commit()
+        return special
+
+    def test_special_73_reconciles_227_rows_without_claiming_zero_balance(self):
+        special = self.special_73_base()
+        with patch.object(app_module, "ENV_TYPE", "LAB"), patch.object(
+                app_module, "_legacy_73_lab_target", return_value=True), patch.object(
+                app_module, "_require_admin", return_value=(
+                    SimpleNamespace(id=special.OWNER, role="admin"), None)), patch.object(
+                app_module, "_resolve_owner", return_value=(special.OWNER, None)):
+            with app_module.app.test_client() as client:
+                response = client.post("/api/legacy_deletion_reconcile_73")
+        self.assertEqual(response.status_code, 200, response.json)
+        with app_module.app.app_context():
+            rows = {row.k: row.v for row in app_module.KVStore.query.filter_by(
+                owner=special.OWNER).all()}
+            state = json.loads(rows["abonents_db_v1"])
+            self.assertEqual(state["abonents"]["1073"]["fio"], "Tarasenko")
+            self.assertEqual(json.loads(rows["payments_uid_1073"]), [{"paid": 500}])
+            self.assertEqual(rows["payments_" + special.TRANSFERS[0][2]], "")
+            self.assertEqual(rows["payments_" + special.TRANSFERS[1][2]], "")
+            self.assertNotIn("note_1088", rows)
+            self.assertEqual(rows["jkh_frozen_debt_v1:1088:2025-02-28"], "")
+            self.assertEqual([e["type"] for e in state["premiseEvents"][-2:]],
+                             ["LEGACY_DELETION_RECONCILED"] * 2)
+            self.assertFalse(any(e["type"] == "ABONENT_DELETED"
+                                 for e in state["premiseEvents"]))
+            self.assertEqual(len(json.loads(rows["jkh_financial_events_v1"])), 2)
+            self.assertEqual(app_module.AbonentSummary.query.filter_by(owner_id=special.OWNER).count(), 0)
+            self.assertEqual(app_module.CardSnapshot.query.filter_by(owner_id=special.OWNER).count(), 0)
+
+    def test_special_73_rolls_back_both_when_second_identity_unverified(self):
+        special = self.special_73_base(second_audit=False)
+        with patch.object(app_module, "ENV_TYPE", "LAB"), patch.object(
+                app_module, "_legacy_73_lab_target", return_value=True), patch.object(
+                app_module, "_require_admin", return_value=(
+                    SimpleNamespace(id=special.OWNER, role="admin"), None)), patch.object(
+                app_module, "_resolve_owner", return_value=(special.OWNER, None)):
+            with app_module.app.test_client() as client:
+                response = client.post("/api/legacy_deletion_reconcile_73")
+        self.assertEqual(response.status_code, 409)
+        with app_module.app.app_context():
+            rows = {row.k: row for row in app_module.KVStore.query.filter_by(
+                owner=special.OWNER).all()}
+            self.assertEqual(rows["abonents_db_v1"].version, 1)
+            self.assertEqual(len(json.loads(rows["payments_" + special.TRANSFERS[0][2]].v)), 120)
+            self.assertEqual(len(json.loads(rows["payments_" + special.TRANSFERS[1][2]].v)), 107)
+            self.assertFalse(any(e["type"] == "LEGACY_DELETION_RECONCILED" for e in
+                                 json.loads(rows["abonents_db_v1"].v)["premiseEvents"]))
+
+    def test_special_73_ledger_content_conflict_rolls_back_both(self):
+        special = self.special_73_base()
+        with app_module.app.app_context():
+            report = special.inspect_state()
+            key = "payments_" + special.TRANSFERS[1][2]
+            row = app_module.KVStore.query.filter_by(owner=special.OWNER, k=key).one()
+            rows = json.loads(row.v)
+            rows[0]["accrued"] = 999
+            row.v = json.dumps(rows)
+            app_module.db.session.commit()
+            with self.assertRaisesRegex(ValueError, "reconciliation_failed:1089"):
+                special.execute_cleanup(report, SimpleNamespace(id="test-admin"), special.OWNER)
+            app_module.db.session.rollback()
+            db_row = app_module.KVStore.query.filter_by(
+                owner=special.OWNER, k="abonents_db_v1").one()
+            self.assertEqual(db_row.version, 1)
+            self.assertEqual(json.loads(app_module.KVStore.query.filter_by(
+                owner=special.OWNER, k="payments_" + special.TRANSFERS[0][2]).one().v)[0]["accrued"], 1)
+            self.assertEqual(json.loads(app_module.KVStore.query.filter_by(
+                owner=special.OWNER, k=key).one().v)[0]["accrued"], 999)
+            self.assertFalse(any(event["type"] == "LEGACY_DELETION_RECONCILED"
+                                 for event in json.loads(db_row.v)["premiseEvents"]))
+
+    def test_special_73_ledger_version_conflict_rolls_back_both(self):
+        special = self.special_73_base()
+        with app_module.app.app_context():
+            report = special.inspect_state()
+            row = app_module.KVStore.query.filter_by(
+                owner=special.OWNER, k="payments_" + special.TRANSFERS[1][2]).one()
+            row.version += 1
+            app_module.db.session.commit()
+            with self.assertRaisesRegex(ValueError, "reconciliation_failed:1089"):
+                special.execute_cleanup(report, SimpleNamespace(id="test-admin"), special.OWNER)
+            app_module.db.session.rollback()
+            self.assertEqual(app_module.KVStore.query.filter_by(
+                owner=special.OWNER, k="abonents_db_v1").one().version, 1)
+            self.assertEqual(app_module.KVStore.query.filter_by(
+                owner=special.OWNER, k="payments_" + special.TRANSFERS[0][2]).one().version, 1)
+
+    def test_special_73_financial_journal_content_conflict_blocks(self):
+        special = self.special_73_base()
+        with app_module.app.app_context():
+            report = special.inspect_state()
+            row = app_module.KVStore.query.filter_by(
+                owner=special.OWNER, k="jkh_financial_events_v1").one()
+            events = json.loads(row.v)
+            events[0]["date"] = "2008-01-01"
+            row.v = json.dumps(events)
+            app_module.db.session.commit()
+            with self.assertRaisesRegex(ValueError, "reconciliation_failed:1088"):
+                special.execute_cleanup(report, SimpleNamespace(id="test-admin"), special.OWNER)
+            app_module.db.session.rollback()
+            self.assertEqual(app_module.KVStore.query.filter_by(
+                owner=special.OWNER, k="abonents_db_v1").one().version, 1)
+
+    def test_special_73_requires_exact_no_name_start(self):
+        special = self.special_73_base()
+        with app_module.app.app_context():
+            row = app_module.KVStore.query.filter_by(owner=special.OWNER, k="abonents_db_v1").one()
+            state = json.loads(row.v)
+            state["links"][1]["dateFrom"] = "2008-01-02"
+            row.v = json.dumps(state)
+            app_module.db.session.commit()
+            with self.assertRaisesRegex(ValueError, "no_name_period_unverified"):
+                special.inspect_state()
+            self.assertEqual(row.version, 1)
+            self.assertEqual(app_module.KVStore.query.filter_by(
+                owner=special.OWNER, k="payments_" + special.TRANSFERS[0][2]).one().version, 1)
+
+    def test_special_73_rejects_non_lab_database_even_with_lab_label(self):
+        self.special_73_base()
+        with patch.object(app_module, "ENV_TYPE", "LAB"), patch.object(
+                app_module, "_require_admin",
+                return_value=(SimpleNamespace(id="test-admin", role="admin"), None)):
+            with app_module.app.test_client() as client:
+                response = client.post("/api/legacy_deletion_reconcile_73",
+                                       base_url="https://lab.valvera.ru")
+        self.assertEqual(response.status_code, 403)
+
+    def test_special_73_requires_real_lab_admin_session(self):
+        special = self.special_73_base()
+        with app_module.app.app_context():
+            app_module.db.session.add(app_module.User(
+                id=special.OWNER, email="local-test-73@example.invalid",
+                password_hash=app_module.generate_password_hash("local-test-password"),
+                role="user", display_name="Local test", disabled=False))
+            app_module.db.session.commit()
+        self.owner.stop()
+        self.access.stop()
+        try:
+            with patch.object(app_module, "ENV_TYPE", "LAB"), patch.object(
+                    app_module, "_legacy_73_lab_target", return_value=True):
+                with app_module.app.test_client() as client:
+                    self.assertEqual(client.post("/api/legacy_deletion_reconcile_73").status_code, 401)
+                    login = client.post("/api/auth/login", json={
+                        "email": "local-test-73@example.invalid",
+                        "password": "local-test-password"})
+                    self.assertEqual(login.status_code, 200)
+                    self.assertEqual(client.post("/api/legacy_deletion_reconcile_73").status_code, 403)
+                    with app_module.app.app_context():
+                        user = app_module.User.query.filter_by(id=special.OWNER).one()
+                        user.role = "admin"
+                        app_module.db.session.commit()
+                    result = client.post("/api/legacy_deletion_reconcile_73")
+                    self.assertEqual(result.status_code, 200, result.json)
+        finally:
+            self.owner.start()
+            self.access.start()
+            with app_module.app.app_context():
+                app_module.User.query.filter_by(id=special.OWNER).delete()
+                app_module.db.session.commit()
+
+    def test_legacy_reconciliation_requires_explicit_zero_transfer_fields(self):
+        for field in ("debtAmount", "balanceAmount"):
+            with self.subTest(field=field):
+                self.legacy_base()
+                with app_module.app.app_context():
+                    row = app_module.KVStore.query.filter_by(owner="owner1", k="jkh_financial_events_v1").first()
+                    events = json.loads(row.v)
+                    events[0].pop(field)
+                    row.v = json.dumps(events)
+                    app_module.db.session.commit()
+                self.assertEqual(self.reconcile().status_code, 409)
+                self.assertEqual(self.state()[2], 1)
+                with app_module.app.app_context():
+                    app_module.PaymentLedgerStoreAudit.query.delete()
+                    app_module.KVStore.query.filter_by(owner="owner1").delete()
+                    app_module.db.session.commit()
+
+    def test_delete_with_successor_requires_confirmed_zero_transfer(self):
+        self.seed({"A": {"uid": "uid_a", "regnum": "p73"},
+                   "B": {"uid": "uid_b", "regnum": "p73"}},
+                  [{"abonentId": "A", "regnum": "p73", "dateFrom": "2025-01-01",
+                    "dateTo": "2025-01-31"},
+                   {"abonentId": "B", "regnum": "p73", "dateFrom": "2025-02-01",
+                    "dateTo": ""}])
+        self.assertEqual(self.delete(abonent_id="A", uid="uid_a", start="2025-01-01",
+                                     end="2025-01-31").status_code, 409)
+        with app_module.app.app_context():
+            row = app_module.KVStore.query.filter_by(owner="owner1", k="abonents_db_v1").one()
+            state = json.loads(row.v)
+            state["premiseEvents"].append({"type": "RESPONSIBILITY_TRANSFER",
+                "operationId": "a-b", "oldAbonentId": "A", "newAbonentId": "B",
+                "transferMode": "NO_DEBT", "fromRegnums": ["p73"]})
+            row.v = json.dumps(state)
+            app_module.db.session.add(app_module.KVStore(owner="owner1", k="jkh_financial_events_v1",
+                v=json.dumps([{"type": "TRANSFER_WITHOUT_DEBT", "mode": "WITHOUT_DEBT",
+                    "operationId": "a-b", "sourceAbonentId": "A", "targetAbonentId": "B",
+                    "regnum": "p73", "debtAmount": 0}]), version=1))
+            app_module.db.session.commit()
+        self.assertEqual(self.delete(abonent_id="A", uid="uid_a", start="2025-01-01",
+                                     end="2025-01-31").status_code, 409)
+        with app_module.app.app_context():
+            row = app_module.KVStore.query.filter_by(owner="owner1", k="jkh_financial_events_v1").one()
+            events = json.loads(row.v)
+            events[0]["balanceAmount"] = 0
+            row.v = json.dumps(events)
+            app_module.db.session.commit()
+        self.assertEqual(self.delete(abonent_id="A", uid="uid_a", start="2025-01-01",
+                                     end="2025-01-31").status_code, 200)
+        state, values, _ = self.state()
+        self.assertIn("B", state["abonents"])
+        self.assertEqual(json.loads(values["jkh_financial_events_v1"]), events)
+
+    def test_legacy_reconciliation_requires_clean_verified_identity(self):
+        for change in ("wrong_uid", "wrong_owner", "wrong_operation",
+                       "debt_balance", "debt_event", "historical_with_debt",
+                       "wrong_regnum", "missing_audit"):
+            with self.subTest(change=change):
+                self.legacy_base()
+                with app_module.app.app_context():
+                    if change == "debt_balance":
+                        key, value = {
+                            "debt_balance": ("jkh_transfer_balance_v1:X:p73",
+                                             '{"fromAbonentId":"B","regnum":"p73","principal":500}')
+                        }[change]
+                        app_module.db.session.add(app_module.KVStore(
+                            owner="owner1", k=key, v=value, version=1))
+                    if change == "wrong_owner":
+                        app_module.PaymentLedgerStoreAudit.query.filter_by(
+                            owner_id="owner1", account_uid="uid_b").update({"owner_id": "other-owner"})
+                    if change == "missing_audit":
+                        app_module.PaymentLedgerStoreAudit.query.filter_by(
+                            owner_id="owner1", account_uid="uid_b").delete()
+                    if change == "debt_event":
+                        row = app_module.KVStore.query.filter_by(
+                            owner="owner1", k="jkh_financial_events_v1").first()
+                        events = json.loads(row.v)
+                        events.append({"type": "TRANSFER_WITH_DEBT", "mode": "WITH_DEBT",
+                                       "operationId": "other-debt", "sourceAbonentId": "B",
+                                       "targetAbonentId": "X", "regnum": "p73",
+                                       "principal": 500})
+                        row.v = json.dumps(events)
+                    if change == "historical_with_debt":
+                        row = app_module.KVStore.query.filter_by(
+                            owner="owner1", k="jkh_financial_events_v1").first()
+                        events = json.loads(row.v)
+                        events[0]["type"] = "TRANSFER_WITH_DEBT"
+                        events[0]["mode"] = "WITH_DEBT"
+                        events[0]["principal"] = 10000
+                        row.v = json.dumps(events)
+                    app_module.db.session.commit()
+                response = self.reconcile(
+                    uid="uid_wrong" if change == "wrong_uid" else "uid_b",
+                    historical="wrong-operation" if change == "wrong_operation" else "old-a-b",
+                    regnum="other-flat" if change == "wrong_regnum" else "p73")
+                self.assertEqual(response.status_code, 409, (change, response.json))
+                self.assertEqual(self.state()[2], 1)
+                with app_module.app.app_context():
+                    app_module.PaymentLedgerStoreAudit.query.delete()
+                    app_module.KVStore.query.filter_by(owner="owner1").delete()
+                    app_module.db.session.commit()
+
+    def test_legacy_reconciliation_cas_duplicate_and_store_forgery(self):
+        self.legacy_base()
+        self.assertEqual(self.reconcile(version=0).status_code, 409)
+        state, _, _ = self.state()
+        forged = json.loads(json.dumps(state))
+        forged["premiseEvents"].append({"type": "LEGACY_DELETION_RECONCILED",
+            "operationId": "forged", "historicalOperationId": "old-a-b",
+            "ownerId": "owner1", "abonentId": "B", "uid": "uid_b", "regnum": "p73"})
+        with app_module.app.test_client() as client:
+            response = client.post("/api/store", json={"key": "abonents_db_v1",
+                "value": json.dumps(forged), "expected_version": 1})
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(self.reconcile().status_code, 200)
+        self.assertEqual(self.reconcile().status_code, 409)
+        self.assertEqual(self.reconcile(operation="second-reconciliation", version=2).status_code, 409)
+        self.assertEqual(self.state()[2], 2)
+        with app_module.app.app_context():
+            app_module.db.session.add(app_module.KVStore(
+                owner="owner1", k="payments_uid_b", v='[{"paid":100}]', version=1))
+            app_module.db.session.commit()
+        self.assertEqual(self.closed_assign(version=2).status_code, 409)
+        self.assertEqual(self.state()[2], 2)
+
+    def test_legacy_reconciliation_rollback(self):
+        self.legacy_base()
+        before = self.state()
+        with patch.object(app_module.db.session, "commit",
+                          side_effect=app_module.SQLAlchemyError("synthetic reconciliation failure")):
+            self.assertEqual(self.reconcile().status_code, 500)
+        self.assertEqual(self.state(), before)
 
 
 if __name__ == "__main__":
