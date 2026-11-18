@@ -5455,6 +5455,127 @@ def _responsibility_periods_valid(links, regnum):
     return all(periods[i - 1][1] < periods[i][0] for i in range(1, len(periods)))
 
 
+def _restore_closed_tail_no_name(state, regnum, source_id, source_close):
+    """Fill the sole gap after a verified real period, bounded or open-ended."""
+    premises, abonents, links = state.get("premises"), state.get("abonents"), state.get("links")
+    if (not isinstance(premises, dict) or not isinstance(abonents, dict) or
+            not isinstance(links, list) or not isinstance(premises.get(regnum), dict) or
+            str(premises[regnum].get("status") or "active").lower() != "active" or
+            not _responsibility_periods_valid(links, regnum)):
+        raise ValueError("no_name_period_ambiguous")
+    periods = [link for link in links if isinstance(link, dict) and
+               str(link.get("regnum") or "").strip() == regnum]
+    periods.sort(key=lambda link: str(link.get("dateFrom") or ""))
+    if not periods or any(str(link.get("dateTo") or "") == "" for link in periods[:-1]):
+        raise ValueError("no_name_period_ambiguous")
+    candidates = []
+    for left, right in zip(periods, periods[1:]):
+        next_day = date.fromisoformat(str(left["dateTo"])) + timedelta(days=1)
+        right_day = date.fromisoformat(str(right["dateFrom"]))
+        if next_day < right_day:
+            candidates.append((left, next_day, right_day - timedelta(days=1)))
+    last = periods[-1]
+    if str(last.get("dateTo") or ""):
+        candidates.append((last, date.fromisoformat(str(last["dateTo"])) + timedelta(days=1), None))
+    if not candidates:
+        return False
+    if len(candidates) != 1:
+        raise ValueError("no_name_period_ambiguous")
+    source, start, end = candidates[0]
+    if (str(source.get("abonentId") or "") != source_id or
+            str(source.get("dateTo") or "") != source_close or
+            source_id not in abonents or source.get("technicalType")):
+        raise ValueError("no_name_period_ambiguous")
+    links.append({"technicalType": "NO_NAME", "abonentId": "", "regnum": regnum,
+                  "dateFrom": start.isoformat(), "dateTo": end.isoformat() if end else ""})
+    if not _responsibility_periods_valid(links, regnum):
+        raise ValueError("no_name_period_ambiguous")
+    return True
+
+
+def _newly_closed_tail(previous, proposed):
+    """Identify a single real period just closed by a generic registry write."""
+    old_links, new_links = previous.get("links", []), proposed.get("links", [])
+    if not isinstance(old_links, list) or not isinstance(new_links, list):
+        raise ValueError("no_name_period_ambiguous")
+    closed = []
+    for old in old_links:
+        if not isinstance(old, dict) or old.get("technicalType") or str(old.get("dateTo") or ""):
+            continue
+        matching = [link for link in new_links if isinstance(link, dict) and
+                    str(link.get("regnum") or "") == str(old.get("regnum") or "") and
+                    str(link.get("abonentId") or "") == str(old.get("abonentId") or "") and
+                    str(link.get("dateFrom") or "") == str(old.get("dateFrom") or "")]
+        if len(matching) == 1 and str(matching[0].get("dateTo") or ""):
+            regnum = str(old.get("regnum") or "")
+            premise = proposed.get("premises", {}).get(regnum)
+            if isinstance(premise, dict) and str(premise.get("status") or "active").lower() == "active":
+                closed.append((regnum, str(old.get("abonentId") or ""), str(matching[0].get("dateTo") or "")))
+    if len(closed) > 1:
+        raise ValueError("no_name_period_ambiguous")
+    return closed[0] if closed else None
+
+
+@app.post("/api/no_name_restore_closed_tail")
+def no_name_restore_closed_tail():
+    """CAS repair for an existing closed tail, including legacy apartment 73."""
+    data = request.get_json(silent=True) or {}
+    user, owner, err = _session_store_owner(_client_owner_hint_from_request(data))
+    if err:
+        return err
+    regnum = str(data.get("regnum") or "").strip()
+    source_id = str(data.get("source_abonent_id") or "").strip()
+    source_close = str(data.get("source_close_date") or "").strip()
+    operation_id = str(data.get("operation_id") or "").strip()
+    expected = _expected_db_version(data)
+    if not regnum or not source_id or not source_close or not operation_id or len(operation_id) > 255 or expected is None:
+        return _json_error("invalid_no_name_restore_request", 400)
+    access_err, _ = _require_write_access_for_key(owner, "abonents_db_v1")
+    if access_err:
+        return access_err
+    claimed = db.session.execute(update(KVStore).where(
+        KVStore.owner == owner, KVStore.k == "abonents_db_v1", KVStore.version == expected
+    ).values(version=KVStore.version + 1))
+    if claimed.rowcount != 1:
+        db.session.rollback()
+        row = KVStore.query.filter_by(owner=owner, k="abonents_db_v1").first()
+        try:
+            state = json.loads(row.v) if row and row.v else {}
+            prior = _responsibility_operation(state, operation_id, "NO_NAME_RESTORED")
+            if (prior and prior.get("regnum") == regnum and prior.get("sourceAbonentId") == source_id and
+                    prior.get("sourceCloseDate") == source_close):
+                return jsonify(ok=True, committed=True, replay=True, operation_id=operation_id)
+        except (TypeError, ValueError):
+            pass
+        return _db_version_conflict()
+    row = KVStore.query.filter_by(owner=owner, k="abonents_db_v1").with_for_update().one()
+    try:
+        state = json.loads(row.v)
+        if _transfer_event(state, operation_id):
+            raise ValueError()
+        links = state["links"]
+        source = [link for link in links if isinstance(link, dict) and
+                  str(link.get("regnum") or "") == regnum and
+                  str(link.get("abonentId") or "") == source_id and
+                  str(link.get("dateTo") or "") == source_close]
+        if len(source) != 1 or not _restore_closed_tail_no_name(state, regnum, source_id, source_close):
+            raise ValueError()
+        state["premiseEvents"].append({"type": "NO_NAME_RESTORED", "operationId": operation_id,
+            "regnum": regnum, "sourceAbonentId": source_id, "sourceCloseDate": source_close,
+            "dateFrom": str(date.fromisoformat(source_close) + timedelta(days=1))})
+        row.v = json.dumps(state, ensure_ascii=False)
+        db.session.commit()
+    except SQLAlchemyError:
+        db.session.rollback()
+        app.logger.exception("[no-name-restore] atomic commit failed operation_id=%s", operation_id)
+        return _json_error("no_name_restore_persist_failed", 500)
+    except (TypeError, KeyError, ValueError, OverflowError):
+        db.session.rollback()
+        return _json_error("no_name_period_ambiguous", 409)
+    return jsonify(ok=True, committed=True, replay=False, operation_id=operation_id,
+                   version=expected + 1)
+
+
 def _closed_no_debt_retry(current, owner, source_id, regnum, financial_events, balances):
     """Return the original operation only for a fully deleted NO_DEBT chain."""
     events = current.get("premiseEvents", [])
@@ -5592,7 +5713,7 @@ def _store_db_transition_allowed(previous_raw, proposed_raw):
     if any(isinstance(link, dict) and link.get("technicalType") == "NO_NAME" and link not in new_links
            for link in old_links):
         return False
-    protected = ("ABONENT_DELETED", "LEGACY_DELETION_RECONCILED")
+    protected = ("ABONENT_DELETED", "LEGACY_DELETION_RECONCILED", "NO_NAME_RESTORED")
     if [event for event in old_events if isinstance(event, dict) and event.get("type") in protected] != [
             event for event in new_events if isinstance(event, dict) and event.get("type") in protected]:
         return False
@@ -6693,9 +6814,22 @@ def store_set():
             if not _store_db_transition_allowed(row.v, value):
                 db.session.rollback()
                 return _json_error("abonent_delete_requires_atomic_api", 409)
+            no_name_created = False
+            try:
+                previous_db = json.loads(row.v) if row.v else {}
+                proposed_db = json.loads(value)
+                closed_period = _newly_closed_tail(previous_db, proposed_db)
+                if closed_period:
+                    no_name_created = _restore_closed_tail_no_name(proposed_db, *closed_period)
+                    if no_name_created:
+                        value = json.dumps(proposed_db, ensure_ascii=False)
+            except (TypeError, KeyError, ValueError, OverflowError):
+                db.session.rollback()
+                return _json_error("no_name_period_ambiguous", 409)
             row.v = value
             db.session.commit()
-            return jsonify(ok=True, owner=owner_eff, version=expected + 1)
+            return jsonify(ok=True, owner=owner_eff, version=expected + 1,
+                           **({"canonical_value": value} if no_name_created else {}))
         db.session.rollback()
         if expected == 0 and KVStore.query.filter_by(owner=owner_eff, k=key).first() is None:
             try:

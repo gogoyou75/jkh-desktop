@@ -95,6 +95,126 @@ class ResponsibilityMutationTest(unittest.TestCase):
                 "success": True, "principal": 10000, "penalty": 100, "calculatedAt": "2025-01-31"})
         self.seed({"A": {"uid": "uid_a", "regnum": "p73", "calcEndDate": "2025-01-31"}}, links, extra)
 
+    def test_store_close_creates_one_open_no_name_atomically(self):
+        self.seed({"A": {"uid": "uid_a", "regnum": "p73"}},
+                  [{"abonentId": "A", "regnum": "p73", "dateFrom": "2025-01-01", "dateTo": ""}],
+                  {"payments_uid_a": '[{"paid":100}]'})
+        proposed, _, _ = self.state()
+        proposed["links"][0]["dateTo"] = "2025-01-31"
+        with app_module.app.test_client() as client:
+            response = client.post("/api/store", json={"key": "abonents_db_v1",
+                "value": json.dumps(proposed), "expected_version": 1})
+        self.assertEqual(response.status_code, 200)
+        state, values, version = self.state()
+        self.assertEqual(version, 2)
+        self.assertEqual(state["links"][1], {"technicalType": "NO_NAME", "abonentId": "",
+                         "regnum": "p73", "dateFrom": "2025-02-01", "dateTo": ""})
+        self.assertEqual(values["payments_uid_a"], '[{"paid":100}]')
+        self.assertEqual(state["premiseEvents"], [])
+
+    def test_store_close_with_successor_does_not_add_no_name(self):
+        self.seed({"A": {"uid": "uid_a", "regnum": "p73"},
+                   "B": {"uid": "uid_b", "regnum": "p73"}},
+                  [{"abonentId": "A", "regnum": "p73", "dateFrom": "2025-01-01", "dateTo": ""}])
+        proposed, _, _ = self.state()
+        proposed["links"][0]["dateTo"] = "2025-01-31"
+        proposed["links"].append({"abonentId": "B", "regnum": "p73",
+                                  "dateFrom": "2025-02-01", "dateTo": ""})
+        with app_module.app.test_client() as client:
+            response = client.post("/api/store", json={"key": "abonents_db_v1",
+                "value": json.dumps(proposed), "expected_version": 1})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.state()[0]["links"], proposed["links"])
+
+    def test_store_close_fills_bounded_gap(self):
+        self.seed({"A": {"uid": "uid_a", "regnum": "p73"},
+                   "B": {"uid": "uid_b", "regnum": "p73"}},
+                  [{"abonentId": "A", "regnum": "p73", "dateFrom": "2025-01-01", "dateTo": ""}])
+        proposed, _, _ = self.state()
+        proposed["links"][0]["dateTo"] = "2025-01-31"
+        proposed["links"].append({"abonentId": "B", "regnum": "p73",
+                                  "dateFrom": "2025-03-01", "dateTo": ""})
+        with app_module.app.test_client() as client:
+            response = client.post("/api/store", json={"key": "abonents_db_v1",
+                "value": json.dumps(proposed), "expected_version": 1})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.state()[0]["links"][-1], {"technicalType": "NO_NAME",
+            "abonentId": "", "regnum": "p73", "dateFrom": "2025-02-01", "dateTo": "2025-02-28"})
+
+    def test_closed_tail_restore_73_replay_cas_and_ambiguity(self):
+        regnum = "TEMP-20260501-5388"
+        self.seed({"1073": {"uid": "uid_1073", "regnum": regnum}},
+                  [{"abonentId": "1073", "regnum": regnum,
+                    "dateFrom": "2007-06-01", "dateTo": "2007-12-31"}],
+                  {"payments_uid_1073": '[{"paid":100}]'})
+        with app_module.app.app_context():
+            row = app_module.KVStore.query.filter_by(owner="owner1", k="abonents_db_v1").one()
+            state = json.loads(row.v)
+            state["premises"][regnum] = {"flat": "73", "status": "active"}
+            row.v = json.dumps(state)
+            app_module.db.session.commit()
+        payload = {"operation_id": "restore-73", "expected_version": 1, "regnum": regnum,
+                   "source_abonent_id": "1073", "source_close_date": "2007-12-31"}
+        with app_module.app.test_client() as client:
+            self.assertEqual(client.post("/api/no_name_restore_closed_tail", json=dict(payload, expected_version=0)).status_code, 409)
+            self.assertEqual(client.post("/api/no_name_restore_closed_tail", json=payload).status_code, 200)
+            replay = client.post("/api/no_name_restore_closed_tail", json=payload)
+        self.assertEqual(replay.status_code, 200)
+        self.assertTrue(replay.json["replay"])
+        state, values, version = self.state()
+        self.assertEqual(version, 2)
+        self.assertEqual(state["links"][-1]["dateFrom"], "2008-01-01")
+        self.assertEqual(state["links"][-1]["dateTo"], "")
+        self.assertEqual(values["payments_uid_1073"], '[{"paid":100}]')
+        self.assertEqual(len([e for e in state["premiseEvents"] if e["type"] == "NO_NAME_RESTORED"]), 1)
+
+    def test_closed_tail_restore_rejects_historical_gap_without_write(self):
+        self.seed({"A": {"uid": "uid_a", "regnum": "p73"},
+                   "B": {"uid": "uid_b", "regnum": "p73"}},
+                  [{"abonentId": "A", "regnum": "p73", "dateFrom": "2025-01-01", "dateTo": "2025-01-31"},
+                   {"abonentId": "B", "regnum": "p73", "dateFrom": "2025-03-01", "dateTo": "2025-03-31"}])
+        before = self.state()
+        with app_module.app.test_client() as client:
+            response = client.post("/api/no_name_restore_closed_tail", json={
+                "operation_id": "ambiguous", "expected_version": 1, "regnum": "p73",
+                "source_abonent_id": "B", "source_close_date": "2025-03-31"})
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(self.state(), before)
+
+    def test_closed_tail_restore_commit_failure_rolls_back(self):
+        self.closed_base()
+        before = self.state()
+        with patch.object(app_module.db.session, "commit", side_effect=app_module.SQLAlchemyError("synthetic failure")):
+            with app_module.app.test_client() as client:
+                response = client.post("/api/no_name_restore_closed_tail", json={
+                    "operation_id": "restore-fail", "expected_version": 1, "regnum": "p73",
+                    "source_abonent_id": "A", "source_close_date": "2025-01-31"})
+        self.assertEqual(response.status_code, 500)
+        self.assertEqual(self.state(), before)
+
+    def test_restored_tail_assigns_with_explicit_debt_modes(self):
+        for mode in ("WITH_DEBT", "NO_DEBT"):
+            with self.subTest(mode=mode):
+                self.closed_base()
+                original_ledger = self.state()[1]["payments_uid_a"]
+                with app_module.app.test_client() as client:
+                    restored = client.post("/api/no_name_restore_closed_tail", json={
+                        "operation_id": "restore-a", "expected_version": 1, "regnum": "p73",
+                        "source_abonent_id": "A", "source_close_date": "2025-01-31"})
+                self.assertEqual(restored.status_code, 200)
+                self.assertEqual(self.closed_assign(mode=mode, version=2).status_code, 200)
+                state, values, version = self.state()
+                self.assertEqual(version, 3)
+                self.assertEqual(values["payments_uid_a"], original_ledger)
+                self.assertEqual(state["links"][1]["abonentId"], "C")
+                if mode == "WITH_DEBT":
+                    self.assertEqual(json.loads(values["jkh_transfer_balance_v1:C:p73"])["principal"], 10000)
+                else:
+                    self.assertNotIn("jkh_transfer_balance_v1:C:p73", values)
+                with app_module.app.app_context():
+                    app_module.KVStore.query.filter_by(owner="owner1").delete()
+                    app_module.db.session.commit()
+
     def closed_assign(self, mode="WITH_DEBT", start="2025-02-01", operation="closed-a-c",
                       version=1, ledger_version=1, debt=None, source_id="A"):
         with app_module.app.test_client() as client:

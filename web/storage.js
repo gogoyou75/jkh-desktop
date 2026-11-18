@@ -1064,7 +1064,8 @@
           Number.isSafeInteger(res.data.version) &&
           res.data.version === expected + (method === "DELETE" && res.data.deleted === false ? 0 : 1)) {
         _setDbCasVersion(ownerId, res.data.version);
-        return { ok: true, state: "confirmed", version: res.data.version };
+        return { ok: true, state: "confirmed", version: res.data.version,
+          canonicalValue: typeof res.data.canonical_value === "string" ? res.data.canonical_value : null };
       }
       if (res.status === 428) return { ok: false, state: "conflict", error: "expected_version_required" };
       return { ok: false, state: "failed", error: res.data && res.data.error || "HTTP " + res.status };
@@ -2028,7 +2029,17 @@
         }
         if (baseKey === KEY_DB && resSet.ok) {
           outcome.dbSaved = true;
-          __lastSavedDbRaw[_dbCasScope(ownerId)] = raw;
+          if (resSet.canonicalValue !== null) {
+            if (_readLocalCompat(KEY_DB, ownerId) !== raw ||
+                JSON.stringify(window.AbonentsDB || {}) !== raw) {
+              outcome.state = "partial";
+              _blockUploadUntilRefresh();
+              return false;
+            }
+            window.AbonentsDB = JSON.parse(resSet.canonicalValue);
+            _writeLocalCompat(KEY_DB, resSet.canonicalValue, ownerId);
+          }
+          __lastSavedDbRaw[_dbCasScope(ownerId)] = resSet.canonicalValue || raw;
         }
         if (baseKey === KEY_DB && !resSet.ok) outcome.state = resSet.state;
         if (resSet.status === 428 || resSet.error === "expected_version_required") {

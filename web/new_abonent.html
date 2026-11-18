@@ -639,13 +639,13 @@ function r2(n){
    ПЕРЕДАЧА КВАРТИРЫ (CANON)
    ========================= */
 let __jkhTransferConfirmed = false;
-let __transferMode = 'NO_DEBT'; // 'WITH_DEBT' | 'NO_DEBT'
+let __transferMode = null; // 'WITH_DEBT' | 'NO_DEBT' after explicit choice
 let __transferCtx = null; // { regnum, oldId, oldFio, oldLink, transferDate }
 
 function __updateNewDebtStartPreview(){
   const el = document.getElementById('newDebtStart');
   if (!el) return;
-  const checked = (String(__transferMode||'NO_DEBT') === 'WITH_DEBT');
+  const checked = (__transferMode === 'WITH_DEBT');
   el.textContent = (__transferCtx && checked)
     ? (__transferCtx.noName ? 'из сохранённого frozen_debt' : 'будет рассчитан сервисом transfer')
     : '0.00';
@@ -655,6 +655,7 @@ let __debtTransferRefreshId = 0;
 async function refreshDebtTransferBox() {
   const refreshId = ++__debtTransferRefreshId;
   __jkhTransferConfirmed = false;
+  __transferMode = null;
   __transferCtx = null;
 
   const box = document.getElementById('debtTransferBox');
@@ -706,7 +707,7 @@ async function refreshDebtTransferBox() {
       box.style.display = 'block';
       return;
     }
-    if (gap && !retry?.priorOperationId) {
+    if (gap && !closedCandidate) {
       __transferCtx = { noName:true, regnum, gap:gap, transferDate:df0 };
       if (title) title.textContent = 'Назначение на период No Name';
       const priorName = closedCandidate ? String(db.abonents[closedCandidate.id]?.fio || closedCandidate.id) : 'не установлен';
@@ -1276,6 +1277,10 @@ async function createAbonent() {
     const isClosedAssign = !!(closedPrevious && __jkhTransferConfirmed && __transferCtx?.closed &&
       __transferCtx.oldId === closedPrevious.id && __transferCtx.closeDate === closedPrevious.closeDate &&
       respStart > closedPrevious.closeDate);
+    if (__jkhTransferConfirmed && !['WITH_DEBT', 'NO_DEBT'].includes(__transferMode)) {
+      setCreateStatus('Выберите «С долгом» или «Без долга».');
+      return;
+    }
     const src = String(document.getElementById("na_src").value || "").trim();
 
     if (prevActive?.technicalType === 'NO_NAME' && !isNoNameAssign && !isClosedAssign) {
@@ -1370,7 +1375,7 @@ async function createAbonent() {
         if (!(window.Data && typeof Data.assignClosedResponsibilityAtomic === 'function')) throw new Error('CLOSED_ASSIGN_UNAVAILABLE');
         if (!__noNameAssignOperationId) __noNameAssignOperationId = 'responsibility:' + crypto.randomUUID();
         const assigned = await Data.assignClosedResponsibilityAtomic({ abonentId:String(ls), regnum:String(regnum),
-          dateFrom:String(respStart), mode:String(__transferMode || 'NO_DEBT'),
+          dateFrom:String(respStart), mode:__transferMode,
           sourceAbonentId:closedPrevious.id, sourceCloseDate:closedPrevious.closeDate,
           operationId:__noNameAssignOperationId, abonent:dbRoot.abonents[ls],
           initialRows:stagedImport ? (stagedImport.rows || []) : [] });
@@ -1394,7 +1399,7 @@ async function createAbonent() {
         if (!__noNameAssignOperationId) __noNameAssignOperationId = 'responsibility:' + crypto.randomUUID();
         const assigned = await Data.assignNoNameAtomic({ abonentId:String(ls), regnum:String(regnum),
           dateFrom:String(noNameGap.dateFrom || ''), dateTo:String(noNameGap.dateTo || ''),
-          mode:String(__transferMode || 'NO_DEBT'), operationId:__noNameAssignOperationId,
+          mode:__transferMode, operationId:__noNameAssignOperationId,
           abonent:dbRoot.abonents[ls],
           initialRows:stagedImport ? (stagedImport.rows || []) : [] });
         if (assigned !== true) throw new Error('NO_NAME_ASSIGN_NOT_COMMITTED');
@@ -1424,7 +1429,7 @@ async function createAbonent() {
         newAbonentId: String(ls),
         regnum: String(regnum),
         transferDate: String(respStart),
-        transferMode: String(__transferMode || 'NO_DEBT'),
+        transferMode: __transferMode,
         initialRows: stagedImport ? (stagedImport.rows || []) : undefined
       });
 

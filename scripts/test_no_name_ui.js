@@ -20,6 +20,7 @@ const context = vm.createContext({
   location: { href: '' }, console, URLSearchParams, Date, Math, setTimeout
 });
 vm.runInContext(mainScript, context);
+assert.equal(vm.runInContext('__transferMode', context), null);
 
 (async () => {
 const activeGap = { technicalType: 'NO_NAME', abonentId: '', regnum: 'p73',
@@ -33,6 +34,10 @@ await vm.runInContext('refreshDebtTransferBox()', context);
 assert.equal(elements.debtTransferBox.style.display, 'block');
 assert.equal(vm.runInContext('__transferCtx.noName', context), true);
 assert.match(elements.debtTransferInfo.textContent, /No Name/);
+vm.runInContext("__transferMode = 'WITH_DEBT'; __jkhTransferConfirmed = true", context);
+await vm.runInContext('refreshDebtTransferBox()', context);
+assert.equal(vm.runInContext('__transferMode', context), null);
+assert.equal(vm.runInContext('__jkhTransferConfirmed', context), false);
 
 elements.na_date_from.value = '2025-02-02';
 await vm.runInContext('refreshDebtTransferBox()', context);
@@ -159,9 +164,12 @@ vm.runInContext("__jkhTransferConfirmed = true; __transferMode = 'WITH_DEBT'; __
   assert.equal(elements.debtTransferBox.style.display, 'block');
   assert.equal(vm.runInContext('__transferCtx.closed', context), true);
   assert.match(elements.debtTransferInfo.textContent, /10000\.00/);
+  context.window.AbonentsDB.links.push({ ...activeGap });
+  await vm.runInContext('refreshDebtTransferBox()', context);
+  assert.equal(vm.runInContext('__transferCtx.closed', context), true);
   await vm.runInContext('createAbonent()', context);
   assert.equal(closedCalls, 0);
-  assert.match(elements.createStatusText.textContent, /обычное создание заблокировано/);
+  assert.match(elements.createStatusText.textContent, /выберите «С долгом» или «Без долга»/);
   vm.runInContext("__jkhTransferConfirmed = true; __transferMode = 'WITH_DEBT'", context);
   await vm.runInContext('createAbonent()', context);
   assert.equal(closedCalls, 1);

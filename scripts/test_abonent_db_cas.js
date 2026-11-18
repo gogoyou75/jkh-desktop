@@ -50,6 +50,14 @@ function contextFor(state) {
         state.value = body.value;
         state.version++;
         if (state.loseResponse) { state.loseResponse = false; throw new Error('response lost'); }
+        if (state.canonicalOnNextWrite) {
+          state.canonicalOnNextWrite = false;
+          const db = JSON.parse(state.value);
+          db.links.push({ technicalType: 'NO_NAME', abonentId: '', regnum: 'P1',
+            dateFrom: '2025-02-01', dateTo: '' });
+          state.value = JSON.stringify(db);
+          return response({ ok: true, version: state.version, canonical_value: state.value });
+        }
         return response({ ok: true, version: state.version });
       }
       const financial = /^payments_uid_[a-z0-9][a-z0-9_-]*$/i.test(body.key) || body.key === 'jkh_financial_events_v1' || /^(jkh_freeze_to_v1:|jkh_frozen_debt_v1:|jkh_transfer_to_v1:|jkh_transfer_balance_v1:|exclude_periods_)/.test(body.key);
@@ -105,6 +113,18 @@ async function loaded(state) {
   assert.strictEqual(await context.window.JKHRemoteSync.uploadNow(), true);
   assert.strictEqual(state.posts, beforeAreaOnly + 1, 'area-only change must trigger POST');
   assert.strictEqual(JSON.parse(state.value).abonents['1006'].square, 46);
+
+  const canonicalState = server();
+  const canonicalContext = await loaded(canonicalState);
+  const closing = JSON.parse(canonicalState.value);
+  closing.links.push({ abonentId: '1006', regnum: 'P1', dateFrom: '2025-01-01', dateTo: '2025-01-31' });
+  canonicalContext.window.AbonentsDB = closing;
+  canonicalContext.window.JKHStore.setRaw('abonents_db_v1', JSON.stringify(closing));
+  canonicalState.canonicalOnNextWrite = true;
+  assert.strictEqual(await canonicalContext.window.JKHRemoteSync.uploadNow(), true);
+  assert.strictEqual(canonicalContext.window.AbonentsDB.links[1].technicalType, 'NO_NAME');
+  assert.strictEqual(JSON.parse(canonicalContext.window.JKHStore.getRaw('abonents_db_v1')).links.length, 2);
+  assert.strictEqual(canonicalContext.window.JKHDbCas.isVerifiedRaw('owner1', canonicalState.value), true);
 
   const legacyLedgerState = server();
   const emptyLedgerKey = 'payments_uid_legacy';
