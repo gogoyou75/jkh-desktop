@@ -889,22 +889,16 @@ window.PremisesAdmin = (function () {
         if (!oid || oid === 'guest' || oid === 'ALL') throw new Error('SERVER_UPLOAD_FAILED');
         const raw = JSON.stringify(window.AbonentsDB || { premises: {}, links: [], abonents: {} });
 
-        let res = null;
-        try {
-            res = await fetch('/api/store', {
-                method: 'POST',
-                credentials: 'include',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ client_owner_hint: oid, key: KEY_DB, value: String(raw || '') })
-            });
-        } catch (e) {
-            throw new Error('SERVER_UPLOAD_FAILED');
+        if (!window.JKHDbCas || typeof window.JKHDbCas.write !== 'function') {
+            throw new Error('DB_VERSION_NOT_LOADED');
         }
-        if (!res || !res.ok) throw new Error('SERVER_UPLOAD_FAILED');
-
-        let data = null;
-        try { data = await res.json(); } catch (e) { data = null; }
-        if (!(data && data.ok === true)) throw new Error('SERVER_UPLOAD_FAILED');
+        const result = await window.JKHDbCas.write(oid, raw);
+        if (!result.ok) {
+            if (result.state === 'conflict') throw new Error('Конфликт версии базы. Обновите страницу перед повторным сохранением.');
+            if (result.error === 'DB_VERSION_NOT_LOADED') throw new Error('Версия базы не загружена. Обновите страницу перед сохранением.');
+            if (result.state === 'unknown') throw new Error('Результат сохранения на сервере неизвестен. Обновите страницу и проверьте данные перед повтором.');
+            throw new Error(result.error || 'SERVER_UPLOAD_FAILED');
+        }
     }
 
     async function flushDbToServerStrict(ownerId) {
@@ -927,8 +921,12 @@ window.PremisesAdmin = (function () {
         if (state.busy) return;
         setBusyUI(true);
         const snapshot = makeTxSnapshot();
+        let persistOwnerId = null;
+        let localDbBefore = null;
+        let localDbWritten = false;
         try {
-            const persistOwnerId = getPersistOwnerIdOrThrow();
+            persistOwnerId = getPersistOwnerIdOrThrow();
+            if (window.JKHStore) localDbBefore = window.JKHStore.getRaw(KEY_DB, persistOwnerId);
             const tx = (opts && typeof opts.mutate === 'function') ? (opts.mutate() || {}) : {};
             if (tx && tx.ok === false) {
                 restoreFromTxSnapshot(snapshot);
@@ -946,7 +944,9 @@ window.PremisesAdmin = (function () {
                 throw new Error(recalcRes.message || 'Не удалось выполнить пересчёт начислений.');
             }
 
+            localDbWritten = true;
             await flushDbToServerStrict(persistOwnerId);
+            localDbWritten = false;
 
             setWarn((opts && opts.successMessage) || 'Сохранено.', true);
             renderTable();
@@ -955,6 +955,14 @@ window.PremisesAdmin = (function () {
         } catch (e) {
             console.warn('[premises] transaction failed', e);
             restoreFromTxSnapshot(snapshot);
+            if (localDbWritten && window.JKHStore) {
+                try {
+                    if (localDbBefore == null) window.JKHStore.removeRaw(KEY_DB, persistOwnerId);
+                    else window.JKHStore.setRaw(KEY_DB, localDbBefore, persistOwnerId);
+                } catch (restoreError) {
+                    console.error('[premises][save] local rollback failed', restoreError);
+                }
+            }
             if (String(e?.message || e) === 'SERVER_UPLOAD_FAILED') {
                 console.log('[premises][save] rollback after SERVER_UPLOAD_FAILED');
             }
