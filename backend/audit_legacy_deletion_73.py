@@ -116,7 +116,17 @@ def inspect_state():
             "snapshot_status": snapshot.snapshot_status if snapshot else "missing",
         })
     result["ledger_rows_total"] = sum(item["ledger_rows"] for item in result["recipients"])
-    if result["ledger_rows_total"] != 227:
+    if result["ledger_rows_total"] == 0:
+        if any(item["ledger_version"] is not None or
+               item["summary_status"] != "missing" or
+               item["snapshot_status"] != "missing"
+               for item in result["recipients"]):
+            raise ValueError("historical_cleanup_incomplete")
+        personal = KVStore.query.filter_by(owner=OWNER).all()
+        if any(_personal_abonent_key(row.k, target, uid)
+               for _, target, uid, _ in TRANSFERS for row in personal):
+            raise ValueError("historical_cleanup_incomplete")
+    elif result["ledger_rows_total"] != 227:
         raise ValueError("ledger_row_count_changed:" + str(result["ledger_rows_total"]))
     return result
 
@@ -145,15 +155,16 @@ def execute_cleanup(report, user, owner):
     protected_financial = [event for event in before_financial if isinstance(event, dict)
                            and event.get("type") in transfer_types]
     for index, (_, target, uid, historical) in enumerate(TRANSFERS):
+        recipient = report["recipients"][index]
         result = _legacy_deletion_reconcile_atomic({
             "operation_id": "legacy-reconcile-73-" + target + "-v1",
             "historical_operation_id": historical,
             "abonent_id": target, "uid": uid, "regnum": REGNUM,
             "expected_version": report["db_version"] + index,
         }, user, OWNER, commit=False,
-            expected_ledger_rows=report["recipients"][index]["ledger_rows"],
-            expected_ledger_version=report["recipients"][index]["ledger_version"],
-            expected_ledger_sha256=report["recipients"][index]["ledger_sha256"],
+            expected_ledger_rows=recipient["ledger_rows"] if report["ledger_rows_total"] else None,
+            expected_ledger_version=recipient["ledger_version"],
+            expected_ledger_sha256=recipient["ledger_sha256"],
             expected_financial_version=report["financial_version"] if index == 0 else None,
             expected_financial_sha256=report["financial_sha256"] if index == 0 else None)
         if isinstance(result, tuple) or result.get_json().get("ok") is not True:

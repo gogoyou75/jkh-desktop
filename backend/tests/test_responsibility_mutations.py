@@ -972,6 +972,82 @@ class ResponsibilityMutationTest(unittest.TestCase):
             self.assertEqual(app_module.AbonentSummary.query.filter_by(owner_id=special.OWNER).count(), 0)
             self.assertEqual(app_module.CardSnapshot.query.filter_by(owner_id=special.OWNER).count(), 0)
 
+    def test_special_73_reconciles_already_removed_recipients_atomically(self):
+        special = self.special_73_base()
+        with app_module.app.app_context():
+            for _, target, uid, _ in special.TRANSFERS:
+                app_module.KVStore.query.filter_by(
+                    owner=special.OWNER, k="payments_" + uid).delete()
+                app_module.AbonentSummary.query.filter_by(
+                    owner_id=special.OWNER, account_uid=uid).delete()
+                app_module.CardSnapshot.query.filter_by(
+                    owner_id=special.OWNER, abonent_uid=uid).delete()
+            app_module.KVStore.query.filter_by(owner=special.OWNER, k="note_1088").delete()
+            app_module.KVStore.query.filter_by(
+                owner=special.OWNER, k="jkh_frozen_debt_v1:1088:2025-02-28").delete()
+            app_module.db.session.commit()
+            self.assertEqual(special.inspect_state()["ledger_rows_total"], 0)
+        with patch.object(app_module, "ENV_TYPE", "LAB"), patch.object(
+                app_module, "_legacy_73_lab_target", return_value=True), patch.object(
+                app_module, "_require_admin", return_value=(
+                    SimpleNamespace(id=special.OWNER, role="admin"), None)), patch.object(
+                app_module, "_resolve_owner", return_value=(special.OWNER, None)):
+            with app_module.app.test_client() as client:
+                response = client.post("/api/legacy_deletion_reconcile_73")
+                repeat = client.post("/api/legacy_deletion_reconcile_73")
+        self.assertEqual(response.status_code, 200, response.json)
+        self.assertEqual(repeat.status_code, 409)
+        with app_module.app.app_context():
+            state_row = app_module.KVStore.query.filter_by(
+                owner=special.OWNER, k="abonents_db_v1").one()
+            state = json.loads(state_row.v)
+            self.assertEqual(state_row.version, 3)
+            self.assertEqual(state["abonents"]["1073"]["fio"], "Tarasenko")
+            self.assertEqual(state["links"][1]["technicalType"], "NO_NAME")
+            self.assertEqual([e["abonentId"] for e in state["premiseEvents"][-2:]],
+                             ["1088", "1089"])
+            self.assertEqual(len(json.loads(app_module.KVStore.query.filter_by(
+                owner=special.OWNER, k="jkh_financial_events_v1").one().v)), 2)
+
+    def test_special_73_rejects_partial_prior_cleanup(self):
+        special = self.special_73_base()
+        with app_module.app.app_context():
+            for _, _, uid, _ in special.TRANSFERS:
+                app_module.KVStore.query.filter_by(
+                    owner=special.OWNER, k="payments_" + uid).delete()
+            app_module.db.session.commit()
+            with self.assertRaisesRegex(ValueError, "historical_cleanup_incomplete"):
+                special.inspect_state()
+
+    def test_special_73_removed_recipients_roll_back_if_audit_missing(self):
+        special = self.special_73_base(second_audit=False)
+        with app_module.app.app_context():
+            for _, _, uid, _ in special.TRANSFERS:
+                app_module.KVStore.query.filter_by(
+                    owner=special.OWNER, k="payments_" + uid).delete()
+                app_module.AbonentSummary.query.filter_by(
+                    owner_id=special.OWNER, account_uid=uid).delete()
+                app_module.CardSnapshot.query.filter_by(
+                    owner_id=special.OWNER, abonent_uid=uid).delete()
+            app_module.KVStore.query.filter_by(owner=special.OWNER, k="note_1088").delete()
+            app_module.KVStore.query.filter_by(
+                owner=special.OWNER, k="jkh_frozen_debt_v1:1088:2025-02-28").delete()
+            app_module.db.session.commit()
+        with patch.object(app_module, "ENV_TYPE", "LAB"), patch.object(
+                app_module, "_legacy_73_lab_target", return_value=True), patch.object(
+                app_module, "_require_admin", return_value=(
+                    SimpleNamespace(id=special.OWNER, role="admin"), None)), patch.object(
+                app_module, "_resolve_owner", return_value=(special.OWNER, None)):
+            with app_module.app.test_client() as client:
+                response = client.post("/api/legacy_deletion_reconcile_73")
+        self.assertEqual(response.status_code, 409)
+        with app_module.app.app_context():
+            row = app_module.KVStore.query.filter_by(
+                owner=special.OWNER, k="abonents_db_v1").one()
+            self.assertEqual(row.version, 1)
+            self.assertFalse(any(e["type"] == "LEGACY_DELETION_RECONCILED"
+                                 for e in json.loads(row.v)["premiseEvents"]))
+
     def test_special_73_rolls_back_both_when_second_identity_unverified(self):
         special = self.special_73_base(second_audit=False)
         with patch.object(app_module, "ENV_TYPE", "LAB"), patch.object(
