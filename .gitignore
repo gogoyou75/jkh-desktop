@@ -19,6 +19,7 @@ Thumbs.db
 .vscode/
 .idea/
 .env
+.local-lab/
 *.sql
 !backend/migrations/008_kv_store_version.sql
 /root/jkh_backups/

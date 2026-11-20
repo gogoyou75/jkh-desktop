@@ -17,8 +17,8 @@ from werkzeug.security import generate_password_hash, check_password_hash
 from openpyxl import load_workbook, Workbook
 
 ENV_TYPE = os.getenv("ENV_TYPE", "PROD").strip().upper()
-if ENV_TYPE not in {"LAB", "PROD"}:
-    ENV_TYPE = "PROD"
+if ENV_TYPE not in {"LAB", "PROD", "LOCAL_LAB"}:
+    raise RuntimeError("Unsupported ENV_TYPE")
 DB_HOST = os.getenv("DB_HOST", "mysql")
 
 if ENV_TYPE == "LAB":
@@ -32,6 +32,12 @@ DB_USER = os.getenv("DB_USER", "jkh")
 DB_PASSWORD = os.getenv("DB_PASSWORD", "")
 DB_PORT = os.getenv("DB_PORT", "3306")
 DB_NAME = os.getenv("DB_NAME", "jkh")
+
+if ENV_TYPE == "LOCAL_LAB":
+    if (DB_HOST, DB_PORT, DB_NAME, DB_USER) != ("mysql", "3306", "jkh_local_lab", "jkh_local"):
+        raise RuntimeError("LOCAL_LAB SECURITY BLOCK: invalid database target")
+    if not DB_PASSWORD or not os.getenv("SECRET_KEY"):
+        raise RuntimeError("LOCAL_LAB SECURITY BLOCK: test credentials are required")
 
 app.config["SQLALCHEMY_DATABASE_URI"] = (
     f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}?charset=utf8mb4"

@@ -46,7 +46,7 @@
 
   function _normalizeEnvType(value) {
     var env = String(value || "").trim().toUpperCase();
-    return (env === "LAB" || env === "PROD") ? env : "";
+    return (env === "LAB" || env === "PROD" || env === "LOCAL_LAB") ? env : "";
   }
 
   function setEnvType(value) {
