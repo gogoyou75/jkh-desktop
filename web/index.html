@@ -994,7 +994,8 @@ function summaryStatusHtml(row){
     const status = normalizeSummaryStatus(row && row.summaryStatus);
     const reason = String((row && row.summaryReason) || "").trim();
     const reasonHtml = reason ? '<span class="summary-reason">' + escapeHtml(reason) + '</span>' : '';
-    return '<span class="summary-status-badge summary-status-' + status + '">' + escapeHtml(summaryStatusText(status)) + '</span>' + reasonHtml;
+    const staleWarning = status === "dirty" ? '<span title="Показаны данные последнего расчёта. Требуется перерасчёт" aria-label="Устаревший расчёт">⚠</span> ' : '';
+    return staleWarning + '<span class="summary-status-badge summary-status-' + status + '">' + escapeHtml(summaryStatusText(status)) + '</span>' + reasonHtml;
 }
 
 function recordIndexTotalsChain(uid, stage, totals, extra){
@@ -1062,10 +1063,11 @@ function buildIndexRowFromSummaryItem(item){
     const otch = summary.otch || summary.middle_name || abonent.otch || abonent.middle_name || fio.slice(2).join(" ") || "";
 
     const period = (summary.period && typeof summary.period === "object") ? summary.period : {};
-    const debtValue = isFresh ? pickSummaryValueWithSource(summary, INDEX_SUMMARY_TOTAL_KEYS.debt) : { value: "", source: "" };
-    const penaltyValue = isFresh ? pickSummaryValueWithSource(summary, INDEX_SUMMARY_TOTAL_KEYS.penalty) : { value: "", source: "" };
-    const accruedValue = isFresh ? pickSummaryValueWithSource(summary, INDEX_SUMMARY_TOTAL_KEYS.accrued) : { value: "", source: "" };
-    const paidValue = isFresh ? pickSummaryValueWithSource(summary, INDEX_SUMMARY_TOTAL_KEYS.paid) : { value: "", source: "" };
+    const showLastTotals = isFresh || status === "dirty";
+    const debtValue = showLastTotals ? pickSummaryValueWithSource(summary, INDEX_SUMMARY_TOTAL_KEYS.debt) : { value: "", source: "" };
+    const penaltyValue = showLastTotals ? pickSummaryValueWithSource(summary, INDEX_SUMMARY_TOTAL_KEYS.penalty) : { value: "", source: "" };
+    const accruedValue = showLastTotals ? pickSummaryValueWithSource(summary, INDEX_SUMMARY_TOTAL_KEYS.accrued) : { value: "", source: "" };
+    const paidValue = showLastTotals ? pickSummaryValueWithSource(summary, INDEX_SUMMARY_TOTAL_KEYS.paid) : { value: "", source: "" };
     const renderedValues = {
         debt: summaryNumberToDisplay(debtValue.value),
         penalty: summaryNumberToDisplay(penaltyValue.value),
@@ -1156,7 +1158,7 @@ function buildIndexRowFromSummaryItem(item){
 function writeIndexTotalsCell(tr, uid, field, value){
     const target = tr ? tr.querySelector('td[data-field="' + field + '"]') : null;
     const beforeText = target ? String(target.textContent || "") : "";
-    if (target) target.textContent = String(value || "");
+    if (target) target.textContent = value === null || value === undefined || value === "" ? "—" : String(value);
     const afterText = target ? String(target.textContent || "") : "";
     try {
         console.log("[index][totals-dom-write]", {

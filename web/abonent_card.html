@@ -3969,7 +3969,7 @@ function __summaryStatusText(status){
 
 function __summaryWarningText(status){
     if (status === "calculating") return "Выполняется пересчёт…";
-    if (status === "dirty") return "Требуется пересчёт. Показан последний сохранённый расчёт. Нажмите «Пересчитать», чтобы обновить итог.";
+    if (status === "dirty") return "Показаны данные последнего расчёта. Требуется перерасчёт";
     if (status === "missing") return "Нет сохранённого расчёта. Нажмите «Пересчитать».";
     if (status === "cancelled") return "Пересчёт остановлен пользователем. Частичные данные не сохранялись как актуальный итог.";
     if (status === "timeout") return "Пересчёт остановлен по таймауту. Частичные данные не сохранялись как актуальный итог.";
@@ -4004,7 +4004,7 @@ function renderAbonentSummaryStatus(status, reason){
     }
     if (warningEl) {
         const modeMismatchReason = visibleReason === "CARD_SNAPSHOT_MODE_MISMATCH_FULL_VS_PERIOD" || visibleReason === "CARD_SNAPSHOT_PERIOD_MISMATCH" || visibleReason === "CARD_SNAPSHOT_LEGACY_MODE_AMBIGUOUS";
-        const text = __isRatesSummaryReason(visibleReason) ? __ratesFatalLedgerVisibleMessage() : modeMismatchReason ? "Сохранённый snapshot не соответствует текущему режиму расчёта. Нажмите «Пересчитать» для этого режима." : visibleReason === "CARD_ROWS_NOT_RESTORED"
+        const text = visibleReason === "PROTECTED_HISTORY_CHANGED" ? "Изменение финансовых параметров затрагивает защищённую историю. Обычный перерасчёт запрещён; переданный долг сохранён." : __isRatesSummaryReason(visibleReason) ? __ratesFatalLedgerVisibleMessage() : modeMismatchReason ? "Сохранённый snapshot не соответствует текущему режиму расчёта. Нажмите «Пересчитать» для этого режима." : visibleReason === "CARD_ROWS_NOT_RESTORED"
             ? "Итоги есть, но строки карточки не восстановлены. Нажмите «Пересчитать»."
             : __summaryWarningText(normalized);
         warningEl.textContent = text;
@@ -4012,7 +4012,7 @@ function renderAbonentSummaryStatus(status, reason){
         warningEl.className = "summary-warning" + (normalized === "error" ? " summary-error" : "");
     }
     const runBtn = document.getElementById("calcRunBtn");
-    if (runBtn) runBtn.disabled = normalized === "calculating";
+    if (runBtn) runBtn.disabled = normalized === "calculating" || visibleReason === "PROTECTED_HISTORY_CHANGED";
     try {
         console.log("[summary][visible-status]", { status: normalized, reason: visibleReason });
         console.log("[summary][status-set]", { status: normalized, reason: visibleReason });
@@ -4073,6 +4073,15 @@ function restoreFullSummaryStatusUi(snapshot){
         warningEl.className = String(s.warningClass || warningEl.className || "summary-warning");
     }
 }
+
+window.addEventListener("jkh:summary-dirty", function(event){
+    const detail = event.detail || {};
+    if (__currentFullRecalcRun()) return;
+    const current = getCurrentAbonent();
+    if (String(current.a && current.a.uid || "") !== String(detail.uid || "")) return;
+    renderAbonentSummaryStatus("dirty", detail.reason || "INPUT_HASH_CHANGED");
+    loadAbonentSummaryStatus().catch(function(){ /* Local DIRTY warning remains visible. */ });
+});
 
 window.addEventListener("jkh:runtime-cache-invalid", function(event){
     const detail = event && event.detail ? event.detail : {};
@@ -4268,6 +4277,17 @@ async function __tryUseBackendFreshSnapshot(uid, reason){
     if (!normalizedUid || !window.Data || typeof Data.readFreshBackendCardSnapshotForCard !== "function") return false;
     try {
         const result = await Data.readFreshBackendCardSnapshotForCard(normalizedUid, { hydrateLocal: true, validateLocalInputs: false });
+        if (result && result.ok === true && result.stale) {
+            const summary = result.summary || __summaryFromCardSnapshot(result.snapshot, "dirty", result.reason);
+            window.__lastCardSummaryForDebug = summary;
+            __cardSnapshotFreshValidated = false;
+            __lastCardSnapshotValidation = { valid: false, reason: result.reason };
+            __runtimeCacheFreshBlocked = true;
+            __skipCardAutoRecalcFreshSnapshot(normalizedUid);
+            renderAbonentSummaryStatus("dirty", result.reason);
+            __renderAbonentTotalsFromSummary(summary);
+            return true;
+        }
         if (result && result.ok === true && result.snapshot) {
             try { console.log("[reload-chain][card-open-source]", { uid: normalizedUid, source: "backend_canonical_snapshot", accepted: true, reason: String(result.reason || "OK"), rowsByIdCount: Number(result.rowsByIdCount || 0) }); } catch(eReloadSourceLog) {}
             try {
@@ -4324,14 +4344,15 @@ async function loadAbonentSummaryStatus(){
             window.__lastCardSummaryForDebug = null;
             __resetCardAutoRecalcForUid(uid);
             renderAbonentSummaryStatus("missing", "Нет сохранённого расчёта. Нажмите «Пересчитать»");
+            __renderAbonentTotalsFromSummary({ totals: {} });
             return;
         }
         if (snapshot.dirty === true) {
             __debugCurrentCardSnapshotLifecycle(snapshot.dirtyReason || "LOCAL_CARD_SNAPSHOT_DIRTY_PASSIVE");
-            const cachedSummary = __summaryFromCardSnapshot(snapshot, "missing", "LOCAL_CARD_SNAPSHOT_DIRTY_PASSIVE");
+            const cachedSummary = __summaryFromCardSnapshot(snapshot, "dirty", snapshot.dirtyReason || snapshot.summary_reason || "LOCAL_CARD_SNAPSHOT_DIRTY_PASSIVE");
             window.__lastCardSummaryForDebug = cachedSummary;
             __resetCardAutoRecalcForUid(uid);
-            renderAbonentSummaryStatus("missing", "Серверный snapshot недоступен. Локальный cache не является источником актуальности.");
+            renderAbonentSummaryStatus("dirty", cachedSummary.summary_reason);
             __renderAbonentTotalsFromSummary(cachedSummary);
             return;
         }
@@ -4386,12 +4407,13 @@ function __renderAbonentTotalsFromSummary(summary){
     if (!totals) return;
 
     function finite(v){
+        if (v === null || v === undefined || v === "") return null;
         const n = Number(v);
         return Number.isFinite(n) ? n : null;
     }
     function put(el, value){
-        if (!el || value === null) return;
-        el.textContent = value.toFixed(2);
+        if (!el) return;
+        el.textContent = value === null ? "—" : value.toFixed(2);
     }
 
     const total = finite(totals.total != null ? totals.total : totals.total_debt);
@@ -4550,6 +4572,11 @@ function bindCalcButtons(){
         if (!canWriteOrExplainLocal()) return;
         const currentAbonentId = getAbonentIdFromURL();
         hydrateCardRuntimeDbFromStore();
+        const transferInfo = window.Data && Data.getFinancialTransferInfo(currentAbonentId, getCurrentAbonent().a?.regnum || getCurrentAbonent().a?.premiseRegnum);
+        if (transferInfo && transferInfo.outgoing && transferInfo.outgoing.length) {
+            renderAbonentSummaryStatus("dirty", "PROTECTED_HISTORY_CHANGED");
+            return;
+        }
         const recalcRunId = __nextFullRecalcRunId();
         let from = String(fromEl.value || "").trim();
         let to   = String(toEl.value || "").trim();
@@ -5070,8 +5097,8 @@ function bindCalcButtons(){
 
             if (!uidResult || uidResult.ok !== true || !uidResult.uid) {
                 logFullRecalcExit("UID_NOT_SAVED", "early-return", "ensure-uid", { ok: false, reason: "UID_NOT_SAVED", uidResult: uidResult || null }, null);
-                renderAbonentSummaryStatus("error", "UID_NOT_SAVED");
-                alert("Период расчёта не сохранён: UID абонента не сохранён.");
+                renderAbonentSummaryStatus("error", uidResult && uidResult.reason || "UID_NOT_SAVED");
+                alert(uidResult && uidResult.message || "UID абонента не подтверждён сервером. Расчёт не запускался.");
                 return;
             }
             fullRecalcState.uid = String(uidResult.uid || fullRecalcState.uid || "");
@@ -5403,7 +5430,7 @@ function bindCalcButtons(){
                         const totalsSyncReason = "CANONICAL_SUMMARY_TOTALS_API_UNAVAILABLE";
                         rememberExplicitFullRecalcFinal("error", totalsSyncReason, recalcResult);
                         renderExplicitFullRecalcFinal("canonical-summary-totals-api-unavailable");
-                        renderAbonentSummaryStatus("error", totalsSyncReason);
+                        renderAbonentSummaryStatus("dirty", totalsSyncReason);
                         logFullRecalcExit(totalsSyncReason, "early-return", "canonical-summary-totals-api-unavailable", { ok: false, reason: totalsSyncReason }, null);
                         return;
                     }
@@ -5413,7 +5440,7 @@ function bindCalcButtons(){
                         const totalsSyncReason = String(canonicalSummarySave && canonicalSummarySave.reason || "ABONENT_SUMMARY_CANONICAL_TOTALS_SAVE_FAILED");
                         rememberExplicitFullRecalcFinal("error", totalsSyncReason, recalcResult);
                         renderExplicitFullRecalcFinal("canonical-summary-totals-save-failed");
-                        renderAbonentSummaryStatus("error", totalsSyncReason);
+                        renderAbonentSummaryStatus("dirty", totalsSyncReason);
                         alert("Canonical snapshot сохранён, но totals для списка не подтверждены: " + totalsSyncReason);
                         logFullRecalcExit(totalsSyncReason, "early-return", "canonical-summary-totals-save-failed", canonicalSummarySave || null, null);
                         return;

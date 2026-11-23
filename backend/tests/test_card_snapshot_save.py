@@ -3,6 +3,8 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
+from sqlalchemy.exc import SQLAlchemyError
 from decimal import Decimal
 from sqlalchemy import create_engine
 
@@ -252,6 +254,122 @@ class CardSnapshotSaveTest(unittest.TestCase):
         self.assertEqual(audit["counts"]["hash_mismatch_count"], 0)
         self.assertFalse(item["hash_mismatch"])
         self.assertEqual(item["warnings"], [])
+
+
+    def _mark_dirty(self):
+        return self.client.post("/api/abonent_summary/mark_dirty", json={
+            "account_uid": "uid-1", "reason": "TARIFFS_CHANGED"})
+
+    def _confirmed_summary(self, snapshot):
+        return {"account_uid": "uid-1", "confirm_snapshot": True, "summary": {
+            "summary_status": "fresh", "summary_reason": "OK", "summary_scope": "full",
+            "calculation_mode": "FULL_SUMMARY_REBUILD", "input_hash": snapshot["input_hash"],
+            "period": {"from": "2026-01-01", "to": "2026-01-31"},
+            "totals": snapshot["totals"]}}
+
+    def test_dirty_preserves_last_result_and_f5_without_hash_promotion(self):
+        self._login("owner1")
+        self._post_snapshot(self._snapshot())
+        with app_module.app.app_context():
+            row = app_module.AbonentSummary.query.filter_by(owner_id="owner1").one()
+            value = json.loads(row.summary_json)
+            value["generated_at"] = "2026-02-01T00:00:00Z"
+            row.summary_json = json.dumps(value)
+            app_module.db.session.commit()
+        for _ in range(2):
+            self.assertEqual(self._mark_dirty().status_code, 200)
+        # A new HTTP context must use the persisted dirty status even with equal hashes.
+        fresh_client = app_module.app.test_client()
+        with fresh_client.session_transaction() as sess:
+            sess["user_id"] = "owner1"
+        result = fresh_client.get("/api/card_snapshot/uid-1").get_json()
+        self.assertEqual(result["snapshot_status"], "dirty")
+        self.assertEqual(result["snapshot"]["rowsById"], self._snapshot()["rowsById"])
+        self.assertEqual(result["last_summary"]["totals"]["debt"], 12)
+        self.assertEqual(result["last_summary"]["input_hash"], "hash-1")
+        self.assertEqual(result["last_summary"]["generated_at"], "2026-02-01T00:00:00Z")
+        with app_module.app.app_context():
+            row = app_module.AbonentSummary.query.filter_by(owner_id="owner1").one()
+            self.assertEqual(row.summary_status, "dirty")
+            self.assertEqual(row.total_debt, Decimal("12.00"))
+
+    def test_dirty_rollback_keeps_both_objects_fresh(self):
+        self._login("owner1")
+        self._post_snapshot(self._snapshot())
+        with patch.object(app_module.db.session, "commit", side_effect=SQLAlchemyError("isolated failure")):
+            self.assertEqual(self._mark_dirty().status_code, 500)
+        with app_module.app.app_context():
+            self.assertEqual(app_module.AbonentSummary.query.filter_by(owner_id="owner1").one().summary_status, "fresh")
+            self.assertEqual(app_module.CardSnapshot.query.filter_by(owner_id="owner1").one().snapshot_status, "fresh")
+
+    def test_dirty_missing_objects_do_not_invent_zero_totals(self):
+        self._login("owner1")
+        with app_module.app.app_context():
+            app_module.AbonentSummary.query.filter_by(owner_id="owner1").delete()
+            app_module.db.session.commit()
+        self.assertEqual(self._mark_dirty().status_code, 200)
+        result = self.client.get("/api/card_snapshot/uid-1").get_json()
+        self.assertIsNone(result["snapshot"])
+        self.assertNotIn("totals", result["last_summary"])
+        with app_module.app.app_context():
+            self.assertIsNone(app_module.AbonentSummary.query.filter_by(owner_id="owner1").one().total_debt)
+
+    def test_dirty_cannot_clear_before_full_pair_confirmation(self):
+        self._login("owner1")
+        self._post_snapshot(self._snapshot())
+        self._mark_dirty()
+        new_snapshot = self._snapshot(input_hash="hash-new")
+        payload = self._confirmed_summary(new_snapshot)
+        unconfirmed = dict(payload, confirm_snapshot=False)
+        self.assertEqual(self.client.post("/api/abonent_summary/rebuild", json=unconfirmed).status_code, 409)
+        self.assertEqual(self._post_snapshot(new_snapshot).get_json()["snapshot_status"], "dirty")
+        # A failed confirmation must not clear dirty or replace the last summary.
+        wrong = self._confirmed_summary(new_snapshot)
+        wrong["summary"]["totals"] = dict(new_snapshot["totals"], debt=99)
+        self.assertEqual(self.client.post("/api/abonent_summary/rebuild", json=wrong).status_code, 409)
+        self.assertEqual(self.client.get("/api/card_snapshot/uid-1").get_json()["snapshot_status"], "dirty")
+        self.assertEqual(self.client.post("/api/abonent_summary/rebuild", json=payload).status_code, 200)
+        self.assertEqual(self.client.get("/api/card_snapshot/uid-1").get_json()["snapshot_status"], "fresh")
+        with app_module.app.app_context():
+            self.assertEqual(app_module.AbonentSummary.query.filter_by(owner_id="owner1").one().summary_status, "fresh")
+
+    def test_new_dirty_after_snapshot_blocks_old_confirmation(self):
+        self._login("owner1")
+        self._mark_dirty()
+        self._post_snapshot(self._snapshot())
+        self._mark_dirty()
+        response = self.client.post("/api/abonent_summary/rebuild", json=self._confirmed_summary(self._snapshot()))
+        self.assertEqual(response.status_code, 409)
+
+    def test_confirmation_failure_rolls_back_fresh_snapshot_status(self):
+        self._login("owner1")
+        self._mark_dirty()
+        self._post_snapshot(self._snapshot())
+        with patch.object(app_module.db.session, "commit", side_effect=SQLAlchemyError("isolated confirmation failure")):
+            try:
+                self.client.post("/api/abonent_summary/rebuild", json=self._confirmed_summary(self._snapshot()))
+            except SQLAlchemyError:
+                # The testing client propagates unhandled errors; teardown rolls back.
+                pass
+        with app_module.app.app_context():
+            self.assertEqual(app_module.CardSnapshot.query.filter_by(owner_id="owner1").one().snapshot_status, "dirty")
+            self.assertEqual(app_module.AbonentSummary.query.filter_by(owner_id="owner1").one().summary_status, "dirty")
+
+    def test_transferred_history_stays_dirty_and_balances_unchanged(self):
+        self._login("owner1")
+        self._post_snapshot(self._snapshot())
+        keys = {"jkh_transfer_balance_v1:2002:test": json.dumps({"fromAbonentId": "1001", "principal": 10, "penalty": 2}),
+                "jkh_frozen_debt_v1:1001:2025-12-31": json.dumps({"principal": 10, "penalty": 2})}
+        with app_module.app.app_context():
+            for key, value in keys.items():
+                app_module.db.session.add(app_module.KVStore(owner="owner1", k=key, v=value))
+            app_module.db.session.commit()
+        self.assertEqual(self._mark_dirty().get_json()["reason"], "PROTECTED_HISTORY_CHANGED")
+        self.assertEqual(self._post_snapshot(self._snapshot()).status_code, 409)
+        self.assertEqual(self.client.post("/api/abonent_summary/rebuild", json=self._confirmed_summary(self._snapshot())).status_code, 409)
+        with app_module.app.app_context():
+            for key, value in keys.items():
+                self.assertEqual(app_module.KVStore.query.filter_by(owner="owner1", k=key).one().v, value)
 
 
 if __name__ == "__main__":

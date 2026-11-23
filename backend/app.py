@@ -1555,25 +1555,13 @@ def _owner_abonents_db_v1_summary_targets(owner_id: str):
 
 def _dirty_abonent_summary_payload(existing_summary: dict | None, reason: str):
     payload = existing_summary.copy() if isinstance(existing_summary, dict) else {}
-    for key in (
-        "totals",
-        "total",
-        "total_debt",
-        "total_penalty",
-        "total_accrued",
-        "total_paid",
-        "total_principal",
-        "debt",
-        "penalty",
-        "principal",
-    ):
-        payload.pop(key, None)
+    # DIRTY invalidates freshness, not the last successfully calculated result.
     payload.update({
         "summary_status": "dirty",
         "summary_reason": _cache_reason("summary", "dirty", reason),
         "status": "dirty",
         "reason": _cache_reason("summary", "dirty", reason),
-        "dirty_at": datetime.utcnow().isoformat() + "Z",
+        "dirty_at": payload.get("dirty_at") or datetime.utcnow().isoformat() + "Z",
     })
     if "period" not in payload or not isinstance(payload.get("period"), dict):
         payload["period"] = {"from": None, "to": None}
@@ -1915,7 +1903,7 @@ def _summary_without_stale_totals(summary: dict | None, target: dict | None = No
         payload["reason"] = "PERIOD_SUMMARY_IGNORED"
     payload["summary_status"] = status
     payload["status"] = status
-    if status != "fresh":
+    if status not in {"fresh", "dirty"}:
         for key in (
             "totals",
             "total",
@@ -2168,11 +2156,16 @@ def _client_recalc_fresh_guard(owner_id: str, account_uid: str, summary: dict | 
     if not all(_summary_finite_number(value) for value in required.values()):
         return False, "SUMMARY_TOTALS_INVALID"
 
-    row = CardSnapshot.query.filter_by(owner_id=owner_id, abonent_uid=account_uid).first()
+    target = next((t for t in _owner_abonent_summary_targets(owner_id) if t.get("account_uid") == account_uid), {})
+    if _summary_history_protected(owner_id, target):
+        return False, "PROTECTED_HISTORY_CHANGED"
+    row = CardSnapshot.query.filter_by(owner_id=owner_id, abonent_uid=account_uid).with_for_update().first()
     if not row:
         return False, "CARD_SNAPSHOT_MISSING"
     if _cache_status(row.snapshot_status) != "fresh":
-        return False, "CARD_SNAPSHOT_NOT_FRESH"
+        confirmation_error = _confirm_full_snapshot(row, summary)
+        if confirmation_error:
+            return False, "CARD_SNAPSHOT_NOT_FRESH"
     try:
         snapshot = json.loads(row.snapshot_json or "{}")
     except (TypeError, ValueError):
@@ -2907,6 +2900,9 @@ def _abonents_api_row_payload(row):
         warnings.append("SUMMARY_FRESH_CARD_SNAPSHOT_MISSING")
     if summary_status == "fresh" and snapshot_status in {"dirty", "error", "invalid"}:
         warnings.append("SUMMARY_FRESH_SNAPSHOT_NOT_FRESH")
+        if snapshot_status == "dirty":
+            summary_status = "dirty"
+            summary_reason = snapshot_reason
 
     payload = {
         "abonent_id": _norm_text(data.get("abonent_id")),
@@ -3291,6 +3287,54 @@ def abonent_summary_list():
     )
 
 
+def _confirm_full_snapshot(canonical_row, summary):
+    try:
+        canonical = json.loads(canonical_row.snapshot_json or "{}")
+    except (TypeError, ValueError):
+        return "canonical_summary_confirmation_conflict"
+    if (not isinstance(canonical, dict) or
+            not (canonical.get("summary_confirmation_pending") or canonical_row.snapshot_status == "fresh") or
+            not summary.get("input_hash") or summary.get("input_hash") != canonical_row.input_hash or
+            _norm_text(summary.get("calculation_mode")) != "FULL_SUMMARY_REBUILD"):
+        return "canonical_summary_confirmation_conflict"
+    for aliases in (("debt", "total"), ("penalty",), ("accrued",), ("paid",)):
+        saved_totals = canonical.get("totals") or {}
+        submitted_totals = summary.get("totals") or {}
+        left = next((saved_totals[k] for k in aliases if k in saved_totals), None)
+        right = next((submitted_totals[k] for k in aliases if k in submitted_totals), None)
+        if left is None or _decimal_or_none(left) is None or _decimal_or_none(left) != _decimal_or_none(right):
+            return "canonical_summary_totals_mismatch"
+    canonical.update(dirty=False, summary_status="fresh", snapshot_status="fresh",
+                     summary_reason="OK", snapshot_reason="OK")
+    canonical.pop("dirtyReason", None)
+    canonical.pop("summary_confirmation_pending", None)
+    canonical_row.snapshot_status = "fresh"
+    canonical_row.snapshot_reason = "OK"
+    canonical_row.computed_at = datetime.utcnow()
+    canonical_row.snapshot_json = json.dumps(canonical, ensure_ascii=False, sort_keys=True)
+    return ""
+
+
+def _summary_history_protected(owner, target):
+    """Read-only guard: a live outgoing balance makes history non-recalculable."""
+    source = _norm_text(target.get("abonent_id"))
+    if not source:
+        return False
+    if AbonentSummary.query.filter_by(owner_id=owner, abonent_id=source,
+                                     summary_status="dirty", summary_reason="PROTECTED_HISTORY_CHANGED").first():
+        return True
+    rows = KVStore.query.filter(KVStore.owner == owner, KVStore.k.like("jkh_transfer_balance_v1:%")).all()
+    for row in rows:
+        try:
+            balance = json.loads(row.v or "{}")
+        except (TypeError, ValueError):
+            # Ambiguous financial dependencies must not authorize a rebuild.
+            return True
+        if isinstance(balance, dict) and _norm_text(balance.get("fromAbonentId")) == source:
+            return True
+    return False
+
+
 @app.post("/api/abonent_summary/mark_dirty")
 def abonent_summary_mark_dirty():
     user, err = _require_user()
@@ -3328,7 +3372,10 @@ def abonent_summary_mark_dirty():
                 counters=counters,
             )
 
-        row = AbonentSummary.query.filter_by(owner_id=owner, account_uid=account_uid).order_by(AbonentSummary.id.asc()).first()
+        row = AbonentSummary.query.filter_by(owner_id=owner, account_uid=account_uid).order_by(AbonentSummary.id.asc()).with_for_update().first()
+        snapshot_row = CardSnapshot.query.filter_by(owner_id=owner, abonent_uid=account_uid).with_for_update().first()
+        if _summary_history_protected(owner, target):
+            reason = "PROTECTED_HISTORY_CHANGED"
         if row:
             try:
                 existing_summary = json.loads(row.summary_json or "{}")
@@ -3351,6 +3398,18 @@ def abonent_summary_mark_dirty():
             db.session.add(row)
             counters["created"] += 1
 
+        if snapshot_row:
+            try:
+                snapshot = json.loads(snapshot_row.snapshot_json or "{}")
+            except (TypeError, ValueError):
+                snapshot = None
+            snapshot_row.snapshot_status = "dirty"
+            snapshot_row.snapshot_reason = reason
+            if isinstance(snapshot, dict):
+                snapshot.update(dirty=True, dirtyReason=reason, summary_status="dirty",
+                                snapshot_status="dirty", summary_reason=reason, snapshot_reason=reason)
+                snapshot.pop("summary_confirmation_pending", None)
+                snapshot_row.snapshot_json = json.dumps(snapshot, ensure_ascii=False, sort_keys=True)
         db.session.commit()
     except SQLAlchemyError as exc:
         db.session.rollback()
@@ -3554,6 +3613,18 @@ def abonent_summary_rebuild():
             target = next((t for t in targets if _norm_text(t.get("account_uid")) == account_uid), None)
             if not target:
                 return jsonify(ok=False, error="uid_not_found", counters=counters), 404
+            existing_row = AbonentSummary.query.filter_by(owner_id=owner, account_uid=account_uid).with_for_update().first()
+            canonical_row = CardSnapshot.query.filter_by(owner_id=owner, abonent_uid=account_uid).with_for_update().first()
+            if incoming_status == "fresh" and _summary_history_protected(owner, target):
+                return jsonify(ok=False, error="protected_history_recalc_forbidden"), 409
+            if incoming_status == "fresh" and (body.get("confirm_snapshot") is True or
+                    (existing_row and existing_row.summary_status == "dirty") or
+                    (canonical_row and canonical_row.snapshot_status == "dirty")):
+                if body.get("confirm_snapshot") is not True or not canonical_row:
+                    return jsonify(ok=False, error="canonical_summary_confirmation_required"), 409
+                confirmation_error = _confirm_full_snapshot(canonical_row, summary)
+                if confirmation_error:
+                    return jsonify(ok=False, error=confirmation_error), 409
             summary = _summary_without_stale_totals(summary, target, owner)
             app.logger.info("[index-totals-chain][backend-rebuild-normalized] %s", json.dumps({
                 "uid": account_uid,
@@ -4098,10 +4169,20 @@ def card_snapshot_get(account_uid: str):
         return jsonify(ok=False, error="account_uid_required"), 400
     owner = _environment_owner_id(user.id)
     row = CardSnapshot.query.filter_by(owner_id=owner, abonent_uid=uid).first()
+    summary_row = AbonentSummary.query.filter_by(owner_id=owner, account_uid=uid).first()
+    dirty_summary = summary_row and summary_row.summary_status == "dirty"
+    last_summary = _summary_from_row_or_missing(summary_row, {}) if dirty_summary else None
     if not row:
         app.logger.info("[reload-chain][canonical-read] %s", json.dumps({"found": False, "owner": owner, "uid": uid}, ensure_ascii=False))
-        return jsonify(ok=True, snapshot_status="missing", snapshot_reason="SNAPSHOT_NOT_BUILT", snapshot=None)
+        return jsonify(ok=True, snapshot_status="dirty" if dirty_summary else "missing",
+                       snapshot_reason=summary_row.summary_reason if dirty_summary else "SNAPSHOT_NOT_BUILT",
+                       snapshot=None, last_summary=last_summary)
     payload = _card_snapshot_payload(row)
+    if dirty_summary:
+        payload.update(snapshot_status="dirty", snapshot_reason=summary_row.summary_reason, last_summary=last_summary)
+        if isinstance(payload.get("snapshot"), dict):
+            payload["snapshot"].update(dirty=True, summary_status="dirty", snapshot_status="dirty",
+                                       summary_reason=summary_row.summary_reason)
     snapshot = payload.get("snapshot") if isinstance(payload.get("snapshot"), dict) else {}
     app.logger.info("[reload-chain][canonical-read] %s", json.dumps({"found": True, "owner": owner, "uid": uid, "status": row.snapshot_status, "rowsByIdCount": _snapshot_rows_by_id_count(snapshot), "totals": snapshot.get("totals"), "input_hash": row.input_hash, "ledgerVersion": row.ledger_version, "storedPayloadSize": len(row.snapshot_json or "")}, ensure_ascii=False))
     return jsonify(ok=True, **payload)
@@ -4132,8 +4213,14 @@ def card_snapshot_put(account_uid: str):
     validation_error = _card_snapshot_validation_error(snapshot, target, uid)
     if validation_error:
         return jsonify(ok=False, error=validation_error), 400
+    if _summary_history_protected(owner, target):
+        return jsonify(ok=False, error="protected_history_recalc_forbidden"), 409
     status = "fresh"
     reason = "OK"
+    summary_row = AbonentSummary.query.filter_by(owner_id=owner, account_uid=uid).with_for_update().first()
+    if body.get("defer_confirmation") is True or (summary_row and summary_row.summary_status == "dirty"):
+        status = "dirty"
+        reason = summary_row.summary_reason if summary_row and summary_row.summary_status == "dirty" else "SUMMARY_CONFIRMATION_PENDING"
     snapshot = dict(snapshot)
     snapshot["uid"] = uid
     snapshot["account_uid"] = uid
@@ -4141,6 +4228,9 @@ def card_snapshot_put(account_uid: str):
     snapshot["summary_status"] = status
     snapshot["snapshot_reason"] = reason
     snapshot["summary_reason"] = reason
+    snapshot["dirty"] = status == "dirty"
+    if status == "dirty":
+        snapshot["summary_confirmation_pending"] = True
     row = CardSnapshot.query.filter_by(owner_id=owner, abonent_uid=uid).first()
     if not row:
         row = CardSnapshot(owner_id=owner, abonent_uid=uid)

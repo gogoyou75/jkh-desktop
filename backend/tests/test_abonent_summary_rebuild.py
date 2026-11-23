@@ -2,6 +2,7 @@ import hashlib
 import json
 import os
 import re
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -15,6 +16,100 @@ import app as app_module
 
 
 class AbonentSummaryRebuildTest(unittest.TestCase):
+    def test_new_uid_ordinary_registry_registration_preserves_financial_keys_and_cas(self):
+        from unittest.mock import patch
+        owner = "owner-uid-registration"
+        protected = {"jkh_frozen_debt_v1:1000:2025-12-31": '{"principal":10,"penalty":2}',
+                     "jkh_transfer_balance_v1:1002:test": '{"fromAbonentId":"1000","principal":10,"penalty":2}'}
+        with app_module.app.app_context():
+            self._add_user(owner)
+            self._put_abonents(owner, {"1000": {"id": "1000", "uid": "uid_existing"}})
+            for key, value in protected.items():
+                app_module.db.session.add(app_module.KVStore(owner=owner, k=key, v=value, version=4))
+            app_module.db.session.commit()
+        self._login(owner)
+        with patch.object(app_module, "ENV_TYPE", "LOCAL_LAB"):
+            before = self.client.get("/api/store", query_string={"key": "abonents_db_v1", "client_owner_hint": owner}).get_json()
+            registry = json.loads(before["value"])
+            self.assertNotIn("8801", registry["abonents"])
+            registry["abonents"]["8801"] = {"id": "8801", "uid": "uid_new_registered"}
+            payload = {"key": "abonents_db_v1", "value": json.dumps(registry), "expected_version": before["version"]}
+            response = self.client.post("/api/store", json=payload)
+            self.assertEqual(response.status_code, 200)
+            confirmed = self.client.get("/api/store", query_string={"key": "abonents_db_v1", "client_owner_hint": owner}).get_json()
+            self.assertEqual(json.loads(confirmed["value"])["abonents"]["8801"]["uid"], "uid_new_registered")
+            self.assertEqual(confirmed["version"], before["version"] + 1)
+            self.assertEqual(self.client.post("/api/store", json=payload).status_code, 409)
+        with app_module.app.app_context():
+            for key, value in protected.items():
+                row = app_module.KVStore.query.filter_by(owner=owner, k=key).one()
+                self.assertEqual((row.v, row.version), (value, 4))
+            self.assertEqual(app_module.AbonentSummary.query.count(), 0)
+            self.assertEqual(app_module.CardSnapshot.query.count(), 0)
+
+    def test_stale_ui_restore_and_index_without_financial_engine(self):
+        """Execute the real rendering functions in an isolated DOM, including reload."""
+        script = r'''
+const fs = require('fs'), vm = require('vm'), assert = require('assert');
+function install(c, source, name) {
+  let start = source.indexOf('function ' + name + '(');
+  assert(start >= 0, name);
+  if (source.slice(start - 6, start) === 'async ') start -= 6;
+  for (let end = source.indexOf('}', start); end >= 0; end = source.indexOf('}', end + 1)) {
+    const code = source.slice(start, end + 1);
+    try { new vm.Script(code); } catch (_) { continue; }
+    vm.runInContext(code, c); return;
+  }
+  throw Error('Cannot extract ' + name);
+}
+const index = fs.readFileSync(process.argv[1], 'utf8');
+const card = fs.readFileSync(process.argv[2], 'utf8');
+const quiet = {log(){}, warn(){}, error(){}};
+const c = vm.createContext({console:quiet, window:{}, toNum:Number,
+  sessionStorage:{getItem(){return null},setItem(){}},
+  escapeHtml:s=>String(s).replaceAll('<','&lt;'), recordIndexTotalsChain(){},
+  fetch(){throw Error('Network/engine must not run during rendering')}});
+vm.runInContext(index.match(/const INDEX_SUMMARY_TOTAL_KEYS = \{[\s\S]*?\};/)[0], c);
+for (const name of ['normalizeSummaryStatus','summaryNumberToDisplay','summaryFiniteNumber',
+  'pickSummaryValue','pickSummaryValueWithSource','firstPresentValue','isBackendAbonentsRow',
+  'buildSummaryFromBackendAbonentsRow','validateIndexSummaryTotals','buildIndexRowFromSummaryItem',
+  'summaryStatusText','summaryStatusHtml','writeIndexTotalsCell']) install(c,index,name);
+const row = c.buildIndexRowFromSummaryItem({uid:'test',summary:{summary_status:'dirty',
+  summary_reason:'TARIFFS_CHANGED',totals:{debt:12,penalty:2,accrued:15,paid:3}}});
+assert.equal(row.totalDebt,'12.00'); assert.equal(row.summaryStatus,'dirty');
+assert(c.summaryStatusHtml(row).includes('⚠')); assert(c.summaryStatusHtml(row).includes('Требуется перерасчёт'));
+const missing = c.buildIndexRowFromSummaryItem({uid:'missing',summary:{summary_status:'missing'}});
+const cell={textContent:''}; c.writeIndexTotalsCell({querySelector(){return cell}},'missing','debt',missing.totalDebt);
+assert.equal(cell.textContent,'—');
+const elements = new Map();
+const el = id => { if (!elements.has(id)) elements.set(id,{textContent:'',style:{},disabled:false}); return elements.get(id); };
+Object.assign(c,{document:{getElementById:el,querySelector(){return null}},
+  __lastRenderedSummaryStatusLocal:'',__lastRenderedSummaryReasonLocal:'',
+  __cardSnapshotFreshValidated:false,__lastCardSnapshotValidation:{},__runtimeCacheFreshBlocked:false,
+  __skipCardAutoRecalcFreshSnapshot(){},__freshSummaryVisibleGuard(){throw Error('Dirty is never fresh')},
+  __summaryStatusText:s=>s,__isRatesSummaryReason:()=>false});
+for (const name of ['__normalizeSummaryStatus','__summaryWarningText','renderAbonentSummaryStatus',
+  '__renderAbonentTotalsFromSummary','__summaryFromCardSnapshot','__tryUseBackendFreshSnapshot']) install(c,card,name);
+const stale={ok:true,stale:true,reason:'TARIFFS_CHANGED',snapshot:{input_hash:'same'},
+  summary:{summary_status:'dirty',totals:{total:12,principal:10,penalty:2}}};
+c.Data={readFreshBackendCardSnapshotForCard:async()=>stale}; c.window.Data=c.Data;
+(async()=>{
+  for(let reload=0;reload<2;reload++) {
+    assert(await c.__tryUseBackendFreshSnapshot('test','F5'));
+    assert.equal(el('summaryStatusBadge').textContent,'dirty');
+    assert(el('summaryStatusWarning').textContent.includes('Показаны данные последнего расчёта'));
+    assert.equal(el('abonent_total_debt').textContent,'12.00');
+    assert.equal(c.__cardSnapshotFreshValidated,false);
+  }
+  c.__renderAbonentTotalsFromSummary({totals:{}}); assert.equal(el('abonent_total_debt').textContent,'—');
+})().catch(e=>{console.error(e);process.exitCode=1});
+'''
+        result = subprocess.run(["node", "-e", script,
+            str(self._find_repo_file("web", "index.html")),
+            str(self._find_repo_file("web", "abonent_card.html"))],
+            capture_output=True, text=True, encoding="utf-8", timeout=20)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     @staticmethod
     def _find_repo_file(*parts: str):
         return find_repo_file(*parts)
@@ -626,7 +721,7 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
             self.assertEqual(payload["summary_reason"], "IMPORT_PAYMENTS_APPLIED")
             self.assertEqual(payload["status"], "dirty")
             self.assertEqual(payload["reason"], "IMPORT_PAYMENTS_APPLIED")
-            self.assertNotIn("totals", payload)
+            self.assertEqual(payload["totals"], self._fresh_summary(50, 7, 57)["totals"])
             self.assertNotEqual(payload.get("total_debt"), 0)
 
     def test_mark_dirty_rejects_unknown_uid_with_404(self):
@@ -1145,7 +1240,7 @@ class AbonentSummaryRebuildTest(unittest.TestCase):
         with app_module.app.app_context():
             payload = json.loads(app_module.AbonentSummary.query.one().summary_json)
             self.assertEqual(payload["summary_status"], "dirty")
-            self.assertNotIn("totals", payload)
+            self.assertEqual(payload["totals"], {"principal": 5, "penalty": 1, "total": 6})
             self.assertNotEqual(payload.get("totals"), {"principal": 0, "penalty": 0, "total": 0})
 
     def test_get_abonent_summary_remains_read_only_after_mark_dirty_endpoint_added(self):

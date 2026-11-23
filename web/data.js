@@ -1272,6 +1272,13 @@
     }
     var serverStatus = String(data.snapshot_status || data.status || "").toLowerCase();
     var serverSnapshot = data.snapshot && typeof data.snapshot === "object" ? data.snapshot : null;
+    if (serverStatus === "dirty") {
+      var stale = serverSnapshot || { uid: uid, totals: data.last_summary && data.last_summary.totals || {} };
+      stale = Object.assign({}, stale, { dirty: true, summary_status: "dirty", snapshot_status: "dirty",
+        summary_reason: data.snapshot_reason || "INPUT_HASH_CHANGED" });
+      if (opts.hydrateLocal !== false) _setProjectRaw(resolveCardSnapshotKey(abonent || uid), JSON.stringify(stale));
+      return { ok: true, stale: true, snapshot: stale, summary: data.last_summary && data.last_summary.totals ? data.last_summary : null, reason: stale.summary_reason };
+    }
     if (!serverSnapshot || serverStatus === "missing") {
       try { console.log("[card-snapshot][backend-read-through]", { uid: uid, reason: "card_auto_recalc_backend_snapshot_missing" }); } catch (eMissingLog) {}
       return { ok: false, reason: "card_auto_recalc_backend_snapshot_missing", snapshot: null, status: res.status };
@@ -1394,7 +1401,7 @@
       return { ok: false, reason: "UID_REQUIRED" };
     }
     var postUrl = "/api/card_snapshot/" + encodeURIComponent(uid);
-    var requestBody = JSON.stringify({ snapshot: snapshot });
+    var requestBody = JSON.stringify({ snapshot: snapshot, defer_confirmation: true });
     var requestRowsById = snapshot && snapshot.rowsById && typeof snapshot.rowsById === "object" && !Array.isArray(snapshot.rowsById) ? snapshot.rowsById : {};
     var requestRowIds = Object.keys(requestRowsById);
     var requestTotals = snapshot && snapshot.totals && typeof snapshot.totals === "object" ? snapshot.totals : {};
@@ -1625,7 +1632,9 @@
       var key = prepared.key;
       var ownerId = prepared.ownerId;
       var normalized = prepared.normalized;
-      var serialized = prepared.serialized;
+      // Until the summary confirms these totals, F5/offline fallback must stay DIRTY.
+      var serialized = JSON.stringify(Object.assign({}, normalized, { dirty: true,
+        summary_status: "dirty", snapshot_status: "dirty", summary_reason: "SUMMARY_CONFIRMATION_PENDING" }));
       result.rowsByIdCount = _cardSnapshotRowsByIdCount(normalized.rowsById);
       result.ledgerVersion = String(normalized.ledgerVersion || "");
       var localWrite = _setProjectRawDetailed(key, serialized);
@@ -3601,10 +3610,9 @@
   }
 
   async function ensureAbonentUid(abonentOrId, options) {
-    var opts = options || {};
     var db = window.AbonentsDB || null;
     if (!db) return { ok: false, uid: "", changed: false, reason: "DB_NOT_READY" };
-    if (!db.abonents || typeof db.abonents !== "object") db.abonents = {};
+    if (!db.abonents || typeof db.abonents !== "object") return { ok: false, uid: "", changed: false, reason: "DB_NOT_READY" };
 
     var found = _findAbonentByIdOrUid(abonentOrId);
     var id = String(found && found.id || (abonentOrId && typeof abonentOrId === "object" ? abonentOrId.id : abonentOrId) || "").trim();
@@ -3618,35 +3626,47 @@
       }
     }
 
-    var result = ensureAbonentUidOnRecord(db, id, abonent, { source: opts.source || "ensureAbonentUid" });
-    if (!result.ok) return result;
-
-    var saved = false;
-    try {
-      normalizeDb(db);
-      saved = saveToStorage(db) === true;
-      if (saved) {
-        _resetPaymentKeyResolveCache("ensure-abonent-uid");
-        try { console.log("[abonent][uid-persist-ok]", { abonentId: id, uid: result.uid, storage: "local" }); } catch (eOk) {}
-      } else {
-        try { console.error("[abonent][uid-persist-failed]", { abonentId: id, uid: result.uid, reason: "LOCAL_SAVE_FAILED" }); } catch (eFail) {}
-        return { ok: false, uid: result.uid, changed: true, reason: "LOCAL_SAVE_FAILED" };
-      }
-    } catch (e3) {
-      try { console.error("[abonent][uid-persist-failed]", { abonentId: id, uid: result.uid, reason: String(e3 && e3.message || e3) }); } catch (eFail2) {}
-      return { ok: false, uid: result.uid, changed: true, reason: "LOCAL_SAVE_EXCEPTION" };
+    var uid = String(abonent && abonent.uid || "").trim();
+    function failed(reason) {
+      var messages = {
+        UID_REGISTRATION_REQUIRED: "UID не зарегистрирован на сервере. Сначала завершите штатное сохранение абонента; расчёт не запускался.",
+        UID_SERVER_UNAVAILABLE: "Не удалось проверить UID на сервере. Расчёт не запускался; локальные данные сохранены без изменений.",
+        UID_SERVER_MISMATCH: "UID или принадлежность абонента не совпадают с серверным реестром. Расчёт не запускался.",
+        LOCAL_DB_UNSAVED_CHANGES: "Локальный реестр отличается от серверного. Сначала сохраните или проверьте изменения; общий upload автоматически не запускается."
+      };
+      return { ok: false, uid: uid, changed: false, reason: reason,
+        message: messages[reason] || "UID абонента не подтверждён сервером. Расчёт не запускался." };
     }
-
+    if (!abonent || !id) return failed("ABONENT_NOT_FOUND");
+    if (!_canWriteStorage()) return failed("READ_ONLY");
+    if (!isValidUid(uid)) return failed(uid ? "INVALID_UID" : "UID_REGISTRATION_REQUIRED");
+    var ownerId = String(_ownerId() || "").trim();
+    if (!ownerId || ownerId === "guest" || ownerId === "ALL") return failed("OWNER_REQUIRED");
+    var localBefore = _stableFinancialJson(db);
     try {
-      if (window.Data && typeof window.Data.flushDbToServer === "function") {
-        await window.Data.flushDbToServer();
-        try { console.log("[abonent][uid-persist-ok]", { abonentId: id, uid: result.uid, storage: "server" }); } catch (eSrvOk) {}
-      }
-    } catch (e4) {
-      try { console.warn("[abonent][uid-persist-failed]", { abonentId: id, uid: result.uid, storage: "server", reason: String(e4 && e4.message || e4) }); } catch (eSrvFail) {}
+      // This session-scoped read proves registration. It must never save the
+      // registry or unrelated financial keys as a side effect of UID preparation.
+      var read = await _serverStoreGet(ownerId, KEY_DB);
+      if (ownerId !== String(_ownerId() || "").trim()) return failed("OWNER_CHANGED");
+      if (db !== window.AbonentsDB || localBefore !== _stableFinancialJson(window.AbonentsDB)) return failed("LOCAL_DB_UNSAVED_CHANGES");
+      if (read && read.missing) return failed("UID_REGISTRATION_REQUIRED");
+      if (!read || !read.ok || read.status !== 200 || typeof read.raw !== "string" ||
+          !Number.isSafeInteger(read.version) || read.version < 0) return failed("UID_SERVER_UNAVAILABLE");
+      var serverDb = JSON.parse(read.raw);
+      if (!serverDb || !serverDb.abonents || typeof serverDb.abonents !== "object") return failed("UID_SERVER_UNAVAILABLE");
+      var registered = serverDb.abonents[id];
+      if (!registered || !String(registered.uid || "").trim()) return failed("UID_REGISTRATION_REQUIRED");
+      var matchingIds = Object.keys(serverDb.abonents).filter(function(key) {
+        return String(serverDb.abonents[key] && serverDb.abonents[key].uid || "").trim() === uid;
+      });
+      if (String(registered.uid || "").trim() !== uid || matchingIds.length !== 1 || matchingIds[0] !== id) return failed("UID_SERVER_MISMATCH");
+      // Do not discard or silently publish unsaved registry edits previously
+      // swept up by flushDbToServer(). Registration is not a general sync.
+      if (localBefore !== _stableFinancialJson(serverDb)) return failed("LOCAL_DB_UNSAVED_CHANGES");
+      return { ok: true, uid: uid, changed: false, serverConfirmed: true, version: read.version };
+    } catch (e) {
+      return failed("UID_SERVER_UNAVAILABLE");
     }
-
-    return result;
   }
 
 
@@ -3881,6 +3901,9 @@
         err.responseText = text;
         throw err;
       }
+      try {
+        window.dispatchEvent(new CustomEvent("jkh:summary-dirty", { detail: { uid: uid, reason: data.reason || reasonCode } }));
+      } catch (eNotify) {}
       return data;
     } catch (e) {
       try { console.warn("[summary][mark-dirty-failed]", { reason: String(e && e.message || e), status: e && e.status, payload: e && e.payload }); } catch (eLog) {}
@@ -4011,7 +4034,7 @@
     });
   }
 
-  async function saveAbonentSummaryAfterRecalc(abonentOrId, summary) {
+  async function saveAbonentSummaryAfterRecalc(abonentOrId, summary, options) {
     var saveLogCtx = { uid: "", status: "", reason: "", totalsKeys: [] };
     try {
       var found = _findAbonentByIdOrUid(abonentOrId);
@@ -4049,7 +4072,8 @@
         account_uid: uid,
         abonent_id: String(abonentId || abonent && abonent.id || ""),
         account_number: String(abonent && (abonent.account_number || abonent.accountNumber || abonent.ls || abonent.id) || abonentId || ""),
-        summary: summaryPayload
+        summary: summaryPayload,
+        confirm_snapshot: !!(options && options.confirmSnapshot)
       };
       _recordSummaryTotalsChain(uid, "summary-save-payload", summaryPayload, {
         endpoint: "/api/abonent_summary/rebuild",
@@ -4228,13 +4252,17 @@
     try { console.log("[canonical_totals_before_summary_save]", { uid: String(snapshot.uid || ""), totals: canonical.totals, input_hash: summary.input_hash, ledgerVersion: summary.ledger_version, period: summary.period }); } catch(eBeforeLog) {}
     _recordSummaryTotalsChain(snapshot && snapshot.uid, "canonical-summary-payload", summary, { summaryScope: summary.summary_scope });
     try { console.log("[abonent_summary_save_payload]", { uid: String(snapshot.uid || ""), summary_status: summary.summary_status, summary_reason: summary.summary_reason, summary_scope: summary.summary_scope, totals: summary.totals }); } catch(ePayloadLog) {}
-    var saved = await saveAbonentSummaryAfterRecalc(abonentOrId, summary);
+    var saved = await saveAbonentSummaryAfterRecalc(abonentOrId, summary, { confirmSnapshot: true });
     try { console.log("[abonent_summary_save_response]", saved); } catch(eResponseLog) {}
     if (!saved || saved.ok !== true || !saved.summary || typeof saved.summary !== "object") {
       return { ok: false, reason: String(saved && (saved.error || saved.reason) || "ABONENT_SUMMARY_CANONICAL_TOTALS_SAVE_FAILED"), save: saved || null };
     }
     var persisted = _canonicalSnapshotSummaryTotals({ totals: saved.totals && typeof saved.totals === "object" ? saved.totals : {} });
     var matches = persisted.ok === true && ["debt", "penalty", "accrued", "paid", "total"].every(function(key){ return Number(persisted.totals[key]) === Number(canonical.totals[key]); });
+    if (matches) {
+      _setProjectRaw(resolveCardSnapshotKey(abonentOrId), JSON.stringify(Object.assign({}, snapshot,
+        { dirty: false, summary_status: "fresh", snapshot_status: "fresh", summary_reason: "OK" })));
+    }
     var comparison = { uid: String(snapshot.uid || ""), matches: matches, canonicalTotals: canonical.totals, summaryTotals: persisted.totals, summaryStatus: String(saved.summary.summary_status || saved.summary.status || "") };
     try { console.log("[canonical_vs_summary_totals]", comparison); } catch(eComparisonLog) {}
     return { ok: matches, reason: matches ? "OK" : "CANONICAL_SUMMARY_TOTALS_MISMATCH", comparison: comparison, summary: saved.summary, save: saved };
@@ -6246,7 +6274,7 @@
     if (!summaryIsFresh && !periodActive) {
       saveResult = { ok: false, skipped: true, reason: "FAILED_FULL_SUMMARY_NOT_SAVED", summary_status: summary.summary_status || summary.status || "error", summary_reason: summary.summary_reason || summary.reason || "CALC_FAILED", summary_scope: "full" };
       try { console.warn("[summary][failed-full-save-skipped]", { uid: String(summary.account_uid || summary.uid || ""), reason: saveResult.summary_reason }); } catch(eFailedSkipLog) {}
-    } else if (periodActive || opts.saveSummary === false) {
+    } else if (periodActive || opts.saveSummary === false || runId) {
       saveResult = {
         ok: true,
         skipped: true,
@@ -6446,6 +6474,10 @@
       endCardRecalcFullTimer();
       return { ok: false, uid: uid, summary_status: "error", summary_reason: "ABONENT_NOT_FOUND", summary: null };
     }
+    if (getFinancialTransferInfo(abonentId, resolveAbonentRegnumForSummary(abonentId, abonent)).outgoing.length) {
+      endCardRecalcFullTimer();
+      return { ok: false, uid: uid, summary_status: "dirty", summary_reason: "PROTECTED_HISTORY_CHANGED", reason: "PROTECTED_HISTORY_CHANGED", summary: null };
+    }
     if (!isValidUid(uid)) {
       endCardRecalcFullTimer();
       return { ok: false, uid: uid, summary_status: "error", summary_reason: "UID_REQUIRED", summary: null };
@@ -6596,6 +6628,9 @@
     var abonent = foundInfo.abonent;
     var abonentId = foundInfo.abonentId;
     var uid = foundInfo.uid;
+    if (abonent && getFinancialTransferInfo(abonentId, resolveAbonentRegnumForSummary(abonentId, abonent)).outgoing.length) {
+      return attachProfile({ ok: false, uid: uid, summary_status: "dirty", summary_reason: "PROTECTED_HISTORY_CHANGED", reason: "PROTECTED_HISTORY_CHANGED", rowsById: {} });
+    }
     profileContext.uid = uid;
     profileContext.abonentId = abonentId;
     profileContext.account = foundInfo.account;
