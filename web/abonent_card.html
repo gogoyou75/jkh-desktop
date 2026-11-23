@@ -437,6 +437,7 @@ Doc: docs/LOGIC_SPEC_v1.5.3.md
         <div class="transfer-sub">Передано этим абонентом</div>
         <div id="to_list"></div>
       </div>
+      <div id="transferClosedNotice" style="display:none; margin-top:10px;"></div>
     </div>
 
 </div>
@@ -1937,7 +1938,8 @@ function renderResponsibilityHistory(regnum){
   const db = getDb();
   links.forEach(l => {
     const aid = String(l?.abonentId || '').trim();
-    const fio = String(db[aid]?.fio || '').trim();
+    const isNoName = l?.technicalType === 'NO_NAME';
+    const fio = isNoName ? 'No Name — Требуется назначить ответственного' : String(db[aid]?.fio || '').trim();
     const df = String(l?.dateFrom || '').trim();
     const dt = String(l?.dateTo || '').trim();
     const active = !dt;
@@ -1952,7 +1954,7 @@ function renderResponsibilityHistory(regnum){
         ${active ? 'текущий' : 'закрыт'}
       </td>
       <td style="border:2px solid #000; padding:6px;">
-        <a href="abonent_card.html?abonent=${encodeURIComponent(aid)}" style="text-decoration:underline;">открыть</a>
+        ${isNoName ? 'Требуется назначить ответственного' : `<a href="abonent_card.html?abonent=${encodeURIComponent(aid)}" style="text-decoration:underline;">открыть</a>`}
       </td>
     `;
     body.appendChild(tr);
@@ -2031,14 +2033,17 @@ function renderTransferInfo(abonentId, regnum){
   const incBox = document.getElementById("transferIncoming");
   const frzBox = document.getElementById("transferFreeze");
   const outBox = document.getElementById("transferOutgoing");
+  const closedNotice = document.getElementById("transferClosedNotice");
 
   if (incBox) incBox.style.display = "none";
   if (frzBox) frzBox.style.display = "none";
   if (outBox) outBox.style.display = "none";
+  if (closedNotice) closedNotice.style.display = "none";
 
   const incoming = __getIncomingTransfer(abonentId, regnum);
   const freezeISO = __getFreezeToISO(abonentId);
   const outgoing = __findOutgoingTransfers(abonentId);
+  const transferHistory = window.Data?.getFinancialTransferHistory?.(abonentId, regnum) || [];
 
   let any = false;
 
@@ -2084,6 +2089,48 @@ function renderTransferInfo(abonentId, regnum){
     any = true;
     frzBox.style.display = "block";
     document.getElementById("tf_freeze").textContent = freezeISO;
+  }
+  if (transferHistory.length && closedNotice){
+    any = true;
+    closedNotice.replaceChildren();
+    for (const operation of transferHistory){
+      const outgoing = operation.sourceId === String(abonentId);
+      const otherId = outgoing ? operation.targetId : operation.sourceId;
+      const otherName = outgoing ? operation.targetName : operation.sourceName;
+      const row = document.createElement('div');
+      row.className = 'transfer-item';
+      const heading = document.createElement('b');
+      heading.textContent = outgoing ? 'Передача задолженности' : 'Полученная задолженность';
+      row.appendChild(heading);
+      const details = document.createElement('div');
+      const sourcePrincipal = operation.sourcePrincipal == null || !Number.isFinite(operation.sourcePrincipal)
+        ? 'не зафиксирован' : __fmt2(operation.sourcePrincipal);
+      const sourcePenalty = operation.sourcePenalty == null || !Number.isFinite(operation.sourcePenalty)
+        ? 'не зафиксирована' : __fmt2(operation.sourcePenalty);
+      const receivedPrincipal = Number.isFinite(operation.transferredPrincipal) ? __fmt2(operation.transferredPrincipal) : 'не подтверждён';
+      const receivedPenalty = Number.isFinite(operation.transferredPenalty) ? __fmt2(operation.transferredPenalty) : 'не подтверждена';
+      const total = Number.isFinite(operation.transferredPrincipal + operation.transferredPenalty)
+        ? __fmt2(operation.transferredPrincipal + operation.transferredPenalty) : 'не подтверждён';
+      details.textContent = 'Дата передачи: ' + (operation.date || '—') +
+        '; остаток на: ' + (operation.freezeDate || 'не зафиксирована') +
+        '; ' + (outgoing ? 'получатель: ' : 'отправитель: ') + otherId + (otherName ? ' — ' + otherName : '') +
+        '; режим: ' + operation.mode +
+        '; основной долг на дату закрытия: ' + sourcePrincipal + '; пеня: ' + sourcePenalty +
+        '; фактически переданы: основной долг ' + receivedPrincipal + ', пеня ' + receivedPenalty +
+        ', всего ' + total +
+        '; статус: ' + (operation.status === 'DELETED_RECIPIENT' ? 'историческая операция, получатель удалён' :
+          operation.status === 'UNVERIFIED' ? 'финансовый остаток не подтверждён' : 'подтверждена') +
+        (operation.replacesOperationId ? '; связана с операцией ' + operation.replacesOperationId : '');
+      row.appendChild(details);
+      if (getDb()[otherId]) {
+        const link = document.createElement('a');
+        link.href = 'abonent_card.html?abonent=' + encodeURIComponent(otherId);
+        link.textContent = 'Открыть карточку ' + otherId;
+        row.appendChild(link);
+      }
+      closedNotice.appendChild(row);
+    }
+    closedNotice.style.display = 'block';
   }
 
   if (outgoing && outgoing.length && outBox){
@@ -2555,42 +2602,37 @@ function __restoreDeletedRuntimeState(snapshot){
     }
 }
 
+let __deleteAbonentBusy = false;
+let __deleteAbonentOperationId = "";
 async function deleteAbonentFromCard(){
+    if (__deleteAbonentBusy) return;
     if (!canWriteOrExplainLocal()) return;
     const { id: abonentId, a } = getCurrentAbonent();
     if (!a) { alert('Абонент не найден'); return; }
 
-    const uid = String(a.uid || '').trim();
-    const account = String(a.account || a.ls || abonentId || '').trim();
-    const ownerId = (window.JKHStore && typeof JKHStore.getOwnerId === 'function') ? JKHStore.getOwnerId() : 'guest';
-
-    console.log('[abonent][delete] start', { ownerId: ownerId, abonentId: String(abonentId), uid: uid, account: account });
-
-    const ok = window.confirm('Точно удалить абонента? Будут удалены карточка абонента, начисления, платежи, примечания и связанные данные. Действие нельзя отменить.');
-    if (!ok) return;
-
-    const keysToDelete = __collectAbonentScopedKeysForDelete(String(abonentId), uid, account);
-    const keySnapshot = {};
-    for (let i = 0; i < keysToDelete.length; i++) keySnapshot[keysToDelete[i]] = storeGet(keysToDelete[i]);
-
-    const __localSnapshot = { db: __deepCloneJSONSafe(getDb()), keys: keySnapshot };
-
+    __deleteAbonentBusy = true;
     try {
-        if (window.Data && typeof window.Data.deleteAbonent === 'function') {
-            window.Data.deleteAbonent(String(abonentId));
-        }
-        for (let i = 0; i < keysToDelete.length; i++) storeRemove(keysToDelete[i]);
-
-        await Data.flushDbToServer();
-
-        console.log('[abonent][delete] success', { ownerId: ownerId, abonentId: String(abonentId) });
+        const preview = await Data.getAbonentDeletionPreview(String(abonentId));
+        const ok = window.confirm('Безвозвратно удалить абонента? Платежей: ' + preview.payments +
+          '; строк начислений: ' + preview.accruals + '. Будут удалены связанные финансовые данные, примечания и снимки. ' +
+          'Период квартиры станет «No Name — Требуется назначить ответственного». Действие нельзя отменить.');
+        if (!ok) return;
+        if (!__deleteAbonentOperationId) __deleteAbonentOperationId = 'responsibility:' + crypto.randomUUID();
+        if (!(window.Data && typeof Data.deleteAbonentAtomic === 'function')) throw new Error('ATOMIC_DELETE_UNAVAILABLE');
+        const deleted = await Data.deleteAbonentAtomic(String(abonentId), __deleteAbonentOperationId, preview);
+        if (deleted !== true) throw new Error('ATOMIC_DELETE_NOT_COMMITTED');
         alert('Абонент удалён');
         closeAbonentEdit();
         window.location.href = 'index.html';
     } catch (err) {
         console.error('[abonent][delete] failed', err);
-        __restoreDeletedRuntimeState(__localSnapshot);
-        alert('Ошибка удаления абонента: не удалось сохранить изменения на сервере. Данные восстановлены.');
+        if (err && err.code === 'dependent_recipient') {
+            alert('Удаление заблокировано. Сначала вручную удалите зависимого абонента: ' + err.dependentAbonentId);
+        } else {
+            alert('Удаление не подтверждено: ' + String(err && err.message || err) + '. Обновите данные с сервера перед повтором.');
+        }
+    } finally {
+        __deleteAbonentBusy = false;
     }
 }
 
@@ -2655,24 +2697,10 @@ async function saveAbonentEdit() {
         console.warn('saveAbonentEdit: premiseRegnum/regnum not found, updated only abonent.square for LS', String(newId));
     }
 
-    if (window.Data && typeof window.Data.upsertAbonent === 'function') {
-        window.Data.upsertAbonent(updated);
-    }
-
     if (isIdChanged) {
-        if (window.Data && typeof window.Data.getLinksForAbonent === 'function') {
-            const oldLinks = window.Data.getLinksForAbonent(String(oldId));
-            oldLinks.forEach((l) => {
-                if (window.Data && typeof window.Data.unlinkAbonentFromPremise === 'function') {
-                    window.Data.unlinkAbonentFromPremise(String(oldId), String(l.regnum || ''));
-                }
-                if (window.Data && typeof window.Data.linkAbonentToPremise === 'function') {
-                    window.Data.linkAbonentToPremise(String(newId), String(l.regnum || ''), String(l.dateFrom || ''), String(l.dateTo || ''));
-                }
-            });
-        }
-        if (window.Data && typeof window.Data.deleteAbonent === 'function') {
-            window.Data.deleteAbonent(String(oldId));
+        if (!(window.Data && typeof Data.renameAbonentIdLocal === 'function') ||
+            Data.renameAbonentIdLocal(String(oldId), updated) !== true) {
+            throw new Error('ABONENT_RENAME_LOCAL_FAILED');
         }
 
         migrateLocalKeys(String(oldId), String(newId));
@@ -2680,6 +2708,8 @@ async function saveAbonentEdit() {
         const url = new URL(window.location.href);
         url.searchParams.set("abonent", String(newId));
         window.history.replaceState({}, "", url.toString());
+    } else if (window.Data && typeof window.Data.upsertAbonent === 'function') {
+        window.Data.upsertAbonent(updated);
     }
 
     await Data.flushDbToServer();

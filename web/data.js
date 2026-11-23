@@ -3747,7 +3747,7 @@
 
     // чистим битые links
     db.links = db.links.filter((l) => {
-      const abonentOk = !!db.abonents?.[String(l?.abonentId)];
+      const abonentOk = l?.technicalType === "NO_NAME" || !!db.abonents?.[String(l?.abonentId)];
       const premiseOk = !!db.premises?.[String(l?.regnum || "").trim()];
       return abonentOk && premiseOk;
     });
@@ -7221,22 +7221,30 @@
 
       return !!window.saveAbonentsDB && window.saveAbonentsDB();
     },
-    deleteAbonent: function (abonentId) {
+    renameAbonentIdLocal: function (oldAbonentId, updatedAbonent) {
       if (!this.ensureWriteOrExplain()) return false;
-      if (!window.AbonentsDB) return false;
-      var id = String(abonentId || "").trim();
-      if (!id) return false;
-
-      if (window.AbonentsDB.abonents && window.AbonentsDB.abonents[id]) {
-        delete window.AbonentsDB.abonents[id];
-      }
-      if (Array.isArray(window.AbonentsDB.links)) {
-        window.AbonentsDB.links = window.AbonentsDB.links.filter(function (l) {
-          return String(l && l.abonentId) !== id;
-        });
-      }
-
-      return !!window.saveAbonentsDB && window.saveAbonentsDB();
+      var db = window.AbonentsDB;
+      var oldId = String(oldAbonentId || "").trim();
+      var newId = String(updatedAbonent && updatedAbonent.id || "").trim();
+      if (!db || !db.abonents || !Array.isArray(db.links) || !oldId || !newId || oldId === newId ||
+          !db.abonents[oldId] || db.abonents[newId]) return false;
+      var uid = String(db.abonents[oldId].uid || "").trim();
+      if (!isValidUid(uid) || String(updatedAbonent.uid || "").trim() !== uid) return false;
+      var renamed = JSON.parse(JSON.stringify(db));
+      renamed.abonents[newId] = Object.assign({}, updatedAbonent, { id:newId, uid:uid });
+      delete renamed.abonents[oldId];
+      renamed.links.forEach(function(link) {
+        if (link && String(link.abonentId || "") === oldId) link.abonentId = newId;
+      });
+      window.AbonentsDB = renamed;
+      try { if (window.saveAbonentsDB && window.saveAbonentsDB()) return true; }
+      catch (e) {}
+      window.AbonentsDB = db;
+      try { if (window.saveAbonentsDB) window.saveAbonentsDB(); } catch (e) {}
+      return false;
+    },
+    deleteAbonent: function () {
+      throw new Error("ATOMIC_DELETE_REQUIRED");
     },
     mergePremises: async function (options) {
       // TODO/CRITICAL: merge changes responsibility links and creates a new abonent;
@@ -7906,6 +7914,149 @@
     return true;
   }
 
+  function __responsibilityMutationOperationId() {
+    if (!(window.crypto && typeof window.crypto.randomUUID === "function")) throw new Error("RESPONSIBILITY_CRYPTO_UNAVAILABLE");
+    return "responsibility:" + window.crypto.randomUUID();
+  }
+
+  async function __responsibilityMutationPost(path, payload, deletedId, deletedUid) {
+    var result;
+    try {
+      var http = await fetch(path, { method:"POST", credentials:"include",
+        headers:{ "Content-Type":"application/json" }, body:JSON.stringify(payload) });
+      result = { status:http.status, data:await http.json() };
+    } catch (networkError) {
+      var statusHttp, statusData;
+      try {
+        statusHttp = await fetch(path + "?operation_id=" + encodeURIComponent(payload.operation_id) +
+          "&client_owner_hint=" + encodeURIComponent(_ownerId()), { credentials:"include" });
+        statusData = await statusHttp.json();
+      } catch (_) { throw new Error("RESPONSIBILITY_OUTCOME_UNKNOWN"); }
+      if (!(statusHttp.ok && statusData && statusData.committed === true)) throw new Error("RESPONSIBILITY_OUTCOME_UNKNOWN");
+      result = { status:200, data:{ok:true, committed:true, replay:true} };
+    }
+    if (!(result.status === 200 && result.data && result.data.ok === true && result.data.committed === true)) {
+      var error = new Error(result.data && result.data.error || "RESPONSIBILITY_SERVER_REJECTED");
+      error.code = result.data && result.data.error || "RESPONSIBILITY_SERVER_REJECTED";
+      error.dependentAbonentId = result.data && result.data.dependent_abonent_id || "";
+      throw error;
+    }
+    if (!(window.JKHDataLoader && typeof window.JKHDataLoader.refreshAfterResponsibilityMutation === "function")) {
+      throw new Error("RESPONSIBILITY_RELOAD_UNAVAILABLE");
+    }
+    var loaded = await window.JKHDataLoader.refreshAfterResponsibilityMutation(deletedId, deletedUid);
+    if (!(loaded && loaded.ok)) throw new Error("RESPONSIBILITY_COMMITTED_RELOAD_FAILED");
+    return true;
+  }
+
+  Data.getAbonentDeletionPreview = async function(abonentId) {
+    var response = await fetch('/api/abonent_delete?preview=1&abonent_id=' + encodeURIComponent(abonentId), {credentials:'include'});
+    var result = await response.json();
+    if (!response.ok || result.ok !== true) throw new Error(result.error || 'DELETE_PREVIEW_FAILED');
+    return result;
+  };
+
+  Data.deleteAbonentAtomic = async function(abonentId, operationId, preview) {
+    if (!Data.ensureWriteOrExplain()) return false;
+    var id = String(abonentId || "").trim();
+    var db = window.AbonentsDB || {};
+    var a = db.abonents && db.abonents[id];
+    var links = Array.isArray(db.links) ? db.links.filter(function(l){ return String(l && l.abonentId || "") === id; }) : [];
+    var version = window.JKHDbCas && window.JKHDbCas.version(_ownerId());
+    if (!a || links.length !== 1 || !Number.isSafeInteger(version)) throw new Error("RESPONSIBILITY_LOCAL_STATE_INVALID");
+    if (!preview || preview.expected_version !== version || !Number.isSafeInteger(preview.ledger_version)) {
+      throw new Error('DELETE_PREVIEW_STALE');
+    }
+    return __responsibilityMutationPost("/api/abonent_delete", {
+      client_owner_hint:_ownerId(), operation_id:operationId || __responsibilityMutationOperationId(),
+      expected_version:version, ledger_version:preview.ledger_version, abonent_id:id, uid:String(a.uid || ""),
+      regnum:String(links[0].regnum || ""), date_from:String(links[0].dateFrom || ""),
+      date_to:String(links[0].dateTo || "")
+    }, id, String(a.uid || ""));
+  };
+
+  Data.restoreClosedTailNoNameAtomic = async function(options) {
+    if (!Data.ensureWriteOrExplain()) return false;
+    var opts = options || {};
+    var version = window.JKHDbCas && window.JKHDbCas.version(_ownerId());
+    if (!Number.isSafeInteger(version)) throw new Error("RESPONSIBILITY_VERSION_MISSING");
+    return __responsibilityMutationPost("/api/no_name_restore_closed_tail", {
+      client_owner_hint:_ownerId(), operation_id:opts.operationId || __responsibilityMutationOperationId(),
+      expected_version:version, regnum:String(opts.regnum || ""),
+      source_abonent_id:String(opts.sourceAbonentId || ""),
+      source_close_date:String(opts.sourceCloseDate || "")
+    }, "", "");
+  };
+
+  Data.assignNoNameAtomic = async function(options) {
+    if (!Data.ensureWriteOrExplain()) return false;
+    var opts = options || {};
+    var version = window.JKHDbCas && window.JKHDbCas.version(_ownerId());
+    if (!Number.isSafeInteger(version)) throw new Error("RESPONSIBILITY_VERSION_MISSING");
+    return __responsibilityMutationPost("/api/no_name_assign", {
+      client_owner_hint:_ownerId(), operation_id:opts.operationId || __responsibilityMutationOperationId(),
+      expected_version:version, abonent_id:String(opts.abonentId || ""),
+      regnum:String(opts.regnum || ""), date_from:String(opts.dateFrom || ""),
+      date_to:String(opts.dateTo || ""), mode:String(opts.mode || ""),
+      abonent:opts.abonent, initial_rows:Array.isArray(opts.initialRows) ? opts.initialRows : []
+    }, "", "");
+  };
+
+  function __verifiedClosedFrozenDebt(snapshot, sourceId, closeDate) {
+    var freeze = snapshot.values["jkh_freeze_to_v1:" + sourceId];
+    var raw = snapshot.values["jkh_frozen_debt_v1:" + sourceId + ":" + closeDate];
+    var debt = raw ? JSON.parse(raw) : null;
+    if (freeze !== closeDate || !debt || debt.success !== true || debt.calculatedAt !== closeDate ||
+        debt.principal === null || debt.penalty === null || debt.principal === "" || debt.penalty === "" ||
+        !Number.isFinite(Number(debt.principal)) || !Number.isFinite(Number(debt.penalty)) ||
+        Number(debt.principal) < 0 || Number(debt.penalty) < 0) {
+      throw new Error("CLOSED_SOURCE_SNAPSHOT_REQUIRED");
+    }
+    return debt;
+  }
+
+  Data.previewClosedResponsibilityDebt = async function(sourceId, closeDate) {
+    var snapshot = await __transferServerSnapshot(["jkh_freeze_to_v1:" + sourceId,
+      "jkh_frozen_debt_v1:" + sourceId + ":" + closeDate]);
+    return __verifiedClosedFrozenDebt(snapshot, sourceId, closeDate);
+  };
+
+  Data.assignClosedResponsibilityAtomic = async function(options) {
+    if (!Data.ensureWriteOrExplain()) return false;
+    var opts = options || {};
+    var sourceId = String(opts.sourceAbonentId || "").trim();
+    var closeDate = String(opts.sourceCloseDate || "").trim();
+    var source = window.AbonentsDB && window.AbonentsDB.abonents && window.AbonentsDB.abonents[sourceId];
+    var version = window.JKHDbCas && window.JKHDbCas.version(_ownerId());
+    if (!source || !Number.isSafeInteger(version) || !/^\d{4}-\d{2}-\d{2}$/.test(closeDate)) {
+      throw new Error("CLOSED_SOURCE_LOCAL_STATE_INVALID");
+    }
+    var ledgerKey = resolvePaymentLedgerKey(sourceId);
+    var freezeKey = "jkh_freeze_to_v1:" + sourceId;
+    var debtKey = "jkh_frozen_debt_v1:" + sourceId + ":" + closeDate;
+    var withDebt = String(opts.mode || "") === "WITH_DEBT";
+    if (!ledgerKey) throw new Error("CLOSED_SOURCE_LEDGER_MISSING");
+    var snapshot = await __transferServerSnapshot([ledgerKey, freezeKey].concat(withDebt ? [debtKey] : []));
+    var serverRows = snapshot.values[ledgerKey] ? JSON.parse(snapshot.values[ledgerKey]) : null;
+    if (!Array.isArray(serverRows) || JSON.stringify(serverRows) !== JSON.stringify(readPaymentLedger(sourceId))) {
+      throw new Error("CLOSED_SOURCE_LEDGER_STALE");
+    }
+    if (snapshot.values[freezeKey] && snapshot.values[freezeKey] !== closeDate) {
+      throw new Error("CLOSED_SOURCE_FREEZE_CONFLICT");
+    }
+    var debt = withDebt ? __verifiedClosedFrozenDebt(snapshot, sourceId, closeDate) : null;
+    return __responsibilityMutationPost("/api/closed_responsibility_assign", {
+      client_owner_hint:_ownerId(), operation_id:opts.operationId || __responsibilityMutationOperationId(),
+      expected_version:version, abonent_id:String(opts.abonentId || ""),
+      regnum:String(opts.regnum || ""), date_from:String(opts.dateFrom || ""), date_to:"",
+      mode:String(opts.mode || ""), abonent:opts.abonent,
+      initial_rows:Array.isArray(opts.initialRows) ? opts.initialRows : [],
+      source_abonent_id:sourceId, source_close_date:closeDate,
+      source_ledger_version:snapshot.versions[ledgerKey],
+      ...(withDebt ? { source_debt:debt } : {})
+    }, "", "");
+  };
+
   async function transferResponsibility(options){
     if (!Data.ensureWriteOrExplain()) return false;
     var db = window.AbonentsDB;
@@ -8155,6 +8306,136 @@
   Data.transferResponsibility = transferResponsibility;
   Data.getAbonentTransferInfo = getAbonentTransferInfo;
   Data.getFinancialTransferInfo = getFinancialTransferInfo;
+  Data.inspectClosedTransferRetry = async function(abonentId, regnum) {
+    var db = window.AbonentsDB || {};
+    var id = String(abonentId || "").trim(), rn = normalizeRegnumValue(regnum);
+    var events = Array.isArray(db.premiseEvents) ? db.premiseEvents : [];
+    var prior = events.filter(function(e){ return e &&
+      String(e.oldAbonentId || e.sourceAbonentId || "") === id &&
+      (e.regnum === rn || (e.fromRegnums || []).includes(rn)) &&
+      ["RESPONSIBILITY_TRANSFER", "NO_NAME_ASSIGNED", "CLOSED_RESPONSIBILITY_ASSIGNED"].includes(e.type); });
+    if (!prior.length) return { eligible:true, priorOperationId:"", deletedRecipients:[] };
+    var reject = function(reason){ return { eligible:false, reason:reason, priorOperationId:"", deletedRecipients:[] }; };
+    var financial, journal;
+    try { journal = await _serverStoreGet(_ownerId(), "jkh_financial_events_v1"); }
+    catch (e) { return reject("Не удалось загрузить финансовый журнал с сервера. Повторите попытку позже."); }
+    if (!journal || !journal.ok || journal.status !== 200 || !journal.data ||
+        !Number.isSafeInteger(journal.data.version) || typeof journal.raw !== "string")
+      return reject("Не удалось подтвердить финансовый журнал на сервере. Повторите попытку позже.");
+    try { financial = JSON.parse(journal.raw); }
+    catch (e) { return reject("Серверный финансовый журнал повреждён. Повторная передача заблокирована."); }
+    if (!Array.isArray(financial))
+      return reject("Серверный финансовый журнал повреждён. Повторная передача заблокирована.");
+    var source = id, seen = new Set([id]), operations = new Set(), deleted = [], pending = [id];
+    while (pending.length) {
+      source = pending.shift();
+      var steps = events.filter(function(e){ return e &&
+        ["RESPONSIBILITY_TRANSFER", "NO_NAME_ASSIGNED", "CLOSED_RESPONSIBILITY_ASSIGNED"].includes(e.type) &&
+        String(e.oldAbonentId || e.sourceAbonentId || "") === source && (e.fromRegnums || [e.regnum]).includes(rn); });
+      for (var step of steps) {
+      var target = String(step.newAbonentId || step.abonentId || ""), op = String(step.operationId || "");
+      var mode = String(step.transferMode || step.mode || ""), withDebt = mode === "WITH_DEBT";
+      if (!target || seen.has(target) || !op || operations.has(op) || !["WITH_DEBT", "NO_DEBT", "WITHOUT_DEBT"].includes(mode))
+        return reject("Цепочка ответственности неоднозначна.");
+      var matches = financial.filter(function(e){ return e &&
+        e.type === (withDebt ? "TRANSFER_WITH_DEBT" : "TRANSFER_WITHOUT_DEBT") &&
+        e.operationId === op && String(e.sourceAbonentId || "") === source &&
+        String(e.targetAbonentId || "") === target && normalizeRegnumValue(e.regnum || e.premiseId) === rn &&
+        (withDebt ? e.mode === "WITH_DEBT" : ["NO_DEBT", "WITHOUT_DEBT"].includes(e.mode)); });
+      if (matches.length !== 1 || ["debtAmount", "balanceAmount", "principal", "penalty"].some(function(key){
+        var amount = Number(matches[0][key] || 0);
+        return !Number.isFinite(amount) || amount < 0 || (!withDebt && amount !== 0);
+      })) return reject("Историческая финансовая передача не подтверждена.");
+      var deletions = events.filter(function(e){ return e &&
+        ["ABONENT_DELETED", "LEGACY_DELETION_RECONCILED"].includes(e.type) &&
+        String(e.abonentId || "") === target && String(e.regnum || "") === rn; });
+      var deletion = deletions[0];
+      if (deletions.length === 1 && deletion.type === "LEGACY_DELETION_RECONCILED" &&
+          (String(deletion.ownerId || "") !== String(_ownerId() || "") ||
+           String(deletion.historicalOperationId || "") !== op))
+        return reject("Историческая сверка удаления не соответствует владельцу или операции.");
+      if (matches.length !== 1) return reject("Историческая финансовая передача не подтверждена.");
+      if (deletions.length !== 1)
+        return reject("Нет подтверждённой сверки удаления получателя ЛС " + target + ". Передача заблокирована.");
+      if (db.abonents?.[target] ||
+          (db.links || []).some(function(l){ return String(l?.abonentId || "") === target; }) ||
+          !deletions[0].uid || _getProjectRaw("payments_" + deletions[0].uid) ||
+          _getProjectRaw("jkh_transfer_to_v1:" + target) || getFinancialTransferInfo(target, rn).incoming)
+        return reject("Получатель или его данные удалены не полностью.");
+      operations.add(op); seen.add(target); deleted.push(target); pending.push(target);
+      }
+    }
+    for (var source of seen) {
+      if (getFinancialTransferInfo(source, rn).outgoing.some(function(o){ return o.regnum === rn; }))
+        return reject("Сохранилась исходящая финансовая зависимость.");
+    }
+    if (financial.some(function(e){ return e && seen.has(String(e.sourceAbonentId || "")) &&
+        normalizeRegnumValue(e.regnum || e.premiseId) === rn && !operations.has(String(e.operationId || "")); }))
+      return reject("Есть другая финансовая операция в цепочке.");
+    return { eligible:true, priorOperationId:String(prior[prior.length - 1].operationId), deletedRecipients:deleted };
+  };
+  Data.getFinancialTransferHistory = function(abonentId, regnum) {
+    var id = String(abonentId || ""), rn = normalizeRegnumValue(regnum);
+    var db = window.AbonentsDB || {};
+    try {
+      var events = JSON.parse(_getProjectRaw("jkh_financial_events_v1") || "[]");
+      if (!Array.isArray(events)) return [];
+      return events.filter(function(e){ return e && ["TRANSFER_WITH_DEBT", "TRANSFER_WITHOUT_DEBT"].includes(e.type) &&
+        normalizeRegnumValue(e.regnum || e.premiseId) === rn &&
+        (String(e.sourceAbonentId || "") === id || String(e.targetAbonentId || "") === id); }).map(function(e){
+        var sourceId = String(e.sourceAbonentId || ""), targetId = String(e.targetAbonentId || "");
+        var premiseEvent = (db.premiseEvents || []).find(function(item){ return item &&
+          String(item.operationId || "") === String(e.operationId || ""); });
+        var freezeDate = String(e.freezeDate || premiseEvent?.oldRespTo || premiseEvent?.sourceCloseDate || "");
+        var sourceSnapshot = null;
+        if (freezeDate) {
+          try { sourceSnapshot = JSON.parse(_getProjectRaw("jkh_frozen_debt_v1:" + sourceId + ":" +
+            freezeDate) || "null"); } catch (_) {}
+        }
+        var balance = null;
+        try { balance = JSON.parse(_getProjectRaw("jkh_transfer_balance_v1:" + targetId + ":" + rn) || "null"); } catch (_) {}
+        var transferred = e.type === "TRANSFER_WITH_DEBT";
+        var validBalance = transferred && balance && String(balance.fromAbonentId || "") === sourceId &&
+          String(balance.startDate || "") === String(e.date || "");
+        return { operationId:String(e.operationId || ""), replacesOperationId:String(e.replacesOperationId || ""),
+          date:String(e.date || ""), freezeDate:freezeDate,
+          sourceId:sourceId, targetId:targetId, sourceName:String(db.abonents?.[sourceId]?.fio || ""),
+          targetName:String(db.abonents?.[targetId]?.fio || ""), mode:transferred ? "WITH_DEBT" : "NO_DEBT",
+          sourcePrincipal:Number.isFinite(Number(e.sourcePrincipal)) && e.sourcePrincipal != null ? Number(e.sourcePrincipal) :
+            (sourceSnapshot?.success && sourceSnapshot.calculatedAt === freezeDate ? Number(sourceSnapshot.principal) : null),
+          sourcePenalty:Number.isFinite(Number(e.sourcePenalty)) && e.sourcePenalty != null ? Number(e.sourcePenalty) :
+            (sourceSnapshot?.success && sourceSnapshot.calculatedAt === freezeDate ? Number(sourceSnapshot.penalty) : null),
+          transferredPrincipal:transferred ? (validBalance ? Number(balance.principal) : Number(e.principal ?? NaN)) : 0,
+          transferredPenalty:transferred ? (validBalance ? Number(balance.penalty) : Number(e.penalty ?? NaN)) : 0,
+          status:!db.abonents?.[targetId] ? (transferred && validBalance ? "UNVERIFIED" : "DELETED_RECIPIENT") :
+            (transferred && !validBalance ? "UNVERIFIED" : "CONFIRMED") };
+      });
+    } catch (e) { return []; }
+  };
+  Data.getConfirmedClosedOutgoingTransfer = function(abonentId, regnum) {
+    var id = String(abonentId || "").trim();
+    var rn = normalizeRegnumValue(regnum);
+    if (!id || !rn) return null;
+    try {
+      var events = JSON.parse(_getProjectRaw("jkh_financial_events_v1") || "[]");
+      if (!Array.isArray(events)) return null;
+      for (var i = events.length - 1; i >= 0; i--) {
+        var event = events[i];
+        if (!event || event.type !== "TRANSFER_WITH_DEBT" || event.closedSource !== true ||
+            String(event.sourceAbonentId || "") !== id || normalizeRegnumValue(event.regnum) !== rn) continue;
+        var target = String(event.targetAbonentId || "").trim();
+        var balance = _getProjectRaw("jkh_transfer_balance_v1:" + target + ":" + rn);
+        if (!balance) return null;
+        var incoming = JSON.parse(balance);
+        if (String(incoming.fromAbonentId || "") !== id ||
+            String(incoming.startDate || "") !== String(event.date || "") ||
+            Number(incoming.principal) !== Number(event.principal) ||
+            Number(incoming.penalty) !== Number(event.penalty)) return null;
+        return event;
+      }
+    } catch (e) { return null; }
+    return null;
+  };
 
 window.getCalcPeriodStorageKey = resolveCalcPeriodStorageKey;
 window.getCalcPeriodActiveStorageKey = resolveCalcPeriodActiveStorageKey;
