@@ -237,12 +237,26 @@
       messages.push("Нарушен порядок подключений: calc_engine.js должен идти ДО spravka_sud.js.");
     }
 
-    // 3) Historical pitfall: spravka_sud.html should not load storage.js (ES-module / side-effects)
+    // 3) Server-first reports require the classic auth -> storage -> data chain.
+    // Reject unsafe loading instead of rejecting the required storage dependency itself.
     var p = (window.location.pathname || "").toLowerCase();
     if (p.indexOf("spravka_sud") !== -1) {
       var iStorage = findIndexBySrc(/(^|\/)storage\.js(\?|$)/);
       if (iStorage !== -1) {
-        messages.push("spravka_sud.html не должен подключать storage.js (исторически ломало загрузку/данные).");
+        var iAuth = findIndexBySrc(/(^|\/)auth\.js(\?|$)/);
+        var iData = findIndexBySrc(/(^|\/)data\.js(\?|$)/);
+        var chain = [iAuth, iStorage, iData, iCalc, iSud];
+        var safeChain = chain.every(function (index, position) {
+          if (index < 0 || (position > 0 && index <= chain[position - 1])) return false;
+          var script = scripts[index];
+          return !script.async && !script.defer && (script.type || "").toLowerCase() !== "module";
+        });
+        var storageCount = scripts.filter(function (script) {
+          return /(^|\/)storage\.js(\?|$)/.test(script.getAttribute("src") || "");
+        }).length;
+        if (!safeChain || storageCount !== 1 || !window.JKHStore || typeof window.JKHStore.getRaw !== "function" || !window.Data || typeof window.Data.readPaymentLedger !== "function") {
+          messages.push("spravka_sud.html: требуется однократная классическая загрузка auth → storage → data → calc_engine → spravka_sud и готовые API чтения.");
+        }
       }
     }
 

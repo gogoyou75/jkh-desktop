@@ -690,18 +690,21 @@
       return;
     }
 
-    const tariffs = loadTariffsFromCanon();
-    tariffs.push({
+    const tariffs = readFromUI();
+    const added = {
       id: uid(),
       code: "",
       title: "Новый тариф",
       type: "per_m2",
       active: true,
       rates: []
-    });
+    };
+    tariffs.push(added);
 
     saveTariffsToCanon(tariffs);
-    renderTariffs();
+    const host = $("tariffsHost");
+    if (!host.querySelector('.tariff-card')) host.innerHTML = '';
+    host.insertAdjacentHTML('beforeend', cardHtml(added));
     refreshEditLocks();
   }
 

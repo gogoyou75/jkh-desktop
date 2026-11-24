@@ -922,7 +922,7 @@ function collectPaymentRowsForYearValidation(rows){
   return list;
 }
 
-function setFileYearAnalysis(result, fileName, errorMessage){
+function setFileYearAnalysis(result, fileName, errorMessage, paymentPlan){
   const box = $('fileYearAnalysisBox');
   if (!box) return;
 
@@ -957,7 +957,7 @@ function setFileYearAnalysis(result, fileName, errorMessage){
 
   if (result.status === 'error'){
     html += '<span class="danger">Обнаружены некорректные даты оплат</span><br>' +
-      '<span class="danger">Импорт заблокирован</span>';
+      '<span class="danger">Ошибки дат всего файла; допуск платежей проверяется отдельно ниже.</span>';
     const examples = (result.errors || []).slice(0, 10);
     if (examples.length){
       html += '<br><br>Примеры:';
@@ -973,6 +973,16 @@ function setFileYearAnalysis(result, fileName, errorMessage){
     html += '<span class="ok">Критических ошибок нет</span>';
   }
 
+  const plan = paymentPlan || getPaymentImportPlan(getDB());
+  html += '<br><br><b>Проверка допущенных платежей</b><br>' +
+    'К отправке: ' + plan.collection.rows.length + '<br>' +
+    'Исключено ошибочных строк: ' + plan.collection.totalErrorRows + '<br>';
+  if (plan.blocked){
+    html += '<span class="danger">Импорт заблокирован: ' + escHtml(plan.reason) + '</span>';
+  } else {
+    html += '<span class="ok">Проверка года допущенных платежей пройдена.</span>';
+    if (plan.yearValidation.status === 'warning') html += '<br><span class="status-warn">Допущены оплаты соседнего года.</span>';
+  }
   box.innerHTML = html;
 }
 
@@ -2388,12 +2398,16 @@ function parseSheetToRows(sheet, fileName, sheetName){
   parseMeta = { mode:'none', indexRowIndex:-1, fieldMapStatus:null, paymentGroups:[], workbookYear:'', headerDetect:null, customer2009FieldMap:null };
 
   const workbookYear = detectWorkbookYear(aoa, fileName, sheetName);
-  const strictCustomerYear = '2009';
+  const fileYear = readFileYearFromA15(sheet);
+  const strictCustomerYear = fileYear === null ? '' : String(fileYear);
 
   function parseStrictCustomer2009Rows(){
     const headerRowIndex = findCustomer2009HeaderRow(aoa);
     console.log('[CUSTOMER_2009][selectedHeaderRow]', headerRowIndex);
     if (headerRowIndex < 0) return null;
+    if (!strictCustomerYear){
+      return { ok:false, msg:getFileYearA15Error(sheet), customerLike:true };
+    }
 
     const rawRowValues = aoa[headerRowIndex] || [];
     const fieldMap = {};
@@ -3031,6 +3045,23 @@ function collectImportPaymentsToApply(db, options){
   return result;
 }
 
+function getPaymentImportPlan(db){
+  const fileYear = fileYearValidation && fileYearValidation.fileYear;
+  if (!Number.isInteger(fileYear) || fileYear < 1900 || fileYear > 2100){
+    return { collection:makeEmptyImportPaymentsCollection(), yearValidation:null, blocked:true,
+      reason:fileYearBlockReason || 'Ошибка определения года A15. Повторно проверьте файл.' };
+  }
+  if (!db || !db.abonents){
+    return { collection:makeEmptyImportPaymentsCollection(), yearValidation:null, blocked:true, reason:'База абонентов не готова.' };
+  }
+  const collection = collectImportPaymentsToApply(db, { silent:true });
+  const yearValidation = validatePaymentYears(collection.rows.map(function(row){
+    return { paymentDate:row.payment_date };
+  }), fileYear);
+  return { collection:collection, yearValidation:yearValidation, blocked:yearValidation.status === 'error',
+    reason:yearValidation.status === 'error' ? 'Обнаружены некорректные даты оплат среди допущенных платежей.' : '' };
+}
+
 function evaluatePaymentsRow(db, row){
   const details = [];
   if (row && row.paymentsImportStatus === 'applied'){
@@ -3332,12 +3363,12 @@ function hasRowsWithUid(){
   }
   return false;
 }
-function canEnterPaymentsMode(){
+function canEnterPaymentsMode(paymentPlan){
   const parsed = dataRows.length > 0;
-  return parsed && !isImportBlockedByFileYear() && (primaryApplied || hasRowsWithUid());
+  return parsed && !isImportBlockedByFileYear(paymentPlan) && (primaryApplied || hasRowsWithUid());
 }
-function isImportBlockedByFileYear(){
-  return !!(fileYearBlockReason || (fileYearValidation && fileYearValidation.status === 'error'));
+function isImportBlockedByFileYear(paymentPlan){
+  return (paymentPlan || getPaymentImportPlan(getDB())).blocked;
 }
 
 function hasPaymentsReadyRows(){
@@ -3385,15 +3416,17 @@ function setButtons(){
 
   const canWrite = canWriteOrExplain();
   const parsed = dataRows.length > 0;
-  const fileYearBlocked = isImportBlockedByFileYear();
   const db = getDB();
+  const paymentPlan = getPaymentImportPlan(db);
+  const fileYearBlocked = isImportBlockedByFileYear(paymentPlan);
+  const primaryFileYearBlocked = !!(fileYearBlockReason || (fileYearValidation && fileYearValidation.status === 'error'));
   const primaryPlan = getPrimaryApplyPlan(db);
 
   $('btnModePrimary').disabled = importApplyBusy;
-  $('btnModePayments').disabled = !canEnterPaymentsMode() || importApplyBusy || fileYearBlocked;
-  const canApplyPrimary = (mode==='primary' && parsed && canWrite && primaryPlan.applicable > 0 && !importApplyBusy && !isApplyBlockedByTemplateMode() && !fileYearBlocked);
+  $('btnModePayments').disabled = !canEnterPaymentsMode(paymentPlan) || importApplyBusy || fileYearBlocked;
+  const canApplyPrimary = (mode==='primary' && parsed && canWrite && primaryPlan.applicable > 0 && !importApplyBusy && !isApplyBlockedByTemplateMode() && !primaryFileYearBlocked);
   $('btnApplyPrimary').disabled = !canApplyPrimary;
-  const paymentsCount = getPaymentsToApplyCount();
+  const paymentsCount = paymentPlan.collection.totalNew;
   const templateModeBlocked = isApplyBlockedByTemplateMode();
   $('btnApplyPayments').textContent = 'Применить: добавить ' + paymentsCount + ' платежей';
   $('btnApplyPayments').disabled = !(mode==='payments' && parsed && canWrite && paymentsCount>0 && !importApplyBusy && !templateModeBlocked && !fileYearBlocked);
@@ -3413,6 +3446,7 @@ function setButtons(){
   $('primarySettings').style.display = mode==='primary' ? 'flex' : 'none';
   $('paymentsSettings').style.display = mode==='payments' ? 'flex' : 'none';
   $('optAllowSquareUpdate').disabled = mode!=='primary';
+  if (fileYearValidation) setFileYearAnalysis(fileYearValidation, currentFileName, '', paymentPlan);
 }
 
 function updateRestoredFileInfo(){
@@ -3524,7 +3558,7 @@ async function onParse(){
 
 async function applyPrimary(){
   if (importApplyBusy) return;
-  if (isImportBlockedByFileYear()){ setImportStatus((fileYearBlockReason || 'Импорт заблокирован проверкой года A15') + '.', 'err'); setButtons(); return; }
+  if (fileYearBlockReason || (fileYearValidation && fileYearValidation.status === 'error')){ setImportStatus((fileYearBlockReason || 'Импорт заблокирован проверкой года A15') + '.', 'err'); setButtons(); return; }
   if (!canWriteOrExplain()) return setButtons();
   setImportBusy(true, 'Применение первички…');
   if (window.JKHBusy && typeof JKHBusy.show === 'function') JKHBusy.show('Применение первички…');
@@ -3642,15 +3676,19 @@ async function applyPrimary(){
 
 async function applyPayments(){
   if (importApplyBusy) return;
-  if (isImportBlockedByFileYear()){ setImportStatus((fileYearBlockReason || 'Импорт заблокирован проверкой года A15') + '.', 'err'); setButtons(); return; }
-  setImportBusy(true, 'Добавление платежей…');
-  if (window.JKHBusy && typeof JKHBusy.show === 'function') JKHBusy.show('Добавление платежей…');
   const db = getDB();
   if (!db || !db.abonents){ setImportStatus('База абонентов не загружена.', 'err'); setImportBusy(false); if (window.JKHBusy && typeof JKHBusy.hide === 'function') JKHBusy.hide(); return; }
 
   let collection;
   try{
-    collection = collectImportPaymentsToApply(db);
+    const paymentPlan = getPaymentImportPlan(db);
+    if (isImportBlockedByFileYear(paymentPlan)){
+      setImportStatus(paymentPlan.reason, 'err');
+      setButtons();
+      return;
+    }
+    if (mode !== 'payments' || isApplyBlockedByTemplateMode() || !canWriteOrExplain()) return;
+    collection = paymentPlan.collection;
   }catch(e){
     if (isLedgerJsonInvalidError(e)){
       setImportStatus(LEDGER_FATAL_MESSAGE, 'err');
@@ -3660,6 +3698,8 @@ async function applyPayments(){
     }
     throw e;
   }
+  setImportBusy(true, 'Добавление платежей…');
+  if (window.JKHBusy && typeof JKHBusy.show === 'function') JKHBusy.show('Добавление платежей…');
   const rows = Array.isArray(collection.rows) ? collection.rows : [];
   const appliedExcelRows = {};
   const byExcelRow = collection.byExcelRow || {};

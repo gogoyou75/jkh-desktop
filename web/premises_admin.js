@@ -889,26 +889,25 @@ window.PremisesAdmin = (function () {
         if (!oid || oid === 'guest' || oid === 'ALL') throw new Error('SERVER_UPLOAD_FAILED');
         const raw = JSON.stringify(window.AbonentsDB || { premises: {}, links: [], abonents: {} });
 
-        let res = null;
-        try {
-            res = await fetch('/api/store', {
-                method: 'POST',
-                credentials: 'include',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ client_owner_hint: oid, key: KEY_DB, value: String(raw || '') })
-            });
-        } catch (e) {
-            throw new Error('SERVER_UPLOAD_FAILED');
+        if (!window.JKHDbCas || typeof window.JKHDbCas.write !== 'function') {
+            throw new Error('Версия базы не загружена. Обновите страницу перед сохранением.');
         }
-        if (!res || !res.ok) throw new Error('SERVER_UPLOAD_FAILED');
-
-        let data = null;
-        try { data = await res.json(); } catch (e) { data = null; }
-        if (!(data && data.ok === true)) throw new Error('SERVER_UPLOAD_FAILED');
+        const result = await window.JKHDbCas.write(oid, raw);
+        if (!result || !result.ok || result.state !== 'confirmed') {
+            if (result?.state === 'conflict') {
+                throw new Error('Данные на сервере изменились или отсутствует версия базы. Сохранение отменено. Обновите страницу и повторите изменения.');
+            }
+            if (result?.state === 'unknown' || result?.error === 'DB_VERSION_NOT_LOADED') {
+                throw new Error('Результат сохранения или версия базы не подтверждены. Не повторяйте сохранение до обновления данных с сервера.');
+            }
+            throw new Error('Сервер не подтвердил сохранение квартиры. Обновите страницу и проверьте данные.');
+        }
     }
 
     async function flushDbToServerStrict(ownerId) {
         const persistOwnerId = String(ownerId || getPersistOwnerIdOrThrow()).trim();
+
+        await uploadOnlyAbonentsDbToServer(persistOwnerId);
 
         if (window.JKHStore && window.AbonentsDB) {
             try {
@@ -918,7 +917,6 @@ window.PremisesAdmin = (function () {
             }
         }
 
-        await uploadOnlyAbonentsDbToServer(persistOwnerId);
         console.log('[premises][save] server flush ok owner=' + persistOwnerId);
         return true;
     }

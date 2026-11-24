@@ -466,7 +466,11 @@
 
 
   function rateOnDate(d, rates){
-  const t = d && d.getTime ? d.getTime() : NaN;
+  // Rates take effect on a calendar day, regardless of the parser's time of day.
+  const dayKey = date => date && date.getTime
+    ? date.getFullYear() * 10000 + (date.getMonth() + 1) * 100 + date.getDate()
+    : NaN;
+  const t = dayKey(d);
   if (!Number.isFinite(t)) return null;
   if (!Array.isArray(rates) || rates.length === 0) return null;
 
@@ -476,7 +480,7 @@
 
   if (!first) return null;
 
-  if (t < first.from.getTime()){
+  if (t < dayKey(first.from)){
     console.error("[calc_engine][ref_rates] date before first available rate", {
       date: toISODateString(d),
       firstRateDate: toISODateString(first.from),
@@ -488,7 +492,7 @@
   let cur = null;
   for (const r of rates){
     if (!r || !r.from || !r.from.getTime) continue;
-    if (r.from.getTime() <= t) cur = r.rate;
+    if (dayKey(r.from) <= t) cur = r.rate;
     else break;
   }
 
@@ -497,7 +501,7 @@
 
 
   function capRateUntil2027(dateObj, rate){
-    const cutoff = new Date("2027-01-01");
+    const cutoff = new Date(2027, 0, 1);
     if (dateObj < cutoff) return Math.min(9.5, rate);
     return rate;
   }

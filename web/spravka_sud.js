@@ -267,6 +267,26 @@
     };
   }
 
+  function refreshReadOwnerAfterInit(ctx){
+    // Authentication may finish after DOMContentLoaded; do not keep the guest scope.
+    const readyContext = getContext();
+    ctx.currentOwner = readyContext.currentOwner;
+    ctx.readOwner = ctx.forcedOwner || readyContext.currentOwner;
+    return ctx;
+  }
+
+  function reportRowsThroughDate(rows, asOf, eng){
+    const cutoff = eng.startOfDay(asOf).getTime();
+    return rows.map(function(row){
+      const paidDate = eng.parseDateAnyToDate(row && row.paid_date);
+      if (eng.toNum(row && row.paid) > 0 && paidDate && eng.startOfDay(paidDate).getTime() > cutoff) {
+        // Hide a future payment in the report without changing the source ledger/accrual.
+        return Object.assign({}, row, { paid: 0, paid_date: "" });
+      }
+      return row;
+    });
+  }
+
   function normalizeDbRoot(obj){
     if (!obj || typeof obj !== "object") return null;
     const abonents = (obj.abonents && typeof obj.abonents === "object") ? obj.abonents : null;
@@ -702,6 +722,7 @@
         return;
       }
 
+      refreshReadOwnerAfterInit(ctx);
       const dbRoot = getDbRootForContext(ctx);
       const abonent = (dbRoot && dbRoot.abonents && dbRoot.abonents[String(ctx.abonentId)]) ? dbRoot.abonents[String(ctx.abonentId)] : null;
       if (!abonent) {
@@ -794,8 +815,7 @@
       setText("period_from", fmtDateRuAny(period.from));
       setText("period_to", fmtDateRuAny(period.to));
 
-      const toD = periodToD;
-      const asOfFinal = eng.endOfMonth(toD);
+      const asOfFinal = eng.startOfDay(periodToD);
 
       setText("stateDate", fmtDateRuAny(asOfFinal));
       setText("docDate", fmtDateRuAny(new Date()));
@@ -871,7 +891,7 @@
 
       let viewRows;
       try {
-        viewRows = eng.buildCourtViewRows(baseRows, period);
+        viewRows = eng.buildCourtViewRows(reportRowsThroughDate(baseRows, asOfFinal, eng), period);
       } catch (e) {
         console.error("[spravka_sud] buildCourtViewRows failed", e);
         return;
