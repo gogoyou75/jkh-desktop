@@ -26,7 +26,7 @@ function ensureAuthScriptLoaded() {
     if (existing) return;
 
     const s = document.createElement("script");
-    s.src = "auth.js";
+    s.src = "auth.js?v=20261124-no-name";
     s.defer = true;
     s.setAttribute("data-auth", "1");
     s.onload = () => {
