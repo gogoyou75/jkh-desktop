@@ -84,16 +84,36 @@ pause() {
 }
 
 cleanup_lock() {
-  if [ "$LOCK_HELD" -eq 1 ]; then
-    rm -f "$LOCK_FILE"
+  local lock_pid lock_metadata cleanup_code
+  [ "$LOCK_HELD" -eq 1 ] || return 0
+
+  if [ ! -e "$LOCK_FILE" ] && [ ! -L "$LOCK_FILE" ]; then
     LOCK_HELD=0
+    return 0
+  fi
+  if [ -L "$LOCK_FILE" ] || ! IFS=' ' read -r lock_pid lock_metadata < "$LOCK_FILE"; then
+    echo "ERROR: cannot verify ownership of lock: $LOCK_FILE"
+    return 1
+  fi
+  if [ "$lock_pid" != "pid=$$" ]; then
+    echo "ERROR: lock ownership changed; leaving lock untouched: $LOCK_FILE"
+    return 1
+  fi
+
+  if rm -f -- "$LOCK_FILE"; then
+    LOCK_HELD=0
+    return 0
+  else
+    cleanup_code=$?
+    echo "ERROR: cannot remove owned lock: $LOCK_FILE"
+    return "$cleanup_code"
   fi
 }
 
 trap cleanup_lock EXIT INT TERM
 
 acquire_lock() {
-  if [ -f "$LOCK_FILE" ]; then
+  if ! ( set -C; printf '%s\n' "pid=$$ env=$ENVIRONMENT dir=$PROJECT_DIR date=$(date '+%F %T')" > "$LOCK_FILE" ) 2>/dev/null; then
     echo "ОШИБКА: найден lock-файл: $LOCK_FILE"
     echo "Это защита от одновременного запуска двух операций."
     echo
@@ -105,7 +125,6 @@ acquire_lock() {
     return 1
   fi
 
-  printf '%s\n' "pid=$$ env=$ENVIRONMENT dir=$PROJECT_DIR date=$(date '+%F %T')" > "$LOCK_FILE"
   LOCK_HELD=1
 }
 
@@ -786,6 +805,72 @@ run_git_preserving_infra() {
 
   return 0
 }
+
+# Align only the index entries for protected LAB files before switching branches.
+# Their server-local working copies remain untouched throughout the checkout.
+lab_checkout_test_branch_preserving_infra() (
+  local target="origin/$SELECTED_BRANCH"
+  local path current_entry target_entry mode current_mode oid stage kind listed_path
+  local original_head original_branch completed=0
+  local -a protected_paths=(docker-compose.yml nginx/default.conf)
+  local -a original_entries=() target_entries=()
+  local i
+
+  [ "$ENVIRONMENT" = "LAB" ] || return 1
+  original_head="$(git rev-parse HEAD)" || return 1
+  original_branch="$(git symbolic-ref --quiet --short HEAD)" || return 1
+  git rev-parse --verify --quiet "$target^{commit}" >/dev/null || return 1
+
+  if [ -n "$(git ls-files -- .env)" ]; then
+    protected_paths+=(.env)
+  fi
+
+  for path in "${protected_paths[@]}"; do
+    current_entry="$(git ls-files --stage -- "$path")" || return 1
+    target_entry="$(git ls-tree "$target" -- "$path")" || return 1
+    read -r mode oid stage listed_path <<< "$current_entry"
+    if [ -z "$current_entry" ] || [ "$stage" != 0 ] || [ "$listed_path" != "$path" ]; then
+      block_operation "BLOCKED: индекс LAB infra-файла не готов: $path"
+      return 1
+    fi
+    if ! git diff --cached --quiet HEAD -- "$path"; then
+      block_operation "BLOCKED: LAB infra-файл подготовлен к коммиту: $path"
+      return 1
+    fi
+    current_mode="$mode"
+    original_entries+=("$mode,$oid,$path")
+    read -r mode kind oid listed_path <<< "$target_entry"
+    if [ "$kind" != blob ] || [ "$listed_path" != "$path" ] ||
+       [ "$mode" != "$current_mode" ]; then
+      block_operation "BLOCKED: LAB infra-файл отсутствует или сменил тип в целевой ветке: $path"
+      return 1
+    fi
+    target_entries+=("$mode,$oid,$path")
+  done
+
+  restore_lab_index_on_failure() {
+    if [ "$completed" -eq 0 ]; then
+      for i in "${!protected_paths[@]}"; do
+        git update-index --cacheinfo "${original_entries[$i]}" &&
+          git update-index --skip-worktree "${protected_paths[$i]}" ||
+          echo "BLOCKED: не удалось восстановить индекс для ${protected_paths[$i]}"
+      done
+      if [ "$(git rev-parse HEAD)" != "$original_head" ] ||
+         [ "$(git symbolic-ref --quiet --short HEAD)" != "$original_branch" ]; then
+        echo "BLOCKED: Git изменил HEAD при неудачном checkout; требуется ручная проверка."
+      fi
+    fi
+  }
+  trap restore_lab_index_on_failure EXIT
+
+  for i in "${!protected_paths[@]}"; do
+    git update-index --cacheinfo "${target_entries[$i]}" || return 1
+    git update-index --skip-worktree "${protected_paths[$i]}" || return 1
+  done
+
+  git checkout -B test-pr "$target" || return 1
+  completed=1
+)
 
 infra_files_guard() {
   local config_file env_type db_name pattern
@@ -2192,7 +2277,7 @@ deploy_test_branch() {
   select_branch || return 1
   infra_snapshot="$(mktemp)" || return 1
   infra_snapshot_before_git "$infra_snapshot" || return 1
-  run_git_preserving_infra "$infra_snapshot" git checkout -B test-pr "origin/$SELECTED_BRANCH" || return 1
+  run_git_preserving_infra "$infra_snapshot" lab_checkout_test_branch_preserving_infra || return 1
   environment_compose_guard_only || return 1
 
   if [ "$with_build" = "yes" ]; then
@@ -2355,50 +2440,68 @@ safe_rollback() {
 }
 
 run_case() {
+  local operation_rc=0 cleanup_rc=0 final_status_rc=0 operation_error=0
   SELECTED_COMMIT=""
   LAST_ERROR=0
   LAST_BLOCKED=0
   BLOCKED_MESSAGE=""
   LAST_BLOCK_REASONS=()
-  go_project || {
-    show_final_status
-    check_result
-    return
-  }
+  if go_project; then
+    if acquire_lock; then
+      case "$1" in
+        1) deploy_main_no_build || operation_rc=$? ;;
+        2) hard_reset_main || operation_rc=$? ;;
+        3) deploy_main_with_build || operation_rc=$? ;;
+        4) deploy_test_branch "yes" || operation_rc=$? ;;
+        5) deploy_test_branch "no" || operation_rc=$? ;;
+        6) restart_services || operation_rc=$? ;;
+        7) run_basic_checks || operation_rc=$? ;;
+        8) show_logs || operation_rc=$? ;;
+        9) safe_main_deploy || operation_rc=$? ;;
+        10) full_stage_verification || operation_rc=$? ;;
+        11) cherry_pick_commit || operation_rc=$? ;;
+        13) dashboard || operation_rc=$? ;;
+        14) safe_rollback || operation_rc=$? ;;
+        15) lab_prod_readiness_preflight || operation_rc=$? ;;
+        16) backup_current_environment || operation_rc=$? ;;
+        17) lab_prod_deploy_wizard || operation_rc=$? ;;
+        18) check_lab_prod_isolation || operation_rc=$? ;;
+        *)
+          echo "Нет такого пункта."
+          LAST_ERROR=1
+          operation_rc=1
+          ;;
+      esac
+    else
+      operation_rc=$?
+    fi
+  else
+    operation_rc=$?
+  fi
 
-  acquire_lock || {
-    show_final_status
-    check_result
-    return
-  }
+  # Preserve errors even when the handler did not update the shared flags.
+  if [ "$operation_rc" -ne 0 ] && [ "$LAST_ERROR" -eq 0 ]; then
+    LAST_ERROR=$operation_rc
+  fi
+  operation_error=$LAST_ERROR
 
-  case "$1" in
-    1) deploy_main_no_build || true ;;
-    2) hard_reset_main || true ;;
-    3) deploy_main_with_build || true ;;
-    4) deploy_test_branch "yes" || true ;;
-    5) deploy_test_branch "no" || true ;;
-    6) restart_services || true ;;
-    7) run_basic_checks || true ;;
-    8) show_logs ;;
-    9) safe_main_deploy || true ;;
-    10) full_stage_verification || true ;;
-    11) cherry_pick_commit || true ;;
-    13) dashboard ;;
-    14) safe_rollback || true ;;
-    15) lab_prod_readiness_preflight || true ;;
-    16) backup_current_environment || true ;;
-    17) lab_prod_deploy_wizard || true ;;
-    18) check_lab_prod_isolation || true ;;
-    *)
-      echo "Нет такого пункта."
-      LAST_ERROR=1
-      ;;
-  esac
+  # Always attempt owned-lock cleanup; neither cleanup nor reporting may hide
+  # the original operation failure. BLOCKED remains the highest-priority status.
+  release_lock || cleanup_rc=$?
+  show_final_status || final_status_rc=$?
+  if [ "$operation_error" -ne 0 ]; then
+    LAST_ERROR=$operation_error
+  elif [ "$cleanup_rc" -ne 0 ]; then
+    LAST_ERROR=$cleanup_rc
+  elif [ "$LAST_ERROR" -eq 0 ] && [ "$final_status_rc" -ne 0 ]; then
+    LAST_ERROR=$final_status_rc
+  fi
 
-  release_lock
-  show_final_status
   check_result
+  if [ "$LAST_BLOCKED" -eq 1 ] || [ "$LAST_ERROR" -ne 0 ]; then
+    return 1
+  fi
+  return 0
 }
 
 menu() {
@@ -2462,7 +2565,8 @@ main() {
       continue
     fi
 
-    run_case "$choice"
+    # The result is already displayed; an ordinary failure must not exit the menu.
+    run_case "$choice" || :
     pause
   done
 }
