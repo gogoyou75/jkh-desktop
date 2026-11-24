@@ -3183,8 +3183,9 @@ def index():
 
 @app.post("/api/admin/initdb")
 def initdb():
-    db.create_all()
-    return jsonify(ok=True, message="users + kv_store ready")
+    # Schema creation/adoption requires a reviewed Alembic plan and backup.
+    # Keep the legacy endpoint explicit, but never perform unversioned DDL here.
+    return jsonify(ok=False, error="schema_control_required"), 409
 
 
 @app.get("/api/abonents")

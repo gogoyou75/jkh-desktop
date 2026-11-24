@@ -1,0 +1,2005 @@
+{
+  "format": 1,
+  "tables": {
+    "abonent_summary": {
+      "columns": [
+        {
+          "default": null,
+          "name": "id",
+          "nullable": false,
+          "primary_key": true,
+          "type": "BIGINT"
+        },
+        {
+          "default": null,
+          "name": "owner_id",
+          "nullable": false,
+          "primary_key": false,
+          "type": "VARCHAR(128)"
+        },
+        {
+          "default": null,
+          "name": "abonent_id",
+          "nullable": false,
+          "primary_key": false,
+          "type": "VARCHAR(128)"
+        },
+        {
+          "default": null,
+          "name": "account_uid",
+          "nullable": false,
+          "primary_key": false,
+          "type": "VARCHAR(128)"
+        },
+        {
+          "default": null,
+          "name": "account_number",
+          "nullable": false,
+          "primary_key": false,
+          "type": "VARCHAR(128)"
+        },
+        {
+          "default": null,
+          "name": "fio",
+          "nullable": false,
+          "primary_key": false,
+          "type": "VARCHAR(255)"
+        },
+        {
+          "default": null,
+          "name": "address",
+          "nullable": false,
+          "primary_key": false,
+          "type": "VARCHAR(1024)"
+        },
+        {
+          "default": null,
+          "name": "total_accrued",
+          "nullable": true,
+          "primary_key": false,
+          "type": "NUMERIC(14, 2)"
+        },
+        {
+          "default": null,
+          "name": "total_paid",
+          "nullable": true,
+          "primary_key": false,
+          "type": "NUMERIC(14, 2)"
+        },
+        {
+          "default": null,
+          "name": "main_debt",
+          "nullable": true,
+          "primary_key": false,
+          "type": "NUMERIC(14, 2)"
+        },
+        {
+          "default": null,
+          "name": "penalty_debt",
+          "nullable": true,
+          "primary_key": false,
+          "type": "NUMERIC(14, 2)"
+        },
+        {
+          "default": null,
+          "name": "total_debt",
+          "nullable": true,
+          "primary_key": false,
+          "type": "NUMERIC(14, 2)"
+        },
+        {
+          "default": null,
+          "name": "summary_status",
+          "nullable": false,
+          "primary_key": false,
+          "type": "VARCHAR(32)"
+        },
+        {
+          "default": null,
+          "name": "summary_reason",
+          "nullable": false,
+          "primary_key": false,
+          "type": "VARCHAR(128)"
+        },
+        {
+          "default": null,
+          "name": "input_hash",
+          "nullable": false,
+          "primary_key": false,
+          "type": "VARCHAR(64)"
+        },
+        {
+          "default": null,
+          "name": "dirty_since",
+          "nullable": true,
+          "primary_key": false,
+          "type": "DATETIME"
+        },
+        {
+          "default": null,
+          "name": "last_error_code",
+          "nullable": false,
+          "primary_key": false,
+          "type": "VARCHAR(64)"
+        },
+        {
+          "default": null,
+          "name": "summary_json",
+          "nullable": false,
+          "primary_key": false,
+          "type": "TEXT"
+        },
+        {
+          "default": "CURRENT_TIMESTAMP",
+          "name": "created_at",
+          "nullable": false,
+          "primary_key": false,
+          "type": "DATETIME"
+        },
+        {
+          "default": "CURRENT_TIMESTAMP",
+          "name": "updated_at",
+          "nullable": true,
+          "primary_key": false,
+          "type": "DATETIME"
+        }
+      ],
+      "ddl": "\nCREATE TABLE abonent_summary (\n\tid BIGINT NOT NULL AUTO_INCREMENT, \n\towner_id VARCHAR(128) NOT NULL, \n\tabonent_id VARCHAR(128) NOT NULL, \n\taccount_uid VARCHAR(128) NOT NULL, \n\taccount_number VARCHAR(128) NOT NULL, \n\tfio VARCHAR(255) NOT NULL, \n\taddress VARCHAR(1024) NOT NULL, \n\ttotal_accrued NUMERIC(14, 2), \n\ttotal_paid NUMERIC(14, 2), \n\tmain_debt NUMERIC(14, 2), \n\tpenalty_debt NUMERIC(14, 2), \n\ttotal_debt NUMERIC(14, 2), \n\tsummary_status VARCHAR(32) NOT NULL, \n\tsummary_reason VARCHAR(128) NOT NULL, \n\tinput_hash VARCHAR(64) NOT NULL, \n\tdirty_since DATETIME, \n\tlast_error_code VARCHAR(64) NOT NULL, \n\tsummary_json TEXT NOT NULL, \n\tcreated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, \n\tupdated_at DATETIME DEFAULT CURRENT_TIMESTAMP, \n\tPRIMARY KEY (id)\n)\n\n",
+      "foreign_keys": [],
+      "index_ddl": [
+        "CREATE INDEX ix_abonent_summary_abonent_id ON abonent_summary (abonent_id)",
+        "CREATE INDEX ix_abonent_summary_account_number ON abonent_summary (account_number)",
+        "CREATE INDEX ix_abonent_summary_account_uid ON abonent_summary (account_uid)",
+        "CREATE INDEX ix_abonent_summary_input_hash ON abonent_summary (input_hash)",
+        "CREATE INDEX ix_abonent_summary_owner_id ON abonent_summary (owner_id)",
+        "CREATE INDEX ix_abonent_summary_summary_status ON abonent_summary (summary_status)"
+      ],
+      "indexes": [
+        {
+          "columns": [
+            "account_number"
+          ],
+          "unique": false
+        },
+        {
+          "columns": [
+            "owner_id"
+          ],
+          "unique": false
+        },
+        {
+          "columns": [
+            "input_hash"
+          ],
+          "unique": false
+        },
+        {
+          "columns": [
+            "account_uid"
+          ],
+          "unique": false
+        },
+        {
+          "columns": [
+            "abonent_id"
+          ],
+          "unique": false
+        },
+        {
+          "columns": [
+            "summary_status"
+          ],
+          "unique": false
+        }
+      ],
+      "pk": [
+        "id"
+      ]
+    },
+    "bulk_calc_verify_job_items": {
+      "columns": [
+        {
+          "default": null,
+          "name": "id",
+          "nullable": false,
+          "primary_key": true,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "job_id",
+          "nullable": false,
+          "primary_key": false,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "owner_id",
+          "nullable": false,
+          "primary_key": false,
+          "type": "VARCHAR(128)"
+        },
+        {
+          "default": null,
+          "name": "account_uid",
+          "nullable": false,
+          "primary_key": false,
+          "type": "VARCHAR(128)"
+        },
+        {
+          "default": null,
+          "name": "status",
+          "nullable": false,
+          "primary_key": false,
+          "type": "VARCHAR(32)"
+        },
+        {
+          "default": null,
+          "name": "reason",
+          "nullable": false,
+          "primary_key": false,
+          "type": "VARCHAR(128)"
+        },
+        {
+          "default": null,
+          "name": "old_summary_json",
+          "nullable": false,
+          "primary_key": false,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "new_summary_json",
+          "nullable": false,
+          "primary_key": false,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "diff_json",
+          "nullable": false,
+          "primary_key": false,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "error_code",
+          "nullable": false,
+          "primary_key": false,
+          "type": "VARCHAR(64)"
+        },
+        {
+          "default": null,
+          "name": "started_at",
+          "nullable": true,
+          "primary_key": false,
+          "type": "DATETIME"
+        },
+        {
+          "default": null,
+          "name": "finished_at",
+          "nullable": true,
+          "primary_key": false,
+          "type": "DATETIME"
+        },
+        {
+          "default": null,
+          "name": "error_message",
+          "nullable": false,
+          "primary_key": false,
+          "type": "TEXT"
+        }
+      ],
+      "ddl": "\nCREATE TABLE bulk_calc_verify_job_items (\n\tid INTEGER NOT NULL AUTO_INCREMENT, \n\tjob_id INTEGER NOT NULL, \n\towner_id VARCHAR(128) NOT NULL, \n\taccount_uid VARCHAR(128) NOT NULL, \n\tstatus VARCHAR(32) NOT NULL, \n\treason VARCHAR(128) NOT NULL, \n\told_summary_json TEXT NOT NULL, \n\tnew_summary_json TEXT NOT NULL, \n\tdiff_json TEXT NOT NULL, \n\terror_code VARCHAR(64) NOT NULL, \n\tstarted_at DATETIME, \n\tfinished_at DATETIME, \n\terror_message TEXT NOT NULL, \n\tPRIMARY KEY (id), \n\tFOREIGN KEY(job_id) REFERENCES bulk_calc_verify_jobs (id)\n)\n\n",
+      "foreign_keys": [
+        {
+          "columns": [
+            "job_id"
+          ],
+          "ondelete": null,
+          "referred_columns": [
+            "id"
+          ],
+          "referred_table": "bulk_calc_verify_jobs"
+        }
+      ],
+      "index_ddl": [
+        "CREATE INDEX ix_bulk_calc_verify_job_items_account_uid ON bulk_calc_verify_job_items (account_uid)",
+        "CREATE INDEX ix_bulk_calc_verify_job_items_job_id ON bulk_calc_verify_job_items (job_id)",
+        "CREATE INDEX ix_bulk_calc_verify_job_items_owner_id ON bulk_calc_verify_job_items (owner_id)",
+        "CREATE INDEX ix_bulk_calc_verify_job_items_status ON bulk_calc_verify_job_items (status)"
+      ],
+      "indexes": [
+        {
+          "columns": [
+            "status"
+          ],
+          "unique": false
+        },
+        {
+          "columns": [
+            "job_id"
+          ],
+          "unique": false
+        },
+        {
+          "columns": [
+            "account_uid"
+          ],
+          "unique": false
+        },
+        {
+          "columns": [
+            "owner_id"
+          ],
+          "unique": false
+        }
+      ],
+      "pk": [
+        "id"
+      ]
+    },
+    "bulk_calc_verify_jobs": {
+      "columns": [
+        {
+          "default": null,
+          "name": "id",
+          "nullable": false,
+          "primary_key": true,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "owner_id",
+          "nullable": false,
+          "primary_key": false,
+          "type": "VARCHAR(128)"
+        },
+        {
+          "default": null,
+          "name": "requested_by",
+          "nullable": false,
+          "primary_key": false,
+          "type": "VARCHAR(64)"
+        },
+        {
+          "default": null,
+          "name": "reason",
+          "nullable": false,
+          "primary_key": false,
+          "type": "VARCHAR(64)"
+        },
+        {
+          "default": null,
+          "name": "status",
+          "nullable": false,
+          "primary_key": false,
+          "type": "VARCHAR(32)"
+        },
+        {
+          "default": null,
+          "name": "total_count",
+          "nullable": false,
+          "primary_key": false,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "processed_count",
+          "nullable": false,
+          "primary_key": false,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "ok_count",
+          "nullable": false,
+          "primary_key": false,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "mismatch_count",
+          "nullable": false,
+          "primary_key": false,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "error_count",
+          "nullable": false,
+          "primary_key": false,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "skipped_count",
+          "nullable": false,
+          "primary_key": false,
+          "type": "INTEGER"
+        },
+        {
+          "default": "CURRENT_TIMESTAMP",
+          "name": "created_at",
+          "nullable": false,
+          "primary_key": false,
+          "type": "DATETIME"
+        },
+        {
+          "default": null,
+          "name": "started_at",
+          "nullable": true,
+          "primary_key": false,
+          "type": "DATETIME"
+        },
+        {
+          "default": null,
+          "name": "finished_at",
+          "nullable": true,
+          "primary_key": false,
+          "type": "DATETIME"
+        },
+        {
+          "default": null,
+          "name": "error_message",
+          "nullable": false,
+          "primary_key": false,
+          "type": "TEXT"
+        }
+      ],
+      "ddl": "\nCREATE TABLE bulk_calc_verify_jobs (\n\tid INTEGER NOT NULL AUTO_INCREMENT, \n\towner_id VARCHAR(128) NOT NULL, \n\trequested_by VARCHAR(64) NOT NULL, \n\treason VARCHAR(64) NOT NULL, \n\tstatus VARCHAR(32) NOT NULL, \n\ttotal_count INTEGER NOT NULL, \n\tprocessed_count INTEGER NOT NULL, \n\tok_count INTEGER NOT NULL, \n\tmismatch_count INTEGER NOT NULL, \n\terror_count INTEGER NOT NULL, \n\tskipped_count INTEGER NOT NULL, \n\tcreated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, \n\tstarted_at DATETIME, \n\tfinished_at DATETIME, \n\terror_message TEXT NOT NULL, \n\tPRIMARY KEY (id)\n)\n\n",
+      "foreign_keys": [],
+      "index_ddl": [
+        "CREATE INDEX ix_bulk_calc_verify_jobs_owner_id ON bulk_calc_verify_jobs (owner_id)",
+        "CREATE INDEX ix_bulk_calc_verify_jobs_status ON bulk_calc_verify_jobs (status)"
+      ],
+      "indexes": [
+        {
+          "columns": [
+            "owner_id"
+          ],
+          "unique": false
+        },
+        {
+          "columns": [
+            "status"
+          ],
+          "unique": false
+        }
+      ],
+      "pk": [
+        "id"
+      ]
+    },
+    "card_snapshot": {
+      "columns": [
+        {
+          "default": null,
+          "name": "id",
+          "nullable": false,
+          "primary_key": true,
+          "type": "BIGINT"
+        },
+        {
+          "default": null,
+          "name": "owner_id",
+          "nullable": false,
+          "primary_key": false,
+          "type": "VARCHAR(128)"
+        },
+        {
+          "default": null,
+          "name": "abonent_uid",
+          "nullable": false,
+          "primary_key": false,
+          "type": "VARCHAR(128)"
+        },
+        {
+          "default": null,
+          "name": "abonent_id",
+          "nullable": false,
+          "primary_key": false,
+          "type": "VARCHAR(128)"
+        },
+        {
+          "default": null,
+          "name": "snapshot_status",
+          "nullable": false,
+          "primary_key": false,
+          "type": "VARCHAR(32)"
+        },
+        {
+          "default": null,
+          "name": "snapshot_reason",
+          "nullable": false,
+          "primary_key": false,
+          "type": "VARCHAR(128)"
+        },
+        {
+          "default": null,
+          "name": "input_hash",
+          "nullable": false,
+          "primary_key": false,
+          "type": "VARCHAR(64)"
+        },
+        {
+          "default": null,
+          "name": "ledger_version",
+          "nullable": false,
+          "primary_key": false,
+          "type": "VARCHAR(64)"
+        },
+        {
+          "default": null,
+          "name": "tariff_version",
+          "nullable": false,
+          "primary_key": false,
+          "type": "VARCHAR(64)"
+        },
+        {
+          "default": null,
+          "name": "rate_version",
+          "nullable": false,
+          "primary_key": false,
+          "type": "VARCHAR(64)"
+        },
+        {
+          "default": null,
+          "name": "exclude_version",
+          "nullable": false,
+          "primary_key": false,
+          "type": "VARCHAR(64)"
+        },
+        {
+          "default": null,
+          "name": "links_version",
+          "nullable": false,
+          "primary_key": false,
+          "type": "VARCHAR(64)"
+        },
+        {
+          "default": null,
+          "name": "engine_version",
+          "nullable": false,
+          "primary_key": false,
+          "type": "VARCHAR(64)"
+        },
+        {
+          "default": null,
+          "name": "computed_at",
+          "nullable": true,
+          "primary_key": false,
+          "type": "DATETIME"
+        },
+        {
+          "default": "CURRENT_TIMESTAMP",
+          "name": "updated_at",
+          "nullable": true,
+          "primary_key": false,
+          "type": "DATETIME"
+        },
+        {
+          "default": null,
+          "name": "snapshot_json",
+          "nullable": false,
+          "primary_key": false,
+          "type": "TEXT"
+        }
+      ],
+      "ddl": "\nCREATE TABLE card_snapshot (\n\tid BIGINT NOT NULL AUTO_INCREMENT, \n\towner_id VARCHAR(128) NOT NULL, \n\tabonent_uid VARCHAR(128) NOT NULL, \n\tabonent_id VARCHAR(128) NOT NULL, \n\tsnapshot_status VARCHAR(32) NOT NULL, \n\tsnapshot_reason VARCHAR(128) NOT NULL, \n\tinput_hash VARCHAR(64) NOT NULL, \n\tledger_version VARCHAR(64) NOT NULL, \n\ttariff_version VARCHAR(64) NOT NULL, \n\trate_version VARCHAR(64) NOT NULL, \n\texclude_version VARCHAR(64) NOT NULL, \n\tlinks_version VARCHAR(64) NOT NULL, \n\tengine_version VARCHAR(64) NOT NULL, \n\tcomputed_at DATETIME, \n\tupdated_at DATETIME DEFAULT CURRENT_TIMESTAMP, \n\tsnapshot_json TEXT NOT NULL, \n\tPRIMARY KEY (id), \n\tCONSTRAINT uq_card_snapshot_owner_uid UNIQUE (owner_id, abonent_uid)\n)\n\n",
+      "foreign_keys": [],
+      "index_ddl": [
+        "CREATE INDEX ix_card_snapshot_abonent_id ON card_snapshot (abonent_id)",
+        "CREATE INDEX ix_card_snapshot_abonent_uid ON card_snapshot (abonent_uid)",
+        "CREATE INDEX ix_card_snapshot_input_hash ON card_snapshot (input_hash)",
+        "CREATE INDEX ix_card_snapshot_owner_id ON card_snapshot (owner_id)",
+        "CREATE INDEX ix_card_snapshot_snapshot_status ON card_snapshot (snapshot_status)"
+      ],
+      "indexes": [
+        {
+          "columns": [
+            "input_hash"
+          ],
+          "unique": false
+        },
+        {
+          "columns": [
+            "abonent_uid"
+          ],
+          "unique": false
+        },
+        {
+          "columns": [
+            "snapshot_status"
+          ],
+          "unique": false
+        },
+        {
+          "columns": [
+            "abonent_id"
+          ],
+          "unique": false
+        },
+        {
+          "columns": [
+            "owner_id"
+          ],
+          "unique": false
+        },
+        {
+          "columns": [
+            "owner_id",
+            "abonent_uid"
+          ],
+          "unique": true
+        }
+      ],
+      "pk": [
+        "id"
+      ]
+    },
+    "import_applied_fingerprints": {
+      "columns": [
+        {
+          "default": null,
+          "name": "id",
+          "nullable": false,
+          "primary_key": true,
+          "type": "BIGINT"
+        },
+        {
+          "default": null,
+          "name": "owner_id",
+          "nullable": false,
+          "primary_key": false,
+          "type": "VARCHAR(191)"
+        },
+        {
+          "default": null,
+          "name": "import_type",
+          "nullable": false,
+          "primary_key": false,
+          "type": "VARCHAR(32)"
+        },
+        {
+          "default": null,
+          "name": "fingerprint",
+          "nullable": false,
+          "primary_key": false,
+          "type": "VARCHAR(255)"
+        },
+        {
+          "default": null,
+          "name": "account_uid",
+          "nullable": true,
+          "primary_key": false,
+          "type": "VARCHAR(191)"
+        },
+        {
+          "default": null,
+          "name": "account_number",
+          "nullable": true,
+          "primary_key": false,
+          "type": "VARCHAR(191)"
+        },
+        {
+          "default": null,
+          "name": "payment_period",
+          "nullable": true,
+          "primary_key": false,
+          "type": "VARCHAR(7)"
+        },
+        {
+          "default": null,
+          "name": "paid_date",
+          "nullable": true,
+          "primary_key": false,
+          "type": "DATE"
+        },
+        {
+          "default": null,
+          "name": "amount",
+          "nullable": false,
+          "primary_key": false,
+          "type": "NUMERIC(12, 2)"
+        },
+        {
+          "default": null,
+          "name": "source_index",
+          "nullable": false,
+          "primary_key": false,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "payment_id",
+          "nullable": false,
+          "primary_key": false,
+          "type": "VARCHAR(64)"
+        },
+        {
+          "default": null,
+          "name": "batch_id",
+          "nullable": true,
+          "primary_key": false,
+          "type": "BIGINT"
+        },
+        {
+          "default": "CURRENT_TIMESTAMP",
+          "name": "created_at",
+          "nullable": false,
+          "primary_key": false,
+          "type": "DATETIME"
+        }
+      ],
+      "ddl": "\nCREATE TABLE import_applied_fingerprints (\n\tid BIGINT NOT NULL AUTO_INCREMENT, \n\towner_id VARCHAR(191) NOT NULL, \n\timport_type VARCHAR(32) NOT NULL, \n\tfingerprint VARCHAR(255) NOT NULL, \n\taccount_uid VARCHAR(191), \n\taccount_number VARCHAR(191), \n\tpayment_period VARCHAR(7), \n\tpaid_date DATE, \n\tamount NUMERIC(12, 2) NOT NULL, \n\tsource_index INTEGER NOT NULL, \n\tpayment_id VARCHAR(64) NOT NULL, \n\tbatch_id BIGINT, \n\tcreated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, \n\tPRIMARY KEY (id), \n\tCONSTRAINT uq_owner_import_fp UNIQUE (owner_id, import_type, fingerprint)\n)\n\n",
+      "foreign_keys": [],
+      "index_ddl": [
+        "CREATE INDEX ix_import_applied_fingerprints_batch_id ON import_applied_fingerprints (batch_id)",
+        "CREATE INDEX ix_import_applied_fingerprints_owner_id ON import_applied_fingerprints (owner_id)"
+      ],
+      "indexes": [
+        {
+          "columns": [
+            "batch_id"
+          ],
+          "unique": false
+        },
+        {
+          "columns": [
+            "owner_id"
+          ],
+          "unique": false
+        },
+        {
+          "columns": [
+            "owner_id",
+            "import_type",
+            "fingerprint"
+          ],
+          "unique": true
+        }
+      ],
+      "pk": [
+        "id"
+      ]
+    },
+    "import_batches": {
+      "columns": [
+        {
+          "default": null,
+          "name": "id",
+          "nullable": false,
+          "primary_key": true,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "owner_id",
+          "nullable": false,
+          "primary_key": false,
+          "type": "VARCHAR(128)"
+        },
+        {
+          "default": null,
+          "name": "created_by_user_id",
+          "nullable": false,
+          "primary_key": false,
+          "type": "VARCHAR(64)"
+        },
+        {
+          "default": null,
+          "name": "original_filename",
+          "nullable": false,
+          "primary_key": false,
+          "type": "VARCHAR(255)"
+        },
+        {
+          "default": null,
+          "name": "file_sha256",
+          "nullable": false,
+          "primary_key": false,
+          "type": "VARCHAR(64)"
+        },
+        {
+          "default": null,
+          "name": "upload_blob",
+          "nullable": false,
+          "primary_key": false,
+          "type": "BLOB"
+        },
+        {
+          "default": null,
+          "name": "display_name",
+          "nullable": false,
+          "primary_key": false,
+          "type": "VARCHAR(255)"
+        },
+        {
+          "default": null,
+          "name": "accounting_year",
+          "nullable": false,
+          "primary_key": false,
+          "type": "VARCHAR(16)"
+        },
+        {
+          "default": null,
+          "name": "version_label",
+          "nullable": false,
+          "primary_key": false,
+          "type": "VARCHAR(64)"
+        },
+        {
+          "default": null,
+          "name": "notes",
+          "nullable": false,
+          "primary_key": false,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "duplicate_of_batch_id",
+          "nullable": true,
+          "primary_key": false,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "supersedes_batch_id",
+          "nullable": true,
+          "primary_key": false,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "overlaps_with_batch_id",
+          "nullable": true,
+          "primary_key": false,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "is_exact_duplicate",
+          "nullable": false,
+          "primary_key": false,
+          "type": "BOOL"
+        },
+        {
+          "default": null,
+          "name": "has_period_overlap",
+          "nullable": false,
+          "primary_key": false,
+          "type": "BOOL"
+        },
+        {
+          "default": null,
+          "name": "rows_total",
+          "nullable": false,
+          "primary_key": false,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "rows_valid",
+          "nullable": false,
+          "primary_key": false,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "rows_invalid",
+          "nullable": false,
+          "primary_key": false,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "rows_duplicate",
+          "nullable": false,
+          "primary_key": false,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "rows_applied",
+          "nullable": false,
+          "primary_key": false,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "rows_skipped",
+          "nullable": false,
+          "primary_key": false,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "file_name",
+          "nullable": false,
+          "primary_key": false,
+          "type": "VARCHAR(255)"
+        },
+        {
+          "default": null,
+          "name": "uploaded_by",
+          "nullable": false,
+          "primary_key": false,
+          "type": "VARCHAR(64)"
+        },
+        {
+          "default": null,
+          "name": "error_message",
+          "nullable": false,
+          "primary_key": false,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "status",
+          "nullable": false,
+          "primary_key": false,
+          "type": "VARCHAR(32)"
+        },
+        {
+          "default": null,
+          "name": "uploaded_at",
+          "nullable": false,
+          "primary_key": false,
+          "type": "DATETIME"
+        },
+        {
+          "default": null,
+          "name": "started_at",
+          "nullable": true,
+          "primary_key": false,
+          "type": "DATETIME"
+        },
+        {
+          "default": null,
+          "name": "finished_at",
+          "nullable": true,
+          "primary_key": false,
+          "type": "DATETIME"
+        }
+      ],
+      "ddl": "\nCREATE TABLE import_batches (\n\tid INTEGER NOT NULL AUTO_INCREMENT, \n\towner_id VARCHAR(128) NOT NULL, \n\tcreated_by_user_id VARCHAR(64) NOT NULL, \n\toriginal_filename VARCHAR(255) NOT NULL, \n\tfile_sha256 VARCHAR(64) NOT NULL, \n\tupload_blob BLOB NOT NULL, \n\tdisplay_name VARCHAR(255) NOT NULL, \n\taccounting_year VARCHAR(16) NOT NULL, \n\tversion_label VARCHAR(64) NOT NULL, \n\tnotes TEXT NOT NULL, \n\tduplicate_of_batch_id INTEGER, \n\tsupersedes_batch_id INTEGER, \n\toverlaps_with_batch_id INTEGER, \n\tis_exact_duplicate BOOL NOT NULL, \n\thas_period_overlap BOOL NOT NULL, \n\trows_total INTEGER NOT NULL, \n\trows_valid INTEGER NOT NULL, \n\trows_invalid INTEGER NOT NULL, \n\trows_duplicate INTEGER NOT NULL, \n\trows_applied INTEGER NOT NULL, \n\trows_skipped INTEGER NOT NULL, \n\tfile_name VARCHAR(255) NOT NULL, \n\tuploaded_by VARCHAR(64) NOT NULL, \n\terror_message TEXT NOT NULL, \n\tstatus VARCHAR(32) NOT NULL, \n\tuploaded_at DATETIME NOT NULL, \n\tstarted_at DATETIME, \n\tfinished_at DATETIME, \n\tPRIMARY KEY (id)\n)\n\n",
+      "foreign_keys": [],
+      "index_ddl": [
+        "CREATE INDEX ix_import_batches_created_by_user_id ON import_batches (created_by_user_id)",
+        "CREATE INDEX ix_import_batches_file_sha256 ON import_batches (file_sha256)",
+        "CREATE INDEX ix_import_batches_owner_id ON import_batches (owner_id)",
+        "CREATE INDEX ix_import_batches_status ON import_batches (status)"
+      ],
+      "indexes": [
+        {
+          "columns": [
+            "file_sha256"
+          ],
+          "unique": false
+        },
+        {
+          "columns": [
+            "created_by_user_id"
+          ],
+          "unique": false
+        },
+        {
+          "columns": [
+            "status"
+          ],
+          "unique": false
+        },
+        {
+          "columns": [
+            "owner_id"
+          ],
+          "unique": false
+        }
+      ],
+      "pk": [
+        "id"
+      ]
+    },
+    "import_rows": {
+      "columns": [
+        {
+          "default": null,
+          "name": "id",
+          "nullable": false,
+          "primary_key": true,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "batch_id",
+          "nullable": false,
+          "primary_key": false,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "row_no",
+          "nullable": false,
+          "primary_key": false,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "excel_sheet_name",
+          "nullable": false,
+          "primary_key": false,
+          "type": "VARCHAR(255)"
+        },
+        {
+          "default": null,
+          "name": "excel_row_ref",
+          "nullable": false,
+          "primary_key": false,
+          "type": "VARCHAR(64)"
+        },
+        {
+          "default": null,
+          "name": "raw_payload_json",
+          "nullable": false,
+          "primary_key": false,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "normalized_payload_json",
+          "nullable": false,
+          "primary_key": false,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "account_uid",
+          "nullable": false,
+          "primary_key": false,
+          "type": "VARCHAR(128)"
+        },
+        {
+          "default": null,
+          "name": "abonent_id",
+          "nullable": false,
+          "primary_key": false,
+          "type": "VARCHAR(128)"
+        },
+        {
+          "default": null,
+          "name": "account_number",
+          "nullable": false,
+          "primary_key": false,
+          "type": "VARCHAR(128)"
+        },
+        {
+          "default": null,
+          "name": "payment_date",
+          "nullable": false,
+          "primary_key": false,
+          "type": "VARCHAR(10)"
+        },
+        {
+          "default": null,
+          "name": "payment_period",
+          "nullable": false,
+          "primary_key": false,
+          "type": "VARCHAR(7)"
+        },
+        {
+          "default": null,
+          "name": "charge_year",
+          "nullable": false,
+          "primary_key": false,
+          "type": "VARCHAR(4)"
+        },
+        {
+          "default": null,
+          "name": "charge_month",
+          "nullable": false,
+          "primary_key": false,
+          "type": "VARCHAR(2)"
+        },
+        {
+          "default": null,
+          "name": "amount",
+          "nullable": false,
+          "primary_key": false,
+          "type": "VARCHAR(32)"
+        },
+        {
+          "default": null,
+          "name": "paid_date",
+          "nullable": false,
+          "primary_key": false,
+          "type": "VARCHAR(10)"
+        },
+        {
+          "default": null,
+          "name": "source_index",
+          "nullable": true,
+          "primary_key": false,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "source_label",
+          "nullable": false,
+          "primary_key": false,
+          "type": "VARCHAR(255)"
+        },
+        {
+          "default": null,
+          "name": "fingerprint",
+          "nullable": false,
+          "primary_key": false,
+          "type": "VARCHAR(64)"
+        },
+        {
+          "default": null,
+          "name": "matched_payment_id",
+          "nullable": false,
+          "primary_key": false,
+          "type": "VARCHAR(64)"
+        },
+        {
+          "default": null,
+          "name": "applied_at",
+          "nullable": true,
+          "primary_key": false,
+          "type": "DATETIME"
+        },
+        {
+          "default": null,
+          "name": "status",
+          "nullable": false,
+          "primary_key": false,
+          "type": "VARCHAR(32)"
+        },
+        {
+          "default": null,
+          "name": "reason_code",
+          "nullable": false,
+          "primary_key": false,
+          "type": "VARCHAR(64)"
+        },
+        {
+          "default": null,
+          "name": "reason_text",
+          "nullable": false,
+          "primary_key": false,
+          "type": "VARCHAR(1024)"
+        },
+        {
+          "default": null,
+          "name": "error_details_json",
+          "nullable": false,
+          "primary_key": false,
+          "type": "TEXT"
+        }
+      ],
+      "ddl": "\nCREATE TABLE import_rows (\n\tid INTEGER NOT NULL AUTO_INCREMENT, \n\tbatch_id INTEGER NOT NULL, \n\trow_no INTEGER NOT NULL, \n\texcel_sheet_name VARCHAR(255) NOT NULL, \n\texcel_row_ref VARCHAR(64) NOT NULL, \n\traw_payload_json TEXT NOT NULL, \n\tnormalized_payload_json TEXT NOT NULL, \n\taccount_uid VARCHAR(128) NOT NULL, \n\tabonent_id VARCHAR(128) NOT NULL, \n\taccount_number VARCHAR(128) NOT NULL, \n\tpayment_date VARCHAR(10) NOT NULL, \n\tpayment_period VARCHAR(7) NOT NULL, \n\tcharge_year VARCHAR(4) NOT NULL, \n\tcharge_month VARCHAR(2) NOT NULL, \n\tamount VARCHAR(32) NOT NULL, \n\tpaid_date VARCHAR(10) NOT NULL, \n\tsource_index INTEGER, \n\tsource_label VARCHAR(255) NOT NULL, \n\tfingerprint VARCHAR(64) NOT NULL, \n\tmatched_payment_id VARCHAR(64) NOT NULL, \n\tapplied_at DATETIME, \n\tstatus VARCHAR(32) NOT NULL, \n\treason_code VARCHAR(64) NOT NULL, \n\treason_text VARCHAR(1024) NOT NULL, \n\terror_details_json TEXT NOT NULL, \n\tPRIMARY KEY (id), \n\tFOREIGN KEY(batch_id) REFERENCES import_batches (id)\n)\n\n",
+      "foreign_keys": [
+        {
+          "columns": [
+            "batch_id"
+          ],
+          "ondelete": null,
+          "referred_columns": [
+            "id"
+          ],
+          "referred_table": "import_batches"
+        }
+      ],
+      "index_ddl": [
+        "CREATE INDEX ix_import_rows_account_uid ON import_rows (account_uid)",
+        "CREATE INDEX ix_import_rows_batch_id ON import_rows (batch_id)",
+        "CREATE INDEX ix_import_rows_fingerprint ON import_rows (fingerprint)",
+        "CREATE INDEX ix_import_rows_status ON import_rows (status)"
+      ],
+      "indexes": [
+        {
+          "columns": [
+            "status"
+          ],
+          "unique": false
+        },
+        {
+          "columns": [
+            "account_uid"
+          ],
+          "unique": false
+        },
+        {
+          "columns": [
+            "fingerprint"
+          ],
+          "unique": false
+        },
+        {
+          "columns": [
+            "batch_id"
+          ],
+          "unique": false
+        }
+      ],
+      "pk": [
+        "id"
+      ]
+    },
+    "kv_store": {
+      "columns": [
+        {
+          "default": null,
+          "name": "id",
+          "nullable": false,
+          "primary_key": true,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "owner",
+          "nullable": false,
+          "primary_key": false,
+          "type": "VARCHAR(128)"
+        },
+        {
+          "default": null,
+          "name": "k",
+          "nullable": false,
+          "primary_key": false,
+          "type": "VARCHAR(255)"
+        },
+        {
+          "default": null,
+          "name": "v",
+          "nullable": false,
+          "primary_key": false,
+          "type": "TEXT"
+        },
+        {
+          "default": "0",
+          "name": "version",
+          "nullable": false,
+          "primary_key": false,
+          "type": "BIGINT"
+        },
+        {
+          "default": "CURRENT_TIMESTAMP",
+          "name": "updated_at",
+          "nullable": true,
+          "primary_key": false,
+          "type": "DATETIME"
+        }
+      ],
+      "ddl": "\nCREATE TABLE kv_store (\n\tid INTEGER NOT NULL AUTO_INCREMENT, \n\towner VARCHAR(128) NOT NULL, \n\tk VARCHAR(255) NOT NULL, \n\tv TEXT NOT NULL, \n\tversion BIGINT NOT NULL DEFAULT 0, \n\tupdated_at DATETIME DEFAULT CURRENT_TIMESTAMP, \n\tPRIMARY KEY (id), \n\tCONSTRAINT uq_owner_key UNIQUE (owner, k)\n)\n\n",
+      "foreign_keys": [],
+      "index_ddl": [],
+      "indexes": [
+        {
+          "columns": [
+            "owner",
+            "k"
+          ],
+          "unique": true
+        }
+      ],
+      "pk": [
+        "id"
+      ]
+    },
+    "payment_audit_log": {
+      "columns": [
+        {
+          "default": null,
+          "name": "id",
+          "nullable": false,
+          "primary_key": true,
+          "type": "BIGINT"
+        },
+        {
+          "default": null,
+          "name": "owner_id",
+          "nullable": false,
+          "primary_key": false,
+          "type": "VARCHAR(128)"
+        },
+        {
+          "default": null,
+          "name": "batch_id",
+          "nullable": false,
+          "primary_key": false,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "row_id",
+          "nullable": true,
+          "primary_key": false,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "action",
+          "nullable": false,
+          "primary_key": false,
+          "type": "VARCHAR(32)"
+        },
+        {
+          "default": null,
+          "name": "status",
+          "nullable": false,
+          "primary_key": false,
+          "type": "VARCHAR(32)"
+        },
+        {
+          "default": null,
+          "name": "details_json",
+          "nullable": false,
+          "primary_key": false,
+          "type": "TEXT"
+        },
+        {
+          "default": "CURRENT_TIMESTAMP",
+          "name": "created_at",
+          "nullable": false,
+          "primary_key": false,
+          "type": "DATETIME"
+        }
+      ],
+      "ddl": "\nCREATE TABLE payment_audit_log (\n\tid BIGINT NOT NULL AUTO_INCREMENT, \n\towner_id VARCHAR(128) NOT NULL, \n\tbatch_id INTEGER NOT NULL, \n\trow_id INTEGER, \n\taction VARCHAR(32) NOT NULL, \n\tstatus VARCHAR(32) NOT NULL, \n\tdetails_json TEXT NOT NULL, \n\tcreated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, \n\tPRIMARY KEY (id)\n)\n\n",
+      "foreign_keys": [],
+      "index_ddl": [
+        "CREATE INDEX ix_payment_audit_log_batch_id ON payment_audit_log (batch_id)",
+        "CREATE INDEX ix_payment_audit_log_owner_id ON payment_audit_log (owner_id)",
+        "CREATE INDEX ix_payment_audit_log_row_id ON payment_audit_log (row_id)"
+      ],
+      "indexes": [
+        {
+          "columns": [
+            "batch_id"
+          ],
+          "unique": false
+        },
+        {
+          "columns": [
+            "row_id"
+          ],
+          "unique": false
+        },
+        {
+          "columns": [
+            "owner_id"
+          ],
+          "unique": false
+        }
+      ],
+      "pk": [
+        "id"
+      ]
+    },
+    "payment_ledger_store_audit": {
+      "columns": [
+        {
+          "default": null,
+          "name": "id",
+          "nullable": false,
+          "primary_key": true,
+          "type": "BIGINT"
+        },
+        {
+          "default": "CURRENT_TIMESTAMP",
+          "name": "created_at",
+          "nullable": false,
+          "primary_key": false,
+          "type": "DATETIME"
+        },
+        {
+          "default": null,
+          "name": "owner_id",
+          "nullable": false,
+          "primary_key": false,
+          "type": "VARCHAR(128)"
+        },
+        {
+          "default": null,
+          "name": "actor_id",
+          "nullable": false,
+          "primary_key": false,
+          "type": "VARCHAR(128)"
+        },
+        {
+          "default": null,
+          "name": "storage_key",
+          "nullable": false,
+          "primary_key": false,
+          "type": "VARCHAR(255)"
+        },
+        {
+          "default": null,
+          "name": "account_uid",
+          "nullable": false,
+          "primary_key": false,
+          "type": "VARCHAR(128)"
+        },
+        {
+          "default": null,
+          "name": "action",
+          "nullable": false,
+          "primary_key": false,
+          "type": "VARCHAR(16)"
+        },
+        {
+          "default": null,
+          "name": "endpoint",
+          "nullable": false,
+          "primary_key": false,
+          "type": "VARCHAR(128)"
+        },
+        {
+          "default": null,
+          "name": "request_id",
+          "nullable": false,
+          "primary_key": false,
+          "type": "VARCHAR(64)"
+        },
+        {
+          "default": null,
+          "name": "source",
+          "nullable": false,
+          "primary_key": false,
+          "type": "VARCHAR(128)"
+        },
+        {
+          "default": null,
+          "name": "old_rows_count",
+          "nullable": true,
+          "primary_key": false,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "new_rows_count",
+          "nullable": true,
+          "primary_key": false,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "old_value_present",
+          "nullable": false,
+          "primary_key": false,
+          "type": "BOOL"
+        },
+        {
+          "default": null,
+          "name": "new_value_present",
+          "nullable": false,
+          "primary_key": false,
+          "type": "BOOL"
+        },
+        {
+          "default": null,
+          "name": "guard_result",
+          "nullable": false,
+          "primary_key": false,
+          "type": "VARCHAR(32)"
+        },
+        {
+          "default": null,
+          "name": "guard_reason",
+          "nullable": false,
+          "primary_key": false,
+          "type": "VARCHAR(128)"
+        },
+        {
+          "default": null,
+          "name": "http_status",
+          "nullable": false,
+          "primary_key": false,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "full_recalc_lock_present",
+          "nullable": false,
+          "primary_key": false,
+          "type": "BOOL"
+        },
+        {
+          "default": null,
+          "name": "calculated_final_empty",
+          "nullable": false,
+          "primary_key": false,
+          "type": "BOOL"
+        },
+        {
+          "default": null,
+          "name": "payload_size",
+          "nullable": false,
+          "primary_key": false,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "details_json",
+          "nullable": false,
+          "primary_key": false,
+          "type": "TEXT"
+        }
+      ],
+      "ddl": "\nCREATE TABLE payment_ledger_store_audit (\n\tid BIGINT NOT NULL AUTO_INCREMENT, \n\tcreated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, \n\towner_id VARCHAR(128) NOT NULL, \n\tactor_id VARCHAR(128) NOT NULL, \n\tstorage_key VARCHAR(255) NOT NULL, \n\taccount_uid VARCHAR(128) NOT NULL, \n\taction VARCHAR(16) NOT NULL, \n\tendpoint VARCHAR(128) NOT NULL, \n\trequest_id VARCHAR(64) NOT NULL, \n\tsource VARCHAR(128) NOT NULL, \n\told_rows_count INTEGER, \n\tnew_rows_count INTEGER, \n\told_value_present BOOL NOT NULL, \n\tnew_value_present BOOL NOT NULL, \n\tguard_result VARCHAR(32) NOT NULL, \n\tguard_reason VARCHAR(128) NOT NULL, \n\thttp_status INTEGER NOT NULL, \n\tfull_recalc_lock_present BOOL NOT NULL, \n\tcalculated_final_empty BOOL NOT NULL, \n\tpayload_size INTEGER NOT NULL, \n\tdetails_json TEXT NOT NULL, \n\tPRIMARY KEY (id)\n)\n\n",
+      "foreign_keys": [],
+      "index_ddl": [
+        "CREATE INDEX ix_payment_ledger_store_audit_account_uid ON payment_ledger_store_audit (account_uid)",
+        "CREATE INDEX ix_payment_ledger_store_audit_action ON payment_ledger_store_audit (action)",
+        "CREATE INDEX ix_payment_ledger_store_audit_actor_id ON payment_ledger_store_audit (actor_id)",
+        "CREATE INDEX ix_payment_ledger_store_audit_created_at ON payment_ledger_store_audit (created_at)",
+        "CREATE INDEX ix_payment_ledger_store_audit_owner_id ON payment_ledger_store_audit (owner_id)",
+        "CREATE UNIQUE INDEX ix_payment_ledger_store_audit_request_id ON payment_ledger_store_audit (request_id)",
+        "CREATE INDEX ix_payment_ledger_store_audit_storage_key ON payment_ledger_store_audit (storage_key)"
+      ],
+      "indexes": [
+        {
+          "columns": [
+            "request_id"
+          ],
+          "unique": true
+        },
+        {
+          "columns": [
+            "created_at"
+          ],
+          "unique": false
+        },
+        {
+          "columns": [
+            "storage_key"
+          ],
+          "unique": false
+        },
+        {
+          "columns": [
+            "action"
+          ],
+          "unique": false
+        },
+        {
+          "columns": [
+            "owner_id"
+          ],
+          "unique": false
+        },
+        {
+          "columns": [
+            "account_uid"
+          ],
+          "unique": false
+        },
+        {
+          "columns": [
+            "actor_id"
+          ],
+          "unique": false
+        }
+      ],
+      "pk": [
+        "id"
+      ]
+    },
+    "recalc_batch_job_items": {
+      "columns": [
+        {
+          "default": null,
+          "name": "id",
+          "nullable": false,
+          "primary_key": true,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "job_id",
+          "nullable": false,
+          "primary_key": false,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "owner_id",
+          "nullable": false,
+          "primary_key": false,
+          "type": "VARCHAR(128)"
+        },
+        {
+          "default": null,
+          "name": "account_uid",
+          "nullable": false,
+          "primary_key": false,
+          "type": "VARCHAR(128)"
+        },
+        {
+          "default": null,
+          "name": "status",
+          "nullable": false,
+          "primary_key": false,
+          "type": "VARCHAR(32)"
+        },
+        {
+          "default": null,
+          "name": "summary_status",
+          "nullable": false,
+          "primary_key": false,
+          "type": "VARCHAR(32)"
+        },
+        {
+          "default": null,
+          "name": "summary_reason",
+          "nullable": false,
+          "primary_key": false,
+          "type": "VARCHAR(128)"
+        },
+        {
+          "default": null,
+          "name": "started_at",
+          "nullable": true,
+          "primary_key": false,
+          "type": "DATETIME"
+        },
+        {
+          "default": null,
+          "name": "finished_at",
+          "nullable": true,
+          "primary_key": false,
+          "type": "DATETIME"
+        },
+        {
+          "default": null,
+          "name": "error_message",
+          "nullable": false,
+          "primary_key": false,
+          "type": "TEXT"
+        }
+      ],
+      "ddl": "\nCREATE TABLE recalc_batch_job_items (\n\tid INTEGER NOT NULL AUTO_INCREMENT, \n\tjob_id INTEGER NOT NULL, \n\towner_id VARCHAR(128) NOT NULL, \n\taccount_uid VARCHAR(128) NOT NULL, \n\tstatus VARCHAR(32) NOT NULL, \n\tsummary_status VARCHAR(32) NOT NULL, \n\tsummary_reason VARCHAR(128) NOT NULL, \n\tstarted_at DATETIME, \n\tfinished_at DATETIME, \n\terror_message TEXT NOT NULL, \n\tPRIMARY KEY (id), \n\tFOREIGN KEY(job_id) REFERENCES recalc_batch_jobs (id)\n)\n\n",
+      "foreign_keys": [
+        {
+          "columns": [
+            "job_id"
+          ],
+          "ondelete": null,
+          "referred_columns": [
+            "id"
+          ],
+          "referred_table": "recalc_batch_jobs"
+        }
+      ],
+      "index_ddl": [
+        "CREATE INDEX ix_recalc_batch_job_items_account_uid ON recalc_batch_job_items (account_uid)",
+        "CREATE INDEX ix_recalc_batch_job_items_job_id ON recalc_batch_job_items (job_id)",
+        "CREATE INDEX ix_recalc_batch_job_items_owner_id ON recalc_batch_job_items (owner_id)",
+        "CREATE INDEX ix_recalc_batch_job_items_status ON recalc_batch_job_items (status)"
+      ],
+      "indexes": [
+        {
+          "columns": [
+            "status"
+          ],
+          "unique": false
+        },
+        {
+          "columns": [
+            "account_uid"
+          ],
+          "unique": false
+        },
+        {
+          "columns": [
+            "job_id"
+          ],
+          "unique": false
+        },
+        {
+          "columns": [
+            "owner_id"
+          ],
+          "unique": false
+        }
+      ],
+      "pk": [
+        "id"
+      ]
+    },
+    "recalc_batch_jobs": {
+      "columns": [
+        {
+          "default": null,
+          "name": "id",
+          "nullable": false,
+          "primary_key": true,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "owner_id",
+          "nullable": false,
+          "primary_key": false,
+          "type": "VARCHAR(128)"
+        },
+        {
+          "default": null,
+          "name": "requested_by",
+          "nullable": false,
+          "primary_key": false,
+          "type": "VARCHAR(64)"
+        },
+        {
+          "default": null,
+          "name": "reason",
+          "nullable": false,
+          "primary_key": false,
+          "type": "VARCHAR(64)"
+        },
+        {
+          "default": null,
+          "name": "status",
+          "nullable": false,
+          "primary_key": false,
+          "type": "VARCHAR(32)"
+        },
+        {
+          "default": null,
+          "name": "total_count",
+          "nullable": false,
+          "primary_key": false,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "processed_count",
+          "nullable": false,
+          "primary_key": false,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "fresh_count",
+          "nullable": false,
+          "primary_key": false,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "error_count",
+          "nullable": false,
+          "primary_key": false,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "skipped_count",
+          "nullable": false,
+          "primary_key": false,
+          "type": "INTEGER"
+        },
+        {
+          "default": "CURRENT_TIMESTAMP",
+          "name": "created_at",
+          "nullable": false,
+          "primary_key": false,
+          "type": "DATETIME"
+        },
+        {
+          "default": null,
+          "name": "started_at",
+          "nullable": true,
+          "primary_key": false,
+          "type": "DATETIME"
+        },
+        {
+          "default": null,
+          "name": "finished_at",
+          "nullable": true,
+          "primary_key": false,
+          "type": "DATETIME"
+        },
+        {
+          "default": null,
+          "name": "error_message",
+          "nullable": false,
+          "primary_key": false,
+          "type": "TEXT"
+        }
+      ],
+      "ddl": "\nCREATE TABLE recalc_batch_jobs (\n\tid INTEGER NOT NULL AUTO_INCREMENT, \n\towner_id VARCHAR(128) NOT NULL, \n\trequested_by VARCHAR(64) NOT NULL, \n\treason VARCHAR(64) NOT NULL, \n\tstatus VARCHAR(32) NOT NULL, \n\ttotal_count INTEGER NOT NULL, \n\tprocessed_count INTEGER NOT NULL, \n\tfresh_count INTEGER NOT NULL, \n\terror_count INTEGER NOT NULL, \n\tskipped_count INTEGER NOT NULL, \n\tcreated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, \n\tstarted_at DATETIME, \n\tfinished_at DATETIME, \n\terror_message TEXT NOT NULL, \n\tPRIMARY KEY (id)\n)\n\n",
+      "foreign_keys": [],
+      "index_ddl": [
+        "CREATE INDEX ix_recalc_batch_jobs_owner_id ON recalc_batch_jobs (owner_id)",
+        "CREATE INDEX ix_recalc_batch_jobs_status ON recalc_batch_jobs (status)"
+      ],
+      "indexes": [
+        {
+          "columns": [
+            "owner_id"
+          ],
+          "unique": false
+        },
+        {
+          "columns": [
+            "status"
+          ],
+          "unique": false
+        }
+      ],
+      "pk": [
+        "id"
+      ]
+    },
+    "recalc_uid_locks": {
+      "columns": [
+        {
+          "default": null,
+          "name": "id",
+          "nullable": false,
+          "primary_key": true,
+          "type": "BIGINT"
+        },
+        {
+          "default": null,
+          "name": "owner_id",
+          "nullable": false,
+          "primary_key": false,
+          "type": "VARCHAR(128)"
+        },
+        {
+          "default": null,
+          "name": "abonent_uid",
+          "nullable": false,
+          "primary_key": false,
+          "type": "VARCHAR(128)"
+        },
+        {
+          "default": null,
+          "name": "lock_token",
+          "nullable": false,
+          "primary_key": false,
+          "type": "VARCHAR(64)"
+        },
+        {
+          "default": null,
+          "name": "status",
+          "nullable": false,
+          "primary_key": false,
+          "type": "VARCHAR(32)"
+        },
+        {
+          "default": null,
+          "name": "started_at",
+          "nullable": false,
+          "primary_key": false,
+          "type": "DATETIME"
+        },
+        {
+          "default": "CURRENT_TIMESTAMP",
+          "name": "updated_at",
+          "nullable": true,
+          "primary_key": false,
+          "type": "DATETIME"
+        }
+      ],
+      "ddl": "\nCREATE TABLE recalc_uid_locks (\n\tid BIGINT NOT NULL AUTO_INCREMENT, \n\towner_id VARCHAR(128) NOT NULL, \n\tabonent_uid VARCHAR(128) NOT NULL, \n\tlock_token VARCHAR(64) NOT NULL, \n\tstatus VARCHAR(32) NOT NULL, \n\tstarted_at DATETIME NOT NULL, \n\tupdated_at DATETIME DEFAULT CURRENT_TIMESTAMP, \n\tPRIMARY KEY (id), \n\tCONSTRAINT uq_recalc_uid_lock_owner_uid UNIQUE (owner_id, abonent_uid)\n)\n\n",
+      "foreign_keys": [],
+      "index_ddl": [
+        "CREATE INDEX ix_recalc_uid_locks_abonent_uid ON recalc_uid_locks (abonent_uid)",
+        "CREATE INDEX ix_recalc_uid_locks_owner_id ON recalc_uid_locks (owner_id)",
+        "CREATE INDEX ix_recalc_uid_locks_status ON recalc_uid_locks (status)"
+      ],
+      "indexes": [
+        {
+          "columns": [
+            "abonent_uid"
+          ],
+          "unique": false
+        },
+        {
+          "columns": [
+            "status"
+          ],
+          "unique": false
+        },
+        {
+          "columns": [
+            "owner_id"
+          ],
+          "unique": false
+        },
+        {
+          "columns": [
+            "owner_id",
+            "abonent_uid"
+          ],
+          "unique": true
+        }
+      ],
+      "pk": [
+        "id"
+      ]
+    },
+    "users": {
+      "columns": [
+        {
+          "default": null,
+          "name": "id",
+          "nullable": false,
+          "primary_key": true,
+          "type": "VARCHAR(64)"
+        },
+        {
+          "default": null,
+          "name": "email",
+          "nullable": false,
+          "primary_key": false,
+          "type": "VARCHAR(255)"
+        },
+        {
+          "default": null,
+          "name": "password_hash",
+          "nullable": false,
+          "primary_key": false,
+          "type": "VARCHAR(255)"
+        },
+        {
+          "default": null,
+          "name": "role",
+          "nullable": false,
+          "primary_key": false,
+          "type": "VARCHAR(32)"
+        },
+        {
+          "default": null,
+          "name": "display_name",
+          "nullable": false,
+          "primary_key": false,
+          "type": "VARCHAR(255)"
+        },
+        {
+          "default": null,
+          "name": "disabled",
+          "nullable": false,
+          "primary_key": false,
+          "type": "BOOL"
+        },
+        {
+          "default": null,
+          "name": "created_at",
+          "nullable": false,
+          "primary_key": false,
+          "type": "DATETIME"
+        },
+        {
+          "default": null,
+          "name": "last_login",
+          "nullable": true,
+          "primary_key": false,
+          "type": "DATETIME"
+        }
+      ],
+      "ddl": "\nCREATE TABLE users (\n\tid VARCHAR(64) NOT NULL, \n\temail VARCHAR(255) NOT NULL, \n\tpassword_hash VARCHAR(255) NOT NULL, \n\t`role` VARCHAR(32) NOT NULL, \n\tdisplay_name VARCHAR(255) NOT NULL, \n\tdisabled BOOL NOT NULL, \n\tcreated_at DATETIME NOT NULL, \n\tlast_login DATETIME, \n\tPRIMARY KEY (id)\n)\n\n",
+      "foreign_keys": [],
+      "index_ddl": [
+        "CREATE UNIQUE INDEX ix_users_email ON users (email)"
+      ],
+      "indexes": [
+        {
+          "columns": [
+            "email"
+          ],
+          "unique": true
+        }
+      ],
+      "pk": [
+        "id"
+      ]
+    }
+  }
+}

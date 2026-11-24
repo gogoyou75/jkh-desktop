@@ -1,3 +1,9 @@
+# Historical SQL migrations
+
+CUP v5.5 uses Alembic and Schema Control. Files 001–008 are retained as historical material, not a replay queue. Do not run them blindly or use create_all/initdb to repair an existing database. See docs/CUP_V55_SCHEMA_MANAGEMENT.md for the adoption/backup procedure.
+
+## Previous migration notes (historical)
+
 # Import subsystem DB migration
 
 `db.create_all()` must not be used as production migration for import tables.

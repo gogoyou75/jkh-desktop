@@ -24,3 +24,7 @@ Thumbs.db
 !backend/migrations/008_kv_store_version.sql
 /root/jkh_backups/
 graphify-out/
+
+# Isolated CUP schema tests and private operation state.
+/.var/
+/.schema-state/

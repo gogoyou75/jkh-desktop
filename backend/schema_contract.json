@@ -1,0 +1,21 @@
+{
+  "allowed_collations": [
+    "utf8mb4_unicode_ci",
+    "utf8mb4_0900_ai_ci"
+  ],
+  "format": 1,
+  "known_missing_columns": {
+    "kv_store": [
+      "version"
+    ]
+  },
+  "known_missing_tables": [
+    "bulk_calc_verify_jobs",
+    "bulk_calc_verify_job_items",
+    "payment_ledger_store_audit"
+  ],
+  "legacy_sql": "001-008 retained as history; never executed automatically",
+  "orm_sha256": "6418745c76cc29bfbd4e3ed165d662730f9e3638f1e84b2ece123589283041f9",
+  "required_revision": "cup_5502",
+  "snapshot_sha256": "b246fb1cc2f437624d7ab5b2436980bd2a25f096bd0af119acb33d822545e949"
+}
