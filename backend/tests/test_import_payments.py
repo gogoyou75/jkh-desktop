@@ -135,6 +135,10 @@ class ImportHelpersTest(unittest.TestCase):
         self.assertEqual(result, "DUPLICATE")
 
     def test_apply_skips_row_when_fingerprint_already_applied_after_validation(self):
+        self.enterContext(app_module.app.app_context())
+        registry_query = unittest.mock.MagicMock()
+        registry_query.filter_by.return_value.with_for_update.return_value.first.return_value = None
+        self.enterContext(patch.object(app_module.KVStore, "query", registry_query))
         owner_id = "owner-1"
         account_uid = "uid_1"
         account_number = "100500"

@@ -55,6 +55,14 @@ class ResponsibilityMutationTest(unittest.TestCase):
         self.access = patch.object(app_module, "_require_write_access_for_key", return_value=(None, None))
         self.env = patch.object(app_module, "ENV_TYPE", "LOCAL_LAB")
         self.guard = patch.object(app_module, "_local_responsibility_guard", return_value=None)
+        self.policy = patch.multiple(app_module, DB_HOST="mysql", DB_PORT="3306",
+                                     DB_NAME="jkh_local_lab", DB_USER="jkh_local", DB_PASSWORD="synthetic_only")
+        self.enterContext(patch.dict(app_module.app.config, {"SECRET_KEY": "synthetic_test_secret"}))
+        self.policy.start()
+        self.addCleanup(self.policy.stop)
+        self.flags = patch.dict(os.environ, {"NO_NAME_ENABLED": "1"})
+        self.flags.start()
+        self.addCleanup(self.flags.stop)
         self.env.start()
         self.guard.start()
         self.owner.start()
@@ -1003,10 +1011,10 @@ class ResponsibilityMutationTest(unittest.TestCase):
         current["abonents"]["new"]={"uid":"uid_b"}
         self.assertFalse(app_module._store_db_transition_allowed(json.dumps(self.state()[0]),json.dumps(current)))
 
-    def test_local_only_guard_rejects_remote_environment(self):
+    def test_disabled_feature_rejects_mutations(self):
         self.guard.stop()
         try:
-            with patch.object(app_module,"ENV_TYPE","PROD"),app_module.app.test_client() as client:
+            with patch.dict(os.environ, {"NO_NAME_ENABLED": "0"}),app_module.app.test_client() as client:
                 self.assertEqual(client.post("/api/abonent_delete",json={}).status_code,403)
                 self.assertEqual(client.post("/api/no_name_assign",json={}).status_code,403)
         finally:

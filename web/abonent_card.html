@@ -698,7 +698,7 @@ Doc: docs/LOGIC_SPEC_v1.5.3.md
 
         <div class="abonent-edit-actions">
             <button type="button" onclick="saveAbonentEdit()">Сохранить изменения</button>
-            <button type="button" class="danger-btn" onclick="deleteAbonentFromCard()">Удалить абонента</button>
+            <button id="deleteAbonentButton" type="button" class="danger-btn" hidden onclick="deleteAbonentFromCard()">Удалить абонента</button>
             <button type="button" onclick="closeAbonentEdit()">Отмена</button>
         </div>
     </div>
@@ -2602,9 +2602,16 @@ function __restoreDeletedRuntimeState(snapshot){
     }
 }
 
+function refreshResponsibilityDeleteButton(){
+    const button = document.getElementById('deleteAbonentButton');
+    if (button) button.hidden = !(window.Data && Data.isResponsibilityFeatureEnabled());
+}
+document.addEventListener('DOMContentLoaded', refreshResponsibilityDeleteButton);
+document.addEventListener('jkh:features', refreshResponsibilityDeleteButton);
 let __deleteAbonentBusy = false;
 let __deleteAbonentOperationId = "";
 async function deleteAbonentFromCard(){
+    if (!(window.Data && Data.isResponsibilityFeatureEnabled())) { alert("Операции No Name отключены сервером."); return; }
     if (__deleteAbonentBusy) return;
     if (!canWriteOrExplainLocal()) return;
     const { id: abonentId, a } = getCurrentAbonent();

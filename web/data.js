@@ -7914,12 +7914,17 @@
     return true;
   }
 
+  Data.isResponsibilityFeatureEnabled = function() {
+    return !!(window.JKH_FEATURES && window.JKH_FEATURES.no_name === true);
+  };
+
   function __responsibilityMutationOperationId() {
     if (!(window.crypto && typeof window.crypto.randomUUID === "function")) throw new Error("RESPONSIBILITY_CRYPTO_UNAVAILABLE");
     return "responsibility:" + window.crypto.randomUUID();
   }
 
   async function __responsibilityMutationPost(path, payload, deletedId, deletedUid) {
+    if (!Data.isResponsibilityFeatureEnabled()) throw new Error("RESPONSIBILITY_FEATURE_DISABLED");
     var result;
     try {
       var http = await fetch(path, { method:"POST", credentials:"include",
@@ -7950,6 +7955,7 @@
   }
 
   Data.getAbonentDeletionPreview = async function(abonentId) {
+    if (!Data.isResponsibilityFeatureEnabled()) throw new Error("RESPONSIBILITY_FEATURE_DISABLED");
     var response = await fetch('/api/abonent_delete?preview=1&abonent_id=' + encodeURIComponent(abonentId), {credentials:'include'});
     var result = await response.json();
     if (!response.ok || result.ok !== true) throw new Error(result.error || 'DELETE_PREVIEW_FAILED');

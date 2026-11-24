@@ -462,12 +462,16 @@ function _isNetworkOrTimeoutError(err) {
   }
 
   function applyServerEnvType(data) {
+    var enabled = !!(data && data.features && data.features.no_name === true);
+    var changed = !window.JKH_FEATURES || window.JKH_FEATURES.no_name !== enabled;
+    window.JKH_FEATURES = { no_name: enabled };
     try {
       var env = data && (data.env_type || data.env || data.environment);
       if (env && window.JKHStore && typeof JKHStore.setEnvType === "function") JKHStore.setEnvType(env);
       else if (env && window.JKHStorage && typeof JKHStorage.setEnvType === "function") JKHStorage.setEnvType(env);
       else if (env) window.JKH_ENV_TYPE = String(env || "").trim().toUpperCase();
     } catch (e) {}
+    if (changed) document.dispatchEvent(new Event("jkh:features"));
   }
 
   function getCachedSession() {

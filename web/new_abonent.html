@@ -653,6 +653,7 @@ async function restoreSelectedClosedTailNoName(regnum){
   try { candidate = closedTailRecoveryCandidate(window.AbonentsDB, selected); }
   catch (e) { __noNameRecoveryIssue = String(e.message || e); setCreateStatus(__noNameRecoveryIssue); return false; }
   if (!candidate) { __noNameRecoveryIssue = ''; return true; }
+  if (!window.Data?.isResponsibilityFeatureEnabled?.()) return true;
   const state = window.JKH_UI_STATE?.data;
   if (!state || state.status !== 'ready' || state.source !== 'server') {
     __noNameRecoveryIssue = 'Восстановление No Name требует подтверждённой загрузки данных с сервера.';
@@ -768,6 +769,16 @@ async function refreshDebtTransferBox() {
   const gap = (db.links || []).find(l => l?.technicalType === 'NO_NAME' &&
     String(l.regnum || '') === regnum && String(l.dateFrom || '') === df0);
   const closedCandidate = closedPredecessorForRegnum(db, regnum);
+  if ((gap || active?.technicalType === 'NO_NAME' || closedCandidate) &&
+      !window.Data?.isResponsibilityFeatureEnabled?.()) {
+    info.textContent = 'Назначение ответственности No Name отключено сервером.';
+    box.style.display = 'block';
+    for (const id of ['btnTransferWithDebt', 'btnTransferNoDebt']) {
+      const button = document.getElementById(id);
+      if (button) button.disabled = true;
+    }
+    return;
+  }
   let retry = null;
   if (closedCandidate && (!active || active?.technicalType === 'NO_NAME')) {
     info.textContent = 'Проверяем финансовый журнал на сервере…';
@@ -1320,6 +1331,7 @@ function setCreateUiBusy(flag){
 /* =========================
    СОЗДАНИЕ АБОНЕНТА (с поддержкой передачи)
    ========================= */
+document.addEventListener('jkh:features', function(){ refreshDebtTransferBox(); });
 async function createAbonent() {
   if (__createAbonentBusy) return;
   if (__noNameRecoveryPending || (__noNameRecoveryIssue &&
@@ -1389,6 +1401,11 @@ async function createAbonent() {
     const isClosedAssign = !!(closedPrevious && __jkhTransferConfirmed && __transferCtx?.closed &&
       __transferCtx.oldId === closedPrevious.id && __transferCtx.closeDate === closedPrevious.closeDate &&
       respStart > closedPrevious.closeDate);
+    if ((noNameGap || prevActive?.technicalType === 'NO_NAME' || closedPrevious) &&
+        !window.Data?.isResponsibilityFeatureEnabled?.()) {
+      setCreateStatus('Назначение ответственности No Name отключено сервером.');
+      return;
+    }
     if (__jkhTransferConfirmed && !['WITH_DEBT', 'NO_DEBT'].includes(__transferMode)) {
       setCreateStatus('Выберите «С долгом» или «Без долга».');
       return;

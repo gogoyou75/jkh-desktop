@@ -3,6 +3,34 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
 
+
+// Exercise the real server-capability propagation and delete-button rendering.
+const authSource = fs.readFileSync('web/auth.js', 'utf8');
+const envStart = authSource.indexOf('  function applyServerEnvType(data) {');
+const envEnd = authSource.indexOf('  function getCachedSession()', envStart);
+const featureEvents = [];
+const featureContext = vm.createContext({window:{}, document:{dispatchEvent(event){featureEvents.push(event.type);}},
+  Event: class {constructor(type){this.type=type;}}, events:featureEvents});
+vm.runInContext(authSource.slice(envStart, envEnd), featureContext);
+vm.runInContext('applyServerEnvType({features:{no_name:true}})', featureContext);
+assert.equal(featureContext.window.JKH_FEATURES.no_name, true);
+vm.runInContext('applyServerEnvType({features:{no_name:true}})', featureContext);
+assert.equal(featureContext.events.length, 1, 'unchanged capability must not reset transfer selection');
+vm.runInContext('applyServerEnvType({})', featureContext);
+assert.equal(featureContext.window.JKH_FEATURES.no_name, false);
+assert.equal(featureContext.events.length, 2);
+const buttonHtml = fs.readFileSync('web/abonent_card.html', 'utf8');
+const buttonStart = buttonHtml.indexOf('function refreshResponsibilityDeleteButton(){');
+const buttonEnd = buttonHtml.indexOf("document.addEventListener('DOMContentLoaded', refreshResponsibilityDeleteButton)", buttonStart);
+const deleteButton = {hidden:false};
+featureContext.document.getElementById = () => deleteButton;
+featureContext.Data = featureContext.window.Data = {isResponsibilityFeatureEnabled:()=>featureContext.window.JKH_FEATURES.no_name === true};
+vm.runInContext(buttonHtml.slice(buttonStart,buttonEnd),featureContext);
+vm.runInContext('refreshResponsibilityDeleteButton()',featureContext);
+assert.equal(deleteButton.hidden,true);
+vm.runInContext('applyServerEnvType({features:{no_name:true}}); refreshResponsibilityDeleteButton()',featureContext);
+assert.equal(deleteButton.hidden,false);
+
 const newHtml = fs.readFileSync('web/new_abonent.html', 'utf8');
 const mainScript = [...newHtml.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/gi)]
   .map(match => match[1]).find(source => source.includes('function refreshDebtTransferBox'));
@@ -28,7 +56,7 @@ context.window.JKH_UI_STATE = { data: { status: 'ready', source: 'server' } };
 elements.createStatusText = { textContent: '' };
 let restoreCalls = [];
 let restoreOutcome = true;
-context.window.Data = { restoreClosedTailNoNameAtomic: async options => {
+context.window.Data = { isResponsibilityFeatureEnabled: () => true, restoreClosedTailNoNameAtomic: async options => {
   restoreCalls.push(options);
   if (restoreOutcome instanceof Error) throw restoreOutcome;
   if (restoreOutcome === true) context.window.AbonentsDB.links.push({
@@ -152,6 +180,7 @@ let assignCalls = 0;
 let legacyCalls = 0;
 let assignmentOutcome = new Error('synthetic stop before server write');
 const Data = {
+  isResponsibilityFeatureEnabled: () => true,
   assignNoNameAtomic: async options => {
     assignCalls++;
     assert.equal(options.dateFrom, '2025-02-01');
@@ -276,7 +305,7 @@ vm.runInContext("__jkhTransferConfirmed = true; __transferMode = 'WITH_DEBT'; __
   const postSource = sourceData.match(/async function __responsibilityMutationPost\(path, payload, deletedId, deletedUid\) \{[\s\S]*?\n  \}/);
   assert.ok(postSource);
   let postFetchCalls = 0;
-  const postContext = vm.createContext({ window: {}, encodeURIComponent, JSON, Error,
+  const postContext = vm.createContext({ window: {}, Data: { isResponsibilityFeatureEnabled: () => true }, encodeURIComponent, JSON, Error,
     _ownerId: () => 'synthetic-owner',
     fetch: async () => {
       postFetchCalls++;
@@ -287,6 +316,10 @@ vm.runInContext("__jkhTransferConfirmed = true; __transferMode = 'WITH_DEBT'; __
   await assert.rejects(vm.runInContext(`__responsibilityMutationPost('/api/no_name_restore_closed_tail',
     {operation_id:'restore-73'}, '', '')`, postContext), /RESPONSIBILITY_OUTCOME_UNKNOWN/);
   assert.equal(postFetchCalls, 2);
+  postContext.Data.isResponsibilityFeatureEnabled = () => false;
+  await assert.rejects(vm.runInContext("__responsibilityMutationPost('/api/abonent_delete', {}, '', '')", postContext), /RESPONSIBILITY_FEATURE_DISABLED/);
+  assert.equal(postFetchCalls, 2, 'disabled operations must not send requests');
+  postContext.Data.isResponsibilityFeatureEnabled = () => true;
   let reloads = 0;
   postContext.fetch = async () => ({ status: 200, json: async () => ({ ok: true, committed: true }) });
   postContext.window.JKHDataLoader = { refreshAfterResponsibilityMutation: async () => {
@@ -443,10 +476,10 @@ vm.runInContext("__jkhTransferConfirmed = true; __transferMode = 'WITH_DEBT'; __
   let closeCalls = 0;
   let deleteOutcome = false;
   const deleteContext = vm.createContext({
-    window: { confirm: () => true, location: { href: '' }, Data: {
+    window: { confirm: () => true, location: { href: '' }, Data: { isResponsibilityFeatureEnabled: () => true,
       deleteAbonentAtomic: async () => deleteOutcome
     } },
-    Data: { getAbonentDeletionPreview: async () => ({payments:3,accruals:11}), deleteAbonentAtomic: async () => deleteOutcome },
+    Data: { isResponsibilityFeatureEnabled: () => true, getAbonentDeletionPreview: async () => ({payments:3,accruals:11}), deleteAbonentAtomic: async () => deleteOutcome },
     canWriteOrExplainLocal: () => true,
     getCurrentAbonent: () => ({ id: '0100', a: { uid: 'uid_test' } }),
     crypto: { randomUUID: () => 'synthetic-delete' },
@@ -541,6 +574,17 @@ vm.runInContext("__jkhTransferConfirmed = true; __transferMode = 'WITH_DEBT'; __
   assert.match(elements.debtTransferInfo.textContent,/без долга/);
   vm.runInContext('setCreateUiBusy(false)',context);
   assert.equal(elements.btnTransferWithDebt.disabled,true);
+
+  // Feature-off UI blocks assignment before modifying local state.
+  Data.isResponsibilityFeatureEnabled = () => false;
+  const disabledDb = JSON.stringify(context.window.AbonentsDB);
+  await vm.runInContext('refreshDebtTransferBox()', context);
+  assert.equal(elements.btnTransferWithDebt.disabled, true);
+  assert.equal(elements.btnTransferNoDebt.disabled, true);
+  assert.match(elements.debtTransferInfo.textContent, /отключено сервером/);
+  await vm.runInContext('createAbonent()', context);
+  assert.equal(JSON.stringify(context.window.AbonentsDB), disabledDb);
+  Data.isResponsibilityFeatureEnabled = () => true;
 
   // New assignment events are eligible only after deletion and financial cleanup.
   delete retryDb.abonents.B;

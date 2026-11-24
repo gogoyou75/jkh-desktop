@@ -3173,7 +3173,7 @@ def health():
 
 @app.get("/api/env")
 def api_env():
-    return jsonify(ok=True, env_type=ENV_TYPE)
+    return jsonify(ok=True, env_type=ENV_TYPE, features=_responsibility_features())
 
 
 @app.get("/")
@@ -4349,7 +4349,7 @@ def auth_register():
 
     session.clear()
     session["user_id"] = user.id
-    return jsonify(ok=True, user=_user_payload(user), env_type=ENV_TYPE)
+    return jsonify(ok=True, user=_user_payload(user), env_type=ENV_TYPE, features=_responsibility_features())
 
 
 @app.post("/api/auth/login")
@@ -4377,7 +4377,7 @@ def auth_login():
     session.clear()
     session["user_id"] = user.id
     app.logger.info("[auth] login_ok user_id=%s email=%s role=%s", user.id, user.email, user.role)
-    return jsonify(ok=True, user=_user_payload(user), env_type=ENV_TYPE)
+    return jsonify(ok=True, user=_user_payload(user), env_type=ENV_TYPE, features=_responsibility_features())
 
 
 @app.get("/api/auth/me")
@@ -4386,7 +4386,7 @@ def auth_me():
     if not user:
         return _json_error("not_authenticated", 401)
     app.logger.info("[auth] me_ok user_id=%s email=%s role=%s", user.id, user.email, user.role)
-    return jsonify(ok=True, user=_user_payload(user), env_type=ENV_TYPE)
+    return jsonify(ok=True, user=_user_payload(user), env_type=ENV_TYPE, features=_responsibility_features())
 
 
 @app.post("/api/auth/logout")
@@ -5018,13 +5018,14 @@ def import_payments_apply(batch_id):
 
     rows = ImportBatchRow.query.filter_by(batch_id=batch.id).order_by(ImportBatchRow.row_no.asc()).all()
     ready_rows = [r for r in rows if r.status == "ready"]
-    if ENV_TYPE == "LOCAL_LAB":
+    if ENV_TYPE in {"LOCAL_LAB", "LAB", "PROD"}:
         registry = KVStore.query.filter_by(owner=batch.owner_id, k="abonents_db_v1").with_for_update().first()
-        state = json.loads(registry.v) if registry and registry.v else {}
-        live_uids = {str(a.get("uid") or "") for a in state.get("abonents", {}).values() if isinstance(a, dict)}
-        if any(str(row.account_uid) not in live_uids for row in ready_rows):
-            db.session.rollback()
-            return _json_error("import_abonent_no_longer_exists", 409)
+        if _responsibility_protection_required(registry.v if registry else None):
+            state = json.loads(registry.v) if registry and registry.v else {}
+            live_uids = {str(a.get("uid") or "") for a in state.get("abonents", {}).values() if isinstance(a, dict)}
+            if any(str(row.account_uid) not in live_uids for row in ready_rows):
+                db.session.rollback()
+                return _json_error("import_abonent_no_longer_exists", 409)
     if not ready_rows:
         return jsonify(
             ok=False,
@@ -5535,11 +5536,79 @@ def _transfer_payment_signatures(rows):
     return signatures
 
 
+def _responsibility_target():
+    """Explicit deployment allowlist; never infer LAB/PROD database identities."""
+    if not DB_PASSWORD or app.config.get("SECRET_KEY") in (None, "", "change-me-please"):
+        return None
+    local = {"host": "mysql", "port": "3306", "name": "jkh_local_lab", "user": "jkh_local"}
+    if ENV_TYPE == "LOCAL_LAB":
+        target = local
+    elif ENV_TYPE in {"LAB", "PROD"}:
+        try:
+            targets = json.loads(os.getenv("NO_NAME_DB_TARGETS", "{}"))
+            lab, prod = targets["LAB"], targets["PROD"]
+            for item in (lab, prod):
+                if not isinstance(item, dict) or set(item) != set(local):
+                    return None
+                if any(not isinstance(value, str) or not value.strip() or value != value.strip()
+                       for value in item.values()):
+                    return None
+                if not item["port"].isdigit() or not 1 <= int(item["port"]) <= 65535:
+                    return None
+            # Separate schemas are required even when hosts or credentials differ.
+            if len({lab["name"].casefold(), prod["name"].casefold(), local["name"]}) != 3:
+                return None
+            target = targets[ENV_TYPE]
+        except (TypeError, ValueError, KeyError):
+            return None
+    else:
+        return None
+    actual = {"host": DB_HOST, "port": str(DB_PORT), "name": DB_NAME, "user": DB_USER}
+    return target if actual == target else None
+
+
+def _responsibility_feature_enabled():
+    flag = os.getenv("NO_NAME_ENABLED", "1" if ENV_TYPE in {"LOCAL_LAB", "LAB"} else "0")
+    return flag == "1" and _responsibility_target() is not None
+
+
+def _responsibility_features():
+    enabled = _responsibility_feature_enabled()
+    if enabled:
+        try:
+            enabled = db.session.execute(text("SELECT DATABASE()")).scalar() == _responsibility_target()["name"]
+        except SQLAlchemyError:
+            db.session.rollback()
+            enabled = False
+    return {"no_name": enabled}
+
+
+def _responsibility_history_present(raw):
+    try:
+        state = json.loads(raw) if raw else {}
+        return (any(isinstance(link, dict) and link.get("technicalType") == "NO_NAME"
+                    for link in state.get("links", [])) or
+                any(isinstance(event, dict) and event.get("type") in
+                    {"ABONENT_DELETED", "LEGACY_DELETION_RECONCILED", "NO_NAME_RESTORED",
+                     "NO_NAME_ASSIGNED", "CLOSED_RESPONSIBILITY_ASSIGNED"}
+                    for event in state.get("premiseEvents", [])))
+    except (TypeError, ValueError, AttributeError):
+        # Preserve legacy opaque KV behavior while disabled. Protected valid history
+        # cannot transition to an invalid value through _store_db_transition_allowed.
+        return False
+
+
+def _responsibility_protection_required(raw):
+    return _responsibility_feature_enabled() or _responsibility_history_present(raw)
+
+
 def _local_responsibility_guard():
-    if ENV_TYPE != "LOCAL_LAB" or (DB_HOST, str(DB_PORT), DB_NAME) != ("mysql", "3306", "jkh_local_lab"):
-        return _json_error("local_lab_required", 403)
-    if db.session.execute(text("SELECT DATABASE()")).scalar() != "jkh_local_lab":
-        return _json_error("local_database_required", 403)
+    # Keep the existing hook name for callers; the policy is shared by all environments.
+    if not _responsibility_feature_enabled():
+        return _json_error("responsibility_feature_disabled", 403)
+    target = _responsibility_target()
+    if db.session.execute(text("SELECT DATABASE()")).scalar() != target["name"]:
+        return _json_error("responsibility_database_mismatch", 403)
     return None
 
 
@@ -5556,17 +5625,21 @@ def _serialize_local_responsibility_writes():
         error = _local_responsibility_guard()
         if error:
             return error
-    if ENV_TYPE != "LOCAL_LAB" or request.method not in ("POST", "PUT", "PATCH", "DELETE"):
+    if ENV_TYPE not in {"LOCAL_LAB", "LAB", "PROD"} or request.method not in ("POST", "PUT", "PATCH", "DELETE"):
         return None
     if not (request.path.startswith(("/api/store", "/api/import/", "/api/card_snapshot/", "/api/abonent", "/api/recalc"))
             or request.path in mutation_routes or request.path == "/api/responsibility_transfer"):
         return None
+    if request.path not in mutation_routes and _responsibility_feature_enabled():
+        error = _local_responsibility_guard()
+        if error:
+            return error
     body = request.get_json(silent=True) or {}
     user, owner, error = _session_store_owner(_client_owner_hint_from_request(body))
     if error:
         return error
     registry = KVStore.query.filter_by(owner=owner, k="abonents_db_v1").with_for_update().first()
-    if not registry or not registry.v:
+    if not registry or not registry.v or not _responsibility_protection_required(registry.v):
         return None
     try:
         state = json.loads(registry.v)
@@ -5856,8 +5929,8 @@ def _personal_abonent_key(key, abonent_id, uid):
 
 def _store_db_transition_allowed(previous_raw, proposed_raw):
     """Generic KV writes may edit or rename a UID, but may not delete its owner."""
-    if ENV_TYPE != "LOCAL_LAB":
-        return True
+    if not _responsibility_protection_required(previous_raw):
+        return not _responsibility_history_present(proposed_raw)
     try:
         previous = json.loads(previous_raw) if previous_raw else {}
         proposed = json.loads(proposed_raw)
@@ -6748,18 +6821,18 @@ def store_set():
         )
         if result.rowcount == 1:
             row = KVStore.query.filter_by(owner=owner_eff, k=key).with_for_update().one()
-            if ENV_TYPE != "LOCAL_LAB":
+            if not _store_db_transition_allowed(row.v, value):
+                db.session.rollback()
+                return _json_error("abonent_delete_requires_atomic_api", 409)
+            if not _responsibility_protection_required(row.v):
                 row.v = value
                 db.session.commit()
                 return jsonify(ok=True, owner=owner_eff, version=expected + 1)
-            if ENV_TYPE == "LOCAL_LAB" and not _store_db_transition_allowed(row.v, value):
-                db.session.rollback()
-                return _json_error("abonent_delete_requires_atomic_api", 409)
             no_name_created = False
             try:
                 previous_db = json.loads(row.v) if row.v else {}
                 proposed_db = json.loads(value)
-                closed_period = _newly_closed_tail(previous_db, proposed_db)
+                closed_period = _newly_closed_tail(previous_db, proposed_db) if _responsibility_feature_enabled() else None
                 if closed_period:
                     no_name_created = _restore_closed_tail_no_name(proposed_db, *closed_period)
                     if no_name_created:
@@ -6913,7 +6986,7 @@ def store_delete():
         )
         if result.rowcount == 1:
             row = KVStore.query.filter_by(owner=owner_eff, k=key).with_for_update().one()
-            if ENV_TYPE != "LOCAL_LAB":
+            if not _responsibility_protection_required(row.v):
                 row.v = ""
                 db.session.commit()
                 return jsonify(ok=True, deleted=True, version=expected + 1)
