@@ -33,7 +33,7 @@ def verify(f):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--fixture-config", type=Path)
-    parser.add_argument("--suite", choices=["schema", "maintenance", "profiles", "legacy", "workflow"], default="schema")
+    parser.add_argument("--suite", choices=["schema", "maintenance", "profiles", "legacy", "workflow", "runtime"], default="schema")
     parser.add_argument("--case")
     parser.add_argument("--mysql-image", choices=["mysql:8.0", "mysql:8.0.45"], default="mysql:8.0.45")
     args = parser.parse_args()
@@ -88,12 +88,14 @@ def main():
                  "maintenance": ["backend.tests.test_maintenance_mysql"],
                  "legacy": ["backend.tests.test_legacy_schema_mysql"],
                  "workflow": ["backend.tests.test_schema_workflow_mysql", "backend.tests.test_cup_v56_config"],
+                 "runtime": ["backend.tests.test_cup_v561_runtime"],
                  "profiles": ["backend.tests.test_responsibility_profiles." + name for name in ("MySQLLocalProfile", "MySQLLabProfile", "MySQLProdProfile")]}[args.suite]
         if args.case: tests = [('backend.tests.test_schema_workflow_mysql.WorkflowTest.' if args.suite=='workflow' else 'backend.tests.test_legacy_schema_mysql.LegacySchemaTest.' if args.suite == 'legacy' else 'backend.tests.test_maintenance_mysql.MaintenanceTest.') + args.case]
         network = "container:" + container_id if args.suite == "profiles" else f["network"]
         command = ["run", "--rm", "--read-only", "--tmpfs", "/tmp:rw,nosuid,size=268435456", "--network", network, "--env-file", str(env),
                    "-v", str(ROOT / "backend") + ":/work/backend:ro", "-v", str(ROOT / "scripts") + ":/work/scripts:ro", "-w", "/work", "--entrypoint", "python", f["image"],
                    "-m", "unittest", *tests, "-v"]
+        if args.suite=="runtime":command[1:1]=["--tmpfs","/root:rw,nosuid,size=33554432"]
         try:
             result = docker(*command)
             output, code = result.stdout + result.stderr, 0
