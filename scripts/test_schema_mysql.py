@@ -33,10 +33,11 @@ def verify(f):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--fixture-config", type=Path)
-    parser.add_argument("--suite", choices=["schema", "maintenance", "profiles"], default="schema")
+    parser.add_argument("--suite", choices=["schema", "maintenance", "profiles", "legacy"], default="schema")
     parser.add_argument("--case")
+    parser.add_argument("--mysql-image", choices=["mysql:8.0", "mysql:8.0.45"], default="mysql:8.0.45")
     args = parser.parse_args()
-    if args.case and (args.suite != 'maintenance' or not re.fullmatch(r'test_[a-z0-9_]+',args.case)): parser.error('case must select a maintenance test method')
+    if args.case and (args.suite not in {'maintenance','legacy'} or not re.fullmatch(r'test_[a-z0-9_]+',args.case)): parser.error('case must select a maintenance test method')
     STATE.mkdir(parents=True, exist_ok=True)
     created = args.fixture_config is None
     if created:
@@ -50,7 +51,7 @@ def main():
         os.chmod(env_file, 0o600)
         docker("network", "create", "--internal", "--label", "cup.test=v55", f["network"])
         docker("run", "-d", "--name", f["container"], "--label", "cup.test=v55", "--network", f["network"], "--network-alias", "mysql",
-               "--tmpfs", "/var/lib/mysql:rw,nosuid,size=1073741824", "--env-file", str(env_file), "mysql:8.0", "--skip-log-bin", "--event-scheduler=DISABLED", "--innodb-buffer-pool-size=64M")
+               "--tmpfs", "/var/lib/mysql:rw,nosuid,size=1073741824", "--env-file", str(env_file), args.mysql_image, "--skip-log-bin", "--event-scheduler=DISABLED", "--innodb-buffer-pool-size=64M")
     else:
         path = args.fixture_config.resolve()
         if not path.is_relative_to(STATE.resolve()):
@@ -59,9 +60,9 @@ def main():
     container_id, network_id = verify(f)
     restore_id = None
     try:
-        if args.suite == "maintenance":
+        if args.suite in {"maintenance", "legacy"}:
             restored = docker("run", "-d", "--name", f["container"] + "-restore", "--label", "cup.test=v55", "--network", f["network"], "--network-alias", "cup-schema-mysql",
-                              "--tmpfs", "/var/lib/mysql:rw,nosuid,size=1073741824", "--env-file", str(env_file), "mysql:8.0", "--skip-log-bin", "--event-scheduler=DISABLED", "--innodb-buffer-pool-size=64M")
+                              "--tmpfs", "/var/lib/mysql:rw,nosuid,size=1073741824", "--env-file", str(env_file), args.mysql_image, "--skip-log-bin", "--event-scheduler=DISABLED", "--innodb-buffer-pool-size=64M")
             restore_id = restored.stdout.decode().strip()
         if created:
             print("Building disposable Python test image", flush=True)
@@ -85,8 +86,9 @@ def main():
         os.chmod(env, 0o600)
         tests = {"schema": ["backend.tests.test_schema_control_mysql"],
                  "maintenance": ["backend.tests.test_maintenance_mysql"],
+                 "legacy": ["backend.tests.test_legacy_schema_mysql"],
                  "profiles": ["backend.tests.test_responsibility_profiles." + name for name in ("MySQLLocalProfile", "MySQLLabProfile", "MySQLProdProfile")]}[args.suite]
-        if args.case: tests = ['backend.tests.test_maintenance_mysql.MaintenanceTest.' + args.case]
+        if args.case: tests = [('backend.tests.test_legacy_schema_mysql.LegacySchemaTest.' if args.suite == 'legacy' else 'backend.tests.test_maintenance_mysql.MaintenanceTest.') + args.case]
         network = "container:" + container_id if args.suite == "profiles" else f["network"]
         command = ["run", "--rm", "--read-only", "--tmpfs", "/tmp:rw,nosuid,size=268435456", "--network", network, "--env-file", str(env),
                    "-v", str(ROOT / "backend") + ":/work/backend:ro", "-w", "/work", "--entrypoint", "python", f["image"],

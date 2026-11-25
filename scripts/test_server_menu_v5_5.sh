@@ -6,6 +6,10 @@ source <(sed '$d' "$menu")
 [[ "$VERSION" == v5.5 ]]
 LOCK_FILE="$fixture/menu.lock"
 LOCK_HELD=0
+# Existing cases isolate routing/locks. Environment preparation is tested below
+# with the real implementation and child-process exports.
+eval "$(declare -f schema_environment | sed '1s/schema_environment/schema_environment_real/')"
+schema_environment() { return 0; }
 
 (
   set_environment_vars LAB
@@ -263,6 +267,57 @@ echo 'PASS: repeated completed resume re-verifies; lost active service state pre
   [[ ! -f "$PROJECT_DIR/.schema-state/LOCAL_LAB/services-before.txt" ]]
 )
 echo 'PASS: service-start failure retains original state for a checked retry'
+
+(
+  schema_environment() { schema_environment_real "$@"; }
+  ENVIRONMENT=LOCAL_LAB
+  PROJECT_DIR="$fixture/env-scope"
+  mkdir -p "$PROJECT_DIR"
+  CUP_SCHEMA_DB_ENV_FILE="$fixture/schema-db.env"
+  CUP_SCHEMA_ADMIN_ENV_FILE="$fixture/schema-admin.env"
+  cat > "$CUP_SCHEMA_DB_ENV_FILE" <<'DB_ENV'
+ENV_TYPE=LOCAL_LAB
+DB_HOST=mysql
+DB_PORT=3306
+DB_NAME=jkh_local_lab
+DB_USER=jkh_local
+DB_PASSWORD=synthetic_app_only
+DB_ENV
+  cat > "$CUP_SCHEMA_ADMIN_ENV_FILE" <<'ADMIN_ENV'
+MAINT_ENV_TYPE=LOCAL_LAB
+MAINT_DB_HOST=mysql
+MAINT_DB_PORT=3306
+MAINT_DB_NAME=jkh_local_lab
+MAINT_DB_USER=synthetic_maintenance
+MAINT_DB_PASSWORD=synthetic_admin_only
+RESTORE_ENV_TYPE=LOCAL_LAB
+RESTORE_DB_HOST=cup-schema-mysql
+RESTORE_DB_PORT=3306
+RESTORE_DB_NAME=cup_restore_synthetic
+RESTORE_DB_USER=synthetic_restore
+RESTORE_DB_PASSWORD=synthetic_restore_only
+ADMIN_ENV
+  unset DB_PASSWORD MAINT_DB_PASSWORD RESTORE_DB_PASSWORD
+  environment_compose_guard() { bash -c '[[ "$DB_PASSWORD" == synthetic_app_only && "$MAINT_DB_PASSWORD" == synthetic_admin_only ]]'; }
+  schema_writer_services() { bash -c '[[ "$DB_NAME" == jkh_local_lab ]]'; }
+  docker() {
+    [[ "$*" == *'compose run --rm --no-deps --build'* ]]
+    [[ "$*" == *'-e DB_PASSWORD'* && "$*" != *synthetic_app_only* && "$*" != *synthetic_admin_only* ]]
+    bash -c '[[ "$DB_PASSWORD" == synthetic_app_only && "$MAINT_DB_PASSWORD" == synthetic_admin_only && "$RESTORE_DB_PASSWORD" == synthetic_restore_only ]]'
+  }
+  schema_cli diagnose
+  schema_cli backup
+  [[ -z "${DB_PASSWORD+x}" && -z "${MAINT_DB_PASSWORD+x}" && -z "${RESTORE_DB_PASSWORD+x}" ]]
+  CUP_SCHEMA_ADMIN_ENV_FILE="$fixture/missing.env"
+  if schema_cli diagnose > "$fixture/missing-env.log"; then exit 1; fi
+  grep -q schema_environment_file_unreadable "$fixture/missing-env.log"
+  ! grep -q synthetic_admin_only "$fixture/missing-env.log"
+  CUP_SCHEMA_ADMIN_ENV_FILE="$fixture/schema-admin.env"
+  printf '%s\n' 'MAINT_DB_NAME=wrong_database' >> "$CUP_SCHEMA_ADMIN_ENV_FILE"
+  if schema_cli diagnose > "$fixture/wrong-env.log"; then exit 1; fi
+  grep -q schema_environment_identity_mismatch "$fixture/wrong-env.log"
+)
+echo 'PASS: scoped file loading exports all credentials only to the one-off tool and rejects invalid identities'
 
 # Reuse the complete proven v5.4.1 suite against v5.5 without changing old files.
 # Only the source path/version expectation is adjusted in a disposable harness.

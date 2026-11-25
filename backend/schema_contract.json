@@ -17,5 +17,669 @@
   "legacy_sql": "001-008 retained as history; never executed automatically",
   "orm_sha256": "6418745c76cc29bfbd4e3ed165d662730f9e3638f1e84b2ece123589283041f9",
   "required_revision": "cup_5502",
-  "snapshot_sha256": "b246fb1cc2f437624d7ab5b2436980bd2a25f096bd0af119acb33d822545e949"
+  "snapshot_sha256": "b246fb1cc2f437624d7ab5b2436980bd2a25f096bd0af119acb33d822545e949",
+  "compatibility": {
+    "profile": "reviewed_legacy_import_v1",
+    "historical_tables": {
+      "import_batch": {
+        "ddl": "CREATE TABLE import_batch (\n  id int NOT NULL AUTO_INCREMENT,\n  owner_id varchar(128) NOT NULL,\n  created_by_user_id varchar(64) NOT NULL,\n  original_filename varchar(255) NOT NULL,\n  file_sha256 varchar(64) NOT NULL,\n  upload_blob longblob NOT NULL,\n  display_name varchar(255) NOT NULL DEFAULT '',\n  accounting_year varchar(16) NOT NULL DEFAULT '',\n  version_label varchar(64) NOT NULL DEFAULT '',\n  notes text NOT NULL,\n  duplicate_of_batch_id int DEFAULT NULL,\n  supersedes_batch_id int DEFAULT NULL,\n  overlaps_with_batch_id int DEFAULT NULL,\n  is_exact_duplicate tinyint(1) NOT NULL DEFAULT '0',\n  has_period_overlap tinyint(1) NOT NULL DEFAULT '0',\n  rows_total int NOT NULL DEFAULT '0',\n  rows_valid int NOT NULL DEFAULT '0',\n  rows_invalid int NOT NULL DEFAULT '0',\n  rows_duplicate int NOT NULL DEFAULT '0',\n  rows_applied int NOT NULL DEFAULT '0',\n  status varchar(32) NOT NULL DEFAULT 'uploaded',\n  uploaded_at datetime NOT NULL,\n  started_at datetime DEFAULT NULL,\n  finished_at datetime DEFAULT NULL,\n  PRIMARY KEY (id),\n  KEY ix_import_batch_owner_id (owner_id),\n  KEY ix_import_batch_file_sha256 (file_sha256),\n  KEY ix_import_batch_created_by_user_id (created_by_user_id),\n  KEY ix_import_batch_status (status)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci",
+        "columns": [
+          {
+            "name": "id",
+            "type": "INT",
+            "nullable": false,
+            "default": null,
+            "autoincrement": true
+          },
+          {
+            "name": "owner_id",
+            "type": "VARCHAR(128)",
+            "nullable": false,
+            "default": null,
+            "autoincrement": false
+          },
+          {
+            "name": "created_by_user_id",
+            "type": "VARCHAR(64)",
+            "nullable": false,
+            "default": null,
+            "autoincrement": false
+          },
+          {
+            "name": "original_filename",
+            "type": "VARCHAR(255)",
+            "nullable": false,
+            "default": null,
+            "autoincrement": false
+          },
+          {
+            "name": "file_sha256",
+            "type": "VARCHAR(64)",
+            "nullable": false,
+            "default": null,
+            "autoincrement": false
+          },
+          {
+            "name": "upload_blob",
+            "type": "LONGBLOB",
+            "nullable": false,
+            "default": null,
+            "autoincrement": false
+          },
+          {
+            "name": "display_name",
+            "type": "VARCHAR(255)",
+            "nullable": false,
+            "default": "",
+            "autoincrement": false
+          },
+          {
+            "name": "accounting_year",
+            "type": "VARCHAR(16)",
+            "nullable": false,
+            "default": "",
+            "autoincrement": false
+          },
+          {
+            "name": "version_label",
+            "type": "VARCHAR(64)",
+            "nullable": false,
+            "default": "",
+            "autoincrement": false
+          },
+          {
+            "name": "notes",
+            "type": "TEXT",
+            "nullable": false,
+            "default": null,
+            "autoincrement": false
+          },
+          {
+            "name": "duplicate_of_batch_id",
+            "type": "INT",
+            "nullable": true,
+            "default": null,
+            "autoincrement": false
+          },
+          {
+            "name": "supersedes_batch_id",
+            "type": "INT",
+            "nullable": true,
+            "default": null,
+            "autoincrement": false
+          },
+          {
+            "name": "overlaps_with_batch_id",
+            "type": "INT",
+            "nullable": true,
+            "default": null,
+            "autoincrement": false
+          },
+          {
+            "name": "is_exact_duplicate",
+            "type": "TINYINT(1)",
+            "nullable": false,
+            "default": "0",
+            "autoincrement": false
+          },
+          {
+            "name": "has_period_overlap",
+            "type": "TINYINT(1)",
+            "nullable": false,
+            "default": "0",
+            "autoincrement": false
+          },
+          {
+            "name": "rows_total",
+            "type": "INT",
+            "nullable": false,
+            "default": "0",
+            "autoincrement": false
+          },
+          {
+            "name": "rows_valid",
+            "type": "INT",
+            "nullable": false,
+            "default": "0",
+            "autoincrement": false
+          },
+          {
+            "name": "rows_invalid",
+            "type": "INT",
+            "nullable": false,
+            "default": "0",
+            "autoincrement": false
+          },
+          {
+            "name": "rows_duplicate",
+            "type": "INT",
+            "nullable": false,
+            "default": "0",
+            "autoincrement": false
+          },
+          {
+            "name": "rows_applied",
+            "type": "INT",
+            "nullable": false,
+            "default": "0",
+            "autoincrement": false
+          },
+          {
+            "name": "status",
+            "type": "VARCHAR(32)",
+            "nullable": false,
+            "default": "uploaded",
+            "autoincrement": false
+          },
+          {
+            "name": "uploaded_at",
+            "type": "DATETIME",
+            "nullable": false,
+            "default": null,
+            "autoincrement": false
+          },
+          {
+            "name": "started_at",
+            "type": "DATETIME",
+            "nullable": true,
+            "default": null,
+            "autoincrement": false
+          },
+          {
+            "name": "finished_at",
+            "type": "DATETIME",
+            "nullable": true,
+            "default": null,
+            "autoincrement": false
+          }
+        ],
+        "pk": [
+          "id"
+        ],
+        "indexes": [
+          {
+            "columns": [
+              "owner_id"
+            ],
+            "unique": false
+          },
+          {
+            "columns": [
+              "file_sha256"
+            ],
+            "unique": false
+          },
+          {
+            "columns": [
+              "created_by_user_id"
+            ],
+            "unique": false
+          },
+          {
+            "columns": [
+              "status"
+            ],
+            "unique": false
+          }
+        ],
+        "foreign_keys": [],
+        "collation": "utf8mb4_unicode_ci"
+      },
+      "import_batch_rows": {
+        "ddl": "CREATE TABLE import_batch_rows (\n  id int NOT NULL AUTO_INCREMENT,\n  batch_id int NOT NULL,\n  row_no int NOT NULL,\n  excel_sheet_name varchar(255) NOT NULL DEFAULT '',\n  excel_row_ref varchar(64) NOT NULL DEFAULT '',\n  raw_payload_json text NOT NULL,\n  normalized_payload_json text NOT NULL,\n  account_uid varchar(128) NOT NULL DEFAULT '',\n  abonent_id varchar(128) NOT NULL DEFAULT '',\n  account_number varchar(128) NOT NULL DEFAULT '',\n  payment_date varchar(10) NOT NULL DEFAULT '',\n  paid_date varchar(10) NOT NULL DEFAULT '',\n  payment_period varchar(7) NOT NULL DEFAULT '',\n  charge_year varchar(4) NOT NULL DEFAULT '',\n  charge_month varchar(2) NOT NULL DEFAULT '',\n  amount varchar(32) NOT NULL DEFAULT '',\n  source_index int DEFAULT NULL,\n  source_label varchar(255) NOT NULL DEFAULT '',\n  fingerprint varchar(64) NOT NULL DEFAULT '',\n  matched_payment_id varchar(64) NOT NULL DEFAULT '',\n  applied_at datetime DEFAULT NULL,\n  status varchar(32) NOT NULL DEFAULT 'parsed',\n  reason_code varchar(64) NOT NULL DEFAULT '',\n  reason_text varchar(1024) NOT NULL DEFAULT '',\n  error_details_json text NOT NULL,\n  PRIMARY KEY (id),\n  KEY ix_import_batch_rows_batch_id (batch_id),\n  KEY ix_import_batch_rows_account_uid (account_uid),\n  KEY ix_import_batch_rows_fingerprint (fingerprint),\n  KEY ix_import_batch_rows_status (status),\n  CONSTRAINT fk_import_batch_rows_batch FOREIGN KEY (batch_id) REFERENCES import_batch (id) ON DELETE CASCADE\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci",
+        "columns": [
+          {
+            "name": "id",
+            "type": "INT",
+            "nullable": false,
+            "default": null,
+            "autoincrement": true
+          },
+          {
+            "name": "batch_id",
+            "type": "INT",
+            "nullable": false,
+            "default": null,
+            "autoincrement": false
+          },
+          {
+            "name": "row_no",
+            "type": "INT",
+            "nullable": false,
+            "default": null,
+            "autoincrement": false
+          },
+          {
+            "name": "excel_sheet_name",
+            "type": "VARCHAR(255)",
+            "nullable": false,
+            "default": "",
+            "autoincrement": false
+          },
+          {
+            "name": "excel_row_ref",
+            "type": "VARCHAR(64)",
+            "nullable": false,
+            "default": "",
+            "autoincrement": false
+          },
+          {
+            "name": "raw_payload_json",
+            "type": "TEXT",
+            "nullable": false,
+            "default": null,
+            "autoincrement": false
+          },
+          {
+            "name": "normalized_payload_json",
+            "type": "TEXT",
+            "nullable": false,
+            "default": null,
+            "autoincrement": false
+          },
+          {
+            "name": "account_uid",
+            "type": "VARCHAR(128)",
+            "nullable": false,
+            "default": "",
+            "autoincrement": false
+          },
+          {
+            "name": "abonent_id",
+            "type": "VARCHAR(128)",
+            "nullable": false,
+            "default": "",
+            "autoincrement": false
+          },
+          {
+            "name": "account_number",
+            "type": "VARCHAR(128)",
+            "nullable": false,
+            "default": "",
+            "autoincrement": false
+          },
+          {
+            "name": "payment_date",
+            "type": "VARCHAR(10)",
+            "nullable": false,
+            "default": "",
+            "autoincrement": false
+          },
+          {
+            "name": "paid_date",
+            "type": "VARCHAR(10)",
+            "nullable": false,
+            "default": "",
+            "autoincrement": false
+          },
+          {
+            "name": "payment_period",
+            "type": "VARCHAR(7)",
+            "nullable": false,
+            "default": "",
+            "autoincrement": false
+          },
+          {
+            "name": "charge_year",
+            "type": "VARCHAR(4)",
+            "nullable": false,
+            "default": "",
+            "autoincrement": false
+          },
+          {
+            "name": "charge_month",
+            "type": "VARCHAR(2)",
+            "nullable": false,
+            "default": "",
+            "autoincrement": false
+          },
+          {
+            "name": "amount",
+            "type": "VARCHAR(32)",
+            "nullable": false,
+            "default": "",
+            "autoincrement": false
+          },
+          {
+            "name": "source_index",
+            "type": "INT",
+            "nullable": true,
+            "default": null,
+            "autoincrement": false
+          },
+          {
+            "name": "source_label",
+            "type": "VARCHAR(255)",
+            "nullable": false,
+            "default": "",
+            "autoincrement": false
+          },
+          {
+            "name": "fingerprint",
+            "type": "VARCHAR(64)",
+            "nullable": false,
+            "default": "",
+            "autoincrement": false
+          },
+          {
+            "name": "matched_payment_id",
+            "type": "VARCHAR(64)",
+            "nullable": false,
+            "default": "",
+            "autoincrement": false
+          },
+          {
+            "name": "applied_at",
+            "type": "DATETIME",
+            "nullable": true,
+            "default": null,
+            "autoincrement": false
+          },
+          {
+            "name": "status",
+            "type": "VARCHAR(32)",
+            "nullable": false,
+            "default": "parsed",
+            "autoincrement": false
+          },
+          {
+            "name": "reason_code",
+            "type": "VARCHAR(64)",
+            "nullable": false,
+            "default": "",
+            "autoincrement": false
+          },
+          {
+            "name": "reason_text",
+            "type": "VARCHAR(1024)",
+            "nullable": false,
+            "default": "",
+            "autoincrement": false
+          },
+          {
+            "name": "error_details_json",
+            "type": "TEXT",
+            "nullable": false,
+            "default": null,
+            "autoincrement": false
+          }
+        ],
+        "pk": [
+          "id"
+        ],
+        "indexes": [
+          {
+            "columns": [
+              "batch_id"
+            ],
+            "unique": false
+          },
+          {
+            "columns": [
+              "account_uid"
+            ],
+            "unique": false
+          },
+          {
+            "columns": [
+              "fingerprint"
+            ],
+            "unique": false
+          },
+          {
+            "columns": [
+              "status"
+            ],
+            "unique": false
+          }
+        ],
+        "foreign_keys": [
+          {
+            "columns": [
+              "batch_id"
+            ],
+            "referred_table": "import_batch",
+            "referred_columns": [
+              "id"
+            ],
+            "ondelete": "CASCADE"
+          }
+        ],
+        "collation": "utf8mb4_unicode_ci"
+      }
+    },
+    "extra_columns": {
+      "users.status": {
+        "type": "VARCHAR(20)",
+        "nullable": true,
+        "default": "active",
+        "autoincrement": false,
+        "charset": "utf8mb4",
+        "collation": "utf8mb4_unicode_ci"
+      }
+    },
+    "literal_defaults": {
+      "users.role": "user",
+      "users.display_name": "",
+      "users.disabled": false,
+      "kv_store.version": 0,
+      "import_batches.display_name": "",
+      "import_batches.accounting_year": "",
+      "import_batches.version_label": "",
+      "import_batches.notes": "",
+      "import_batches.is_exact_duplicate": false,
+      "import_batches.has_period_overlap": false,
+      "import_batches.rows_total": 0,
+      "import_batches.rows_valid": 0,
+      "import_batches.rows_invalid": 0,
+      "import_batches.rows_duplicate": 0,
+      "import_batches.rows_applied": 0,
+      "import_batches.rows_skipped": 0,
+      "import_batches.file_name": "",
+      "import_batches.uploaded_by": "",
+      "import_batches.error_message": "",
+      "import_batches.status": "uploaded",
+      "import_rows.excel_sheet_name": "",
+      "import_rows.excel_row_ref": "",
+      "import_rows.raw_payload_json": "{}",
+      "import_rows.normalized_payload_json": "{}",
+      "import_rows.account_uid": "",
+      "import_rows.abonent_id": "",
+      "import_rows.account_number": "",
+      "import_rows.payment_date": "",
+      "import_rows.payment_period": "",
+      "import_rows.charge_year": "",
+      "import_rows.charge_month": "",
+      "import_rows.amount": "",
+      "import_rows.paid_date": "",
+      "import_rows.source_label": "",
+      "import_rows.fingerprint": "",
+      "import_rows.matched_payment_id": "",
+      "import_rows.status": "parsed",
+      "import_rows.reason_code": "",
+      "import_rows.reason_text": "",
+      "import_rows.error_details_json": "{}",
+      "import_applied_fingerprints.import_type": "payments",
+      "import_applied_fingerprints.source_index": 1,
+      "import_applied_fingerprints.payment_id": "",
+      "payment_audit_log.details_json": "{}",
+      "payment_ledger_store_audit.actor_id": "",
+      "payment_ledger_store_audit.source": "UNKNOWN",
+      "payment_ledger_store_audit.old_value_present": false,
+      "payment_ledger_store_audit.new_value_present": false,
+      "payment_ledger_store_audit.guard_result": "NOT_APPLICABLE",
+      "payment_ledger_store_audit.guard_reason": "",
+      "payment_ledger_store_audit.full_recalc_lock_present": false,
+      "payment_ledger_store_audit.calculated_final_empty": false,
+      "payment_ledger_store_audit.payload_size": 0,
+      "payment_ledger_store_audit.details_json": "{}",
+      "abonent_summary.abonent_id": "",
+      "abonent_summary.account_uid": "",
+      "abonent_summary.account_number": "",
+      "abonent_summary.fio": "",
+      "abonent_summary.address": "",
+      "abonent_summary.summary_status": "missing",
+      "abonent_summary.summary_reason": "",
+      "abonent_summary.input_hash": "",
+      "abonent_summary.last_error_code": "",
+      "abonent_summary.summary_json": "{}",
+      "card_snapshot.abonent_uid": "",
+      "card_snapshot.abonent_id": "",
+      "card_snapshot.snapshot_status": "missing",
+      "card_snapshot.snapshot_reason": "",
+      "card_snapshot.input_hash": "",
+      "card_snapshot.ledger_version": "",
+      "card_snapshot.tariff_version": "",
+      "card_snapshot.rate_version": "",
+      "card_snapshot.exclude_version": "",
+      "card_snapshot.links_version": "",
+      "card_snapshot.engine_version": "JKHCalcEngine:stage16-mvp",
+      "card_snapshot.snapshot_json": "{}",
+      "recalc_uid_locks.lock_token": "",
+      "recalc_uid_locks.status": "running",
+      "recalc_batch_jobs.requested_by": "",
+      "recalc_batch_jobs.reason": "",
+      "recalc_batch_jobs.status": "queued",
+      "recalc_batch_jobs.total_count": 0,
+      "recalc_batch_jobs.processed_count": 0,
+      "recalc_batch_jobs.fresh_count": 0,
+      "recalc_batch_jobs.error_count": 0,
+      "recalc_batch_jobs.skipped_count": 0,
+      "recalc_batch_jobs.error_message": "",
+      "recalc_batch_job_items.account_uid": "",
+      "recalc_batch_job_items.status": "queued",
+      "recalc_batch_job_items.summary_status": "",
+      "recalc_batch_job_items.summary_reason": "",
+      "recalc_batch_job_items.error_message": "",
+      "bulk_calc_verify_jobs.requested_by": "",
+      "bulk_calc_verify_jobs.reason": "",
+      "bulk_calc_verify_jobs.status": "queued",
+      "bulk_calc_verify_jobs.total_count": 0,
+      "bulk_calc_verify_jobs.processed_count": 0,
+      "bulk_calc_verify_jobs.ok_count": 0,
+      "bulk_calc_verify_jobs.mismatch_count": 0,
+      "bulk_calc_verify_jobs.error_count": 0,
+      "bulk_calc_verify_jobs.skipped_count": 0,
+      "bulk_calc_verify_jobs.error_message": "",
+      "bulk_calc_verify_job_items.account_uid": "",
+      "bulk_calc_verify_job_items.status": "queued",
+      "bulk_calc_verify_job_items.reason": "",
+      "bulk_calc_verify_job_items.old_summary_json": "{}",
+      "bulk_calc_verify_job_items.new_summary_json": "{}",
+      "bulk_calc_verify_job_items.diff_json": "{}",
+      "bulk_calc_verify_job_items.error_code": "",
+      "bulk_calc_verify_job_items.error_message": ""
+    },
+    "type_variants": {
+      "kv_store.v": [
+        "LONGTEXT"
+      ],
+      "card_snapshot.snapshot_json": [
+        "MEDIUMTEXT"
+      ],
+      "import_batches.upload_blob": [
+        "LONGBLOB"
+      ],
+      "import_applied_fingerprints.payment_period": [
+        "CHAR(7)"
+      ],
+      "import_applied_fingerprints.created_at": [
+        "TIMESTAMP"
+      ]
+    },
+    "nullable_variants": {
+      "kv_store.v": {
+        "nullable": true,
+        "require_no_nulls": true
+      }
+    },
+    "on_update_columns": [
+      "abonent_summary.updated_at",
+      "card_snapshot.updated_at",
+      "recalc_uid_locks.updated_at"
+    ],
+    "optional_nonunique_indexes": {
+      "abonent_summary": [
+        [
+          "summary_status"
+        ],
+        [
+          "input_hash"
+        ]
+      ],
+      "card_snapshot": [
+        [
+          "abonent_uid"
+        ],
+        [
+          "owner_id"
+        ],
+        [
+          "input_hash"
+        ],
+        [
+          "snapshot_status"
+        ],
+        [
+          "abonent_id"
+        ]
+      ],
+      "import_applied_fingerprints": [
+        [
+          "batch_id"
+        ],
+        [
+          "owner_id"
+        ]
+      ],
+      "payment_ledger_store_audit": [
+        [
+          "created_at"
+        ],
+        [
+          "actor_id"
+        ],
+        [
+          "account_uid"
+        ],
+        [
+          "owner_id"
+        ]
+      ],
+      "recalc_uid_locks": [
+        [
+          "abonent_uid"
+        ],
+        [
+          "status"
+        ],
+        [
+          "owner_id"
+        ]
+      ]
+    },
+    "extra_nonunique_indexes": {
+      "import_applied_fingerprints": [
+        [
+          "owner_id",
+          "batch_id"
+        ],
+        [
+          "owner_id",
+          "account_number"
+        ]
+      ],
+      "payment_ledger_store_audit": [
+        [
+          "owner_id",
+          "created_at"
+        ],
+        [
+          "owner_id",
+          "account_uid",
+          "created_at"
+        ]
+      ]
+    }
+  }
 }

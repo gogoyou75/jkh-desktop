@@ -2640,12 +2640,48 @@ schema_profile() {
   esac
 }
 
-schema_cli() {
+# Configuration files are explicitly selected by the owner; source them only
+# inside the tool subshell. Do not expose administrative settings to the API.
+schema_environment() {
+  local action="$1" file prefix key name
+  for file in "${CUP_SCHEMA_DB_ENV_FILE:-}" "${CUP_SCHEMA_ADMIN_ENV_FILE:-}"; do
+    [ -n "$file" ] || continue
+    [ -f "$file" ] && [ -r "$file" ] || { printf '%s\n' '{"status":"BLOCKED","reason":"schema_environment_file_unreadable"}'; return 2; }
+    set -a
+    if source "$file"; then set +a; else set +a; return 2; fi
+  done
+  for prefix in '' MAINT_ RESTORE_; do
+    if [ "$prefix" = RESTORE_ ] && [ "$action" != backup ]; then continue; fi
+    for key in ENV_TYPE DB_HOST DB_PORT DB_NAME DB_USER DB_PASSWORD; do
+      name="$prefix$key"
+      [ -n "${!name:-}" ] || { printf '%s\n' '{"status":"BLOCKED","reason":"explicit_database_configuration_required"}'; return 2; }
+      export "$name"
+    done
+  done
+  [ "$ENV_TYPE" = "$ENVIRONMENT" ] && [ "$MAINT_ENV_TYPE" = "$ENV_TYPE" ] &&
+    [ "$MAINT_DB_HOST" = "$DB_HOST" ] && [ "$MAINT_DB_PORT" = "$DB_PORT" ] &&
+    [ "$MAINT_DB_NAME" = "$DB_NAME" ] || {
+      printf '%s\n' '{"status":"BLOCKED","reason":"schema_environment_identity_mismatch"}'; return 2;
+    }
+}
+
+schema_compose() (
+  schema_environment diagnose || return 2
+  docker compose "$@"
+)
+
+schema_compose_guard() (
+  schema_environment diagnose || return 2
+  environment_compose_guard
+)
+
+schema_cli_scoped() (
   local action="$1" profile backend_mount state_mount code
   shift
   profile="$(schema_profile)" || return 1
-  environment_compose_guard || return 1
-  schema_writer_services >/dev/null || { block_operation 'BLOCKED: unreviewed services or administrative credentials exposed to writers'; return 1; }
+  schema_environment "$action" || return 2
+  environment_compose_guard || return 2
+  schema_writer_services >/dev/null || { block_operation 'BLOCKED: unreviewed services or administrative credentials exposed to writers'; return 2; }
   mkdir -p "$PROJECT_DIR/.schema-state/$ENVIRONMENT" || return 1
   chmod 700 "$PROJECT_DIR/.schema-state" "$PROJECT_DIR/.schema-state/$ENVIRONMENT" || return 1
   backend_mount="$PROJECT_DIR/backend"
@@ -2660,6 +2696,7 @@ schema_cli() {
     -v "$backend_mount:/cup-schema-code:ro" \
     -v "$state_mount:/cup-schema-state" \
     -e CUP_SCHEMA_STATE_DIR=/cup-schema-state -e CUP_MAINTENANCE_POLICY=/cup-schema-state/policy.json -e PYTHONDONTWRITEBYTECODE=1 \
+    -e ENV_TYPE -e DB_HOST -e DB_PORT -e DB_NAME -e DB_USER -e DB_PASSWORD \
     -e MAINT_ENV_TYPE -e MAINT_DB_HOST -e MAINT_DB_PORT -e MAINT_DB_NAME -e MAINT_DB_USER -e MAINT_DB_PASSWORD \
     -e RESTORE_ENV_TYPE -e RESTORE_DB_HOST -e RESTORE_DB_PORT \
     -e RESTORE_DB_NAME -e RESTORE_DB_USER -e RESTORE_DB_PASSWORD \
@@ -2668,6 +2705,12 @@ schema_cli() {
   else
     code=$?
   fi
+  return "$code"
+)
+
+schema_cli() {
+  local code
+  if schema_cli_scoped "$@"; then return 0; else code=$?; fi
   if [ "$code" -eq 2 ]; then
     block_operation "BLOCKED: Schema Control refused the operation; see reason above"
   fi
@@ -2747,7 +2790,7 @@ schema_writer_services() {
   local config_file result
   config_file="$(mktemp)" || return 1
   chmod 600 "$config_file" || return 1
-  if ! docker compose config --format json > "$config_file"; then rm -f -- "$config_file"; return 1; fi
+  if ! schema_compose config --format json > "$config_file"; then rm -f -- "$config_file"; return 1; fi
   if "${CUP_HOST_PYTHON:-python3}" - "$config_file" "$PROJECT_DIR/.schema-state/$ENVIRONMENT/policy.json" <<'WRITER_POLICY'
 import json,sys,re
 from pathlib import Path
@@ -2774,16 +2817,16 @@ WRITER_POLICY
 schema_maintenance_begin() {
   local services running profile
   profile="$(schema_profile)" || return 1
-  environment_compose_guard || return 1
+  schema_compose_guard || { block_operation "BLOCKED: schema environment or Compose identity rejected"; return 1; }
   services="$(schema_writer_services)" || { block_operation 'BLOCKED: unknown writer service or missing maintenance policy'; return 1; }
   # Service names are strictly validated above. Stop all declared writers; never MySQL.
-  running="$(docker compose ps --status running --services $services)" || return 1
+  running="$(schema_compose ps --status running --services $services)" || return 1
   mkdir -p "$PROJECT_DIR/.schema-state/$ENVIRONMENT" || return 1
   if [ ! -f "$PROJECT_DIR/.schema-state/$ENVIRONMENT/services-before.txt" ]; then
     (umask 077; printf '%s\n' "$running" > "$PROJECT_DIR/.schema-state/$ENVIRONMENT/services-before.txt") || return 1
   fi
-  docker compose stop --timeout 30 $services || return 1
-  running="$(docker compose ps --status running -q $services)" || return 1
+  schema_compose stop --timeout 30 $services || return 1
+  running="$(schema_compose ps --status running -q $services)" || return 1
   [ -z "$running" ] || { block_operation 'BLOCKED: writer services still running'; return 1; }
   schema_cli maintenance-begin --confirmation "FENCE $profile"
 }
@@ -2791,7 +2834,7 @@ schema_maintenance_begin() {
 schema_maintenance_resume() {
   local profile services before service
   profile="$(schema_profile)" || return 1
-  services="$(schema_writer_services)" || return 1
+  services="$(schema_writer_services)" || { block_operation "BLOCKED: schema environment or writer policy rejected"; return 1; }
   before="$PROJECT_DIR/.schema-state/$ENVIRONMENT/services-before.txt"
   if [ ! -f "$before" ]; then
     "${CUP_HOST_PYTHON:-python3}" - "$PROJECT_DIR/.schema-state/$ENVIRONMENT/maintenance.json" <<'RESUME_STATE' || { block_operation 'BLOCKED: missing original writer service state'; return 1; }
@@ -2810,7 +2853,7 @@ RESUME_STATE
   while IFS= read -r service; do
     [ -n "$service" ] || continue
     case " $services " in *" $service "*) ;; *) block_operation 'BLOCKED: unknown prior writer service'; return 1 ;; esac
-    docker compose start "$service" || return 1
+    schema_compose start "$service" || return 1
   done < "$before"
   rm -f -- "$before" || return 1
 }

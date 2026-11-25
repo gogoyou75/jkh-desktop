@@ -132,6 +132,7 @@ class Settings:
 def norm_type(value):
     import re
     t = str(value).upper().replace("INTEGER", "INT").replace("NUMERIC", "DECIMAL")
+    t = re.sub(r"\s+CHARACTER SET\s+[A-Z0-9_]+", "", t)
     t = re.sub(r"\s+COLLATE\s+[A-Z0-9_]+", "", t)
     t = re.sub(r"\s+", "", t)
     t = re.sub(r"\b(INT|BIGINT|SMALLINT|MEDIUMINT)\(\d+\)", r"\1", t)
@@ -144,7 +145,10 @@ def norm_default(value):
     s = str(value).strip()
     if s.upper() in {"CURRENT_TIMESTAMP", "CURRENT_TIMESTAMP()"}:
         return "CURRENT_TIMESTAMP"
-    return s.strip("()'")
+    # Remove one SQL string quoting layer only; do not erase meaningful parentheses.
+    if len(s) >= 2 and s[0] == s[-1] == "'":
+        return s[1:-1].replace("''", "'")
+    return s
 
 
 def index_signature(index):
@@ -165,84 +169,173 @@ def identity(connection, settings):
     return digest({"server": server, "database": name, "profile": settings.profile})
 
 
-def inspect_schema(connection, package=None):
+def schema_ddl(connection, name):
+    quoted = connection.dialect.identifier_preparer.quote_identifier(name)
+    ddl = connection.exec_driver_sql("SHOW CREATE TABLE " + quoted).one()[1]
+    # MySQL SHOW CREATE may add an explicit CHARACTER SET after restoring a
+    # column that already declares its utf8mb4 collation. Make that implicit
+    # charset explicit on both sides; never erase or substitute a collation.
+    ddl = re.sub(r"(?im)^(\s+`[^`]+`\s+(?:(?:VAR)?CHAR\(\d+\)|(?:TINY|MEDIUM|LONG)?TEXT)) COLLATE (utf8mb4_[a-z0-9_]+)",
+                 r"\1 CHARACTER SET utf8mb4 COLLATE \2", ddl)
+    # Runtime sequence values are verified separately, never a schema equivalence rule.
+    return re.sub(r"(\) ENGINE=[^ \n]+) AUTO_INCREMENT=\d+", r"\1", ddl)
+
+
+def validate_data_checks(connection, checks):
+    issues = []
+    quote = connection.dialect.identifier_preparer.quote_identifier
+    for check in checks:
+        if connection.exec_driver_sql("SELECT COUNT(*) FROM " + quote(check["table"]) +
+                                      " WHERE " + quote(check["column"]) + " IS NULL").scalar_one():
+            issues.append({"kind": "incompatible_null_data", **check})
+    return issues
+
+
+def inspect_schema(connection, package=None, check_data=False):
     contract, snapshot = package or load_package()
+    compatibility = contract.get("compatibility", {})
+    historical = compatibility.get("historical_tables", {})
     inspector = sa.inspect(connection)
     actual_tables = set(inspector.get_table_names()) - {"alembic_version"}
     desired = snapshot["tables"]
-    issues, actual = [], {}
+    issues, actual, advisories, data_checks = [], {}, [], []
+    present_history = actual_tables & set(historical)
+    if present_history and present_history != set(historical):
+        issues.append({"kind": "incomplete_historical_pair"})
     for name in sorted(set(desired) - actual_tables):
         issues.append({"kind": "missing_table", "table": name})
-    for name in sorted(actual_tables - set(desired)):
+    for name in sorted(actual_tables - set(desired) - set(historical)):
         issues.append({"kind": "unknown_table", "table": name})
-    for name in sorted(actual_tables & set(desired)):
-        wanted = desired[name]
+    heads = list(MigrationContext.configure(connection).get_current_heads())
+    # Read information_schema: SQLAlchemy may omit inherited charset/collation and
+    # fold ON UPDATE into DEFAULT. Resolve each attribute instead of stripping it.
+    metadata = {}
+    for row in connection.execute(sa.text("SELECT TABLE_NAME,COLUMN_NAME,COLUMN_DEFAULT,EXTRA,"
+            "CHARACTER_SET_NAME,COLLATION_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE()")).mappings():
+        metadata[(row["TABLE_NAME"], row["COLUMN_NAME"])] = row
+    table_collations = dict(connection.execute(sa.text(
+        "SELECT TABLE_NAME,TABLE_COLLATION FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE()")).all())
+    for name in sorted(actual_tables):
         reflected_columns = inspector.get_columns(name)
+        cols = {}
         for column in reflected_columns:
+            meta = metadata[(name, column["name"])]
+            cols[column["name"]] = {"name": column["name"],
+                "type": norm_type(column["type"].compile(dialect=connection.dialect)),
+                "nullable": bool(column["nullable"]), "default": norm_default(meta["COLUMN_DEFAULT"]),
+                "autoincrement": "auto_increment" in meta["EXTRA"].lower(),
+                "charset": meta["CHARACTER_SET_NAME"], "collation": meta["COLLATION_NAME"],
+                "extra": meta["EXTRA"].lower().replace("default_generated", "").strip()}
             if column.get("computed"):
                 issues.append({"kind": "unknown_computed_column", "table": name, "column": column["name"]})
-            collation = getattr(column["type"], "collation", None)
-            if collation and collation.lower() not in contract["allowed_collations"]:
-                issues.append({"kind": "unknown_collation", "table": name, "column": column["name"]})
-        cols = {c["name"]: {"name": c["name"], "type": norm_type(c["type"].compile(dialect=connection.dialect)),
-                "nullable": bool(c["nullable"]), "default": norm_default(c.get("default")), "autoincrement": bool(c.get("autoincrement"))}
-                for c in reflected_columns}
-        desired_cols = {c["name"]: {"name": c["name"], "type": norm_type(c["type"]),
-                        "nullable": bool(c["nullable"]), "default": norm_default(c["default"]),
-                        "autoincrement": bool(re.search(r"(?im)^\s*`?" + re.escape(c["name"]) + r"`?\s+[^,\n]*\bAUTO_INCREMENT\b", wanted["ddl"]))} for c in wanted["columns"]}
+        options = inspector.get_table_options(name)
+        indexes_raw = inspector.get_indexes(name)
+        fks_raw = inspector.get_foreign_keys(name)
+        indexes = set(index_signature(x) for x in indexes_raw)
+        fks = set(fk_signature(x) for x in fks_raw)
+        pk = inspector.get_pk_constraint(name).get("constrained_columns") or []
+        checks = inspector.get_check_constraints(name)
+        actual[name] = {"columns": cols, "engine": options.get("mysql_engine", ""),
+                        "table_collation": table_collations[name],
+                        "checks": checks, "pk": pk, "indexes": sorted((list(k), v) for k, v in indexes),
+                        "foreign_keys": sorted((list(a), b, list(c), d) for a,b,c,d in fks),
+                        "ddl": schema_ddl(connection, name)}
+        if name not in desired and name not in historical:
+            continue
+        is_history = name in historical
+        wanted = historical[name] if is_history else desired[name]
+        allowed_table_collations = [wanted["collation"]] if is_history else contract["allowed_collations"]
+        if table_collations[name] not in allowed_table_collations:
+            issues.append({"kind": "unknown_table_collation", "table": name})
+        desired_cols = {}
+        for c in wanted["columns"]:
+            auto = c.get("autoincrement", bool(re.search(r"(?im)^\s*`?" + re.escape(c["name"]) +
+                        r"`?\s+[^,\n]*\bAUTO_INCREMENT\b", wanted["ddl"])))
+            desired_cols[c["name"]] = {"name": c["name"], "type": norm_type(c["type"]),
+                "nullable": bool(c["nullable"]), "default": norm_default(c["default"]), "autoincrement": auto}
+        for key, c in compatibility.get("extra_columns", {}).items():
+            table, col = key.split(".")
+            if table == name and col in cols:
+                desired_cols[col] = {"name": col, **{k:v for k,v in c.items() if k not in {"charset", "collation"}}}
         for col in sorted(set(desired_cols) - set(cols)):
             issues.append({"kind": "missing_column", "table": name, "column": col})
         for col in sorted(set(cols) - set(desired_cols)):
             issues.append({"kind": "unknown_column", "table": name, "column": col})
         for col in sorted(set(cols) & set(desired_cols)):
-            if cols[col] != desired_cols[col]:
-                issues.append({"kind": "column_mismatch", "table": name, "column": col})
-        options = inspector.get_table_options(name)
-        engine = options.get("mysql_engine", "")
-        if engine.lower() != "innodb":
-            issues.append({"kind": "unsupported_engine", "table": name})
-        checks = inspector.get_check_constraints(name)
-        if checks:
-            issues.append({"kind": "unknown_check_constraint", "table": name})
-        pk = inspector.get_pk_constraint(name).get("constrained_columns") or []
-        if pk != wanted["pk"]:
-            issues.append({"kind": "primary_key_mismatch", "table": name})
-        reflected_indexes = inspector.get_indexes(name)
-        for index in reflected_indexes:
-            options = index.get("dialect_options", {})
-            if options.get("mysql_length") or options.get("mysql_prefix") or index.get("column_sorting"):
+            expected = desired_cols[col]; current = cols[col]; key = name + "." + col
+            comparable = {k:current[k] for k in expected}
+            if not is_history:
+                if current["type"] in compatibility.get("type_variants", {}).get(key, []):
+                    comparable["type"] = expected["type"]
+                variant = compatibility.get("nullable_variants", {}).get(key)
+                if variant and current["nullable"] == variant["nullable"]:
+                    comparable["nullable"] = expected["nullable"]
+                    if variant.get("require_no_nulls"): data_checks.append({"table": name, "column": col})
+                literal = compatibility.get("literal_defaults", {}).get(key)
+                if literal is not None and current["default"] == norm_default(str(int(literal)) if isinstance(literal,bool) else literal):
+                    comparable["default"] = expected["default"]
+            if comparable != expected:
+                issues.append({"kind": "column_mismatch", "table": name, "column": col,
+                               "actual": comparable, "expected": expected})
+            extra_column = compatibility.get("extra_columns", {}).get(key)
+            if extra_column and any(current[k] != extra_column[k] for k in ("charset", "collation")):
+                issues.append({"kind": "historical_column_charset_mismatch", "table": name, "column": col})
+            charset, collation = current["charset"], current["collation"]
+            if charset is not None and (charset != "utf8mb4" or collation not in
+                    ([wanted["collation"]] if is_history else contract["allowed_collations"])):
+                issues.append({"kind": "unknown_collation", "table": name, "column": col})
+            extra = current["extra"].replace("auto_increment", "").strip()
+            if extra:
+                if not (not is_history and key in compatibility.get("on_update_columns", []) and
+                        extra in {"on update current_timestamp()", "on update current_timestamp"} and
+                        current["type"] == "DATETIME" and current["nullable"] and current["default"] == "CURRENT_TIMESTAMP"):
+                    issues.append({"kind": "unknown_column_extra", "table": name, "column": col})
+            if not is_history and current["type"] == "TIMESTAMP" and expected["type"] != "TIMESTAMP":
+                session, system = connection.exec_driver_sql("SELECT @@session.time_zone, @@system_time_zone").one()
+                if session not in {"+00:00", "UTC"} and not (session == "SYSTEM" and system == "UTC"):
+                    issues.append({"kind": "timestamp_timezone_not_utc", "table": name, "column": col})
+        if actual[name]["engine"].lower() != "innodb": issues.append({"kind": "unsupported_engine", "table": name})
+        if checks: issues.append({"kind": "unknown_check_constraint", "table": name})
+        if pk != wanted["pk"]: issues.append({"kind": "primary_key_mismatch", "table": name})
+        for index in indexes_raw:
+            opt = index.get("dialect_options", {})
+            if opt.get("mysql_length") or opt.get("mysql_prefix") or index.get("column_sorting"):
                 issues.append({"kind": "unsupported_index_details", "table": name})
-        indexes = set(index_signature(x) for x in reflected_indexes)
         expected_indexes = set(index_signature(x) for x in wanted["indexes"])
+        optional = {tuple(x) if isinstance(x,list) else (x,) for x in
+                    compatibility.get("optional_nonunique_indexes", {}).get(name, [])}
         for signature in expected_indexes - indexes:
-            issues.append({"kind": "missing_index", "table": name, "columns": list(signature[0])})
-        reflected_fks = inspector.get_foreign_keys(name)
-        for fk in reflected_fks:
+            issue = {"kind": "missing_index", "table": name, "columns": list(signature[0])}
+            if not signature[1] and signature[0] in optional: advisories.append(issue)
+            else: issues.append(issue)
+        expected_fks = set(fk_signature(x) for x in wanted["foreign_keys"])
+        if name == "import_rows":
+            legacy_fks = {(a,b,c,"CASCADE" if a == ("batch_id",) and b == "import_batches" and c == ("id",) else d)
+                          for a,b,c,d in expected_fks}
+        else: legacy_fks = expected_fks
+        if fks not in (expected_fks, legacy_fks): issues.append({"kind": "foreign_key_mismatch", "table": name})
+        for fk in fks_raw:
             if fk.get("referred_schema") not in {None, connection.engine.url.database}:
                 issues.append({"kind": "cross_schema_foreign_key", "table": name})
             if (fk.get("options", {}).get("onupdate") or "RESTRICT").upper() not in {"RESTRICT", "NO ACTION"}:
                 issues.append({"kind": "unknown_foreign_key_rule", "table": name})
-        fks = set(fk_signature(x) for x in reflected_fks)
-        expected_fks = set(fk_signature(x) for x in wanted["foreign_keys"])
-        if fks != expected_fks:
-            issues.append({"kind": "foreign_key_mismatch", "table": name})
-        # MySQL creates supporting indexes for foreign keys automatically.
-        permitted_implicit = {tuple(x[0]) for x in expected_fks}
+        implicit = {tuple(x[0]) for x in expected_fks}
+        extras = {tuple(x) for x in compatibility.get("extra_nonunique_indexes", {}).get(name, [])}
         for signature in indexes - expected_indexes:
-            if signature[0] not in permitted_implicit or signature[1]:
-                issues.append({"kind": "unknown_index", "table": name, "columns": list(signature[0])})
-        actual[name] = {"columns": cols, "engine": engine, "collations": {c["name"]: getattr(c["type"], "collation", None) for c in reflected_columns}, "checks": checks, "pk": pk, "indexes": sorted((list(k), v) for k, v in indexes),
-                        "foreign_keys": sorted((list(a), b, list(c), d) for a, b, c, d in fks)}
-    if inspector.get_view_names():
-        issues.append({"kind": "unsupported_views"})
-    for source in ("TRIGGERS", "ROUTINES"):
-        schema_column = "TRIGGER_SCHEMA" if source == "TRIGGERS" else "ROUTINE_SCHEMA"
+            if not signature[1] and (signature[0] in implicit or signature[0] in extras):
+                continue
+            issues.append({"kind": "unknown_index", "table": name, "columns": list(signature[0])})
+    if inspector.get_view_names(): issues.append({"kind": "unsupported_views"})
+    for source in ("TRIGGERS", "ROUTINES", "EVENTS"):
+        schema_column = {"TRIGGERS":"TRIGGER_SCHEMA", "ROUTINES":"ROUTINE_SCHEMA", "EVENTS":"EVENT_SCHEMA"}[source]
         if connection.execute(sa.text(f"SELECT COUNT(*) FROM information_schema.{source} WHERE {schema_column}=DATABASE()")).scalar_one():
             issues.append({"kind": "unsupported_" + source.lower()})
-    heads = list(MigrationContext.configure(connection).get_current_heads())
     state = {"tables": actual, "table_names": sorted(actual_tables), "revisions": heads, "issues": issues}
-    return {**state, "fingerprint": digest(state), "required_revision": contract["required_revision"],
-            "current_revision": heads[0] if len(heads) == 1 else ("UNVERSIONED" if not heads else "MULTIPLE_HEADS")}
+    result = {**state, "fingerprint": digest(state), "advisories": advisories, "data_checks": data_checks,
+              "required_revision": contract["required_revision"],
+              "current_revision": heads[0] if len(heads)==1 else ("UNVERSIONED" if not heads else "MULTIPLE_HEADS")}
+    if check_data: result["issues"].extend(validate_data_checks(connection, data_checks))
+    return result
 
 
 def approved_variant(state, contract):
@@ -251,6 +344,10 @@ def approved_variant(state, contract):
         if issue["kind"] == "missing_table" and (empty or issue["table"] in contract["known_missing_tables"]):
             continue
         if issue["kind"] == "missing_column" and issue["column"] in contract["known_missing_columns"].get(issue["table"], []):
+            continue
+        # A previous interrupted cup_5502 may have created a bulk table but not
+        # all its indexes. Only its frozen, named indexes may be completed.
+        if issue["kind"] == "missing_index" and issue["table"] in BULK_TABLES and state["revisions"] in ([], ["cup_5501"]):
             continue
         return False
     return True
@@ -292,7 +389,7 @@ def migrate_tables(op, bulk, frozen_hash):
     if hashlib.sha256(raw).hexdigest() != frozen_hash:
         raise Blocked("historical_snapshot_modified")
     package = load_package()
-    state = inspect_schema(op.get_bind(), package)
+    state = inspect_schema(op.get_bind(), package, check_data=True)
     if not approved_variant(state, package[0]):
         raise Blocked("unknown_schema_drift")
     snapshot = package[1]
@@ -304,6 +401,19 @@ def migrate_tables(op, bulk, frozen_hash):
             op.execute(sa.text(table["ddl"]))
             for ddl in table["index_ddl"]:
                 op.execute(sa.text(ddl))
+        elif bulk:
+            # CREATE TABLE is already committed by MySQL after an interruption.
+            # Never overwrite an existing definition or recreate an existing index.
+            table = snapshot["tables"][name]
+            present = {index_signature(x) for x in sa.inspect(op.get_bind()).get_indexes(name)}
+            for ddl in table["index_ddl"]:
+                match = re.fullmatch(r"CREATE (UNIQUE )?INDEX [A-Za-z0-9_]+ ON [A-Za-z0-9_]+ \(([^)]+)\)", ddl)
+                if not match: raise Blocked("invalid_frozen_index")
+                signature = (tuple(c.strip(" `") for c in match.group(2).split(",")), bool(match.group(1)))
+                if signature not in present:
+                    op.execute(sa.text(ddl))
+                    present.add(signature)
+        if name not in state["table_names"]:
             # Only the explicitly empty restore database receives backup counters.
             counter = op.get_context().config.attributes.get("restore_counters", {}).get(name)
             if counter is not None:
@@ -482,6 +592,15 @@ class Controller:
         with self.diagnostic_connection() as connection:
             database_id = identity(connection, self.settings)
             state = inspect_schema(connection, package)
+        if state["data_checks"]:
+            # Metadata inspection uses Maintenance's read-only metadata account.
+            # Data preconditions use APP SELECT, or the fenced migration session.
+            try:
+                with self.engine.connect() as reader:
+                    if identity(reader, self.settings) != database_id: raise Blocked("data_check_identity_changed")
+                    state["issues"].extend(validate_data_checks(reader, state["data_checks"]))
+            except sa.exc.DBAPIError:
+                state["issues"].append({"kind": "data_precondition_unavailable"})
         return {**state, "database_id": database_id, "profile": self.settings.profile}
 
     def check(self, target_ref=None, target_package=None):
@@ -496,10 +615,10 @@ class Controller:
         heads = state["revisions"]
         if len(heads) > 1 or any(x not in REVISIONS for x in heads):
             raise Blocked("unknown_revision")
-        if not approved_variant(state, contract):
-            raise Blocked("unknown_schema_drift")
         if heads == [contract["required_revision"]] and state["issues"]:
             raise Blocked("revision_schema_mismatch")
+        if not approved_variant(state, contract):
+            raise Blocked("unknown_schema_drift")
         action = "noop" if heads == [contract["required_revision"]] else ("upgrade" if heads else "adopt-or-create")
         plan = {"format": 1, "profile": self.settings.profile, "database_id": state["database_id"],
                 "before_fingerprint": state["fingerprint"], "required_revision": contract["required_revision"],
@@ -526,23 +645,33 @@ class Controller:
         backup_id = hashlib.sha256(os.urandom(32)).hexdigest()[:24]
         path = self.state_dir / "backups" / (backup_id + ".jsonl")
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        tables = [t for t in ordered_tables(snapshot) if t in source["table_names"]]
-        source_columns = {name: sorted(source["tables"][name]["columns"]) for name in tables}
+        # Restore the exact source before testing anything against the target.
+        # Includes reviewed historical tables, additional columns and the original
+        # (possibly empty) Alembic version table. Never narrow data to ORM types.
         records_hash = hashlib.sha256()
+        application_hash = hashlib.sha256()
         with self.engine.connect().execution_options(isolation_level="REPEATABLE READ") as connection:
             if identity(connection, self.settings) != source["database_id"]:
                 raise Blocked("backup_identity_changed")
             source_server = connection.execute(sa.text("SELECT @@server_uuid")).scalar_one()
-            counters = auto_increment_counters(connection, tables)
+            inspector = sa.inspect(connection)
+            definitions = {name: {"ddl": schema_ddl(connection, name), "foreign_keys": inspector.get_foreign_keys(name)}
+                           for name in inspector.get_table_names()}
+            tables = ordered_tables({"tables": definitions})
+            application_tables = [name for name in tables if name != "alembic_version"]
+            source_columns = {name: sorted(c["name"] for c in inspector.get_columns(name)) for name in tables}
+            counters = auto_increment_counters(connection, application_tables)
             with path.open("xb") as file:
                 os.chmod(path, 0o600)
-                file.write((canonical({"format": 1, "database_id": source["database_id"], "tables": tables,
-                                       "before_fingerprint": source["fingerprint"], "columns": source_columns, "auto_increment": counters}) + "\n").encode())
+                file.write((canonical({"format": 2, "database_id": source["database_id"], "tables": tables,
+                                       "definitions": definitions, "before_fingerprint": source["fingerprint"],
+                                       "columns": source_columns, "auto_increment": counters}) + "\n").encode())
                 for record in data_records(connection, tables, source_columns):
                     data = (canonical(record) + "\n").encode()
                     records_hash.update(data)
+                    if record["table"] != "alembic_version": application_hash.update(data)
                     file.write(data)
-            if inspect_schema(connection)["fingerprint"] != source["fingerprint"] or auto_increment_counters(connection, tables) != counters:
+            if inspect_schema(connection)["fingerprint"] != source["fingerprint"] or auto_increment_counters(connection, application_tables) != counters:
                 raise Blocked("schema_changed_during_backup")
         restore_engine = restore_settings.engine()
         try:
@@ -551,9 +680,17 @@ class Controller:
                 restore_server = connection.execute(sa.text("SELECT @@server_uuid")).scalar_one()
                 if self.settings.profile != "LOCAL_LAB" and source_server == restore_server:
                     raise Blocked("server_backup_requires_separate_restore_server")
-                if restore_id == source["database_id"] or sa.inspect(connection).get_table_names():
+                if restore_id == source["database_id"] or sa.inspect(connection).get_table_names() or sa.inspect(connection).get_view_names():
                     raise Blocked("restore_target_must_be_empty_and_distinct")
-                command.upgrade(alembic_config(connection, restore_counters=counters), contract["required_revision"])
+                for source_kind, key in (("TRIGGERS","TRIGGER_SCHEMA"),("ROUTINES","ROUTINE_SCHEMA"),("EVENTS","EVENT_SCHEMA")):
+                    if connection.execute(sa.text(f"SELECT COUNT(*) FROM information_schema.{source_kind} WHERE {key}=DATABASE()")).scalar_one():
+                        raise Blocked("restore_target_must_be_empty_and_distinct")
+                # Restore is reproduction of verified source DDL, not schema
+                # adoption: no stamp and no target upgrade before inserting data.
+                from alembic.operations import Operations
+                with Operations.context(MigrationContext.configure(connection)):
+                    for name in tables:
+                        connection.exec_driver_sql(definitions[name]["ddl"])
                 connection.commit()
                 metadata = sa.MetaData()
                 with path.open(encoding="utf8") as file:
@@ -565,16 +702,33 @@ class Controller:
                             table = sa.Table(record["table"], metadata, autoload_with=connection)
                         connection.execute(table.insert().values(**{k: decode_value(v) for k, v in record["row"].items()}))
                 connection.commit()
+                for name, counter in counters.items():
+                    quoted = connection.dialect.identifier_preparer.quote_identifier(name)
+                    connection.exec_driver_sql("ALTER TABLE " + quoted + " AUTO_INCREMENT=" + str(counter))
+                connection.commit()
                 restored_hash = hashlib.sha256()
                 for record in data_records(connection, tables, source_columns):
                     restored_hash.update((canonical(record) + "\n").encode())
-                if restored_hash.hexdigest() != records_hash.hexdigest() or inspect_schema(connection)["issues"] or auto_increment_counters(connection, tables) != counters:
-                    raise Blocked("backup_restore_verification_failed")
+                restored_definitions = {name: schema_ddl(connection, name) for name in sa.inspect(connection).get_table_names()}
+                if restored_hash.hexdigest() != records_hash.hexdigest():
+                    raise Blocked("backup_restore_data_mismatch")
+                if restored_definitions != {n:t["ddl"] for n,t in definitions.items()}:
+                    raise Blocked("backup_restore_ddl_mismatch")
+                restored_state = inspect_schema(connection)
+                if restored_state["fingerprint"] != source["fingerprint"]:
+                    # Schema metadata only; no row values or credentials in diagnostics.
+                    differing = sorted(n for n in set(source["tables"]) | set(restored_state["tables"])
+                                       if source["tables"].get(n) != restored_state["tables"].get(n))
+                    raise Blocked("backup_restore_schema_mismatch:" + ",".join(differing))
+                if auto_increment_counters(connection, application_tables) != counters:
+                    raise Blocked("backup_restore_counter_mismatch")
         finally:
             restore_engine.dispose()
-        receipt = {"format": 1, "backup_id": backup_id, "database_id": source["database_id"],
-                   "before_fingerprint": source["fingerprint"], "data_sha256": records_hash.hexdigest(),
-                   "tables": tables, "columns": source_columns, "auto_increment": counters, "file_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        receipt = {"format": 2, "backup_id": backup_id, "database_id": source["database_id"],
+                   "before_fingerprint": source["fingerprint"], "data_sha256": application_hash.hexdigest(),
+                   "full_data_sha256": records_hash.hexdigest(), "tables": application_tables,
+                   "columns": {name: source_columns[name] for name in application_tables}, "auto_increment": counters,
+                   "file_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
                    "validated_restore": True, "created_at": int(time.time())}
         private_write(path.with_suffix(".receipt.json"), receipt)
         self.journal("backup", "SUCCESS", backup_id=backup_id)
@@ -606,7 +760,7 @@ class Controller:
             if database_id != plan["database_id"]:
                 raise Blocked("plan_database_mismatch")
             with migration_lock(connection, self.settings):
-                state = inspect_schema(connection)
+                state = inspect_schema(connection, check_data=True)
                 if state["fingerprint"] != plan["before_fingerprint"]:
                     raise Blocked("schema_changed_since_plan")
                 if plan["action"] == "noop":
@@ -620,7 +774,7 @@ class Controller:
                     raise Blocked("validated_backup_required")
                 path = self.state_dir / "backups" / (backup_id + ".jsonl")
                 receipt = read_json(path.with_suffix(".receipt.json"))
-                if not receipt.get("validated_restore") or receipt["database_id"] != database_id or receipt["before_fingerprint"] != state["fingerprint"] or hashlib.sha256(path.read_bytes()).hexdigest() != receipt["file_sha256"]:
+                if receipt.get("format") != 2 or not receipt.get("validated_restore") or receipt["database_id"] != database_id or receipt["before_fingerprint"] != state["fingerprint"] or hashlib.sha256(path.read_bytes()).hexdigest() != receipt["file_sha256"]:
                     raise Blocked("backup_does_not_match_plan")
                 original_hash = hashlib.sha256()
                 for record in data_records(connection, receipt["tables"], receipt["columns"]):
@@ -630,7 +784,7 @@ class Controller:
                 connection.commit()
                 command.upgrade(alembic_config(connection), contract["required_revision"])
                 connection.commit()
-                after = inspect_schema(connection)
+                after = inspect_schema(connection, check_data=True)
                 if after["issues"] or after["revisions"] != [contract["required_revision"]]:
                     raise Blocked("post_migration_schema_mismatch")
                 after_hash = hashlib.sha256()
