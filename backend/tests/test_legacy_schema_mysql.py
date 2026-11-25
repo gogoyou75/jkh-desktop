@@ -93,21 +93,25 @@ class LegacySchemaTest(maintenance.MaintenanceTest):
         with self.assertRaisesRegex(sc.Blocked,'unknown_schema_drift'):self.controller.plan()
         with self.app_engine.connect() as c:self.assertIsNone(c.exec_driver_sql('SELECT v FROM kv_store').scalar_one())
 
-    def test_unknown_historical_definition_blocks(self):
+    def test_optional_historical_extension_column_is_preserved(self):
         self.install_legacy()
         with self.root.begin() as c:
             c.exec_driver_sql('USE `'+self.db+'`');c.exec_driver_sql('ALTER TABLE import_batch_rows ADD unknown_value INT NULL')
-        with self.assertRaisesRegex(sc.Blocked,'unknown_schema_drift'):self.controller.plan()
+            c.exec_driver_sql('UPDATE import_batch_rows SET unknown_value=123')
+        self.migrated()
+        with self.app_engine.connect() as c:self.assertEqual(c.exec_driver_sql('SELECT unknown_value FROM import_batch_rows').scalar_one(),123)
 
-    def test_historical_cascade_is_preserved_but_unknown_rule_blocks(self):
+    def test_isolated_historical_fk_rule_is_preserved(self):
         self.install_legacy()
         with self.root.begin() as c:
             c.exec_driver_sql('USE `'+self.db+'`')
             c.exec_driver_sql('ALTER TABLE import_batch_rows DROP FOREIGN KEY fk_import_batch_rows_batch')
-            c.exec_driver_sql('ALTER TABLE import_batch_rows ADD FOREIGN KEY(batch_id) REFERENCES import_batch(id)')
-        with self.assertRaisesRegex(sc.Blocked,'unknown_schema_drift'):self.controller.plan()
+            c.exec_driver_sql('ALTER TABLE import_batch_rows ADD CONSTRAINT retained_archive_fk FOREIGN KEY(batch_id) REFERENCES import_batch(id)')
+        self.migrated()
+        with self.app_engine.connect() as c:
+            self.assertNotEqual(sa.inspect(c).get_foreign_keys('import_batch_rows')[0]['options'].get('ondelete'),'CASCADE')
 
-    def test_partial_bulk_ddl_is_completed_and_head_drift_still_blocks(self):
+    def test_partial_bulk_ddl_is_completed_and_nonunique_index_is_advisory(self):
         self.install_legacy();plan=self.controller.plan();self.guard.begin();receipt=self.controller.backup(self.restore)
         original=sc.migrate_tables
         def interrupted(op,bulk,frozen_hash):
@@ -130,7 +134,8 @@ class LegacySchemaTest(maintenance.MaintenanceTest):
         with self.root.begin() as c:
             c.exec_driver_sql('USE `'+self.db+'`');self.assertEqual(sum(x['column_names']==['status'] for x in sa.inspect(c).get_indexes('bulk_calc_verify_jobs',schema=self.db)),1)
             c.exec_driver_sql('DROP INDEX reviewed_bulk_status ON bulk_calc_verify_jobs')
-        with self.assertRaisesRegex(sc.Blocked,'revision_schema_mismatch'):self.controller.plan()
+        self.assertEqual(self.controller.plan()['action'],'noop')
+        self.assertTrue(any(i['kind']=='missing_index' and i['table']=='bulk_calc_verify_jobs' for i in self.controller.diagnose()['advisories']))
 
     def test_no_name_real_endpoint_after_historical_adoption(self):
         self.install_legacy();self.migrated()
@@ -161,17 +166,16 @@ class LegacySchemaTest(maintenance.MaintenanceTest):
         self.assertTrue(receipt['validated_restore'])
         for name,ddls in seen.items():self.assertEqual(ddls[0],ddls[-1],name)
 
-    def test_unknown_defaults_charset_and_unique_keys_are_not_whitelisted(self):
+    def test_unmapped_historical_defaults_and_collation_are_preserved(self):
         self.install_legacy()
         with self.root.begin() as c:
             c.exec_driver_sql('USE `'+self.db+'`')
             c.exec_driver_sql("ALTER TABLE users MODIFY status VARCHAR(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NULL DEFAULT 'active'")
-        with self.assertRaisesRegex(sc.Blocked,'unknown_schema_drift'):self.controller.plan()
-        with self.root.begin() as c:
-            c.exec_driver_sql('USE `'+self.db+'`')
-            c.exec_driver_sql("ALTER TABLE users MODIFY status VARCHAR(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NULL DEFAULT 'active'")
             c.exec_driver_sql("ALTER TABLE import_batch_rows ALTER COLUMN amount SET DEFAULT '0'")
-        with self.assertRaisesRegex(sc.Blocked,'unknown_schema_drift'):self.controller.plan()
+        self.migrated()
+        with self.app_engine.connect() as c:
+            self.assertEqual(c.exec_driver_sql('SELECT amount FROM import_batch_rows').scalar_one(),'UNKNOWN')
+            self.assertEqual(c.exec_driver_sql('SELECT status FROM users').scalar_one(),'archived')
 
     def test_non_utc_timestamp_session_blocks(self):
         self.install_legacy()
@@ -217,9 +221,134 @@ class LegacySchemaTest(maintenance.MaintenanceTest):
             self.controller.apply(plan,receipt['backup_id'],'APPLY LOCAL_LAB '+plan['plan_id'])
         self.assert_fenced()
 
-    def test_historical_table_default_collation_is_checked(self):
+    def test_unmapped_table_collation_is_preserved(self):
         self.install_legacy()
         with self.root.begin() as c:
             c.exec_driver_sql('USE `'+self.db+'`')
             c.exec_driver_sql('ALTER TABLE import_batch DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci')
+        self.migrated()
+        with self.app_engine.connect() as c:self.assertEqual(sa.inspect(c).get_table_options('import_batch')['mysql_collate'],'utf8mb4_0900_ai_ci')
+
+    def install_functional_history(self):
+        self.install_legacy()
+        with self.root.begin() as c:
+            c.exec_driver_sql('USE `'+self.db+'`')
+            c.exec_driver_sql('ALTER TABLE import_batches MODIFY error_message TEXT NULL, MODIFY file_name VARCHAR(255) NULL, MODIFY uploaded_by VARCHAR(255) NULL')
+            c.exec_driver_sql('UPDATE import_batches SET error_message=NULL,file_name=NULL,uploaded_by=NULL')
+
+    def test_functional_nullable_import_metadata_and_long_uploader(self):
+        self.install_functional_history()
+        state=self.controller.diagnose()
+        self.assertTrue(state['compatibility']['migration_preconditions']['ready'],state['issues'])
+        self.assertEqual({i['table'] for i in state['compatibility']['required_changes']},sc.BULK_TABLES)
+        self.migrated()
+        with self.app_engine.connect() as c:
+            self.assertEqual(c.exec_driver_sql('SELECT error_message,file_name,uploaded_by FROM import_batches').one(),(None,None,None))
+        import app as application
+        from types import SimpleNamespace
+        with self.app_engine.connect() as c:
+            row=dict(c.exec_driver_sql('SELECT * FROM import_batches').mappings().one())
+        self.assertEqual(application._batch_payload(SimpleNamespace(**row))['uploaded_by'],None)
+        # SQLAlchemy/Flask reads nullable fields and writes new metadata unchanged.
+        with application.app.app_context():
+            old=application.app.extensions['sqlalchemy'].engines[None]
+            application.app.extensions['sqlalchemy'].engines[None]=self.app_engine
+            try:
+                batch=application.db.session.query(application.ImportBatch).one()
+                batch.uploaded_by='u'*200;batch.file_name='synthetic.csv';batch.error_message='synthetic-error'
+                application.db.session.commit();application.db.session.expire_all()
+                self.assertEqual(application.db.session.query(application.ImportBatch).one().uploaded_by,'u'*200)
+            finally:
+                application.db.session.remove();application.app.extensions['sqlalchemy'].engines[None]=old
+
+    def test_generic_extensions_full_backup_and_independent_databases(self):
+        self.install_functional_history()
+        with self.root.begin() as c:
+            c.exec_driver_sql('USE `'+self.db+'`')
+            c.exec_driver_sql('CREATE TABLE retained_custom_archive(id INT PRIMARY KEY, amount DECIMAL(24,6) NULL, value LONGTEXT NULL, binary_value VARBINARY(16) NULL, recorded_at TIMESTAMP NULL)')
+            c.exec_driver_sql("INSERT INTO retained_custom_archive VALUES(1,123456.789123,'UNKNOWN',X'00ff','2026-01-02 03:04:05')")
+            c.exec_driver_sql('ALTER TABLE users ADD optional_archive_value TEXT NULL')
+            c.exec_driver_sql("UPDATE users SET optional_archive_value='retained'")
+            c.exec_driver_sql('CREATE INDEX preserved_custom_index ON users(display_name)')
+        with self.restore_admin.begin() as c:
+            c.exec_driver_sql('CREATE DATABASE cup_test_other_environment')
+            c.exec_driver_sql('CREATE TABLE cup_test_other_environment.sentinel(id INT PRIMARY KEY,value VARCHAR(20))')
+            c.exec_driver_sql("INSERT INTO cup_test_other_environment.sentinel VALUES(1,'independent')")
+        try:
+            self.migrated()
+            for engine in [self.app_engine,self.restore.engine()]:
+                try:
+                    with engine.connect() as c:
+                        self.assertEqual(c.exec_driver_sql('SELECT CAST(amount AS CHAR),value FROM retained_custom_archive').one(),('123456.789123','UNKNOWN'))
+                        self.assertEqual(c.exec_driver_sql('SELECT optional_archive_value FROM users').scalar_one(),'retained')
+                        self.assertEqual(c.exec_driver_sql('SELECT binary_value FROM retained_custom_archive').scalar_one(),b'\x00\xff')
+                finally:
+                    if engine is not self.app_engine:engine.dispose()
+            with self.restore_admin.connect() as c:self.assertEqual(c.exec_driver_sql('SELECT value FROM cup_test_other_environment.sentinel').scalar_one(),'independent')
+        finally:
+            with self.restore_admin.begin() as c:c.exec_driver_sql('DROP DATABASE cup_test_other_environment')
+
+    def test_unsafe_extension_column_unique_and_inbound_fk_block(self):
+        self.install_functional_history()
+        statements=[
+            'ALTER TABLE users ADD required_unknown INT NOT NULL',
+            'ALTER TABLE users ADD UNIQUE KEY unexpected_unique(display_name)',
+            'CREATE TABLE inbound_archive(id INT PRIMARY KEY,user_id VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci,FOREIGN KEY(user_id) REFERENCES users(id))',
+        ]
+        reversals=['ALTER TABLE users DROP COLUMN required_unknown','ALTER TABLE users DROP INDEX unexpected_unique','DROP TABLE inbound_archive']
+        for ddl,undo in zip(statements,reversals):
+            with self.root.begin() as c:
+                c.exec_driver_sql('USE `'+self.db+'`');c.exec_driver_sql(ddl)
+            with self.assertRaisesRegex(sc.Blocked,'unknown_schema_drift'):self.controller.plan()
+            with self.root.begin() as c:
+                c.exec_driver_sql('USE `'+self.db+'`');c.exec_driver_sql(undo)
+
+    def test_narrow_required_type_and_unsafe_nullable_financial_data_block(self):
+        self.install_functional_history()
+        with self.root.begin() as c:
+            c.exec_driver_sql('USE `'+self.db+'`');c.exec_driver_sql('ALTER TABLE import_batches MODIFY uploaded_by VARCHAR(32) NULL')
         with self.assertRaisesRegex(sc.Blocked,'unknown_schema_drift'):self.controller.plan()
+        self.assertTrue(any(i['kind']=='column_mismatch' for i in self.controller.diagnose()['compatibility']['blocking_incompatibilities']))
+
+    def test_unavailable_backup_shape_blocks_before_migration(self):
+        self.install_functional_history()
+        with self.root.begin() as c:
+            c.exec_driver_sql('USE `'+self.db+'`');c.exec_driver_sql('CREATE TABLE archive_without_key(value TEXT NULL)')
+        self.assertTrue(any(i['kind']=='deterministic_backup_key_required' for i in self.controller.diagnose()['issues']))
+        with self.assertRaisesRegex(sc.Blocked,'unknown_schema_drift'):self.controller.plan()
+
+    def test_specific_revision_preconditions_block_unimplemented_repairs(self):
+        self.install_functional_history()
+        with self.root.begin() as c:
+            c.exec_driver_sql('USE `'+self.db+'`');c.exec_driver_sql('ALTER TABLE import_batches DROP COLUMN file_name')
+        state=self.controller.diagnose()
+        self.assertFalse(state['compatibility']['migration_preconditions']['ready'])
+        self.assertTrue(any(i.get('column')=='file_name' for i in state['compatibility']['blocking_incompatibilities']))
+        with self.assertRaisesRegex(sc.Blocked,'unknown_schema_drift'):self.controller.plan()
+
+    def test_no_name_import_atomic_delete_and_assignment_on_functional_schema(self):
+        self.install_functional_history();self.migrated()
+        import app as application
+        import backend.tests.test_responsibility_profiles as profiles
+        target={'host':'mysql','port':'3306','name':self.db,'user':self.names['app']}
+        with application.app.app_context():
+            old=application.app.extensions['sqlalchemy'].engines[None];application.app.extensions['sqlalchemy'].engines[None]=self.app_engine
+        try:
+            with patch.dict(profiles.TARGETS,{'LAB':target}):
+                for method in ['test_delete_and_assign_with_original_debt','test_import_records_removed_atomically_preserving_other_uid','test_import_cleanup_rolls_back_with_commit_failure']:
+                    case=profiles.LabProfile(method)
+                    try:case.setUp();getattr(case,method)()
+                    finally:case.tearDown();case.doCleanups()
+        finally:
+            with application.app.app_context():application.db.session.remove();application.app.extensions['sqlalchemy'].engines[None]=old
+
+    def test_functional_contract_is_bound_to_backend_version(self):
+        import tempfile,shutil
+        from pathlib import Path
+        with tempfile.TemporaryDirectory(prefix='cup-contract-') as directory:
+            target=Path(directory);(target/'alembic').mkdir()
+            for name in ['app.py','schema_contract.json','alembic/schema_snapshot.json']:
+                shutil.copyfile(sc.BASE/name,target/name)
+            sc.load_package(target_package=target)
+            with (target/'app.py').open('a',encoding='utf8') as f:f.write('\n# synthetic target backend change\n')
+            with self.assertRaisesRegex(sc.Blocked,'backend_compatibility_contract_mismatch'):sc.load_package(target_package=target)

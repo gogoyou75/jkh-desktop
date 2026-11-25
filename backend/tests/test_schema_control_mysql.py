@@ -148,17 +148,20 @@ class MySQLSchemaTest(unittest.TestCase):
         self.apply_plan()
         self.assertEqual(self.controller.check()["status"], "SUCCESS")
 
-    def test_unknown_table_blocks_before_writes(self):
+    def test_independent_extension_table_is_preserved_not_a_blocker(self):
         with self.controller.engine.begin() as c:
-            c.exec_driver_sql("CREATE TABLE unknown_finance(id INT PRIMARY KEY)")
-        with self.assertRaises(Blocked): self.controller.plan()
+            c.exec_driver_sql("CREATE TABLE unknown_finance(id INT PRIMARY KEY, amount DECIMAL(20,4) NULL)")
+            c.exec_driver_sql("INSERT INTO unknown_finance VALUES(7,123.4567)")
+        self.apply_plan()
         with self.controller.engine.connect() as c:
-            self.assertNotIn("alembic_version", sa.inspect(c).get_table_names())
+            self.assertEqual(str(c.exec_driver_sql("SELECT amount FROM unknown_finance").scalar_one()),"123.4567")
+        self.assertEqual(self.controller.check()["status"],"SUCCESS")
 
-    def test_unknown_column_blocks(self):
+    def test_optional_extension_column_is_compatible(self):
         self.prepare_schema()
-        with self.controller.engine.begin() as c: c.exec_driver_sql("ALTER TABLE kv_store ADD COLUMN unknown_extra INT")
-        with self.assertRaises(Blocked): self.controller.plan()
+        with self.controller.engine.begin() as c:c.exec_driver_sql("ALTER TABLE kv_store ADD COLUMN unknown_extra INT NULL")
+        self.assertEqual(self.controller.plan()["action"],"noop")
+        self.assertEqual(self.controller.check()["status"],"SUCCESS")
 
     def test_missing_index_and_foreign_key_are_reported(self):
         self.prepare_schema()

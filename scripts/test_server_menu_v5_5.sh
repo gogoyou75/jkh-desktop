@@ -174,10 +174,13 @@ echo 'PASS: schema-tool BLOCKED and ERROR exit codes retain distinct menu result
   if schema_writer_services; then exit 1; fi
   printf '%s' '{"services":["api","worker"]}' > "$PROJECT_DIR/.schema-state/LOCAL_LAB/policy.json"
   [[ "$(schema_writer_services)" == 'api worker' ]]
-  printf '%s' '{"services":{"api":{"environment":{"MYSQL_ROOT_PASSWORD":"synthetic_only"}},"worker":{},"mysql":{},"nginx":{}}}' > "$fixture/services-config.json"
-  if schema_writer_services; then exit 1; fi
+  for key in MYSQL_ROOT_PASSWORD MYSQL_ROOT_PASSWORD_FILE MAINT_DB_PASSWORD MIGRATION_DB_PASSWORD RESTORE_DB_PASSWORD; do
+    printf '{"services":{"api":{"environment":{"%s":"synthetic_only"}},"worker":{},"mysql":{},"nginx":{}}}' "$key" > "$fixture/services-config.json"
+    if schema_writer_services; then exit 1; fi
+  done
 )
 echo 'PASS: undeclared Compose writer services block maintenance'
+echo 'PASS: persistent API rejects application-external Maintenance Migration Restore and root credentials'
 
 (
   ENVIRONMENT=LOCAL_LAB

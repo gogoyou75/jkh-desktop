@@ -681,5 +681,15 @@
         ]
       ]
     }
+  },
+  "functional_compatibility": {
+    "format": 1,
+    "principle": "Application requirements, additive migrations, preserved independently verified extensions; no cross-environment data copying",
+    "nullable_metadata_columns": {
+      "import_batches.error_message": "Optional import result metadata: serialized without string operations; writes assign explicit text",
+      "import_batches.file_name": "Optional filename: payload accepts null; summary uses original_filename fallback",
+      "import_batches.uploaded_by": "Optional uploader metadata: serialized without string operations; new uploads assign user.id"
+    },
+    "backend_sha256": "dd719e0725ab78d8a97d925561d1d1a3b6d99860c050ea3d89bd31afbe2d0c6b"
   }
 }

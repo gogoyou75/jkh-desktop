@@ -20,6 +20,7 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 import sqlalchemy as sa
 from sqlalchemy.pool import NullPool
+from sqlalchemy.dialects.mysql import TINYBLOB, MEDIUMBLOB, LONGBLOB, BINARY, VARBINARY
 from maintenance_control import MaintenanceBlocked
 from alembic import command
 from alembic.config import Config
@@ -78,7 +79,11 @@ def load_package(target_ref=None, target_package=None):
     raw = read("alembic/schema_snapshot.json")
     if contract.get("format") != 1 or hashlib.sha256(raw).hexdigest() != contract.get("snapshot_sha256"):
         raise Blocked("invalid_schema_contract")
-    if model_digest(read("app.py").decode("utf8")) != contract.get("orm_sha256"):
+    backend_source = read("app.py").replace(b"\r\n",b"\n")
+    functional = contract.get("functional_compatibility")
+    if functional and (functional.get("format") != 1 or hashlib.sha256(backend_source).hexdigest() != functional.get("backend_sha256")):
+        raise Blocked("backend_compatibility_contract_mismatch")
+    if model_digest(backend_source.decode("utf8")) != contract.get("orm_sha256"):
         raise Blocked("orm_contract_mismatch")
     if contract.get("required_revision") not in REVISIONS:
         raise Blocked("unsupported_target_revision")
@@ -191,166 +196,214 @@ def validate_data_checks(connection, checks):
     return issues
 
 
+def wider_storage_type(actual, expected):
+    """Only representation-preserving capacity increases; never numeric coercion."""
+    if actual == expected: return True
+    a = re.fullmatch(r"VARCHAR\((\d+)\)", actual)
+    e = re.fullmatch(r"VARCHAR\((\d+)\)", expected)
+    if a and e: return int(a.group(1)) >= int(e.group(1))
+    for family in (("TINYTEXT", "TEXT", "MEDIUMTEXT", "LONGTEXT"),
+                   ("TINYBLOB", "BLOB", "MEDIUMBLOB", "LONGBLOB")):
+        if actual in family and expected in family:
+            return family.index(actual) >= family.index(expected)
+    return False
+
+
+def backup_type_supported(column_type):
+    # TIME/timedelta, SET/set, spatial/unknown and generated values do not have a
+    # proven lossless codec in this logical backup format. Block, do not guess.
+    if column_type.__class__.__name__ in {"SET", "TIME", "BIT", "NullType"}: return False
+    return isinstance(column_type, (sa.String, sa.LargeBinary, TINYBLOB, MEDIUMBLOB, LONGBLOB, BINARY, VARBINARY, sa.Integer, sa.Numeric,
+                                    sa.Float, sa.Boolean, sa.DateTime, sa.Date, sa.JSON))
+
+
+def safe_extension_default(column):
+    default = column["default"]
+    if default is None: return column["nullable"]
+    # Literal defaults (including the empty string) and the reviewed clock
+    # expression are safe for an omitted optional column; arbitrary expressions
+    # can call code or change insertion semantics and need explicit review.
+    if "default_generated" in column.get("raw_extra", ""):
+        return default == "CURRENT_TIMESTAMP" and column["type"] in {"DATETIME", "TIMESTAMP"}
+    return True
+
+
+def migration_preconditions(state, contract):
+    """What the actually pending, published revisions can establish safely."""
+    heads = state["revisions"]
+    target = contract["required_revision"]
+    if len(heads)>1 or any(h not in REVISIONS for h in heads):
+        return {"ready":False,"pending_revisions":[],"required_changes":[],"blockers":[{"kind":"unknown_revision"}]}
+    last = REVISIONS.index(heads[0]) if heads else -1
+    finish = REVISIONS.index(target)
+    pending = list(REVISIONS[last+1:finish+1])
+    required, blockers = [], []
+    for issue in state["issues"]:
+        provided = False
+        if issue["kind"] == "missing_table":
+            revision = "cup_5502" if issue["table"] in BULK_TABLES else "cup_5501"
+            provided = revision in pending
+        elif issue["kind"] == "missing_column":
+            provided = (issue["table"],issue["column"]) == ("kv_store","version") and "cup_5501" in pending
+        if provided: required.append(issue)
+        else: blockers.append(issue)
+    return {"ready":not blockers,"pending_revisions":pending,"required_changes":required,"blockers":blockers}
+
+
+def classify_compatibility(state, contract):
+    preconditions = migration_preconditions(state, contract)
+    return {"required_changes": preconditions["required_changes"],
+            "compatible_differences": state.get("compatible_differences",[]),
+            "recommendations": state.get("advisories",[]),
+            "blocking_incompatibilities": preconditions["blockers"],
+            "migration_preconditions":preconditions}
+
+
 def inspect_schema(connection, package=None, check_data=False):
     contract, snapshot = package or load_package()
     compatibility = contract.get("compatibility", {})
-    historical = compatibility.get("historical_tables", {})
+    functional = contract.get("functional_compatibility", {})
     inspector = sa.inspect(connection)
     actual_tables = set(inspector.get_table_names()) - {"alembic_version"}
     desired = snapshot["tables"]
-    issues, actual, advisories, data_checks = [], {}, [], []
-    present_history = actual_tables & set(historical)
-    if present_history and present_history != set(historical):
-        issues.append({"kind": "incomplete_historical_pair"})
-    for name in sorted(set(desired) - actual_tables):
-        issues.append({"kind": "missing_table", "table": name})
-    for name in sorted(actual_tables - set(desired) - set(historical)):
-        issues.append({"kind": "unknown_table", "table": name})
+    issues, actual, advisories, data_checks, differences = [], {}, [], [], []
+    for name in sorted(set(desired)-actual_tables): issues.append({"kind":"missing_table","table":name})
     heads = list(MigrationContext.configure(connection).get_current_heads())
-    # Read information_schema: SQLAlchemy may omit inherited charset/collation and
-    # fold ON UPDATE into DEFAULT. Resolve each attribute instead of stripping it.
-    metadata = {}
-    for row in connection.execute(sa.text("SELECT TABLE_NAME,COLUMN_NAME,COLUMN_DEFAULT,EXTRA,"
-            "CHARACTER_SET_NAME,COLLATION_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE()")).mappings():
-        metadata[(row["TABLE_NAME"], row["COLUMN_NAME"])] = row
+    metadata = {(r["TABLE_NAME"],r["COLUMN_NAME"]):r for r in connection.execute(sa.text(
+        "SELECT TABLE_NAME,COLUMN_NAME,COLUMN_DEFAULT,EXTRA,CHARACTER_SET_NAME,COLLATION_NAME "
+        "FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE()")).mappings()}
     table_collations = dict(connection.execute(sa.text(
         "SELECT TABLE_NAME,TABLE_COLLATION FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE()")).all())
     for name in sorted(actual_tables):
         reflected_columns = inspector.get_columns(name)
         cols = {}
         for column in reflected_columns:
-            meta = metadata[(name, column["name"])]
-            cols[column["name"]] = {"name": column["name"],
-                "type": norm_type(column["type"].compile(dialect=connection.dialect)),
-                "nullable": bool(column["nullable"]), "default": norm_default(meta["COLUMN_DEFAULT"]),
-                "autoincrement": "auto_increment" in meta["EXTRA"].lower(),
-                "charset": meta["CHARACTER_SET_NAME"], "collation": meta["COLLATION_NAME"],
-                "extra": meta["EXTRA"].lower().replace("default_generated", "").strip()}
+            meta = metadata[(name,column["name"])]
+            cols[column["name"]] = {"name":column["name"],
+                "type":norm_type(column["type"].compile(dialect=connection.dialect)),
+                "nullable":bool(column["nullable"]),"default":norm_default(meta["COLUMN_DEFAULT"]),
+                "autoincrement":"auto_increment" in meta["EXTRA"].lower(),
+                "charset":meta["CHARACTER_SET_NAME"],"collation":meta["COLLATION_NAME"],
+                "extra":meta["EXTRA"].lower().replace("default_generated", "").strip(),
+                "raw_extra":meta["EXTRA"].lower()}
             if column.get("computed"):
-                issues.append({"kind": "unknown_computed_column", "table": name, "column": column["name"]})
-        options = inspector.get_table_options(name)
-        indexes_raw = inspector.get_indexes(name)
-        fks_raw = inspector.get_foreign_keys(name)
-        indexes = set(index_signature(x) for x in indexes_raw)
-        fks = set(fk_signature(x) for x in fks_raw)
-        pk = inspector.get_pk_constraint(name).get("constrained_columns") or []
-        checks = inspector.get_check_constraints(name)
-        actual[name] = {"columns": cols, "engine": options.get("mysql_engine", ""),
-                        "table_collation": table_collations[name],
-                        "checks": checks, "pk": pk, "indexes": sorted((list(k), v) for k, v in indexes),
-                        "foreign_keys": sorted((list(a), b, list(c), d) for a,b,c,d in fks),
-                        "ddl": schema_ddl(connection, name)}
-        if name not in desired and name not in historical:
-            continue
-        is_history = name in historical
-        wanted = historical[name] if is_history else desired[name]
-        allowed_table_collations = [wanted["collation"]] if is_history else contract["allowed_collations"]
-        if table_collations[name] not in allowed_table_collations:
-            issues.append({"kind": "unknown_table_collation", "table": name})
-        desired_cols = {}
-        for c in wanted["columns"]:
-            auto = c.get("autoincrement", bool(re.search(r"(?im)^\s*`?" + re.escape(c["name"]) +
-                        r"`?\s+[^,\n]*\bAUTO_INCREMENT\b", wanted["ddl"])))
-            desired_cols[c["name"]] = {"name": c["name"], "type": norm_type(c["type"]),
-                "nullable": bool(c["nullable"]), "default": norm_default(c["default"]), "autoincrement": auto}
-        for key, c in compatibility.get("extra_columns", {}).items():
-            table, col = key.split(".")
-            if table == name and col in cols:
-                desired_cols[col] = {"name": col, **{k:v for k,v in c.items() if k not in {"charset", "collation"}}}
-        for col in sorted(set(desired_cols) - set(cols)):
-            issues.append({"kind": "missing_column", "table": name, "column": col})
-        for col in sorted(set(cols) - set(desired_cols)):
-            issues.append({"kind": "unknown_column", "table": name, "column": col})
-        for col in sorted(set(cols) & set(desired_cols)):
-            expected = desired_cols[col]; current = cols[col]; key = name + "." + col
-            comparable = {k:current[k] for k in expected}
-            if not is_history:
-                if current["type"] in compatibility.get("type_variants", {}).get(key, []):
-                    comparable["type"] = expected["type"]
-                variant = compatibility.get("nullable_variants", {}).get(key)
-                if variant and current["nullable"] == variant["nullable"]:
-                    comparable["nullable"] = expected["nullable"]
-                    if variant.get("require_no_nulls"): data_checks.append({"table": name, "column": col})
-                literal = compatibility.get("literal_defaults", {}).get(key)
-                if literal is not None and current["default"] == norm_default(str(int(literal)) if isinstance(literal,bool) else literal):
-                    comparable["default"] = expected["default"]
-            if comparable != expected:
-                issues.append({"kind": "column_mismatch", "table": name, "column": col,
-                               "actual": comparable, "expected": expected})
-            extra_column = compatibility.get("extra_columns", {}).get(key)
-            if extra_column and any(current[k] != extra_column[k] for k in ("charset", "collation")):
-                issues.append({"kind": "historical_column_charset_mismatch", "table": name, "column": col})
-            charset, collation = current["charset"], current["collation"]
-            if charset is not None and (charset != "utf8mb4" or collation not in
-                    ([wanted["collation"]] if is_history else contract["allowed_collations"])):
-                issues.append({"kind": "unknown_collation", "table": name, "column": col})
-            extra = current["extra"].replace("auto_increment", "").strip()
-            if extra:
-                if not (not is_history and key in compatibility.get("on_update_columns", []) and
-                        extra in {"on update current_timestamp()", "on update current_timestamp"} and
-                        current["type"] == "DATETIME" and current["nullable"] and current["default"] == "CURRENT_TIMESTAMP"):
-                    issues.append({"kind": "unknown_column_extra", "table": name, "column": col})
-            if not is_history and current["type"] == "TIMESTAMP" and expected["type"] != "TIMESTAMP":
-                session, system = connection.exec_driver_sql("SELECT @@session.time_zone, @@system_time_zone").one()
-                if session not in {"+00:00", "UTC"} and not (session == "SYSTEM" and system == "UTC"):
-                    issues.append({"kind": "timestamp_timezone_not_utc", "table": name, "column": col})
-        if actual[name]["engine"].lower() != "innodb": issues.append({"kind": "unsupported_engine", "table": name})
-        if checks: issues.append({"kind": "unknown_check_constraint", "table": name})
-        if pk != wanted["pk"]: issues.append({"kind": "primary_key_mismatch", "table": name})
-        for index in indexes_raw:
-            opt = index.get("dialect_options", {})
-            if opt.get("mysql_length") or opt.get("mysql_prefix") or index.get("column_sorting"):
-                issues.append({"kind": "unsupported_index_details", "table": name})
-        expected_indexes = set(index_signature(x) for x in wanted["indexes"])
-        optional = {tuple(x) if isinstance(x,list) else (x,) for x in
-                    compatibility.get("optional_nonunique_indexes", {}).get(name, [])}
-        for signature in expected_indexes - indexes:
-            issue = {"kind": "missing_index", "table": name, "columns": list(signature[0])}
-            if not signature[1] and signature[0] in optional: advisories.append(issue)
-            else: issues.append(issue)
-        expected_fks = set(fk_signature(x) for x in wanted["foreign_keys"])
-        if name == "import_rows":
-            legacy_fks = {(a,b,c,"CASCADE" if a == ("batch_id",) and b == "import_batches" and c == ("id",) else d)
-                          for a,b,c,d in expected_fks}
-        else: legacy_fks = expected_fks
-        if fks not in (expected_fks, legacy_fks): issues.append({"kind": "foreign_key_mismatch", "table": name})
+                issues.append({"kind":"unknown_computed_column","table":name,"column":column["name"]})
+            if not backup_type_supported(column["type"]):
+                issues.append({"kind":"unsupported_backup_type","table":name,"column":column["name"]})
+        # Logical TIMESTAMP round trips must preserve instants, not just naive
+        # wall-clock strings. Apply this to retained archives as well as ORM fields.
+        if any(c["type"]=="TIMESTAMP" for c in cols.values()):
+            session,system=connection.exec_driver_sql("SELECT @@session.time_zone, @@system_time_zone").one()
+            if session not in {"+00:00","UTC"} and not(session=="SYSTEM" and system=="UTC"):
+                issues.append({"kind":"timestamp_timezone_not_utc","table":name})
+        options=inspector.get_table_options(name)
+        indexes_raw=inspector.get_indexes(name); fks_raw=inspector.get_foreign_keys(name)
+        indexes=set(index_signature(x) for x in indexes_raw);fks=set(fk_signature(x) for x in fks_raw)
+        pk=inspector.get_pk_constraint(name).get("constrained_columns") or []
+        checks=inspector.get_check_constraints(name)
+        actual[name]={"columns":cols,"engine":options.get("mysql_engine", ""),"table_collation":table_collations[name],
+            "checks":checks,"pk":pk,"indexes":sorted(((list(k),v) for k,v in indexes),key=canonical),
+            "foreign_keys":sorted((list(a),b,list(c),d) for a,b,c,d in fks),"ddl":schema_ddl(connection,name)}
+        if actual[name]["engine"].lower()!="innodb":issues.append({"kind":"unsupported_engine","table":name})
+        if not pk:issues.append({"kind":"deterministic_backup_key_required","table":name})
+        for c in reflected_columns:
+            if isinstance(c["type"],sa.JSON) and "__cup_null_"+c["name"] in cols:
+                issues.append({"kind":"backup_marker_collision","table":name})
         for fk in fks_raw:
-            if fk.get("referred_schema") not in {None, connection.engine.url.database}:
-                issues.append({"kind": "cross_schema_foreign_key", "table": name})
-            if (fk.get("options", {}).get("onupdate") or "RESTRICT").upper() not in {"RESTRICT", "NO ACTION"}:
-                issues.append({"kind": "unknown_foreign_key_rule", "table": name})
-        implicit = {tuple(x[0]) for x in expected_fks}
-        extras = {tuple(x) for x in compatibility.get("extra_nonunique_indexes", {}).get(name, [])}
-        for signature in indexes - expected_indexes:
-            if not signature[1] and (signature[0] in implicit or signature[0] in extras):
-                continue
-            issues.append({"kind": "unknown_index", "table": name, "columns": list(signature[0])})
-    if inspector.get_view_names(): issues.append({"kind": "unsupported_views"})
-    for source in ("TRIGGERS", "ROUTINES", "EVENTS"):
-        schema_column = {"TRIGGERS":"TRIGGER_SCHEMA", "ROUTINES":"ROUTINE_SCHEMA", "EVENTS":"EVENT_SCHEMA"}[source]
+            if fk.get("referred_schema") not in {None,connection.engine.url.database}:
+                issues.append({"kind":"cross_schema_foreign_key","table":name})
+            if fk["referred_table"] not in actual_tables or fk["referred_table"]==name:
+                issues.append({"kind":"unsupported_backup_dependency","table":name})
+        if name not in desired:
+            differences.append({"kind":"preserved_extension_table","table":name})
+            # Even an otherwise harmless archive can block deletion of required
+            # application rows through an inbound FK, or cascade-delete history.
+            if any(fk["referred_table"] in desired for fk in fks_raw):
+                issues.append({"kind":"extension_foreign_key_affects_application","table":name})
+            continue
+        wanted=desired[name]
+        if table_collations[name] not in contract["allowed_collations"]:
+            issues.append({"kind":"unknown_table_collation","table":name})
+        desired_cols={c["name"]:{"name":c["name"],"type":norm_type(c["type"]),
+            "nullable":bool(c["nullable"]),"default":norm_default(c["default"]),
+            "autoincrement":bool(re.search(r"(?im)^\s*`?"+re.escape(c["name"])+r"`?\s+[^,\n]*\bAUTO_INCREMENT\b",wanted["ddl"]))}
+            for c in wanted["columns"]}
+        for col in sorted(set(desired_cols)-set(cols)):issues.append({"kind":"missing_column","table":name,"column":col})
+        for col in sorted(set(cols)-set(desired_cols)):
+            c=cols[col]
+            if c["autoincrement"] or c["extra"] or not safe_extension_default(c):
+                issues.append({"kind":"extension_column_blocks_application_insert","table":name,"column":col})
+            else:differences.append({"kind":"preserved_extension_column","table":name,"column":col})
+        for col in sorted(set(cols)&set(desired_cols)):
+            expected=desired_cols[col];current=cols[col];key=name+"."+col
+            comparable={k:current[k] for k in expected}
+            if wider_storage_type(current["type"],expected["type"]) or current["type"] in compatibility.get("type_variants",{}).get(key,[]):
+                comparable["type"]=expected["type"]
+            variant=compatibility.get("nullable_variants",{}).get(key)
+            if current["nullable"] and key in functional.get("nullable_metadata_columns",{}):
+                comparable["nullable"]=expected["nullable"]
+            elif variant and current["nullable"]==variant["nullable"]:
+                comparable["nullable"]=expected["nullable"]
+                if variant.get("require_no_nulls"):data_checks.append({"table":name,"column":col})
+            literal=compatibility.get("literal_defaults",{}).get(key)
+            if literal is not None and current["default"]==norm_default(str(int(literal)) if isinstance(literal,bool) else literal):
+                comparable["default"]=expected["default"]
+            if comparable!=expected:
+                issues.append({"kind":"column_mismatch","table":name,"column":col,"actual":comparable,"expected":expected})
+            elif any(current[k]!=expected[k] for k in expected):
+                differences.append({"kind":"compatible_column_storage","table":name,"column":col})
+            if current["charset"] is not None and (current["charset"]!="utf8mb4" or current["collation"] not in contract["allowed_collations"]):
+                issues.append({"kind":"unknown_collation","table":name,"column":col})
+            extra=current["extra"].replace("auto_increment", "").strip()
+            if extra and not (key in compatibility.get("on_update_columns",[]) and
+                extra in {"on update current_timestamp()","on update current_timestamp"} and current["type"]=="DATETIME" and
+                current["nullable"] and current["default"]=="CURRENT_TIMESTAMP"):
+                issues.append({"kind":"unknown_column_extra","table":name,"column":col})
+        if checks:issues.append({"kind":"unknown_check_constraint","table":name})
+        if pk!=wanted["pk"]:issues.append({"kind":"primary_key_mismatch","table":name})
+        expected_indexes=set(index_signature(x) for x in wanted["indexes"])
+        # Performance recommendations do not invent missing integrity constraints.
+        for signature in expected_indexes-indexes:
+            item={"kind":"missing_index","table":name,"columns":list(signature[0])}
+            (issues if signature[1] else advisories).append(item)
+        unique_keys=[set(pk)]+[set(columns) for columns,unique in expected_indexes if unique]
+        for signature in indexes-expected_indexes:
+            if signature[1] and not any(k and k<=set(signature[0]) for k in unique_keys):
+                issues.append({"kind":"additional_unique_constraint","table":name,"columns":list(signature[0])})
+            else: differences.append({"kind":"preserved_extension_index","table":name,"columns":list(signature[0])})
+        for index in indexes_raw:
+            if any(not isinstance(c,str) for c in index.get("column_names",[])):
+                issues.append({"kind":"unsupported_index_expression","table":name})
+            opt=index.get("dialect_options",{})
+            if index.get("unique") and (opt.get("mysql_length") or opt.get("mysql_prefix") or index.get("column_sorting")):
+                issues.append({"kind":"unsupported_index_details","table":name})
+        expected_fks=set(fk_signature(x) for x in wanted["foreign_keys"])
+        legacy_fks={(a,b,c,"CASCADE" if name=="import_rows" and a==("batch_id",) and b=="import_batches" and c==("id",) else d)
+                    for a,b,c,d in expected_fks}
+        if fks not in (expected_fks,legacy_fks):issues.append({"kind":"foreign_key_mismatch","table":name})
+        for fk in fks_raw:
+            if (fk.get("options",{}).get("onupdate") or "RESTRICT").upper() not in {"RESTRICT","NO ACTION"}:
+                issues.append({"kind":"unknown_foreign_key_rule","table":name})
+    # The existing restore creates dependencies before dependants, with checks ON.
+    try:
+        ordered_tables({"tables":{name:{"foreign_keys":inspector.get_foreign_keys(name)} for name in actual_tables}})
+    except Blocked:issues.append({"kind":"unsupported_backup_dependency_cycle"})
+    if inspector.get_view_names():issues.append({"kind":"unsupported_views"})
+    for source in ("TRIGGERS","ROUTINES","EVENTS"):
+        schema_column={"TRIGGERS":"TRIGGER_SCHEMA","ROUTINES":"ROUTINE_SCHEMA","EVENTS":"EVENT_SCHEMA"}[source]
         if connection.execute(sa.text(f"SELECT COUNT(*) FROM information_schema.{source} WHERE {schema_column}=DATABASE()")).scalar_one():
-            issues.append({"kind": "unsupported_" + source.lower()})
-    state = {"tables": actual, "table_names": sorted(actual_tables), "revisions": heads, "issues": issues}
-    result = {**state, "fingerprint": digest(state), "advisories": advisories, "data_checks": data_checks,
-              "required_revision": contract["required_revision"],
-              "current_revision": heads[0] if len(heads)==1 else ("UNVERSIONED" if not heads else "MULTIPLE_HEADS")}
-    if check_data: result["issues"].extend(validate_data_checks(connection, data_checks))
+            issues.append({"kind":"unsupported_"+source.lower()})
+    state={"tables":actual,"table_names":sorted(actual_tables),"revisions":heads,"issues":issues}
+    result={**state,"fingerprint":digest(state),"advisories":advisories,"data_checks":data_checks,
+            "compatible_differences":differences,"required_revision":contract["required_revision"],
+            "current_revision":heads[0] if len(heads)==1 else("UNVERSIONED" if not heads else "MULTIPLE_HEADS")}
+    if check_data:result["issues"].extend(validate_data_checks(connection,data_checks))
+    result["compatibility"]=classify_compatibility(result,contract)
     return result
 
 
 def approved_variant(state, contract):
-    empty = not state["table_names"]
-    for issue in state["issues"]:
-        if issue["kind"] == "missing_table" and (empty or issue["table"] in contract["known_missing_tables"]):
-            continue
-        if issue["kind"] == "missing_column" and issue["column"] in contract["known_missing_columns"].get(issue["table"], []):
-            continue
-        # A previous interrupted cup_5502 may have created a bulk table but not
-        # all its indexes. Only its frozen, named indexes may be completed.
-        if issue["kind"] == "missing_index" and issue["table"] in BULK_TABLES and state["revisions"] in ([], ["cup_5501"]):
-            continue
-        return False
-    return True
+    return migration_preconditions(state,contract)["ready"]
 
 
 def alembic_config(connection, restore_counters=None):
@@ -491,8 +544,9 @@ def decode_value(value):
 def auto_increment_counters(connection, table_names):
     counters = {}
     for name in table_names:
-        # Names come from the verified frozen contract, never user input.
-        ddl = connection.exec_driver_sql("SHOW CREATE TABLE `" + name + "`").one()[1]
+        # Extensions are arbitrary valid identifiers; always quote metadata names.
+        quoted = connection.dialect.identifier_preparer.quote_identifier(name)
+        ddl = connection.exec_driver_sql("SHOW CREATE TABLE " + quoted).one()[1]
         if re.search(r"\bAUTO_INCREMENT\b", ddl):
             match = re.search(r"\bAUTO_INCREMENT=(\d+)", ddl)
             counters[name] = int(match.group(1)) if match else 1
@@ -601,6 +655,7 @@ class Controller:
                     state["issues"].extend(validate_data_checks(reader, state["data_checks"]))
             except sa.exc.DBAPIError:
                 state["issues"].append({"kind": "data_precondition_unavailable"})
+        state["compatibility"] = classify_compatibility(state,package[0])
         return {**state, "database_id": database_id, "profile": self.settings.profile}
 
     def check(self, target_ref=None, target_package=None):
@@ -623,7 +678,7 @@ class Controller:
         plan = {"format": 1, "profile": self.settings.profile, "database_id": state["database_id"],
                 "before_fingerprint": state["fingerprint"], "required_revision": contract["required_revision"],
                 "contract_id": digest(contract), "migration_id": migration_fingerprint(), "created_at": int(time.time()), "action": action,
-                "missing_objects": state["issues"]}
+                "missing_objects": state["issues"], "compatibility":state["compatibility"]}
         plan["plan_id"] = digest(plan)
         return plan
 

@@ -2804,7 +2804,7 @@ try:
     assert set(config['services'])-{'mysql','nginx'} == set(services)
     for service in services:
         environment=config['services'][service].get('environment',{})
-        assert not any(k.startswith(('MAINT_','MIGRATION_')) or k in ('MYSQL_ROOT_PASSWORD','MYSQL_ROOT_PASSWORD_FILE') for k in environment)
+        assert not any(k.startswith(('MAINT_','MIGRATION_','RESTORE_')) or k in ('MYSQL_ROOT_PASSWORD','MYSQL_ROOT_PASSWORD_FILE') for k in environment)
     print(' '.join(services))
 except Exception:
     raise SystemExit(1)
