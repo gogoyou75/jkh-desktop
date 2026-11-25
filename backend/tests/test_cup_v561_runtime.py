@@ -78,7 +78,7 @@ class RuntimeTest(unittest.TestCase):
 
     def test_cup_sh_loads_same_profile_and_opens_new_menu(self):
         r=subprocess.run(['bash',str(SCRIPTS/'cup.sh'),'LOCAL_LAB'],input='0\n',text=True,capture_output=True,env=self.env,cwd=self.root,timeout=15)
-        self.assertEqual(r.returncode,0,r.stdout+r.stderr);self.assertIn('v5.6.1',r.stdout)
+        self.assertEqual(r.returncode,0,r.stdout+r.stderr);self.assertIn('v5.6.2',r.stdout)
 
     def test_missing_corrupt_and_unsafe_config_report_exact_path(self):
         for mode in ['missing','corrupt','unsafe']:

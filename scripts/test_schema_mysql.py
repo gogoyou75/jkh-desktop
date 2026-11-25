@@ -88,7 +88,7 @@ def main():
                  "maintenance": ["backend.tests.test_maintenance_mysql"],
                  "legacy": ["backend.tests.test_legacy_schema_mysql"],
                  "workflow": ["backend.tests.test_schema_workflow_mysql", "backend.tests.test_cup_v56_config"],
-                 "runtime": ["backend.tests.test_cup_v561_runtime"],
+                 "runtime": ["backend.tests.test_cup_v561_runtime", "backend.tests.test_cup_v562_runtime"],
                  "profiles": ["backend.tests.test_responsibility_profiles." + name for name in ("MySQLLocalProfile", "MySQLLabProfile", "MySQLProdProfile")]}[args.suite]
         if args.case: tests = [('backend.tests.test_schema_workflow_mysql.WorkflowTest.' if args.suite=='workflow' else 'backend.tests.test_legacy_schema_mysql.LegacySchemaTest.' if args.suite == 'legacy' else 'backend.tests.test_maintenance_mysql.MaintenanceTest.') + args.case]
         network = "container:" + container_id if args.suite == "profiles" else f["network"]

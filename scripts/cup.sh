@@ -15,4 +15,4 @@ settings="$("$python" "$root/scripts/cup_config.py" config "$config" --profile "
 }
 eval "$settings"
 export CUP_HOST_PYTHON="$python"
-exec bash "$root/scripts/jkh_server_menu_v5_6_1.sh" --profile "$profile"
+exec bash "$root/scripts/jkh_server_menu_v5_6_2.sh" --profile "$profile"
